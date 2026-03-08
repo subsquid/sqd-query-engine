@@ -1,0 +1,31 @@
+[package]
+name = "sqd-query-engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+arrow = { version = "54", features = ["ffi"] }
+parquet = { version = "54", features = ["arrow"] }
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+indexmap = { version = "2", features = ["serde"] }
+anyhow = "1"
+itoa = "1"
+memmap2 = "0.9"
+bytes = "1"
+faster-hex = "0.10"
+xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
+
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = "0.6"
+
+[dev-dependencies]
+divan = "0.1"
+paste = "1.0.15"
+tempfile = "3"
+
+[[bench]]
+name = "query"
+harness = false

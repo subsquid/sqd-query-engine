@@ -1,0 +1,468 @@
+name: evm
+
+tables:
+  blocks:
+    block_number_column: number
+    field_name: block
+    sort_key: [number]
+    columns:
+      number:
+        type: uint64
+        stats: true
+      hash:
+        type: string
+        encoding: hex
+      parent_hash:
+        type: string
+        encoding: hex
+      timestamp:
+        type: timestamp_second
+      transactions_root:
+        type: string
+        encoding: hex
+      receipts_root:
+        type: string
+        encoding: hex
+      state_root:
+        type: string
+        encoding: hex
+      logs_bloom:
+        type: string
+        encoding: hex
+      sha3_uncles:
+        type: string
+        encoding: hex
+      extra_data:
+        type: string
+        encoding: hex
+      miner:
+        type: string
+        encoding: hex
+      nonce:
+        type: string
+        encoding: hex
+      mix_hash:
+        type: string
+        encoding: hex
+      size:
+        type: uint64
+      gas_limit:
+        type: string
+        encoding: hex
+      gas_used:
+        type: string
+        encoding: hex
+      difficulty:
+        type: string
+        encoding: hex
+      total_difficulty:
+        type: string
+        encoding: hex
+      base_fee_per_gas:
+        type: string
+        encoding: hex
+      blob_gas_used:
+        type: string
+        encoding: hex
+      excess_blob_gas:
+        type: string
+        encoding: hex
+      l1_block_number:
+        type: uint64
+      extra_data_size:
+        type: uint64
+
+  transactions:
+    block_number_column: block_number
+    query_name: transactions
+    field_name: transaction
+    item_order_keys: [transaction_index]
+    sort_key: [sighash, to, block_number, transaction_index]
+    relations:
+      logs:
+        table: logs
+        key: [block_number, transaction_index]
+      traces:
+        table: traces
+        key: [block_number, transaction_index]
+      state_diffs:
+        table: statediffs
+        key: [block_number, transaction_index]
+    special_filters:
+      first_nonce:
+        type: range_gte
+        column: nonce
+      last_nonce:
+        type: range_lte
+        column: nonce
+    columns:
+      block_number:
+        type: uint64
+        stats: true
+      transaction_index:
+        type: uint32
+        stats: true
+      hash:
+        type: string
+        encoding: hex
+      nonce:
+        type: uint64
+      from:
+        type: string
+        encoding: hex
+        stats: true
+      to:
+        type: string
+        encoding: hex
+        stats: true
+        dictionary: true
+      input:
+        type: string
+        encoding: hex
+      value:
+        type: string
+        encoding: hex
+      type:
+        type: uint64
+      gas:
+        type: string
+        encoding: hex
+      gas_price:
+        type: string
+        encoding: hex
+      max_fee_per_gas:
+        type: string
+        encoding: hex
+      max_priority_fee_per_gas:
+        type: string
+        encoding: hex
+      v:
+        type: string
+        encoding: hex
+      r:
+        type: string
+        encoding: hex
+      s:
+        type: string
+        encoding: hex
+      y_parity:
+        type: uint8
+      chain_id:
+        type: uint64
+      max_fee_per_blob_gas:
+        type: string
+        encoding: hex
+      blob_versioned_hashes:
+        type: list_string
+      authorization_list:
+        type: list_struct
+      contract_address:
+        type: string
+        encoding: hex
+      cumulative_gas_used:
+        type: string
+        encoding: hex
+      effective_gas_price:
+        type: string
+        encoding: hex
+      gas_used:
+        type: string
+        encoding: hex
+      sighash:
+        type: string
+        encoding: hex
+        stats: true
+        dictionary: true
+      status:
+        type: uint8
+      l1_base_fee_scalar:
+        type: uint64
+      l1_blob_base_fee:
+        type: string
+        encoding: hex
+      l1_blob_base_fee_scalar:
+        type: uint64
+      l1_fee:
+        type: string
+        encoding: hex
+      l1_fee_scalar:
+        type: float64
+      l1_gas_price:
+        type: string
+        encoding: hex
+      l1_gas_used:
+        type: string
+        encoding: hex
+      input_size:
+        type: uint64
+    weight_columns:
+      input: input_size
+
+  logs:
+    block_number_column: block_number
+    query_name: logs
+    field_name: log
+    item_order_keys: [transaction_index, log_index]
+    sort_key: [topic0, address, block_number, log_index]
+    relations:
+      transaction:
+        table: transactions
+        key: [block_number, transaction_index]
+      transaction_traces:
+        table: traces
+        key: [block_number, transaction_index]
+      transaction_logs:
+        table: logs
+        key: [block_number, transaction_index]
+      transaction_state_diffs:
+        table: statediffs
+        key: [block_number, transaction_index]
+    columns:
+      block_number:
+        type: uint64
+        stats: true
+      log_index:
+        type: uint32
+        stats: true
+      transaction_index:
+        type: uint32
+        stats: true
+      transaction_hash:
+        type: string
+        encoding: hex
+      address:
+        type: string
+        encoding: hex
+        stats: true
+        dictionary: true
+      data:
+        type: string
+        encoding: hex
+      topic0:
+        type: string
+        encoding: hex
+        stats: true
+        dictionary: true
+      topic1:
+        type: string
+        encoding: hex
+      topic2:
+        type: string
+        encoding: hex
+      topic3:
+        type: string
+        encoding: hex
+      data_size:
+        type: uint64
+    virtual_fields:
+      topics:
+        type: roll
+        columns: [topic0, topic1, topic2, topic3]
+    weight_columns:
+      data: data_size
+
+  traces:
+    block_number_column: block_number
+    address_column: trace_address
+    query_name: traces
+    field_name: trace
+    item_order_keys: [transaction_index]
+    sort_key: [type, create_from, call_sighash, call_to, block_number, transaction_index, trace_address]
+    relations:
+      transaction:
+        table: transactions
+        key: [block_number, transaction_index]
+      transaction_logs:
+        table: logs
+        key: [block_number, transaction_index]
+      subtraces:
+        table: traces
+        kind: children
+        key: [block_number, transaction_index, trace_address]
+      parents:
+        table: traces
+        kind: parents
+        key: [block_number, transaction_index, trace_address]
+    columns:
+      block_number:
+        type: uint64
+        stats: true
+      transaction_index:
+        type: uint32
+        stats: true
+      trace_address:
+        type: list_uint32
+      subtraces:
+        type: uint32
+      type:
+        type: string
+        stats: true
+        dictionary: true
+      error:
+        type: string
+      revert_reason:
+        type: string
+      create_from:
+        type: string
+        encoding: hex
+        stats: true
+        dictionary: true
+      create_value:
+        type: string
+        encoding: hex
+      create_gas:
+        type: string
+        encoding: hex
+      create_init:
+        type: string
+        encoding: hex
+      create_result_gas_used:
+        type: string
+        encoding: hex
+      create_result_code:
+        type: string
+        encoding: hex
+      create_result_address:
+        type: string
+        encoding: hex
+      call_from:
+        type: string
+        encoding: hex
+        stats: true
+        dictionary: true
+      call_to:
+        type: string
+        encoding: hex
+        stats: true
+        dictionary: true
+      call_value:
+        type: string
+        encoding: hex
+      call_gas:
+        type: string
+        encoding: hex
+      call_input:
+        type: string
+        encoding: hex
+      call_sighash:
+        type: string
+        encoding: hex
+        stats: true
+        dictionary: true
+      call_type:
+        type: string
+        dictionary: true
+      call_result_gas_used:
+        type: string
+        encoding: hex
+      call_result_output:
+        type: string
+        encoding: hex
+      suicide_address:
+        type: string
+        encoding: hex
+      suicide_refund_address:
+        type: string
+        encoding: hex
+      suicide_balance:
+        type: string
+        encoding: hex
+      reward_author:
+        type: string
+        encoding: hex
+      reward_value:
+        type: string
+        encoding: hex
+      reward_type:
+        type: string
+      create_init_size:
+        type: uint64
+      create_result_code_size:
+        type: uint64
+      call_input_size:
+        type: uint64
+      call_result_output_size:
+        type: uint64
+    weight_columns:
+      create_init: create_init_size
+      create_result_code: create_result_code_size
+      call_input: call_input_size
+      call_result_output: call_result_output_size
+    field_groups:
+      tag_column: type
+      base_fields: [transaction_index, trace_address, subtraces, type, error, revert_reason]
+      variants:
+        create:
+          action:
+            - { column: create_from, field: from }
+            - { column: create_value, field: value }
+            - { column: create_gas, field: gas }
+            - { column: create_init, field: init }
+          result:
+            - { column: create_result_gas_used, field: gasUsed }
+            - { column: create_result_code, field: code }
+            - { column: create_result_address, field: address }
+        call:
+          action:
+            - { column: call_from, field: from }
+            - { column: call_to, field: to }
+            - { column: call_value, field: value }
+            - { column: call_gas, field: gas }
+            - { column: call_input, field: input }
+            - { column: call_sighash, field: sighash }
+            - { column: call_type, field: type }
+          result:
+            - { column: call_result_gas_used, field: gasUsed }
+            - { column: call_result_output, field: output }
+        suicide:
+          action:
+            - { column: suicide_address, field: address }
+            - { column: suicide_refund_address, field: refundAddress }
+            - { column: suicide_balance, field: balance }
+        reward:
+          action:
+            - { column: reward_author, field: author }
+            - { column: reward_value, field: value }
+            - { column: reward_type, field: type }
+
+  statediffs:
+    block_number_column: block_number
+    query_name: stateDiffs
+    field_name: stateDiff
+    item_order_keys: [transaction_index, address, key]
+    sort_key: [address, block_number, transaction_index]
+    relations:
+      transaction:
+        table: transactions
+        key: [block_number, transaction_index]
+    columns:
+      block_number:
+        type: uint64
+        stats: true
+      transaction_index:
+        type: uint32
+        stats: true
+      address:
+        type: string
+        encoding: hex
+        stats: true
+        dictionary: true
+      key:
+        type: string
+        stats: true
+      kind:
+        type: string
+        dictionary: true
+      prev:
+        type: string
+        encoding: hex
+      next:
+        type: string
+        encoding: hex
+      prev_size:
+        type: uint64
+      next_size:
+        type: uint64
+    weight_columns:
+      prev: prev_size
+      next: next_size

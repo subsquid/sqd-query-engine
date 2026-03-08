@@ -1,0 +1,474 @@
+use arrow::array::*;
+use arrow::datatypes::DataType;
+use std::fmt::Write as FmtWrite;
+
+/// Encode a single value from an Arrow array to JSON bytes.
+/// Returns bytes that are valid JSON fragments.
+pub fn encode_value(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
+    if array.is_null(row) {
+        buf.extend_from_slice(b"null");
+        return;
+    }
+    match array.data_type() {
+        DataType::Boolean => {
+            let a = array.as_any().downcast_ref::<BooleanArray>().unwrap();
+            if a.value(row) {
+                buf.extend_from_slice(b"true");
+            } else {
+                buf.extend_from_slice(b"false");
+            }
+        }
+        DataType::UInt8 => {
+            let a = array.as_any().downcast_ref::<UInt8Array>().unwrap();
+            write_u64(buf, a.value(row) as u64);
+        }
+        DataType::UInt16 => {
+            let a = array.as_any().downcast_ref::<UInt16Array>().unwrap();
+            write_u64(buf, a.value(row) as u64);
+        }
+        DataType::UInt32 => {
+            let a = array.as_any().downcast_ref::<UInt32Array>().unwrap();
+            write_u64(buf, a.value(row) as u64);
+        }
+        DataType::UInt64 => {
+            let a = array.as_any().downcast_ref::<UInt64Array>().unwrap();
+            write_u64(buf, a.value(row));
+        }
+        DataType::Int16 => {
+            let a = array.as_any().downcast_ref::<Int16Array>().unwrap();
+            write_i64(buf, a.value(row) as i64);
+        }
+        DataType::Int32 => {
+            let a = array.as_any().downcast_ref::<Int32Array>().unwrap();
+            write_i64(buf, a.value(row) as i64);
+        }
+        DataType::Int64 => {
+            let a = array.as_any().downcast_ref::<Int64Array>().unwrap();
+            write_i64(buf, a.value(row));
+        }
+        DataType::Float64 => {
+            let a = array.as_any().downcast_ref::<Float64Array>().unwrap();
+            let v = a.value(row);
+            if v.is_nan() || v.is_infinite() {
+                buf.extend_from_slice(b"null");
+            } else {
+                let mut tmp = String::new();
+                write!(tmp, "{}", v).unwrap();
+                buf.extend_from_slice(tmp.as_bytes());
+            }
+        }
+        DataType::Utf8 => {
+            let a = array.as_any().downcast_ref::<StringArray>().unwrap();
+            encode_json_string(a.value(row), buf);
+        }
+        DataType::Binary => {
+            let a = array.as_any().downcast_ref::<BinaryArray>().unwrap();
+            encode_hex_bytes(a.value(row), buf);
+        }
+        DataType::FixedSizeBinary(_) => {
+            let a = array
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+                .unwrap();
+            encode_hex_bytes(a.value(row), buf);
+        }
+        DataType::Timestamp(arrow::datatypes::TimeUnit::Second, _) => {
+            let a = array
+                .as_any()
+                .downcast_ref::<TimestampSecondArray>()
+                .unwrap();
+            write_i64(buf, a.value(row));
+        }
+        DataType::List(_) => {
+            let a = array
+                .as_any()
+                .downcast_ref::<GenericListArray<i32>>()
+                .unwrap();
+            encode_list(a, row, buf);
+        }
+        DataType::Struct(_) => {
+            let a = array.as_any().downcast_ref::<StructArray>().unwrap();
+            encode_struct(a, row, buf);
+        }
+        _ => {
+            // Fallback: try string representation
+            buf.extend_from_slice(b"null");
+        }
+    }
+}
+
+/// Encode a value as a bignum (quoted string number).
+pub fn encode_bignum(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
+    if array.is_null(row) {
+        buf.extend_from_slice(b"null");
+        return;
+    }
+    buf.push(b'"');
+    match array.data_type() {
+        DataType::UInt64 => {
+            let a = array.as_any().downcast_ref::<UInt64Array>().unwrap();
+            write_u64(buf, a.value(row));
+        }
+        DataType::Int64 => {
+            let a = array.as_any().downcast_ref::<Int64Array>().unwrap();
+            write_i64(buf, a.value(row));
+        }
+        DataType::UInt32 => {
+            let a = array.as_any().downcast_ref::<UInt32Array>().unwrap();
+            write_u64(buf, a.value(row) as u64);
+        }
+        _ => {
+            buf.pop(); // remove opening quote
+            buf.extend_from_slice(b"null");
+            return;
+        }
+    }
+    buf.push(b'"');
+}
+
+/// Encode a string column that contains raw JSON — pass through without quoting.
+pub fn encode_json_passthrough(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
+    if array.is_null(row) {
+        buf.extend_from_slice(b"null");
+        return;
+    }
+    let a = array.as_any().downcast_ref::<StringArray>().unwrap();
+    let s = a.value(row);
+    if s.is_empty() {
+        buf.extend_from_slice(b"null");
+    } else {
+        buf.extend_from_slice(s.as_bytes());
+    }
+}
+
+/// Encode Solana transaction version: -1 → "legacy", else number.
+pub fn encode_solana_tx_version(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
+    if array.is_null(row) {
+        buf.extend_from_slice(b"null");
+        return;
+    }
+    let a = array.as_any().downcast_ref::<Int16Array>().unwrap();
+    let v = a.value(row);
+    if v == -1 {
+        buf.extend_from_slice(b"\"legacy\"");
+    } else {
+        write_i64(buf, v as i64);
+    }
+}
+
+/// Encode a list of columns as a "rolled" JSON array.
+/// Non-null values are added sequentially; stops at first null.
+/// If the last column is a list, its elements are spread into the array.
+pub fn encode_roll(batch: &RecordBatch, row: usize, column_indices: &[usize], buf: &mut Vec<u8>) {
+    buf.push(b'[');
+    let mut has_items = false;
+
+    for (i, &col_idx) in column_indices.iter().enumerate() {
+        let col = batch.column(col_idx);
+        let is_last = i == column_indices.len() - 1;
+
+        if col.is_null(row) {
+            // Stop at first null (unless it's a list column at end)
+            break;
+        }
+
+        // Check if last column is a list → spread
+        if is_last && matches!(col.data_type(), DataType::List(_)) {
+            let list = col
+                .as_any()
+                .downcast_ref::<GenericListArray<i32>>()
+                .unwrap();
+            let values = list.value(row);
+            for j in 0..values.len() {
+                if has_items {
+                    buf.push(b',');
+                }
+                encode_value(values.as_ref(), j, buf);
+                has_items = true;
+            }
+        } else {
+            if has_items {
+                buf.push(b',');
+            }
+            encode_value(col.as_ref(), row, buf);
+            has_items = true;
+        }
+    }
+
+    buf.push(b']');
+}
+
+/// Encode a JSON-escaped string with quotes.
+/// Optimized: copies chunks of safe bytes in bulk, only escaping when needed.
+pub fn encode_json_string(s: &str, buf: &mut Vec<u8>) {
+    buf.push(b'"');
+    let bytes = s.as_bytes();
+    let mut start = 0;
+    for (i, &b) in bytes.iter().enumerate() {
+        let escape = match b {
+            b'"' => Some(b"\\\"" as &[u8]),
+            b'\\' => Some(b"\\\\" as &[u8]),
+            b'\n' => Some(b"\\n" as &[u8]),
+            b'\r' => Some(b"\\r" as &[u8]),
+            b'\t' => Some(b"\\t" as &[u8]),
+            b if b < 0x20 => {
+                // Flush pending safe bytes
+                if start < i {
+                    buf.extend_from_slice(&bytes[start..i]);
+                }
+                buf.extend_from_slice(b"\\u00");
+                buf.push(HEX_CHARS[(b >> 4) as usize]);
+                buf.push(HEX_CHARS[(b & 0x0f) as usize]);
+                start = i + 1;
+                continue;
+            }
+            _ => None,
+        };
+        if let Some(esc) = escape {
+            if start < i {
+                buf.extend_from_slice(&bytes[start..i]);
+            }
+            buf.extend_from_slice(esc);
+            start = i + 1;
+        }
+    }
+    // Flush remaining safe bytes (common case: entire string is safe)
+    if start < bytes.len() {
+        buf.extend_from_slice(&bytes[start..]);
+    }
+    buf.push(b'"');
+}
+
+fn encode_hex_bytes(bytes: &[u8], buf: &mut Vec<u8>) {
+    buf.push(b'"');
+    buf.extend_from_slice(b"0x");
+    let hex_len = bytes.len() * 2;
+    let start = buf.len();
+    buf.resize(start + hex_len, 0);
+    faster_hex::hex_encode(bytes, &mut buf[start..]).unwrap();
+    buf.push(b'"');
+}
+
+fn encode_list(array: &GenericListArray<i32>, row: usize, buf: &mut Vec<u8>) {
+    let values = array.value(row);
+    buf.push(b'[');
+    for i in 0..values.len() {
+        if i > 0 {
+            buf.push(b',');
+        }
+        encode_value(values.as_ref(), i, buf);
+    }
+    buf.push(b']');
+}
+
+fn encode_struct(array: &StructArray, row: usize, buf: &mut Vec<u8>) {
+    buf.push(b'{');
+    let fields = array.fields();
+    for (i, (field, col)) in fields.iter().zip(array.columns().iter()).enumerate() {
+        if i > 0 {
+            buf.push(b',');
+        }
+        encode_json_string(&snake_to_camel(field.name()), buf);
+        buf.push(b':');
+        encode_value(col.as_ref(), row, buf);
+    }
+    buf.push(b'}');
+}
+
+fn write_u64(buf: &mut Vec<u8>, v: u64) {
+    let mut tmp = itoa::Buffer::new();
+    buf.extend_from_slice(tmp.format(v).as_bytes());
+}
+
+fn write_i64(buf: &mut Vec<u8>, v: i64) {
+    let mut tmp = itoa::Buffer::new();
+    buf.extend_from_slice(tmp.format(v).as_bytes());
+}
+
+/// Convert snake_case to camelCase.
+pub fn snake_to_camel(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut capitalize_next = false;
+    for c in s.chars() {
+        if c == '_' {
+            capitalize_next = true;
+        } else if capitalize_next {
+            result.push(c.to_ascii_uppercase());
+            capitalize_next = false;
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use std::sync::Arc;
+
+    #[test]
+    fn test_encode_value_uint64() {
+        let arr = UInt64Array::from(vec![42]);
+        let mut buf = Vec::new();
+        encode_value(&arr, 0, &mut buf);
+        assert_eq!(String::from_utf8(buf).unwrap(), "42");
+    }
+
+    #[test]
+    fn test_encode_value_string() {
+        let arr = StringArray::from(vec!["hello \"world\""]);
+        let mut buf = Vec::new();
+        encode_value(&arr, 0, &mut buf);
+        assert_eq!(String::from_utf8(buf).unwrap(), r#""hello \"world\"""#);
+    }
+
+    #[test]
+    fn test_encode_value_null() {
+        let arr = UInt64Array::from(vec![None as Option<u64>]);
+        let mut buf = Vec::new();
+        encode_value(&arr, 0, &mut buf);
+        assert_eq!(String::from_utf8(buf).unwrap(), "null");
+    }
+
+    #[test]
+    fn test_encode_value_boolean() {
+        let arr = BooleanArray::from(vec![true, false]);
+        let mut buf = Vec::new();
+        encode_value(&arr, 0, &mut buf);
+        assert_eq!(String::from_utf8(buf).unwrap(), "true");
+        let mut buf = Vec::new();
+        encode_value(&arr, 1, &mut buf);
+        assert_eq!(String::from_utf8(buf).unwrap(), "false");
+    }
+
+    #[test]
+    fn test_encode_bignum() {
+        let arr = UInt64Array::from(vec![12345678901234567890u64]);
+        let mut buf = Vec::new();
+        encode_bignum(&arr, 0, &mut buf);
+        assert_eq!(String::from_utf8(buf).unwrap(), "\"12345678901234567890\"");
+    }
+
+    #[test]
+    fn test_encode_json_passthrough() {
+        let arr = StringArray::from(vec![Some(r#"{"key":"value"}"#), None]);
+        let mut buf = Vec::new();
+        encode_json_passthrough(&arr, 0, &mut buf);
+        assert_eq!(String::from_utf8(buf).unwrap(), r#"{"key":"value"}"#);
+        buf = Vec::new();
+        encode_json_passthrough(&arr, 1, &mut buf);
+        assert_eq!(String::from_utf8(buf).unwrap(), "null");
+    }
+
+    #[test]
+    fn test_encode_solana_tx_version() {
+        let arr = Int16Array::from(vec![Some(-1), Some(0), Some(1), None]);
+        let mut buf = Vec::new();
+        encode_solana_tx_version(&arr, 0, &mut buf);
+        assert_eq!(String::from_utf8(buf).unwrap(), "\"legacy\"");
+        buf = Vec::new();
+        encode_solana_tx_version(&arr, 1, &mut buf);
+        assert_eq!(String::from_utf8(buf).unwrap(), "0");
+        buf = Vec::new();
+        encode_solana_tx_version(&arr, 3, &mut buf);
+        assert_eq!(String::from_utf8(buf).unwrap(), "null");
+    }
+
+    #[test]
+    fn test_encode_roll() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a0", DataType::Utf8, true),
+            Field::new("a1", DataType::Utf8, true),
+            Field::new("a2", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![Some("alice"), Some("bob")])),
+                Arc::new(StringArray::from(vec![Some("charlie"), None])),
+                Arc::new(StringArray::from(vec![Some("dave"), None])),
+            ],
+        )
+        .unwrap();
+
+        // Row 0: all present
+        let mut buf = Vec::new();
+        encode_roll(&batch, 0, &[0, 1, 2], &mut buf);
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            r#"["alice","charlie","dave"]"#
+        );
+
+        // Row 1: stops at first null (a1)
+        let mut buf = Vec::new();
+        encode_roll(&batch, 1, &[0, 1, 2], &mut buf);
+        assert_eq!(String::from_utf8(buf).unwrap(), r#"["bob"]"#);
+    }
+
+    #[test]
+    fn test_encode_roll_with_list_spread() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a0", DataType::Utf8, false),
+            Field::new(
+                "rest",
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                false,
+            ),
+        ]));
+
+        let mut list_builder = ListBuilder::new(StringBuilder::new()).with_field(Field::new(
+            "item",
+            DataType::Utf8,
+            true,
+        ));
+        list_builder.values().append_value("b1");
+        list_builder.values().append_value("b2");
+        list_builder.append(true);
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a0_val"])),
+                Arc::new(list_builder.finish()),
+            ],
+        )
+        .unwrap();
+
+        let mut buf = Vec::new();
+        encode_roll(&batch, 0, &[0, 1], &mut buf);
+        assert_eq!(String::from_utf8(buf).unwrap(), r#"["a0_val","b1","b2"]"#);
+    }
+
+    #[test]
+    fn test_snake_to_camel() {
+        assert_eq!(snake_to_camel("transaction_index"), "transactionIndex");
+        assert_eq!(snake_to_camel("block_number"), "blockNumber");
+        assert_eq!(snake_to_camel("number"), "number");
+        assert_eq!(snake_to_camel("log_index"), "logIndex");
+        assert_eq!(snake_to_camel("instruction_address"), "instructionAddress");
+        assert_eq!(snake_to_camel("fee_payer"), "feePayer");
+        assert_eq!(snake_to_camel("a0"), "a0");
+    }
+
+    #[test]
+    fn test_encode_list_uint32() {
+        let mut builder = ListBuilder::new(UInt32Builder::new()).with_field(Field::new(
+            "item",
+            DataType::UInt32,
+            true,
+        ));
+        builder.values().append_value(0);
+        builder.values().append_value(1);
+        builder.values().append_value(2);
+        builder.append(true);
+        let arr = builder.finish();
+
+        let mut buf = Vec::new();
+        encode_value(&arr, 0, &mut buf);
+        assert_eq!(String::from_utf8(buf).unwrap(), "[0,1,2]");
+    }
+}
