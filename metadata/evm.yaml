@@ -4,90 +4,91 @@ tables:
   blocks:
     block_number_column: number
     field_name: block
-    sort_key: [number]
+    sort_key: [ number ]
     columns:
       number:
         type: uint64
         stats: true
       hash:
         type: string
-        encoding: hex
+        json_encoding: hex
       parent_hash:
         type: string
-        encoding: hex
+        json_encoding: hex
       timestamp:
         type: timestamp_second
       transactions_root:
         type: string
-        encoding: hex
+        json_encoding: hex
       receipts_root:
         type: string
-        encoding: hex
+        json_encoding: hex
       state_root:
         type: string
-        encoding: hex
+        json_encoding: hex
       logs_bloom:
         type: string
-        encoding: hex
+        json_encoding: hex
       sha3_uncles:
         type: string
-        encoding: hex
+        json_encoding: hex
       extra_data:
         type: string
-        encoding: hex
+        json_encoding: hex
       miner:
         type: string
-        encoding: hex
+        json_encoding: hex
       nonce:
         type: string
-        encoding: hex
+        json_encoding: hex
       mix_hash:
         type: string
-        encoding: hex
+        json_encoding: hex
       size:
         type: uint64
       gas_limit:
         type: string
-        encoding: hex
+        json_encoding: hex
       gas_used:
         type: string
-        encoding: hex
+        json_encoding: hex
       difficulty:
         type: string
-        encoding: hex
+        json_encoding: hex
       total_difficulty:
         type: string
-        encoding: hex
+        json_encoding: hex
       base_fee_per_gas:
         type: string
-        encoding: hex
+        json_encoding: hex
       blob_gas_used:
         type: string
-        encoding: hex
+        json_encoding: hex
       excess_blob_gas:
         type: string
-        encoding: hex
+        json_encoding: hex
       l1_block_number:
         type: uint64
+      # system
       extra_data_size:
         type: uint64
+        system: true
 
   transactions:
-    block_number_column: block_number
     query_name: transactions
     field_name: transaction
-    item_order_keys: [transaction_index]
-    sort_key: [sighash, to, block_number, transaction_index]
+    item_order_keys: [ transaction_index ]
+    sort_key: [ sighash, to, block_number, transaction_index ]
     relations:
       logs:
         table: logs
-        key: [block_number, transaction_index]
+        key: [ block_number, transaction_index ]
       traces:
         table: traces
-        key: [block_number, transaction_index]
+        key: [ block_number, transaction_index ]
       state_diffs:
         table: statediffs
-        key: [block_number, transaction_index]
+        key: [ block_number, transaction_index ]
     special_filters:
       first_nonce:
         type: range_gte
@@ -104,73 +105,74 @@ tables:
         stats: true
       hash:
         type: string
-        encoding: hex
+        json_encoding: hex
       nonce:
         type: uint64
       from:
         type: string
-        encoding: hex
+        json_encoding: hex
         stats: true
       to:
         type: string
-        encoding: hex
+        json_encoding: hex
         stats: true
         dictionary: true
       input:
         type: string
-        encoding: hex
+        json_encoding: hex
+        weight: input_size
       value:
         type: string
-        encoding: hex
+        json_encoding: hex
       type:
         type: uint64
       gas:
         type: string
-        encoding: hex
+        json_encoding: hex
       gas_price:
         type: string
-        encoding: hex
+        json_encoding: hex
       max_fee_per_gas:
         type: string
-        encoding: hex
+        json_encoding: hex
       max_priority_fee_per_gas:
         type: string
-        encoding: hex
+        json_encoding: hex
       v:
         type: string
-        encoding: hex
+        json_encoding: hex
       r:
         type: string
-        encoding: hex
+        json_encoding: hex
       s:
         type: string
-        encoding: hex
+        json_encoding: hex
       y_parity:
         type: uint8
       chain_id:
         type: uint64
       max_fee_per_blob_gas:
         type: string
-        encoding: hex
+        json_encoding: hex
       blob_versioned_hashes:
         type: list_string
       authorization_list:
         type: list_struct
       contract_address:
         type: string
-        encoding: hex
+        json_encoding: hex
       cumulative_gas_used:
         type: string
-        encoding: hex
+        json_encoding: hex
       effective_gas_price:
         type: string
-        encoding: hex
+        json_encoding: hex
       gas_used:
         type: string
-        encoding: hex
+        json_encoding: hex
       sighash:
         type: string
-        encoding: hex
+        json_encoding: hex
         stats: true
         dictionary: true
       status:
@@ -179,44 +181,43 @@ tables:
         type: uint64
       l1_blob_base_fee:
         type: string
-        encoding: hex
+        json_encoding: hex
       l1_blob_base_fee_scalar:
         type: uint64
       l1_fee:
         type: string
-        encoding: hex
+        json_encoding: hex
       l1_fee_scalar:
         type: float64
       l1_gas_price:
         type: string
-        encoding: hex
+        json_encoding: hex
       l1_gas_used:
         type: string
-        encoding: hex
+        json_encoding: hex
+      # system
       input_size:
         type: uint64
-    weight_columns:
-      input: input_size
+        system: true
 
   logs:
-    block_number_column: block_number
     query_name: logs
     field_name: log
-    item_order_keys: [transaction_index, log_index]
-    sort_key: [topic0, address, block_number, log_index]
+    item_order_keys: [ transaction_index, log_index ]
+    sort_key: [ topic0, address, block_number, log_index ]
     relations:
       transaction:
         table: transactions
-        key: [block_number, transaction_index]
+        key: [ block_number, transaction_index ]
       transaction_traces:
         table: traces
-        key: [block_number, transaction_index]
+        key: [ block_number, transaction_index ]
       transaction_logs:
         table: logs
-        key: [block_number, transaction_index]
+        key: [ block_number, transaction_index ]
       transaction_state_diffs:
         table: statediffs
-        key: [block_number, transaction_index]
+        key: [ block_number, transaction_index ]
     columns:
       block_number:
         type: uint64
@@ -229,60 +230,60 @@ tables:
         stats: true
       transaction_hash:
         type: string
-        encoding: hex
+        json_encoding: hex
       address:
         type: string
-        encoding: hex
+        json_encoding: hex
         stats: true
         dictionary: true
       data:
         type: string
-        encoding: hex
+        json_encoding: hex
+        weight: data_size
       topic0:
         type: string
-        encoding: hex
+        json_encoding: hex
         stats: true
         dictionary: true
       topic1:
         type: string
-        encoding: hex
+        json_encoding: hex
       topic2:
         type: string
-        encoding: hex
+        json_encoding: hex
       topic3:
         type: string
-        encoding: hex
+        json_encoding: hex
+      # system
       data_size:
         type: uint64
+        system: true
     virtual_fields:
       topics:
         type: roll
-        columns: [topic0, topic1, topic2, topic3]
-    weight_columns:
-      data: data_size
+        columns: [ topic0, topic1, topic2, topic3 ]
 
   traces:
-    block_number_column: block_number
     address_column: trace_address
     query_name: traces
     field_name: trace
-    item_order_keys: [transaction_index]
-    sort_key: [type, create_from, call_sighash, call_to, block_number, transaction_index, trace_address]
+    item_order_keys: [ transaction_index ]
+    sort_key: [ type, create_from, call_sighash, call_to, block_number, transaction_index, trace_address ]
     relations:
       transaction:
         table: transactions
-        key: [block_number, transaction_index]
+        key: [ block_number, transaction_index ]
       transaction_logs:
         table: logs
-        key: [block_number, transaction_index]
+        key: [ block_number, transaction_index ]
       subtraces:
         table: traces
         kind: children
-        key: [block_number, transaction_index, trace_address]
+        key: [ block_number, transaction_index, trace_address ]
       parents:
         table: traces
         kind: parents
-        key: [block_number, transaction_index, trace_address]
+        key: [ block_number, transaction_index, trace_address ]
     columns:
       block_number:
         type: uint64
@@ -304,49 +305,52 @@ tables:
         type: string
       create_from:
         type: string
-        encoding: hex
+        json_encoding: hex
         stats: true
         dictionary: true
       create_value:
         type: string
-        encoding: hex
+        json_encoding: hex
       create_gas:
         type: string
-        encoding: hex
+        json_encoding: hex
       create_init:
         type: string
-        encoding: hex
+        json_encoding: hex
+        weight: create_init_size
       create_result_gas_used:
         type: string
-        encoding: hex
+        json_encoding: hex
       create_result_code:
         type: string
-        encoding: hex
+        json_encoding: hex
+        weight: create_result_code_size
       create_result_address:
         type: string
-        encoding: hex
+        json_encoding: hex
       call_from:
         type: string
-        encoding: hex
+        json_encoding: hex
         stats: true
         dictionary: true
       call_to:
         type: string
-        encoding: hex
+        json_encoding: hex
         stats: true
         dictionary: true
       call_value:
         type: string
-        encoding: hex
+        json_encoding: hex
       call_gas:
         type: string
-        encoding: hex
+        json_encoding: hex
       call_input:
         type: string
-        encoding: hex
+        json_encoding: hex
+        weight: call_input_size
       call_sighash:
         type: string
-        encoding: hex
+        json_encoding: hex
         stats: true
         dictionary: true
       call_type:
@@ -354,43 +358,46 @@ tables:
         dictionary: true
       call_result_gas_used:
         type: string
-        encoding: hex
+        json_encoding: hex
       call_result_output:
         type: string
-        encoding: hex
+        json_encoding: hex
+        weight: call_result_output_size
       suicide_address:
         type: string
-        encoding: hex
+        json_encoding: hex
       suicide_refund_address:
         type: string
-        encoding: hex
+        json_encoding: hex
       suicide_balance:
         type: string
-        encoding: hex
+        json_encoding: hex
       reward_author:
         type: string
-        encoding: hex
+        json_encoding: hex
       reward_value:
         type: string
-        encoding: hex
+        json_encoding: hex
       reward_type:
         type: string
+
+      # system
       create_init_size:
         type: uint64
+        system: true
       create_result_code_size:
         type: uint64
+        system: true
       call_input_size:
         type: uint64
+        system: true
       call_result_output_size:
         type: uint64
-    weight_columns:
-      create_init: create_init_size
-      create_result_code: create_result_code_size
-      call_input: call_input_size
-      call_result_output: call_result_output_size
+        system: true
+
     field_groups:
       tag_column: type
-      base_fields: [transaction_index, trace_address, subtraces, type, error, revert_reason]
+      base_fields: [ transaction_index, trace_address, subtraces, type, error, revert_reason ]
       variants:
         create:
           action:
@@ -426,15 +433,14 @@ tables:
             - { column: reward_type, field: type }
 
   statediffs:
-    block_number_column: block_number
     query_name: stateDiffs
     field_name: stateDiff
-    item_order_keys: [transaction_index, address, key]
-    sort_key: [address, block_number, transaction_index]
+    item_order_keys: [ transaction_index, address, key ]
+    sort_key: [ address, block_number, transaction_index ]
     relations:
       transaction:
         table: transactions
-        key: [block_number, transaction_index]
+        key: [ block_number, transaction_index ]
     columns:
       block_number:
         type: uint64
@@ -444,7 +450,7 @@ tables:
         stats: true
       address:
         type: string
-        encoding: hex
+        json_encoding: hex
         stats: true
         dictionary: true
       key:
@@ -455,14 +461,16 @@ tables:
         dictionary: true
       prev:
         type: string
-        encoding: hex
+        json_encoding: hex
+        weight: prev_size
       next:
         type: string
-        encoding: hex
+        json_encoding: hex
+        weight: next_size
+      # system
       prev_size:
         type: uint64
+        system: true
       next_size:
         type: uint64
-    weight_columns:
-      prev: prev_size
-      next: next_size
+        system: true

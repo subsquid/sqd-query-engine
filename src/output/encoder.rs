@@ -1,100 +1,206 @@
+use crate::metadata::JsonEncoding;
 use arrow::array::*;
 use arrow::datatypes::DataType;
-use std::fmt::Write as FmtWrite;
 
-/// Encode a single value from an Arrow array to JSON bytes.
-/// Returns bytes that are valid JSON fragments.
-pub fn encode_value(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
+/// Function pointer type for pre-resolved encoders.
+pub type EncoderFn = fn(&dyn Array, usize, &mut Vec<u8>);
+
+/// Resolve an encoder function once per column based on DataType and encoding.
+/// Eliminates per-row DataType match + downcast dispatch in the hot loop.
+pub fn resolve_encoder(data_type: &DataType, encoding: Option<&JsonEncoding>) -> EncoderFn {
+    match encoding {
+        Some(JsonEncoding::String) => encode_bignum,
+        Some(JsonEncoding::Json) => encode_json_passthrough,
+        Some(JsonEncoding::SolanaTxVersion) => encode_solana_tx_version,
+        Some(JsonEncoding::Hex) | Some(JsonEncoding::Base58) | None => {
+            resolve_value_encoder(data_type)
+        }
+    }
+}
+
+fn resolve_value_encoder(data_type: &DataType) -> EncoderFn {
+    match data_type {
+        DataType::Boolean => encode_boolean,
+        DataType::UInt8 => encode_uint8,
+        DataType::UInt16 => encode_uint16,
+        DataType::UInt32 => encode_uint32,
+        DataType::UInt64 => encode_uint64,
+        DataType::Int16 => encode_int16,
+        DataType::Int32 => encode_int32,
+        DataType::Int64 => encode_int64,
+        DataType::Float64 => encode_float64,
+        DataType::Utf8 => encode_utf8_value,
+        DataType::Binary => encode_binary_value,
+        DataType::FixedSizeBinary(_) => encode_fixed_binary_value,
+        DataType::Timestamp(arrow::datatypes::TimeUnit::Second, _) => encode_timestamp_second,
+        DataType::List(_) => encode_list_value,
+        DataType::Struct(_) => encode_struct_value,
+        _ => encode_null_value,
+    }
+}
+
+fn encode_null_value(_array: &dyn Array, _row: usize, buf: &mut Vec<u8>) {
+    buf.extend_from_slice(b"null");
+}
+
+fn encode_boolean(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
     if array.is_null(row) {
         buf.extend_from_slice(b"null");
         return;
     }
-    match array.data_type() {
-        DataType::Boolean => {
-            let a = array.as_any().downcast_ref::<BooleanArray>().unwrap();
-            if a.value(row) {
-                buf.extend_from_slice(b"true");
-            } else {
-                buf.extend_from_slice(b"false");
-            }
-        }
-        DataType::UInt8 => {
-            let a = array.as_any().downcast_ref::<UInt8Array>().unwrap();
-            write_u64(buf, a.value(row) as u64);
-        }
-        DataType::UInt16 => {
-            let a = array.as_any().downcast_ref::<UInt16Array>().unwrap();
-            write_u64(buf, a.value(row) as u64);
-        }
-        DataType::UInt32 => {
-            let a = array.as_any().downcast_ref::<UInt32Array>().unwrap();
-            write_u64(buf, a.value(row) as u64);
-        }
-        DataType::UInt64 => {
-            let a = array.as_any().downcast_ref::<UInt64Array>().unwrap();
-            write_u64(buf, a.value(row));
-        }
-        DataType::Int16 => {
-            let a = array.as_any().downcast_ref::<Int16Array>().unwrap();
-            write_i64(buf, a.value(row) as i64);
-        }
-        DataType::Int32 => {
-            let a = array.as_any().downcast_ref::<Int32Array>().unwrap();
-            write_i64(buf, a.value(row) as i64);
-        }
-        DataType::Int64 => {
-            let a = array.as_any().downcast_ref::<Int64Array>().unwrap();
-            write_i64(buf, a.value(row));
-        }
-        DataType::Float64 => {
-            let a = array.as_any().downcast_ref::<Float64Array>().unwrap();
-            let v = a.value(row);
-            if v.is_nan() || v.is_infinite() {
-                buf.extend_from_slice(b"null");
-            } else {
-                let mut tmp = String::new();
-                write!(tmp, "{}", v).unwrap();
-                buf.extend_from_slice(tmp.as_bytes());
-            }
-        }
-        DataType::Utf8 => {
-            let a = array.as_any().downcast_ref::<StringArray>().unwrap();
-            encode_json_string(a.value(row), buf);
-        }
-        DataType::Binary => {
-            let a = array.as_any().downcast_ref::<BinaryArray>().unwrap();
-            encode_hex_bytes(a.value(row), buf);
-        }
-        DataType::FixedSizeBinary(_) => {
-            let a = array
-                .as_any()
-                .downcast_ref::<FixedSizeBinaryArray>()
-                .unwrap();
-            encode_hex_bytes(a.value(row), buf);
-        }
-        DataType::Timestamp(arrow::datatypes::TimeUnit::Second, _) => {
-            let a = array
-                .as_any()
-                .downcast_ref::<TimestampSecondArray>()
-                .unwrap();
-            write_i64(buf, a.value(row));
-        }
-        DataType::List(_) => {
-            let a = array
-                .as_any()
-                .downcast_ref::<GenericListArray<i32>>()
-                .unwrap();
-            encode_list(a, row, buf);
-        }
-        DataType::Struct(_) => {
-            let a = array.as_any().downcast_ref::<StructArray>().unwrap();
-            encode_struct(a, row, buf);
-        }
-        _ => {
-            // Fallback: try string representation
-            buf.extend_from_slice(b"null");
-        }
+    let a = array.as_any().downcast_ref::<BooleanArray>().unwrap();
+    if a.value(row) {
+        buf.extend_from_slice(b"true");
+    } else {
+        buf.extend_from_slice(b"false");
     }
+}
+
+fn encode_uint8(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
+    if array.is_null(row) {
+        buf.extend_from_slice(b"null");
+        return;
+    }
+    let a = array.as_any().downcast_ref::<UInt8Array>().unwrap();
+    write_u64(buf, a.value(row) as u64);
+}
+
+fn encode_uint16(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
+    if array.is_null(row) {
+        buf.extend_from_slice(b"null");
+        return;
+    }
+    let a = array.as_any().downcast_ref::<UInt16Array>().unwrap();
+    write_u64(buf, a.value(row) as u64);
+}
+
+fn encode_uint32(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
+    if array.is_null(row) {
+        buf.extend_from_slice(b"null");
+        return;
+    }
+    let a = array.as_any().downcast_ref::<UInt32Array>().unwrap();
+    write_u64(buf, a.value(row) as u64);
+}
+
+fn encode_uint64(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
+    if array.is_null(row) {
+        buf.extend_from_slice(b"null");
+        return;
+    }
+    let a = array.as_any().downcast_ref::<UInt64Array>().unwrap();
+    write_u64(buf, a.value(row));
+}
+
+fn encode_int16(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
+    if array.is_null(row) {
+        buf.extend_from_slice(b"null");
+        return;
+    }
+    let a = array.as_any().downcast_ref::<Int16Array>().unwrap();
+    write_i64(buf, a.value(row) as i64);
+}
+
+fn encode_int32(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
+    if array.is_null(row) {
+        buf.extend_from_slice(b"null");
+        return;
+    }
+    let a = array.as_any().downcast_ref::<Int32Array>().unwrap();
+    write_i64(buf, a.value(row) as i64);
+}
+
+fn encode_int64(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
+    if array.is_null(row) {
+        buf.extend_from_slice(b"null");
+        return;
+    }
+    let a = array.as_any().downcast_ref::<Int64Array>().unwrap();
+    write_i64(buf, a.value(row));
+}
+
+fn encode_float64(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
+    if array.is_null(row) {
+        buf.extend_from_slice(b"null");
+        return;
+    }
+    let a = array.as_any().downcast_ref::<Float64Array>().unwrap();
+    let v = a.value(row);
+    if v.is_nan() || v.is_infinite() {
+        buf.extend_from_slice(b"null");
+    } else {
+        let mut tmp = ryu::Buffer::new();
+        buf.extend_from_slice(tmp.format(v).as_bytes());
+    }
+}
+
+fn encode_utf8_value(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
+    if array.is_null(row) {
+        buf.extend_from_slice(b"null");
+        return;
+    }
+    let a = array.as_any().downcast_ref::<StringArray>().unwrap();
+    encode_json_string(a.value(row), buf);
+}
+
+fn encode_binary_value(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
+    if array.is_null(row) {
+        buf.extend_from_slice(b"null");
+        return;
+    }
+    let a = array.as_any().downcast_ref::<BinaryArray>().unwrap();
+    encode_hex_bytes(a.value(row), buf);
+}
+
+fn encode_fixed_binary_value(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
+    if array.is_null(row) {
+        buf.extend_from_slice(b"null");
+        return;
+    }
+    let a = array
+        .as_any()
+        .downcast_ref::<FixedSizeBinaryArray>()
+        .unwrap();
+    encode_hex_bytes(a.value(row), buf);
+}
+
+fn encode_timestamp_second(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
+    if array.is_null(row) {
+        buf.extend_from_slice(b"null");
+        return;
+    }
+    let a = array
+        .as_any()
+        .downcast_ref::<TimestampSecondArray>()
+        .unwrap();
+    write_i64(buf, a.value(row));
+}
+
+fn encode_list_value(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
+    if array.is_null(row) {
+        buf.extend_from_slice(b"null");
+        return;
+    }
+    let a = array
+        .as_any()
+        .downcast_ref::<GenericListArray<i32>>()
+        .unwrap();
+    encode_list(a, row, buf);
+}
+
+fn encode_struct_value(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
+    if array.is_null(row) {
+        buf.extend_from_slice(b"null");
+        return;
+    }
+    let a = array.as_any().downcast_ref::<StructArray>().unwrap();
+    encode_struct(a, row, buf);
+}
+
+/// Encode a single value from an Arrow array to JSON bytes (generic fallback).
+/// Prefer `resolve_encoder` + direct call in hot loops.
+pub fn encode_value(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
+    resolve_value_encoder(array.data_type())(array, row, buf);
 }
 
 /// Encode a value as a bignum (quoted string number).

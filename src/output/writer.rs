@@ -1,6 +1,8 @@
 use std::io::{self, Write};
 
+/// Initial capacity for the internal buffer (tuned for typical block JSON sizes).
 const INITIAL_CAPACITY: usize = 256 * 1024; // 256 KB
+/// Flush the buffer to the underlying writer when it exceeds this size.
 const FLUSH_THRESHOLD: usize = 16 * 1024; // 16 KB
 
 /// A buffered JSON array writer that streams blocks to an underlying writer.
@@ -39,6 +41,16 @@ impl<W: Write> JsonArrayWriter<W> {
     /// Write raw bytes to the current item.
     pub fn write_bytes(&mut self, bytes: &[u8]) {
         self.buf.extend_from_slice(bytes);
+    }
+
+    /// Write a single byte to the current item.
+    pub fn write_byte(&mut self, byte: u8) {
+        self.buf.push(byte);
+    }
+
+    /// Get a mutable reference to the internal buffer for direct writes.
+    pub fn buf_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.buf
     }
 
     /// Finish writing. Closes the JSON array and flushes.

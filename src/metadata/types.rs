@@ -16,9 +16,9 @@ pub struct DatasetDescription {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableDescription {
     /// Column that holds the block number for block range filtering.
-    /// For the blocks table this is "number", for child tables it's "block_number".
-    #[serde(default)]
-    pub block_number_column: Option<String>,
+    /// Defaults to "block_number". The blocks table typically overrides this to "number".
+    #[serde(default = "default_block_number_column")]
+    pub block_number_column: String,
 
     /// Hierarchical address column for children/parents relations.
     /// E.g., "instruction_address" for Solana instructions, "trace_address" for EVM traces.
@@ -39,11 +39,6 @@ pub struct TableDescription {
     /// Column definitions keyed by column name.
     /// Uses IndexMap to preserve YAML definition order (determines output field ordering).
     pub columns: IndexMap<String, ColumnDescription>,
-
-    /// Maps a data column to its weight/size column.
-    /// E.g., "data" -> "data_size", "a0" -> "accounts_size"
-    #[serde(default)]
-    pub weight_columns: BTreeMap<String, WeightSource>,
 
     /// Tables that are children of this table (joined via same key prefix).
     /// E.g., transactions has children [logs, balances, token_balances]
@@ -76,16 +71,15 @@ pub struct TableDescription {
     #[serde(default)]
     pub virtual_fields: BTreeMap<String, VirtualField>,
 
-    /// Per-column output encoding overrides (when different from default).
-    /// E.g., "version" → "solana_tx_version", "err" → "json", "fee" → "bignum"
-    #[serde(default)]
-    pub output_encodings: BTreeMap<String, OutputEncoding>,
-
     /// Polymorphic field grouping: columns with certain prefixes are grouped into
     /// nested JSON objects based on a tag column value.
     /// E.g., EVM traces: `create_from` → `action.from` when type=create.
     #[serde(default)]
     pub field_groups: Option<FieldGrouping>,
+}
+
+fn default_block_number_column() -> String {
+    "block_number".to_string()
 }
 
 /// Weight source for a column — either a reference to a size column or a fixed value.
@@ -103,6 +97,11 @@ pub struct ColumnDescription {
     #[serde(rename = "type")]
     pub data_type: ColumnType,
 
+    /// JSON output encoding override. When set, controls how this column is serialized in JSON.
+    /// E.g., `hex` for "0x..."-prefixed hex strings, `string` for number-as-quoted-string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub json_encoding: Option<JsonEncoding>,
+
     /// Whether parquet statistics (min/max) are written for this column
     #[serde(default)]
     pub stats: bool,
@@ -111,9 +110,14 @@ pub struct ColumnDescription {
     #[serde(default)]
     pub dictionary: bool,
 
-    /// String encoding format (for display/serialization)
+    /// Weight source for response size limiting.
+    /// References a size column (e.g., "input_size") or a fixed weight (e.g., 0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<WeightSource>,
+
+    /// System column — not included in user output (e.g., size columns, bloom filters).
     #[serde(default)]
-    pub encoding: Option<StringEncoding>,
+    pub system: bool,
 }
 
 /// Supported column data types (maps to Arrow types).
@@ -195,6 +199,23 @@ impl<'de> Deserialize<'de> for ColumnType {
             ))),
         }
     }
+}
+
+/// JSON output encoding for a column.
+/// Controls how the column value is serialized in JSON output.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum JsonEncoding {
+    /// Hex-encoded string with "0x" prefix (e.g., addresses, hashes)
+    Hex,
+    /// Base58-encoded string (Solana addresses)
+    Base58,
+    /// Number as quoted string (for large integers that exceed JS safe range)
+    String,
+    /// Raw JSON pass-through — string column containing JSON, embedded without quoting
+    Json,
+    /// Solana transaction version: -1 → "legacy", else number
+    SolanaTxVersion,
 }
 
 /// Description of a relation available in query items.
@@ -307,31 +328,6 @@ pub enum VirtualField {
     /// then an optional trailing list column (spread into array).
     #[serde(rename = "roll")]
     Roll { columns: Vec<String> },
-}
-
-/// Output encoding override for a column.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum OutputEncoding {
-    /// Pass-through (default for most types)
-    Value,
-    /// Large numbers as quoted strings: 12345 → "12345"
-    Bignum,
-    /// String column containing JSON — parse and embed as raw JSON
-    Json,
-    /// Solana transaction version: -1 → "legacy", else number
-    SolanaTxVersion,
-    /// Timestamp in seconds as number
-    TimestampSecond,
-}
-
-/// String encoding format for display purposes.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum StringEncoding {
-    Hex,
-    Base58,
-    Json,
 }
 
 impl DatasetDescription {

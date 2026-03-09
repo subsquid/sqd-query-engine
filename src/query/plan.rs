@@ -1,6 +1,6 @@
 use crate::metadata::{
     ColumnDescription, ColumnType, DatasetDescription, RelationKind as MetaRelationKind,
-    SpecialFilter, StringEncoding, TableDescription,
+    JsonEncoding, SpecialFilter, TableDescription,
 };
 use crate::query::parse::{parse_hex, Query, QueryItem};
 use crate::scan::predicate::{
@@ -66,9 +66,9 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
         .tables
         .iter()
         .find(|(_, desc)| {
-            desc.block_number_column
-                .as_ref()
-                .map(|c| desc.sort_key.first().map(|s| s == c).unwrap_or(false))
+            desc.sort_key
+                .first()
+                .map(|s| s == &desc.block_number_column)
                 .unwrap_or(false)
                 && desc.item_order_keys.is_empty()
         })
@@ -332,7 +332,7 @@ fn compile_in_list(
 
     match &col_desc.data_type {
         ColumnType::String => {
-            let vals: Vec<String> = if col_desc.encoding == Some(StringEncoding::Hex) {
+            let vals: Vec<String> = if col_desc.json_encoding == Some(JsonEncoding::Hex) {
                 strings.iter().map(|s| s.to_ascii_lowercase()).collect()
             } else {
                 strings.iter().map(|s| s.to_string()).collect()
@@ -748,7 +748,7 @@ mod tests {
         request.predicates = pred_refs;
         request.from_block = Some(plan.from_block);
         request.to_block = plan.to_block;
-        request.block_number_column = table_desc.block_number_column.as_deref();
+        request.block_number_column = Some(table_desc.block_number_column.as_str());
 
         let batches = crate::scan::scan(&parquet_table, &request).unwrap();
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
@@ -803,7 +803,7 @@ mod tests {
         let mut request = crate::scan::ScanRequest::new(output_cols);
         request.predicates = pred_refs;
         request.from_block = Some(plan.from_block);
-        request.block_number_column = table_desc.block_number_column.as_deref();
+        request.block_number_column = Some(table_desc.block_number_column.as_str());
 
         let batches = crate::scan::scan(&parquet_table, &request).unwrap();
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();

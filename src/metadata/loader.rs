@@ -23,14 +23,12 @@ pub fn parse_dataset_description(yaml: &str) -> Result<DatasetDescription> {
 fn validate(desc: &DatasetDescription) -> Result<()> {
     for (table_name, table) in &desc.tables {
         // Validate block_number_column exists in columns
-        if let Some(bn_col) = &table.block_number_column {
-            anyhow::ensure!(
-                table.columns.contains_key(bn_col),
-                "table '{}': block_number_column '{}' not found in columns",
-                table_name,
-                bn_col
-            );
-        }
+        anyhow::ensure!(
+            table.columns.contains_key(&table.block_number_column),
+            "table '{}': block_number_column '{}' not found in columns",
+            table_name,
+            table.block_number_column
+        );
 
         // Validate item_order_keys exist in columns
         for key in &table.item_order_keys {
@@ -53,20 +51,14 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
         }
 
         // Validate weight column references
-        for (col, weight) in &table.weight_columns {
-            anyhow::ensure!(
-                table.columns.contains_key(col),
-                "table '{}': weight_columns references unknown column '{}'",
-                table_name,
-                col
-            );
-            if let crate::metadata::WeightSource::Column(weight_col) = weight {
+        for (col_name, col) in &table.columns {
+            if let Some(crate::metadata::WeightSource::Column(weight_col)) = &col.weight {
                 anyhow::ensure!(
-                    table.columns.contains_key(weight_col),
+                    table.columns.contains_key(weight_col.as_str()),
                     "table '{}': weight column '{}' for '{}' not found in columns",
                     table_name,
                     weight_col,
-                    col
+                    col_name
                 );
             }
         }
@@ -108,9 +100,54 @@ tables:
         assert_eq!(desc.name, "test");
         assert_eq!(desc.tables.len(), 1);
         let blocks = desc.table("blocks").unwrap();
-        assert_eq!(blocks.block_number_column.as_deref(), Some("number"));
+        assert_eq!(blocks.block_number_column, "number");
         assert_eq!(blocks.sort_key, vec!["number"]);
         assert_eq!(blocks.stats_columns(), vec!["number"]);
+    }
+
+    #[test]
+    fn test_default_block_number_column() {
+        let yaml = r#"
+name: test
+tables:
+  transactions:
+    columns:
+      block_number: { type: uint64 }
+"#;
+        let desc = parse_dataset_description(yaml).unwrap();
+        let txs = desc.table("transactions").unwrap();
+        assert_eq!(txs.block_number_column, "block_number");
+    }
+
+    #[test]
+    fn test_column_json_encoding() {
+        let yaml = r#"
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    columns:
+      number: { type: uint64 }
+      hash:
+        type: string
+        json_encoding: hex
+      fee:
+        type: uint64
+        json_encoding: string
+"#;
+        let desc = parse_dataset_description(yaml).unwrap();
+        let blocks = desc.table("blocks").unwrap();
+        let hash = blocks.column("hash").unwrap();
+        assert_eq!(hash.data_type, crate::metadata::ColumnType::String);
+        assert_eq!(hash.json_encoding, Some(crate::metadata::JsonEncoding::Hex));
+        let fee = blocks.column("fee").unwrap();
+        assert_eq!(fee.data_type, crate::metadata::ColumnType::UInt64);
+        assert_eq!(
+            fee.json_encoding,
+            Some(crate::metadata::JsonEncoding::String)
+        );
+        let number = blocks.column("number").unwrap();
+        assert_eq!(number.json_encoding, None);
     }
 
     #[test]
@@ -139,10 +176,7 @@ tables:
         assert_eq!(desc.tables.len(), 7);
 
         let instructions = desc.table("instructions").unwrap();
-        assert_eq!(
-            instructions.block_number_column.as_deref(),
-            Some("block_number")
-        );
+        assert_eq!(instructions.block_number_column, "block_number");
         assert_eq!(
             instructions.sort_key,
             vec![
@@ -197,6 +231,7 @@ tables:
 name: test
 tables:
   blocks:
+    block_number_column: number
     children: [missing_table]
     columns:
       number: { type: uint64 }

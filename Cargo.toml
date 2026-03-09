@@ -17,6 +17,8 @@ memmap2 = "0.9"
 bytes = "1"
 faster-hex = "0.10"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
+ryu = "1.0.23"
+rustc-hash = "2"
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.6"
@@ -27,5 +29,9 @@ paste = "1.0.15"
 tempfile = "3"
 
 [[bench]]
-name = "query"
+name = "latency"
+harness = false
+
+[[bench]]
+name = "throughput"
 harness = false
