@@ -1,0 +1,126 @@
+name: hyperliquidReplicaCmds
+
+tables:
+  blocks:
+    block_number_column: number
+    field_name: block
+    sort_key: [ number ]
+    columns:
+      number:
+        type: uint64
+        stats: true
+      hash:
+        type: string
+      parent_hash:
+        type: string
+      round:
+        type: uint64
+      parent_round:
+        type: uint64
+      proposer:
+        type: string
+      timestamp:
+        type: timestamp_millisecond
+        json_encoding: timestamp_millisecond
+      hardfork:
+        type: string
+        json_encoding: json
+
+  actions:
+    query_name: actions
+    field_name: action
+    item_order_keys: [ action_index ]
+    sort_key: [ action_type, user, vault_address, block_number, action_index ]
+    columns:
+      block_number:
+        type: uint64
+        stats: true
+      action_index:
+        type: uint32
+        stats: true
+      user:
+        type: string
+        stats: true
+        dictionary: true
+      action_type:
+        type: string
+        stats: true
+        dictionary: true
+      action:
+        type: string
+        json_encoding: json
+        weight: action_size
+      action_size:
+        type: uint64
+        system: true
+      signature:
+        type: string
+        json_encoding: json
+      nonce:
+        type: uint64
+      vault_address:
+        type: string
+        stats: true
+        dictionary: true
+      status:
+        type: string
+        stats: true
+        dictionary: true
+      response:
+        type: string
+        json_encoding: json
+        weight: response_size
+      response_size:
+        type: uint64
+        system: true
+      # Extracted nested list columns for efficient filtering
+      order_asset:
+        type: list_uint32
+        system: true
+      order_cloid:
+        type: list_string
+        system: true
+      cancel_asset:
+        type: list_uint32
+        system: true
+      cancel_by_cloid_asset:
+        type: list_uint32
+        system: true
+      cancel_by_cloid_cloid:
+        type: list_string
+        system: true
+      batch_modify_asset:
+        type: list_uint32
+        system: true
+      batch_modify_cloid:
+        type: list_string
+        system: true
+
+query_aliases:
+  orderActions:
+    table: actions
+    implicit_predicates:
+      action_type: [ "order" ]
+    filter_aliases:
+      contains_asset: order_asset
+      contains_cloid: order_cloid
+  cancelActions:
+    table: actions
+    implicit_predicates:
+      action_type: [ "cancel" ]
+    filter_aliases:
+      contains_asset: cancel_asset
+  cancelByCloidActions:
+    table: actions
+    implicit_predicates:
+      action_type: [ "cancelByCloid" ]
+    filter_aliases:
+      contains_asset: cancel_by_cloid_asset
+      contains_cloid: cancel_by_cloid_cloid
+  batchModifyActions:
+    table: actions
+    implicit_predicates:
+      action_type: [ "batchModify" ]
+    filter_aliases:
+      contains_asset: batch_modify_asset
+      contains_cloid: batch_modify_cloid

@@ -309,3 +309,42 @@ moonbeam_fixture!(example_proposals_squid);
 moonbeam_fixture!(include_all_blocks);
 moonbeam_fixture!(simple_call_query);
 moonbeam_fixture!(simple_event_query);
+
+// ---------------------------------------------------------------------------
+// Hyperliquid Fills fixtures
+// ---------------------------------------------------------------------------
+
+macro_rules! hyperliquid_fills_fixture {
+    ($name:ident) => {
+        paste::paste! {
+            #[test]
+            fn [<hyperliquid_ $name>]() {
+                test_fixture("hyperliquid", "metadata/hyperliquid_fills.yaml", stringify!($name));
+            }
+        }
+    };
+}
+
+hyperliquid_fills_fixture!(coin_fills);
+hyperliquid_fills_fixture!(user_fills);
+hyperliquid_fills_fixture!(include_all_blocks);
+
+// ---------------------------------------------------------------------------
+// Hyperliquid Replica Commands fixtures
+// ---------------------------------------------------------------------------
+
+macro_rules! hyperliquid_replica_cmds_fixture {
+    ($name:ident) => {
+        paste::paste! {
+            #[test]
+            fn [<hyperliquid_replica_cmds_ $name>]() {
+                test_fixture("hyperliquid_replica_cmds", "metadata/hyperliquid_replica_cmds.yaml", stringify!($name));
+            }
+        }
+    };
+}
+
+hyperliquid_replica_cmds_fixture!(action_type);
+hyperliquid_replica_cmds_fixture!(action_user);
+hyperliquid_replica_cmds_fixture!(include_all_blocks);
+hyperliquid_replica_cmds_fixture!(order_action);

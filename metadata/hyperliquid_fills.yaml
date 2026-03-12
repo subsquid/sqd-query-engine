@@ -1,0 +1,83 @@
+name: hyperliquidFills
+
+tables:
+  blocks:
+    block_number_column: number
+    field_name: block
+    sort_key: [ number ]
+    columns:
+      number:
+        type: uint64
+        stats: true
+      hash:
+        type: string
+      parent_hash:
+        type: string
+      timestamp:
+        type: timestamp_millisecond
+        json_encoding: timestamp_millisecond
+
+  fills:
+    query_name: fills
+    field_name: fill
+    item_order_keys: [ fill_index ]
+    sort_key: [ user, coin, block_number, fill_index ]
+    columns:
+      block_number:
+        type: uint64
+        stats: true
+      fill_index:
+        type: uint32
+        stats: true
+      user:
+        type: string
+        stats: true
+        dictionary: true
+      coin:
+        type: string
+        stats: true
+        dictionary: true
+      px:
+        type: float64
+      sz:
+        type: float64
+      side:
+        type: string
+        stats: true
+        dictionary: true
+      time:
+        type: timestamp_millisecond
+        json_encoding: timestamp_millisecond
+      start_position:
+        type: float64
+      dir:
+        type: string
+        stats: true
+        dictionary: true
+      closed_pnl:
+        type: float64
+      hash:
+        type: string
+      oid:
+        type: uint64
+      crossed:
+        type: boolean
+      fee:
+        type: float64
+      builder_fee:
+        type: float64
+      tid:
+        type: uint64
+      cloid:
+        type: string
+        stats: true
+      fee_token:
+        type: string
+        stats: true
+        dictionary: true
+      builder:
+        type: string
+        stats: true
+        dictionary: true
+      twap_id:
+        type: uint64

@@ -93,6 +93,13 @@ pub struct RangeLtePredicate {
     value: ScalarValue,
 }
 
+/// List-contains-any predicate: checks if a List column contains any of the target values.
+/// Used for filtering on pre-extracted nested list columns (e.g., order_asset: List<UInt32>).
+pub struct ListContainsAnyPredicate {
+    u32_set: Option<HashSet<u32>>,
+    string_set: Option<HashSet<String>>,
+}
+
 /// A scalar value for equality comparison.
 #[derive(Debug, Clone)]
 pub enum ScalarValue {
@@ -626,6 +633,66 @@ impl ArrayPredicate for RangeLtePredicate {
 }
 
 // ---------------------------------------------------------------------------
+// ListContainsAnyPredicate
+// ---------------------------------------------------------------------------
+
+impl ListContainsAnyPredicate {
+    pub fn new_u32(values: Vec<u32>) -> Self {
+        Self {
+            u32_set: Some(values.into_iter().collect()),
+            string_set: None,
+        }
+    }
+
+    pub fn new_string(values: Vec<String>) -> Self {
+        Self {
+            u32_set: None,
+            string_set: Some(values.into_iter().collect()),
+        }
+    }
+}
+
+impl ArrayPredicate for ListContainsAnyPredicate {
+    fn evaluate(&self, array: &dyn Array) -> BooleanArray {
+        let list_array = array
+            .as_any()
+            .downcast_ref::<GenericListArray<i32>>()
+            .expect("ListContainsAny requires a List column");
+
+        let mut results = Vec::with_capacity(list_array.len());
+        for i in 0..list_array.len() {
+            if list_array.is_null(i) {
+                results.push(false);
+                continue;
+            }
+            let item = list_array.value(i);
+            let matches = if let Some(u32_set) = &self.u32_set {
+                if let Some(vals) = item.as_any().downcast_ref::<UInt32Array>() {
+                    (0..vals.len()).any(|j| u32_set.contains(&vals.value(j)))
+                } else {
+                    false
+                }
+            } else if let Some(string_set) = &self.string_set {
+                if let Some(vals) = item.as_any().downcast_ref::<StringArray>() {
+                    (0..vals.len()).any(|j| string_set.contains(vals.value(j)))
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            results.push(matches);
+        }
+        BooleanArray::from(results)
+    }
+
+    fn can_skip(&self, _min: &dyn Array, _max: &dyn Array) -> bool {
+        // No row group pruning for list-contains predicates
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
 // RowPredicate implementation
 // ---------------------------------------------------------------------------
 
@@ -735,6 +802,22 @@ pub fn col_in_list(column: &str, values: Arc<dyn Array>) -> ColumnPredicate {
     ColumnPredicate {
         column: column.to_string(),
         predicate: Arc::new(InListPredicate::new(values)),
+    }
+}
+
+/// Create a list-contains-any predicate for a List<UInt32> column.
+pub fn col_list_contains_any_u32(column: &str, values: Vec<u32>) -> ColumnPredicate {
+    ColumnPredicate {
+        column: column.to_string(),
+        predicate: Arc::new(ListContainsAnyPredicate::new_u32(values)),
+    }
+}
+
+/// Create a list-contains-any predicate for a List<String> column.
+pub fn col_list_contains_any_string(column: &str, values: Vec<String>) -> ColumnPredicate {
+    ColumnPredicate {
+        column: column.to_string(),
+        predicate: Arc::new(ListContainsAnyPredicate::new_string(values)),
     }
 }
 

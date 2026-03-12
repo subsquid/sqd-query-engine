@@ -4,7 +4,8 @@ use crate::metadata::{
 };
 use crate::query::parse::{parse_hex, Query, QueryItem};
 use crate::scan::predicate::{
-    col_bloom, col_eq, col_in_list, ColumnPredicate, InListPredicate, RowPredicate, ScalarValue,
+    col_bloom, col_eq, col_in_list, col_list_contains_any_string, col_list_contains_any_u32,
+    ColumnPredicate, InListPredicate, RowPredicate, ScalarValue,
 };
 use anyhow::{anyhow, bail, ensure, Result};
 use arrow::array::*;
@@ -324,9 +325,11 @@ fn compile_item_predicates(
             col_predicates.push(pred);
         } else if let Some(n) = value.as_u64() {
             col_predicates.push(col_eq(key, ScalarValue::UInt64(n)));
+        } else if let Some(s) = value.as_str() {
+            col_predicates.push(col_eq(key, ScalarValue::Utf8(s.to_string())));
         } else {
             bail!(
-                "invalid filter value for '{}': expected array, boolean, or number",
+                "invalid filter value for '{}': expected array, boolean, number, or string",
                 key
             );
         }
@@ -432,6 +435,22 @@ fn compile_in_list(
                 column,
                 Arc::new(builder.finish()) as Arc<dyn Array>,
             ))
+        }
+        ColumnType::ListUInt32 => {
+            // List-contains-any: values are integers (possibly JSON numbers)
+            let vals: Vec<u32> = values
+                .iter()
+                .filter_map(|v| v.as_u64().map(|n| n as u32))
+                .collect();
+            Ok(col_list_contains_any_u32(column, vals))
+        }
+        ColumnType::ListString => {
+            // List-contains-any: values are strings
+            let vals: Vec<String> = values
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+            Ok(col_list_contains_any_string(column, vals))
         }
         _ => bail!(
             "unsupported column type {:?} for IN-list filter on '{}'",
