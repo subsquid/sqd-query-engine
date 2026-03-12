@@ -58,6 +58,7 @@ tables:
       signature:
         type: string
         json_encoding: json
+        weight: 128
       fee:
         type: decimal128
         json_encoding: string
@@ -92,6 +93,10 @@ tables:
         kind: children
         left_key: [ block_number, extrinsic_index ]
         right_key: [ block_number, extrinsic_index ]
+      subcalls:
+        table: calls
+        kind: children
+        key: [ block_number, extrinsic_index ]
       stack:
         table: calls
         kind: parents
@@ -138,6 +143,7 @@ tables:
   events:
     query_name: events
     field_name: event
+    address_column: call_address
     item_order_keys: [ index ]
     sort_key: [ name, block_number, index ]
     relations:
@@ -206,3 +212,30 @@ tables:
       _idx:
         type: int64
         system: true
+
+query_aliases:
+  evmLogs:
+    table: events
+    implicit_predicates:
+      name: [ "EVM.Log" ]
+    filter_aliases:
+      topic0: _evm_log_topic0
+      topic1: _evm_log_topic1
+      topic2: _evm_log_topic2
+      topic3: _evm_log_topic3
+      address: _evm_log_address
+    relations:
+      extrinsic:
+        table: extrinsics
+        left_key: [ block_number, extrinsic_index ]
+        right_key: [ block_number, index ]
+      call:
+        table: calls
+        left_key: [ block_number, extrinsic_index, call_address ]
+        right_key: [ block_number, extrinsic_index, address ]
+      stack:
+        table: calls
+        kind: parents
+        left_key: [ block_number, extrinsic_index ]
+        right_key: [ block_number, extrinsic_index ]
+

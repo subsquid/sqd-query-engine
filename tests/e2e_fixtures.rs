@@ -277,3 +277,35 @@ kusama_fixture!(example_giant_squid_stats);
 kusama_fixture!(example_substrate_calls_example);
 kusama_fixture!(example_substrate_remark_example);
 kusama_fixture!(example_substrate_storage_example);
+
+// ---------------------------------------------------------------------------
+// Moonbeam fixtures (uses Substrate metadata)
+// ---------------------------------------------------------------------------
+
+macro_rules! moonbeam_fixture {
+    ($name:ident) => {
+        paste::paste! {
+            #[test]
+            fn [<moonbeam_ $name>]() {
+                test_fixture("moonbeam", "metadata/substrate.yaml", stringify!($name));
+            }
+        }
+    };
+}
+
+moonbeam_fixture!(all);
+moonbeam_fixture!(call_relations);
+moonbeam_fixture!(call_subcalls);
+moonbeam_fixture!(event_call_stack);
+moonbeam_fixture!(event_relations);
+moonbeam_fixture!(evm_logs_query);
+moonbeam_fixture!(example_balances_squid);
+moonbeam_fixture!(example_fearless_parachain_staking_squid);
+moonbeam_fixture!(example_giant_squid_explorer);
+moonbeam_fixture!(example_giant_squid_main);
+moonbeam_fixture!(example_giant_squid_stats);
+moonbeam_fixture!(example_modified_substrate_frontier_example);
+moonbeam_fixture!(example_proposals_squid);
+moonbeam_fixture!(include_all_blocks);
+moonbeam_fixture!(simple_call_query);
+moonbeam_fixture!(simple_event_query);

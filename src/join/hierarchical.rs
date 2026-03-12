@@ -55,20 +55,27 @@ fn resolve_indices(schema: &SchemaRef, columns: &[&str]) -> Result<Vec<usize>> {
 }
 
 /// Find all children of the given rows. A child is a row in `target_batches` whose
-/// address column is a strict extension of an address in `source_batches`.
+/// address column is a prefix extension of an address in `source_batches`.
 ///
 /// For example, if a source row has `instruction_address = [0]`, then target rows
 /// with `[0, 0]`, `[0, 1]`, `[0, 0, 3]` etc. are children.
 ///
-/// Both source and target are from the same table (self-join).
-///
 /// - `group_key_columns`: columns that group rows (e.g., ["block_number", "transaction_index"])
-/// - `address_column`: the List<UInt32> column (e.g., "instruction_address", "trace_address")
+/// - `source_address_column`: address column in source batches (e.g., "address")
+/// - `target_address_column`: address column in target batches (e.g., "call_address")
+/// - `inclusive`: controls whether equal-depth addresses count as a match.
+///   When `false` (self-join, e.g. calls→calls), only strictly deeper addresses match:
+///   a call at `[0]` does NOT match itself, only `[0, *]`.
+///   When `true` (cross-table, e.g. calls→events), same-depth addresses also match:
+///   an event with `call_address=[0]` IS considered a child of a call with `address=[0]`,
+///   because the event was emitted by that call.
 pub fn find_children(
     source_batches: &[RecordBatch],
     target_batches: &[RecordBatch],
     group_key_columns: &[&str],
-    address_column: &str,
+    source_address_column: &str,
+    target_address_column: &str,
+    inclusive: bool,
 ) -> Result<Vec<RecordBatch>> {
     if source_batches.is_empty() || target_batches.is_empty() {
         return Ok(Vec::new());
@@ -81,13 +88,18 @@ pub fn find_children(
         let key_indices = resolve_indices(batch.schema_ref(), group_key_columns)?;
         let addr_idx = batch
             .schema()
-            .index_of(address_column)
-            .map_err(|_| anyhow!("column '{}' not found", address_column))?;
+            .index_of(source_address_column)
+            .map_err(|_| anyhow!("column '{}' not found", source_address_column))?;
         let addr_array = batch
             .column(addr_idx)
             .as_any()
             .downcast_ref::<GenericListArray<i32>>()
-            .ok_or_else(|| anyhow!("'{}' must be a List<UInt32> column", address_column))?;
+            .ok_or_else(|| {
+                anyhow!(
+                    "'{}' must be a List<UInt32> column",
+                    source_address_column
+                )
+            })?;
 
         for row in 0..batch.num_rows() {
             let gk = make_group_key(batch, row, &key_indices);
@@ -96,22 +108,32 @@ pub fn find_children(
         }
     }
 
-    // Probe target batches: keep rows whose address is a strict child of any source address
+    // Probe target batches: keep rows whose address is a child of any source address
     let mut result = Vec::new();
     for batch in target_batches {
         let key_indices = resolve_indices(batch.schema_ref(), group_key_columns)?;
         let addr_idx = batch
             .schema()
-            .index_of(address_column)
-            .map_err(|_| anyhow!("column '{}' not found", address_column))?;
+            .index_of(target_address_column)
+            .map_err(|_| anyhow!("column '{}' not found", target_address_column))?;
         let addr_array = batch
             .column(addr_idx)
             .as_any()
             .downcast_ref::<GenericListArray<i32>>()
-            .ok_or_else(|| anyhow!("'{}' must be a List<UInt32> column", address_column))?;
+            .ok_or_else(|| {
+                anyhow!(
+                    "'{}' must be a List<UInt32> column",
+                    target_address_column
+                )
+            })?;
 
         let mut matches = Vec::with_capacity(batch.num_rows());
         for row in 0..batch.num_rows() {
+            // Null addresses never match (e.g., events without a call)
+            if addr_array.is_null(row) {
+                matches.push(false);
+                continue;
+            }
             let gk = make_group_key(batch, row, &key_indices);
             let target_addr = extract_address(addr_array, row);
 
@@ -119,9 +141,13 @@ pub fn find_children(
                 .get(&gk)
                 .map(|addrs| {
                     addrs.iter().any(|parent| {
-                        // Child: target is strictly longer and starts with parent
-                        target_addr.len() > parent.len()
-                            && target_addr[..parent.len()] == parent[..]
+                        if inclusive {
+                            target_addr.len() >= parent.len()
+                                && target_addr[..parent.len()] == parent[..]
+                        } else {
+                            target_addr.len() > parent.len()
+                                && target_addr[..parent.len()] == parent[..]
+                        }
                     })
                 })
                 .unwrap_or(false);
@@ -143,15 +169,22 @@ pub fn find_children(
 }
 
 /// Find all parents (ancestors) of the given rows. A parent is a row in `target_batches`
-/// whose address is a strict prefix of an address in `source_batches`.
+/// whose address is a prefix of an address in `source_batches`.
 ///
 /// For example, if source has `instruction_address = [0, 1, 2]`, then target rows with
 /// `[0]` and `[0, 1]` are parents.
+///
+/// - `source_address_column`: address column in source batches
+/// - `target_address_column`: address column in target batches
+/// - `inclusive`: same semantics as in `find_children` — when `true`, a target row
+///   at the same depth as a source row counts as a parent (cross-table case).
 pub fn find_parents(
     source_batches: &[RecordBatch],
     target_batches: &[RecordBatch],
     group_key_columns: &[&str],
-    address_column: &str,
+    source_address_column: &str,
+    target_address_column: &str,
+    inclusive: bool,
 ) -> Result<Vec<RecordBatch>> {
     if source_batches.is_empty() || target_batches.is_empty() {
         return Ok(Vec::new());
@@ -164,13 +197,18 @@ pub fn find_parents(
         let key_indices = resolve_indices(batch.schema_ref(), group_key_columns)?;
         let addr_idx = batch
             .schema()
-            .index_of(address_column)
-            .map_err(|_| anyhow!("column '{}' not found", address_column))?;
+            .index_of(source_address_column)
+            .map_err(|_| anyhow!("column '{}' not found", source_address_column))?;
         let addr_array = batch
             .column(addr_idx)
             .as_any()
             .downcast_ref::<GenericListArray<i32>>()
-            .ok_or_else(|| anyhow!("'{}' must be a List<UInt32> column", address_column))?;
+            .ok_or_else(|| {
+                anyhow!(
+                    "'{}' must be a List<UInt32> column",
+                    source_address_column
+                )
+            })?;
 
         for row in 0..batch.num_rows() {
             let gk = make_group_key(batch, row, &key_indices);
@@ -179,22 +217,31 @@ pub fn find_parents(
         }
     }
 
-    // Probe: keep rows whose address is a strict prefix of any source address
+    // Probe: keep rows whose address is a prefix of any source address
     let mut result = Vec::new();
     for batch in target_batches {
         let key_indices = resolve_indices(batch.schema_ref(), group_key_columns)?;
         let addr_idx = batch
             .schema()
-            .index_of(address_column)
-            .map_err(|_| anyhow!("column '{}' not found", address_column))?;
+            .index_of(target_address_column)
+            .map_err(|_| anyhow!("column '{}' not found", target_address_column))?;
         let addr_array = batch
             .column(addr_idx)
             .as_any()
             .downcast_ref::<GenericListArray<i32>>()
-            .ok_or_else(|| anyhow!("'{}' must be a List<UInt32> column", address_column))?;
+            .ok_or_else(|| {
+                anyhow!(
+                    "'{}' must be a List<UInt32> column",
+                    target_address_column
+                )
+            })?;
 
         let mut matches = Vec::with_capacity(batch.num_rows());
         for row in 0..batch.num_rows() {
+            if addr_array.is_null(row) {
+                matches.push(false);
+                continue;
+            }
             let gk = make_group_key(batch, row, &key_indices);
             let target_addr = extract_address(addr_array, row);
 
@@ -202,9 +249,13 @@ pub fn find_parents(
                 .get(&gk)
                 .map(|addrs| {
                     addrs.iter().any(|child| {
-                        // Parent: target is strictly shorter and child starts with target
-                        target_addr.len() < child.len()
-                            && child[..target_addr.len()] == target_addr[..]
+                        if inclusive {
+                            target_addr.len() <= child.len()
+                                && child[..target_addr.len()] == target_addr[..]
+                        } else {
+                            target_addr.len() < child.len()
+                                && child[..target_addr.len()] == target_addr[..]
+                        }
                     })
                 })
                 .unwrap_or(false);
@@ -294,6 +345,8 @@ mod tests {
             &target,
             &["block_number", "transaction_index"],
             "instruction_address",
+            "instruction_address",
+            false,
         )
         .unwrap();
 
@@ -332,6 +385,8 @@ mod tests {
             &target,
             &["block_number", "transaction_index"],
             "instruction_address",
+            "instruction_address",
+            false,
         )
         .unwrap();
 
@@ -372,6 +427,8 @@ mod tests {
             &target,
             &["block_number", "transaction_index"],
             "instruction_address",
+            "instruction_address",
+            false,
         )
         .unwrap();
 
@@ -394,7 +451,9 @@ mod tests {
                 &empty,
                 &batch,
                 &["block_number", "transaction_index"],
-                "instruction_address"
+                "instruction_address",
+                "instruction_address",
+                false,
             )
             .unwrap()
             .len(),
@@ -405,7 +464,9 @@ mod tests {
                 &batch,
                 &empty,
                 &["block_number", "transaction_index"],
-                "instruction_address"
+                "instruction_address",
+                "instruction_address",
+                false,
             )
             .unwrap()
             .len(),
@@ -433,6 +494,8 @@ mod tests {
             &target,
             &["block_number", "transaction_index"],
             "instruction_address",
+            "instruction_address",
+            false,
         )
         .unwrap();
 
@@ -496,6 +559,8 @@ mod tests {
             &all_batches,
             &["block_number", "transaction_index"],
             "instruction_address",
+            "instruction_address",
+            false,
         )
         .unwrap();
 
@@ -509,6 +574,8 @@ mod tests {
             &all_batches,
             &["block_number", "transaction_index"],
             "instruction_address",
+            "instruction_address",
+            false,
         )
         .unwrap();
 

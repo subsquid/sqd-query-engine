@@ -1,4 +1,4 @@
-use crate::metadata::{DatasetDescription, TableDescription};
+use crate::metadata::{DatasetDescription, QueryAlias, TableDescription};
 use anyhow::{anyhow, bail, ensure, Result};
 use std::collections::HashMap;
 
@@ -112,29 +112,37 @@ pub fn parse_query(json_bytes: &[u8], metadata: &DatasetDescription) -> Result<Q
             continue;
         }
 
-        // Resolve table name
+        // Resolve table name (try query_name, snake_case, then query_aliases)
         let table_name = query_name_to_table.get(key.as_str()).copied().or_else(|| {
             let snake = camel_to_snake(key);
             if metadata.tables.contains_key(&snake) {
-                // Return None here; we'll check below
                 None
             } else {
                 None
             }
         });
-        // Also try snake_case direct match
         let snake_key = camel_to_snake(key);
-        let table_name = table_name
-            .or_else(|| {
-                if metadata.tables.contains_key(&snake_key) {
-                    Some(snake_key.as_str())
-                } else {
-                    None
-                }
-            })
-            .ok_or_else(|| anyhow!("unknown table filter '{}' in query", key))?;
+        let alias_name: Option<&str> = None;
+        let (table_name, alias_name) = if let Some(tn) = table_name {
+            (tn, alias_name)
+        } else if metadata.tables.contains_key(&snake_key) {
+            (snake_key.as_str(), alias_name)
+        } else if let Some(alias) = metadata.query_aliases.get(key.as_str()).or_else(|| {
+            metadata.query_aliases.get(&snake_key)
+        }) {
+            // Query alias → resolve to the real table
+            (alias.table.as_str(), Some(key.as_str()))
+        } else {
+            return Err(anyhow!("unknown table filter '{}' in query", key));
+        };
 
         let table_desc = metadata.table(table_name).unwrap();
+        let alias_def = alias_name.and_then(|an| {
+            metadata
+                .query_aliases
+                .get(an)
+                .or_else(|| metadata.query_aliases.get(&camel_to_snake(an)))
+        });
 
         let arr = value
             .as_array()
@@ -142,11 +150,14 @@ pub fn parse_query(json_bytes: &[u8], metadata: &DatasetDescription) -> Result<Q
 
         let mut table_items = Vec::new();
         for item_value in arr {
-            let item = parse_query_item(item_value, table_desc, table_name)?;
+            let item = parse_query_item(item_value, table_desc, table_name, alias_def)?;
             table_items.push(item);
         }
 
-        items.insert(table_name.to_string(), table_items);
+        items
+            .entry(table_name.to_string())
+            .or_default()
+            .extend(table_items);
     }
 
     // Validate total item count
@@ -205,6 +216,7 @@ fn parse_query_item(
     value: &serde_json::Value,
     table: &TableDescription,
     table_name: &str,
+    alias: Option<&QueryAlias>,
 ) -> Result<QueryItem> {
     let obj = value
         .as_object()
@@ -213,17 +225,31 @@ fn parse_query_item(
     let mut filters = Vec::new();
     let mut relations = Vec::new();
 
+    // Alias-defined relations
+    let alias_relations = alias.map(|a| &a.relations);
+
     for (key, val) in obj {
         let snake_key = camel_to_snake(key);
 
         // Check if it's a relation flag (boolean true + known relation)
-        if val.as_bool() == Some(true) && table.relations.contains_key(&snake_key) {
+        let is_relation = table.relations.contains_key(&snake_key)
+            || alias_relations
+                .map(|r| r.contains_key(&snake_key))
+                .unwrap_or(false);
+        if val.as_bool() == Some(true) && is_relation {
             relations.push(snake_key);
             continue;
         }
-        // Also handle relation set to false (skip it)
-        if val.as_bool() == Some(false) && table.relations.contains_key(&snake_key) {
+        if val.as_bool() == Some(false) && is_relation {
             continue;
+        }
+
+        // Check alias filter aliases (e.g., topic0 → _evm_log_topic0)
+        if let Some(alias_def) = alias {
+            if let Some(real_col) = alias_def.filter_aliases.get(&snake_key) {
+                filters.push((real_col.clone(), val.clone()));
+                continue;
+            }
         }
 
         // Check if it's a special filter
@@ -244,6 +270,15 @@ fn parse_query_item(
             snake_key,
             table_name
         );
+    }
+
+    // Add implicit predicates from alias (e.g., name: ["EVM.Log"])
+    if let Some(alias_def) = alias {
+        for (col_name, values) in &alias_def.implicit_predicates {
+            let json_values: Vec<serde_json::Value> =
+                values.iter().map(|v| serde_json::Value::String(v.clone())).collect();
+            filters.push((col_name.clone(), serde_json::Value::Array(json_values)));
+        }
     }
 
     Ok(QueryItem { filters, relations })

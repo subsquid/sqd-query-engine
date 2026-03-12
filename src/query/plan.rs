@@ -132,9 +132,20 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
                 }
                 seen_relations.insert(rel_name.clone());
 
-                let rel_def = table_desc.relations.get(rel_name).ok_or_else(|| {
-                    anyhow!("unknown relation '{}' for table '{}'", rel_name, table_name)
-                })?;
+                // Look up relation in table first, then in any alias
+                let rel_def = table_desc
+                    .relations
+                    .get(rel_name)
+                    .or_else(|| {
+                        metadata
+                            .query_aliases
+                            .values()
+                            .find(|a| a.table == *table_name)
+                            .and_then(|a| a.relations.get(rel_name))
+                    })
+                    .ok_or_else(|| {
+                        anyhow!("unknown relation '{}' for table '{}'", rel_name, table_name)
+                    })?;
 
                 let rel_table_desc = metadata.table(&rel_def.table);
                 let target_output: Vec<String> = query

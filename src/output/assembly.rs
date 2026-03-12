@@ -221,8 +221,14 @@ fn execute_plan_inner<W: Write>(
                 .map(|(rel_idx, rel)| match rel.kind {
                     RelationKind::Children | RelationKind::Parents => {
                         let rel_table_desc = metadata.table(&rel.target_table)?;
-                        let addr_col = find_address_column(rel_table_desc)?;
-                        let gk = group_keys_for_relation(&rel.left_key, Some(addr_col));
+                        let target_addr_col = find_address_column(rel_table_desc)?;
+                        let source_addr_col =
+                            find_address_column(table_desc).unwrap_or(target_addr_col);
+                        // Cross-table relations use inclusive prefix matching because the
+                        // source and target address columns are different (e.g., calls.address
+                        // vs events.call_address). Same-table uses strict matching.
+                        let inclusive = source_addr_col != target_addr_col;
+                        let gk = group_keys_for_relation(&rel.left_key, Some(target_addr_col));
                         if gk.is_empty() {
                             return None;
                         }
@@ -232,7 +238,14 @@ fn execute_plan_inner<W: Write>(
                         };
                         let source_batches =
                             rel_filtered_batches[rel_idx].as_deref().unwrap_or(&batches);
-                        let hf = HierarchicalFilter::build(source_batches, &gk, addr_col, mode);
+                        let hf = HierarchicalFilter::build(
+                            source_batches,
+                            &gk,
+                            source_addr_col,
+                            target_addr_col,
+                            mode,
+                            inclusive,
+                        );
                         if hf.is_empty() {
                             None
                         } else {
@@ -323,13 +336,20 @@ fn execute_plan_inner<W: Write>(
                         }
                         RelationKind::Children => {
                             if let Some(desc) = rel_table_desc {
-                                if let Some(addr) = find_address_column(desc) {
-                                    let gk = group_keys_for_relation(&rel.left_key, Some(addr));
+                                if let Some(target_addr) = find_address_column(desc) {
+                                    let source_addr = find_address_column(table_desc)
+                                        .unwrap_or(target_addr);
+                                    // Cross-table → inclusive prefix, same-table → strict prefix
+                                    let inclusive = source_addr != target_addr;
+                                    let gk =
+                                        group_keys_for_relation(&rel.left_key, Some(target_addr));
                                     crate::join::find_children(
                                         source_batches,
                                         &rel_all_batches,
                                         &gk,
-                                        addr,
+                                        source_addr,
+                                        target_addr,
+                                        inclusive,
                                     )
                                 } else {
                                     Ok(Vec::new())
@@ -344,13 +364,20 @@ fn execute_plan_inner<W: Write>(
                         }
                         RelationKind::Parents => {
                             if let Some(desc) = rel_table_desc {
-                                if let Some(addr) = find_address_column(desc) {
-                                    let gk = group_keys_for_relation(&rel.left_key, Some(addr));
+                                if let Some(target_addr) = find_address_column(desc) {
+                                    let source_addr = find_address_column(table_desc)
+                                        .unwrap_or(target_addr);
+                                    // Cross-table → inclusive prefix, same-table → strict prefix
+                                    let inclusive = source_addr != target_addr;
+                                    let gk =
+                                        group_keys_for_relation(&rel.left_key, Some(target_addr));
                                     crate::join::find_parents(
                                         source_batches,
                                         &rel_all_batches,
                                         &gk,
-                                        addr,
+                                        source_addr,
+                                        target_addr,
+                                        inclusive,
                                     )
                                 } else {
                                     Ok(Vec::new())

@@ -147,19 +147,29 @@ pub struct HierarchicalFilter {
     source_addresses: Arc<HashMap<Vec<u8>, Vec<Vec<u32>>>>,
     /// Group key column names in the target table (e.g., ["block_number", "transaction_index"]).
     pub group_key_columns: Vec<String>,
-    /// Address column name (e.g., "instruction_address" or "trace_address").
+    /// Address column name in target table (e.g., "instruction_address", "call_address").
     pub address_column: String,
     /// Whether to find children or parents.
     mode: HierarchicalMode,
+    /// When `true`, same-depth addresses count as a match (cross-table relations).
+    /// When `false`, only strictly deeper/shallower addresses match (self-join).
+    /// See `find_children` in `hierarchical.rs` for full explanation.
+    inclusive: bool,
 }
 
 impl HierarchicalFilter {
     /// Build from primary scan results.
+    ///
+    /// - `source_address_column`: address column name in source (primary) batches
+    /// - `target_address_column`: address column name in target batches (stored for scan-time use)
+    /// - `inclusive`: see `find_children` in `hierarchical.rs`
     pub fn build(
         primary_batches: &[RecordBatch],
         group_key_columns: &[&str],
-        address_column: &str,
+        source_address_column: &str,
+        target_address_column: &str,
         mode: HierarchicalMode,
+        inclusive: bool,
     ) -> Self {
         let mut source_addresses: HashMap<Vec<u8>, Vec<Vec<u32>>> = HashMap::new();
 
@@ -176,7 +186,7 @@ impl HierarchicalFilter {
                 })
                 .collect();
 
-            let addr_col = batch.column_by_name(address_column);
+            let addr_col = batch.column_by_name(source_address_column);
             let addr_list =
                 addr_col.and_then(|c| c.as_any().downcast_ref::<GenericListArray<i32>>());
 
@@ -206,8 +216,9 @@ impl HierarchicalFilter {
         HierarchicalFilter {
             source_addresses: Arc::new(source_addresses),
             group_key_columns: group_key_columns.iter().map(|s| s.to_string()).collect(),
-            address_column: address_column.to_string(),
+            address_column: target_address_column.to_string(),
             mode,
+            inclusive,
         }
     }
 
@@ -240,6 +251,7 @@ fn hierarchical_mask(
     group_key_columns: &[String],
     address_column: &str,
     mode: HierarchicalMode,
+    inclusive: bool,
 ) -> BooleanArray {
     let len = batch.num_rows();
     let mut builder = BooleanBufferBuilder::new(len);
@@ -264,6 +276,12 @@ fn hierarchical_mask(
 
     let mut key_buf = Vec::with_capacity(group_key_columns.len() * 8);
     for row in 0..len {
+        // Null addresses never match
+        if addr_list.is_null(row) {
+            builder.append(false);
+            continue;
+        }
+
         key_buf.clear();
         for tc in &typed_keys {
             if let Some(tc) = tc {
@@ -279,12 +297,22 @@ fn hierarchical_mask(
                 let target_addr = extract_address_values(addr_list, row);
                 match mode {
                     HierarchicalMode::Children => addrs.iter().any(|parent| {
-                        target_addr.len() > parent.len()
-                            && target_addr[..parent.len()] == parent[..]
+                        if inclusive {
+                            target_addr.len() >= parent.len()
+                                && target_addr[..parent.len()] == parent[..]
+                        } else {
+                            target_addr.len() > parent.len()
+                                && target_addr[..parent.len()] == parent[..]
+                        }
                     }),
                     HierarchicalMode::Parents => addrs.iter().any(|child| {
-                        target_addr.len() < child.len()
-                            && child[..target_addr.len()] == target_addr[..]
+                        if inclusive {
+                            target_addr.len() <= child.len()
+                                && child[..target_addr.len()] == target_addr[..]
+                        } else {
+                            target_addr.len() < child.len()
+                                && child[..target_addr.len()] == target_addr[..]
+                        }
                     }),
                 }
             })
@@ -730,6 +758,7 @@ fn scan_row_groups(
                 let group_key_columns = Arc::new(hf.group_key_columns.clone());
                 let address_column = hf.address_column.clone();
                 let mode = hf.mode;
+                let inclusive = hf.inclusive;
                 filter_stages.push(Box::new(ArrowPredicateFn::new(
                     hf_proj,
                     move |batch: RecordBatch| {
@@ -739,6 +768,7 @@ fn scan_row_groups(
                             &group_key_columns,
                             &address_column,
                             mode,
+                            inclusive,
                         ))
                     },
                 )));

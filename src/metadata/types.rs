@@ -10,6 +10,26 @@ pub struct DatasetDescription {
     /// Table definitions keyed by table name.
     /// Uses IndexMap to preserve YAML insertion order (determines output table ordering in blocks).
     pub tables: indexmap::IndexMap<String, TableDescription>,
+    /// Query aliases: maps alternative query names to existing tables with implicit predicates.
+    /// E.g., "evmLogs" → events table with implicit name="EVM.Log" filter.
+    #[serde(default)]
+    pub query_aliases: BTreeMap<String, QueryAlias>,
+}
+
+/// A query alias that maps to an existing table with implicit predicates and filter aliases.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryAlias {
+    /// The actual table name this alias refers to.
+    pub table: String,
+    /// Implicit predicates: always-applied filters (column → list of allowed values).
+    #[serde(default)]
+    pub implicit_predicates: BTreeMap<String, Vec<String>>,
+    /// Filter column aliases: maps query filter keys to actual column names.
+    #[serde(default)]
+    pub filter_aliases: BTreeMap<String, String>,
+    /// Relations available (same format as table relations).
+    #[serde(default)]
+    pub relations: BTreeMap<String, RelationDef>,
 }
 
 /// Description of a single parquet table within a dataset.
@@ -76,6 +96,7 @@ pub struct TableDescription {
     /// E.g., EVM traces: `create_from` → `action.from` when type=create.
     #[serde(default)]
     pub field_groups: Option<FieldGrouping>,
+
 }
 
 fn default_block_number_column() -> String {
