@@ -1,0 +1,182 @@
+name: bitcoin
+
+tables:
+  blocks:
+    block_number_column: number
+    field_name: block
+    sort_key: [ number ]
+    columns:
+      number:
+        type: uint64
+        stats: true
+      hash:
+        type: string
+      parent_hash:
+        type: string
+      timestamp:
+        type: timestamp_second
+      median_time:
+        type: timestamp_second
+      version:
+        type: uint32
+      merkle_root:
+        type: string
+      nonce:
+        type: uint32
+      target:
+        type: string
+      bits:
+        type: string
+      difficulty:
+        type: float64
+      chain_work:
+        type: string
+      stripped_size:
+        type: uint64
+      size:
+        type: uint64
+      weight:
+        type: uint64
+
+  transactions:
+    query_name: transactions
+    field_name: transaction
+    item_order_keys: [ transaction_index ]
+    sort_key: [ block_number, transaction_index ]
+    children: [ inputs, outputs ]
+    parent_key: [ block_number, transaction_index ]
+    relations:
+      inputs:
+        table: inputs
+        key: [ block_number, transaction_index ]
+      outputs:
+        table: outputs
+        key: [ block_number, transaction_index ]
+    columns:
+      block_number:
+        type: uint64
+        stats: true
+      transaction_index:
+        type: uint32
+        stats: true
+      hex:
+        type: string
+      txid:
+        type: string
+      hash:
+        type: string
+      size:
+        type: uint64
+      vsize:
+        type: uint64
+      weight:
+        type: uint64
+      version:
+        type: uint32
+      locktime:
+        type: uint32
+
+  inputs:
+    query_name: inputs
+    field_name: input
+    item_order_keys: [ transaction_index, input_index ]
+    sort_key: [ prevout_script_pub_key_address, block_number, transaction_index, input_index ]
+    relations:
+      transaction:
+        table: transactions
+        key: [ block_number, transaction_index ]
+      transaction_inputs:
+        table: inputs
+        key: [ block_number, transaction_index ]
+      transaction_outputs:
+        table: outputs
+        key: [ block_number, transaction_index ]
+    columns:
+      block_number:
+        type: uint64
+        stats: true
+      transaction_index:
+        type: uint32
+        stats: true
+      input_index:
+        type: uint32
+      type:
+        type: string
+        stats: true
+        dictionary: true
+      txid:
+        type: string
+      vout:
+        type: uint32
+      script_sig_hex:
+        type: string
+      script_sig_asm:
+        type: string
+      sequence:
+        type: uint32
+      coinbase:
+        type: string
+      tx_in_witness:
+        type: list_string
+      prevout_generated:
+        type: boolean
+        stats: true
+      prevout_height:
+        type: uint64
+      prevout_value:
+        type: float64
+      prevout_script_pub_key_hex:
+        type: string
+      prevout_script_pub_key_asm:
+        type: string
+      prevout_script_pub_key_desc:
+        type: string
+      prevout_script_pub_key_type:
+        type: string
+        stats: true
+        dictionary: true
+      prevout_script_pub_key_address:
+        type: string
+        stats: true
+        dictionary: true
+
+  outputs:
+    query_name: outputs
+    field_name: output
+    item_order_keys: [ transaction_index, output_index ]
+    sort_key: [ script_pub_key_address, block_number, transaction_index, output_index ]
+    relations:
+      transaction:
+        table: transactions
+        key: [ block_number, transaction_index ]
+      transaction_inputs:
+        table: inputs
+        key: [ block_number, transaction_index ]
+      transaction_outputs:
+        table: outputs
+        key: [ block_number, transaction_index ]
+    columns:
+      block_number:
+        type: uint64
+        stats: true
+      transaction_index:
+        type: uint32
+        stats: true
+      output_index:
+        type: uint32
+      value:
+        type: float64
+      script_pub_key_hex:
+        type: string
+      script_pub_key_asm:
+        type: string
+      script_pub_key_desc:
+        type: string
+      script_pub_key_type:
+        type: string
+        stats: true
+        dictionary: true
+      script_pub_key_address:
+        type: string
+        stats: true
+        dictionary: true

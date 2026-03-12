@@ -174,3 +174,27 @@ evm_fixture!(example_uniswapv3_abridged_squid_no_preloaded_pools);
 evm_fixture!(example_uniswapv3_abridged_squid_preloaded_pools);
 evm_fixture!(example_evm_ipfs_example);
 evm_fixture!(example_modified_dia_prices_squid);
+
+// ---------------------------------------------------------------------------
+// Bitcoin fixtures
+// ---------------------------------------------------------------------------
+
+macro_rules! bitcoin_fixture {
+    ($name:ident) => {
+        paste::paste! {
+            #[test]
+            fn [<bitcoin_ $name>]() {
+                test_fixture("bitcoin", "metadata/bitcoin.yaml", stringify!($name));
+            }
+        }
+    };
+}
+
+bitcoin_fixture!(include_all_blocks);
+bitcoin_fixture!(input_address_filtering);
+bitcoin_fixture!(input_coinbase_filtering);
+bitcoin_fixture!(input_filtering_with_tx_data);
+bitcoin_fixture!(input_script_type_filtering);
+bitcoin_fixture!(output_address_filtering);
+bitcoin_fixture!(output_filtering_with_tx_data);
+bitcoin_fixture!(output_script_type_filtering);

@@ -3,3 +3,4 @@
 .idea/
 tests/fixtures
 PLAN.md
+.claude/settings.local.json
