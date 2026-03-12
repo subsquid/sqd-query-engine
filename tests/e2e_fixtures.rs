@@ -234,3 +234,23 @@ macro_rules! optimism_fixture {
 }
 
 optimism_fixture!(all);
+
+// ---------------------------------------------------------------------------
+// Binance fixtures (uses EVM metadata)
+// ---------------------------------------------------------------------------
+
+macro_rules! binance_fixture {
+    ($name:ident) => {
+        paste::paste! {
+            #[test]
+            fn [<binance_ $name>]() {
+                test_fixture("binance", "metadata/evm.yaml", stringify!($name));
+            }
+        }
+    };
+}
+
+binance_fixture!(example_showcase00_analyzing_a_large_number_of_wallets);
+binance_fixture!(example_showcase05_dex_pair_creation_and_swaps);
+binance_fixture!(example_thena_squid_no_preloaded_pools);
+binance_fixture!(example_thena_squid_preloaded_pools);
