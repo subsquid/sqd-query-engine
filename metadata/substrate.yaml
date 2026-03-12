@@ -1,0 +1,208 @@
+name: substrate
+
+tables:
+  blocks:
+    block_number_column: number
+    field_name: block
+    sort_key: [ number ]
+    columns:
+      number:
+        type: uint64
+        stats: true
+      hash:
+        type: string
+      parent_hash:
+        type: string
+      state_root:
+        type: string
+      extrinsics_root:
+        type: string
+      digest:
+        type: string
+        json_encoding: json
+      spec_name:
+        type: string
+      spec_version:
+        type: uint32
+      impl_name:
+        type: string
+      impl_version:
+        type: uint32
+      timestamp:
+        type: timestamp_millisecond
+        json_encoding: timestamp_millisecond
+      validator:
+        type: string
+
+  extrinsics:
+    query_name: extrinsics
+    field_name: extrinsic
+    item_order_keys: [ index ]
+    sort_key: [ block_number, index ]
+    children: [ calls ]
+    parent_key: [ block_number, index ]
+    relations:
+      events:
+        table: events
+        left_key: [ block_number, index ]
+        right_key: [ block_number, extrinsic_index ]
+    columns:
+      block_number:
+        type: uint64
+        stats: true
+      index:
+        type: uint32
+        stats: true
+      version:
+        type: uint32
+      signature:
+        type: string
+        json_encoding: json
+      fee:
+        type: decimal128
+        json_encoding: string
+      tip:
+        type: decimal128
+        json_encoding: string
+      error:
+        type: string
+        json_encoding: json
+      success:
+        type: boolean
+      hash:
+        type: string
+      # system
+      _idx:
+        type: int64
+        system: true
+
+  calls:
+    query_name: calls
+    field_name: call
+    address_column: address
+    item_order_keys: [ extrinsic_index, address ]
+    sort_key: [ name, block_number, extrinsic_index ]
+    relations:
+      extrinsic:
+        table: extrinsics
+        left_key: [ block_number, extrinsic_index ]
+        right_key: [ block_number, index ]
+      events:
+        table: events
+        kind: children
+        left_key: [ block_number, extrinsic_index ]
+        right_key: [ block_number, extrinsic_index ]
+      stack:
+        table: calls
+        kind: parents
+        key: [ block_number, extrinsic_index ]
+    columns:
+      block_number:
+        type: uint64
+        stats: true
+      extrinsic_index:
+        type: uint32
+        stats: true
+      address:
+        type: list_uint32
+      name:
+        type: string
+        stats: true
+        dictionary: true
+      args:
+        type: string
+        json_encoding: json
+        weight: args_size
+      origin:
+        type: string
+        json_encoding: json
+      error:
+        type: string
+        json_encoding: json
+      success:
+        type: boolean
+      _ethereum_transact_to:
+        type: string
+        system: true
+      _ethereum_transact_sighash:
+        type: string
+        system: true
+      # system
+      args_size:
+        type: int64
+        system: true
+      _idx:
+        type: int64
+        system: true
+
+  events:
+    query_name: events
+    field_name: event
+    item_order_keys: [ index ]
+    sort_key: [ name, block_number, index ]
+    relations:
+      extrinsic:
+        table: extrinsics
+        left_key: [ block_number, extrinsic_index ]
+        right_key: [ block_number, index ]
+      call:
+        table: calls
+        left_key: [ block_number, extrinsic_index, call_address ]
+        right_key: [ block_number, extrinsic_index, address ]
+      stack:
+        table: calls
+        kind: parents
+        left_key: [ block_number, extrinsic_index ]
+        right_key: [ block_number, extrinsic_index ]
+    columns:
+      block_number:
+        type: uint64
+        stats: true
+      index:
+        type: uint32
+        stats: true
+      name:
+        type: string
+        stats: true
+        dictionary: true
+      args:
+        type: string
+        json_encoding: json
+        weight: args_size
+      phase:
+        type: string
+      extrinsic_index:
+        type: uint32
+        stats: true
+      call_address:
+        type: list_uint32
+      topics:
+        type: list_string
+      _evm_log_address:
+        type: string
+        system: true
+      _evm_log_topic0:
+        type: string
+        system: true
+      _evm_log_topic1:
+        type: string
+        system: true
+      _evm_log_topic2:
+        type: string
+        system: true
+      _evm_log_topic3:
+        type: string
+        system: true
+      _contract_address:
+        type: string
+        system: true
+      _gear_program_id:
+        type: string
+        system: true
+      # system
+      args_size:
+        type: int64
+        system: true
+      _idx:
+        type: int64
+        system: true

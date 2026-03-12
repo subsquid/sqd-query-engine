@@ -254,3 +254,26 @@ binance_fixture!(example_showcase00_analyzing_a_large_number_of_wallets);
 binance_fixture!(example_showcase05_dex_pair_creation_and_swaps);
 binance_fixture!(example_thena_squid_no_preloaded_pools);
 binance_fixture!(example_thena_squid_preloaded_pools);
+
+// ---------------------------------------------------------------------------
+// Kusama fixtures (uses Substrate metadata)
+// ---------------------------------------------------------------------------
+
+macro_rules! kusama_fixture {
+    ($name:ident) => {
+        paste::paste! {
+            #[test]
+            fn [<kusama_ $name>]() {
+                test_fixture("kusama", "metadata/substrate.yaml", stringify!($name));
+            }
+        }
+    };
+}
+
+kusama_fixture!(example_balances_squid);
+kusama_fixture!(example_giant_squid_explorer);
+kusama_fixture!(example_giant_squid_main);
+kusama_fixture!(example_giant_squid_stats);
+kusama_fixture!(example_substrate_calls_example);
+kusama_fixture!(example_substrate_remark_example);
+kusama_fixture!(example_substrate_storage_example);

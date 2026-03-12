@@ -135,11 +135,13 @@ pub enum ColumnType {
     Boolean,
     String,
     TimestampSecond,
+    TimestampMillisecond,
     ListUInt8,
     ListUInt32,
     ListString,
     ListStruct,
     Struct,
+    Decimal128,
     /// Fixed-size binary with given byte length.
     FixedBinary(usize),
 }
@@ -157,11 +159,13 @@ impl Serialize for ColumnType {
             ColumnType::Boolean => "boolean".to_string(),
             ColumnType::String => "string".to_string(),
             ColumnType::TimestampSecond => "timestamp_second".to_string(),
+            ColumnType::TimestampMillisecond => "timestamp_millisecond".to_string(),
             ColumnType::ListUInt8 => "list_uint8".to_string(),
             ColumnType::ListUInt32 => "list_uint32".to_string(),
             ColumnType::ListString => "list_string".to_string(),
             ColumnType::ListStruct => "list_struct".to_string(),
             ColumnType::Struct => "struct".to_string(),
+            ColumnType::Decimal128 => "decimal128".to_string(),
             ColumnType::FixedBinary(size) => format!("fixed_binary_{}", size),
         };
         serializer.serialize_str(&s)
@@ -182,11 +186,13 @@ impl<'de> Deserialize<'de> for ColumnType {
             "boolean" => Ok(ColumnType::Boolean),
             "string" => Ok(ColumnType::String),
             "timestamp_second" => Ok(ColumnType::TimestampSecond),
+            "timestamp_millisecond" => Ok(ColumnType::TimestampMillisecond),
             "list_uint8" => Ok(ColumnType::ListUInt8),
             "list_uint32" => Ok(ColumnType::ListUInt32),
             "list_string" => Ok(ColumnType::ListString),
             "list_struct" => Ok(ColumnType::ListStruct),
             "struct" => Ok(ColumnType::Struct),
+            "decimal128" => Ok(ColumnType::Decimal128),
             _ if s.starts_with("fixed_binary_") => {
                 let size: usize = s["fixed_binary_".len()..].parse().map_err(|_| {
                     serde::de::Error::custom(format!("invalid fixed_binary size in '{}'", s))
@@ -216,6 +222,8 @@ pub enum JsonEncoding {
     Json,
     /// Solana transaction version: -1 → "legacy", else number
     SolanaTxVersion,
+    /// Timestamp as raw millisecond integer (no conversion to seconds)
+    TimestampMillisecond,
 }
 
 /// Description of a relation available in query items.

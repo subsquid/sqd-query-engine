@@ -12,6 +12,7 @@ pub fn resolve_encoder(data_type: &DataType, encoding: Option<&JsonEncoding>) ->
         Some(JsonEncoding::String) => encode_bignum,
         Some(JsonEncoding::Json) => encode_json_passthrough,
         Some(JsonEncoding::SolanaTxVersion) => encode_solana_tx_version,
+        Some(JsonEncoding::TimestampMillisecond) => encode_timestamp_millisecond_raw,
         Some(JsonEncoding::Hex) | Some(JsonEncoding::Base58) | None => {
             resolve_value_encoder(data_type)
         }
@@ -202,6 +203,18 @@ fn encode_timestamp_millisecond(array: &dyn Array, row: usize, buf: &mut Vec<u8>
     write_i64(buf, a.value(row) / 1000);
 }
 
+fn encode_timestamp_millisecond_raw(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
+    if array.is_null(row) {
+        buf.extend_from_slice(b"null");
+        return;
+    }
+    let a = array
+        .as_any()
+        .downcast_ref::<TimestampMillisecondArray>()
+        .unwrap();
+    write_i64(buf, a.value(row));
+}
+
 fn encode_list_value(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
     if array.is_null(row) {
         buf.extend_from_slice(b"null");
@@ -252,6 +265,19 @@ pub fn encode_bignum(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
         DataType::Int32 => {
             let a = array.as_any().downcast_ref::<Int32Array>().unwrap();
             write_i64(buf, a.value(row) as i64);
+        }
+        DataType::Decimal128(_, scale) => {
+            let a = array
+                .as_any()
+                .downcast_ref::<Decimal128Array>()
+                .unwrap();
+            let v = a.value(row);
+            if *scale == 0 {
+                write_i128(buf, v);
+            } else {
+                // For non-zero scale, output the unscaled integer
+                write_i128(buf, v);
+            }
         }
         _ => {
             buf.pop(); // remove opening quote
@@ -417,6 +443,11 @@ fn write_u64(buf: &mut Vec<u8>, v: u64) {
 }
 
 fn write_i64(buf: &mut Vec<u8>, v: i64) {
+    let mut tmp = itoa::Buffer::new();
+    buf.extend_from_slice(tmp.format(v).as_bytes());
+}
+
+fn write_i128(buf: &mut Vec<u8>, v: i128) {
     let mut tmp = itoa::Buffer::new();
     buf.extend_from_slice(tmp.format(v).as_bytes());
 }
