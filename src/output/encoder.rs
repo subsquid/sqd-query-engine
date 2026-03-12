@@ -223,6 +223,10 @@ pub fn encode_bignum(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
             let a = array.as_any().downcast_ref::<UInt32Array>().unwrap();
             write_u64(buf, a.value(row) as u64);
         }
+        DataType::Int32 => {
+            let a = array.as_any().downcast_ref::<Int32Array>().unwrap();
+            write_i64(buf, a.value(row) as i64);
+        }
         _ => {
             buf.pop(); // remove opening quote
             buf.extend_from_slice(b"null");

@@ -291,9 +291,15 @@ pub(crate) fn build_grouped_writers(
     for (variant, groups) in variant_groups {
         let mut group_list = Vec::new();
         for (group_name, writers) in groups {
-            let mut key = Vec::with_capacity(group_name.len() + 4);
-            encode_json_string(&group_name, &mut key);
-            key.push(b':');
+            // Special group name "_" means flat output (no wrapping sub-object)
+            let key = if group_name == "_" {
+                Vec::new()
+            } else {
+                let mut key = Vec::with_capacity(group_name.len() + 4);
+                encode_json_string(&group_name, &mut key);
+                key.push(b':');
+                key
+            };
             group_list.push((key, writers));
         }
         variant_writers.insert(variant, group_list);
@@ -396,11 +402,16 @@ fn write_row_grouped(
                 // Emit group if it has any selected fields (matching legacy behavior:
                 // group is emitted when user selected at least one field, even if all null)
                 if !writers.is_empty() {
-                    buf.extend_from_slice(group_key);
-                    buf.push(b'{');
-                    write_row_fields_resolved(buf, batch, row, writers);
-                    json_close(b'}', buf);
-                    buf.push(b',');
+                    if group_key.is_empty() {
+                        // Flat group ("_"): write fields directly at current level
+                        write_row_fields_resolved(buf, batch, row, writers);
+                    } else {
+                        buf.extend_from_slice(group_key);
+                        buf.push(b'{');
+                        write_row_fields_resolved(buf, batch, row, writers);
+                        json_close(b'}', buf);
+                        buf.push(b',');
+                    }
                 }
             }
         }

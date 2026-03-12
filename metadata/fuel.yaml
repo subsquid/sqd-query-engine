@@ -1,0 +1,440 @@
+name: fuel
+
+tables:
+  blocks:
+    block_number_column: number
+    field_name: block
+    sort_key: [ number ]
+    columns:
+      number:
+        type: uint64
+        stats: true
+      hash:
+        type: string
+      da_height:
+        type: uint64
+        json_encoding: string
+      transactions_root:
+        type: string
+      transactions_count:
+        type: uint64
+      message_receipt_root:
+        type: string
+      message_receipt_count:
+        type: uint64
+      prev_root:
+        type: string
+      application_hash:
+        type: string
+      time:
+        type: uint64
+        json_encoding: string
+
+  transactions:
+    query_name: transactions
+    field_name: transaction
+    item_order_keys: [ index ]
+    sort_key: [ block_number, index ]
+    children: [ receipts, inputs, outputs ]
+    parent_key: [ block_number, index ]
+    relations:
+      receipts:
+        table: receipts
+        left_key: [ block_number, index ]
+        right_key: [ block_number, transaction_index ]
+      inputs:
+        table: inputs
+        left_key: [ block_number, index ]
+        right_key: [ block_number, transaction_index ]
+      outputs:
+        table: outputs
+        left_key: [ block_number, index ]
+        right_key: [ block_number, transaction_index ]
+    columns:
+      block_number:
+        type: uint64
+        stats: true
+      index:
+        type: uint32
+        stats: true
+      hash:
+        type: string
+      input_asset_ids:
+        type: list_string
+        weight: input_asset_ids_size
+      input_contracts:
+        type: list_string
+        weight: input_contracts_size
+      gas_price:
+        type: uint64
+      script_gas_limit:
+        type: uint64
+        json_encoding: string
+      maturity:
+        type: uint32
+      mint_amount:
+        type: uint64
+        json_encoding: string
+      mint_asset_id:
+        type: string
+      tx_pointer:
+        type: string
+      is_script:
+        type: boolean
+      is_create:
+        type: boolean
+      is_mint:
+        type: boolean
+      type:
+        type: string
+        dictionary: true
+      witnesses:
+        type: list_string
+        weight: witnesses_size
+      receipts_root:
+        type: string
+      script:
+        type: string
+      script_data:
+        type: string
+        weight: script_data_size
+      bytecode_witness_index:
+        type: uint32
+      bytecode_length:
+        type: uint64
+      salt:
+        type: string
+      storage_slots:
+        type: list_string
+        weight: storage_slots_size
+      raw_payload:
+        type: string
+        weight: raw_payload_size
+      policies:
+        type: struct
+      input_contract:
+        type: struct
+      output_contract:
+        type: struct
+      status:
+        type: string
+        json_encoding: json
+      # system
+      input_asset_ids_size:
+        type: int64
+        system: true
+      input_contracts_size:
+        type: int64
+        system: true
+      witnesses_size:
+        type: int64
+        system: true
+      storage_slots_size:
+        type: int64
+        system: true
+      script_data_size:
+        type: int64
+        system: true
+      raw_payload_size:
+        type: int64
+        system: true
+
+  receipts:
+    query_name: receipts
+    field_name: receipt
+    item_order_keys: [ transaction_index, index ]
+    sort_key: [ block_number, transaction_index, index ]
+    relations:
+      transaction:
+        table: transactions
+        left_key: [ block_number, transaction_index ]
+        right_key: [ block_number, index ]
+    special_filters:
+      type:
+        type: column_alias
+        column: receipt_type
+    columns:
+      block_number:
+        type: uint64
+        stats: true
+      transaction_index:
+        type: uint32
+        stats: true
+      index:
+        type: uint32
+      contract:
+        type: string
+      pc:
+        type: uint64
+        json_encoding: string
+      is:
+        type: uint64
+        json_encoding: string
+      to:
+        type: string
+      to_address:
+        type: string
+      amount:
+        type: uint64
+        json_encoding: string
+      asset_id:
+        type: string
+      gas:
+        type: uint64
+        json_encoding: string
+      param1:
+        type: uint64
+        json_encoding: string
+      param2:
+        type: uint64
+        json_encoding: string
+      val:
+        type: uint64
+        json_encoding: string
+      ptr:
+        type: uint64
+        json_encoding: string
+      digest:
+        type: string
+      reason:
+        type: uint64
+        json_encoding: string
+      ra:
+        type: uint64
+        json_encoding: string
+      rb:
+        type: uint64
+        json_encoding: string
+      rc:
+        type: uint64
+        json_encoding: string
+      rd:
+        type: uint64
+        json_encoding: string
+      len:
+        type: uint64
+        json_encoding: string
+      receipt_type:
+        type: string
+        dictionary: true
+      result:
+        type: uint64
+        json_encoding: string
+      gas_used:
+        type: uint64
+        json_encoding: string
+      data:
+        type: string
+        weight: data_size
+      sender:
+        type: string
+      recipient:
+        type: string
+      nonce:
+        type: string
+      contract_id:
+        type: string
+      sub_id:
+        type: string
+      # system
+      data_size:
+        type: int64
+        system: true
+
+  inputs:
+    query_name: inputs
+    field_name: input
+    item_order_keys: [ transaction_index, index ]
+    sort_key: [ block_number, transaction_index, index ]
+    relations:
+      transaction:
+        table: transactions
+        left_key: [ block_number, transaction_index ]
+        right_key: [ block_number, index ]
+    columns:
+      block_number:
+        type: uint64
+        stats: true
+      transaction_index:
+        type: uint32
+        stats: true
+      index:
+        type: uint32
+      type:
+        type: string
+        dictionary: true
+      coin_utxo_id:
+        type: string
+      coin_owner:
+        type: string
+      coin_amount:
+        type: uint64
+        json_encoding: string
+      coin_asset_id:
+        type: string
+      coin_tx_pointer:
+        type: string
+      coin_witness_index:
+        type: uint32
+      coin_maturity:
+        type: uint32
+      coin_predicate_gas_used:
+        type: uint64
+        json_encoding: string
+      coin_predicate:
+        type: string
+        weight: coin_predicate_size
+      coin_predicate_data:
+        type: string
+      contract_utxo_id:
+        type: string
+      contract_balance_root:
+        type: string
+      contract_state_root:
+        type: string
+      contract_tx_pointer:
+        type: string
+      contract_contract:
+        type: string
+      message_sender:
+        type: string
+      message_recipient:
+        type: string
+      message_amount:
+        type: uint64
+        json_encoding: string
+      message_nonce:
+        type: string
+      message_witness_index:
+        type: uint32
+      message_predicate_gas_used:
+        type: uint64
+        json_encoding: string
+      message_data:
+        type: string
+      message_predicate:
+        type: string
+        weight: message_predicate_size
+      message_predicate_data:
+        type: string
+      # system
+      coin_predicate_size:
+        type: int64
+        system: true
+      message_predicate_size:
+        type: int64
+        system: true
+
+    field_groups:
+      tag_column: type
+      base_fields: [ transaction_index, index, type ]
+      variants:
+        InputCoin:
+          _:
+            - { column: coin_utxo_id, field: utxoId }
+            - { column: coin_owner, field: owner }
+            - { column: coin_amount, field: amount }
+            - { column: coin_asset_id, field: assetId }
+            - { column: coin_tx_pointer, field: txPointer }
+            - { column: coin_witness_index, field: witnessIndex }
+            - { column: coin_predicate_gas_used, field: predicateGasUsed }
+            - { column: coin_predicate, field: predicate }
+            - { column: coin_predicate_data, field: predicateData }
+        InputContract:
+          _:
+            - { column: contract_utxo_id, field: utxoId }
+            - { column: contract_balance_root, field: balanceRoot }
+            - { column: contract_state_root, field: stateRoot }
+            - { column: contract_tx_pointer, field: txPointer }
+            - { column: contract_contract, field: contractId }
+        InputMessage:
+          _:
+            - { column: message_sender, field: sender }
+            - { column: message_recipient, field: recipient }
+            - { column: message_amount, field: amount }
+            - { column: message_nonce, field: nonce }
+            - { column: message_witness_index, field: witnessIndex }
+            - { column: message_predicate_gas_used, field: predicateGasUsed }
+            - { column: message_data, field: data }
+            - { column: message_predicate, field: predicate }
+            - { column: message_predicate_data, field: predicateData }
+
+  outputs:
+    query_name: outputs
+    field_name: output
+    item_order_keys: [ transaction_index, index ]
+    sort_key: [ block_number, transaction_index, index ]
+    relations:
+      transaction:
+        table: transactions
+        left_key: [ block_number, transaction_index ]
+        right_key: [ block_number, index ]
+    columns:
+      block_number:
+        type: uint64
+        stats: true
+      transaction_index:
+        type: uint32
+        stats: true
+      index:
+        type: uint32
+      type:
+        type: string
+        dictionary: true
+      coin_to:
+        type: string
+      coin_amount:
+        type: uint64
+      coin_asset_id:
+        type: string
+      contract_input_index:
+        type: uint32
+      contract_balance_root:
+        type: string
+      contract_state_root:
+        type: string
+      change_to:
+        type: string
+      change_amount:
+        type: uint64
+      change_asset_id:
+        type: string
+      variable_to:
+        type: string
+      variable_amount:
+        type: uint64
+      variable_asset_id:
+        type: string
+      contract_created_contract:
+        type: struct
+      contract_created_state_root:
+        type: string
+
+    field_groups:
+      tag_column: type
+      base_fields: [ transaction_index, index, type ]
+      variants:
+        CoinOutput:
+          _:
+            - { column: coin_to, field: to }
+            - { column: coin_amount, field: amount }
+            - { column: coin_asset_id, field: assetId }
+        ContractOutput:
+          _:
+            - { column: contract_input_index, field: inputIndex }
+            - { column: contract_balance_root, field: balanceRoot }
+            - { column: contract_state_root, field: stateRoot }
+        ChangeOutput:
+          _:
+            - { column: change_to, field: to }
+            - { column: change_amount, field: amount }
+            - { column: change_asset_id, field: assetId }
+        VariableOutput:
+          _:
+            - { column: variable_to, field: to }
+            - { column: variable_amount, field: amount }
+            - { column: variable_asset_id, field: assetId }
+        ContractCreated:
+          _:
+            - { column: contract_created_contract, field: contract }
+            - { column: contract_created_state_root, field: stateRoot }

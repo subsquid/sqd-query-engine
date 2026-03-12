@@ -286,6 +286,9 @@ pub enum SpecialFilter {
     /// Range filter: column <= value.
     #[serde(rename = "range_lte")]
     RangeLte { column: String },
+    /// Alias: query key maps to a different physical column name.
+    #[serde(rename = "column_alias")]
+    ColumnAlias { column: String },
 }
 
 /// Polymorphic field grouping for tables whose output structure depends on a tag column.

@@ -198,3 +198,22 @@ bitcoin_fixture!(input_script_type_filtering);
 bitcoin_fixture!(output_address_filtering);
 bitcoin_fixture!(output_filtering_with_tx_data);
 bitcoin_fixture!(output_script_type_filtering);
+
+// ---------------------------------------------------------------------------
+// Fuel fixtures
+// ---------------------------------------------------------------------------
+
+macro_rules! fuel_fixture {
+    ($name:ident) => {
+        paste::paste! {
+            #[test]
+            fn [<fuel_ $name>]() {
+                test_fixture("fuel", "metadata/fuel.yaml", stringify!($name));
+            }
+        }
+    };
+}
+
+fuel_fixture!(asset_transfers);
+fuel_fixture!(created_contracts);
+fuel_fixture!(log_data_from_contract);

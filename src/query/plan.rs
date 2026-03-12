@@ -284,6 +284,19 @@ fn compile_item_predicates(
                         col_predicates.push(p);
                     }
                 }
+                SpecialFilter::ColumnAlias { column } => {
+                    let col_desc = table.column(column).ok_or_else(|| {
+                        anyhow!("alias target column '{}' not found", column)
+                    })?;
+                    if let Some(bool_val) = value.as_bool() {
+                        col_predicates.push(col_eq(column, ScalarValue::Boolean(bool_val)));
+                    } else if let Some(arr) = value.as_array() {
+                        let pred = compile_in_list(column, arr, col_desc)?;
+                        col_predicates.push(pred);
+                    } else if let Some(n) = value.as_u64() {
+                        col_predicates.push(col_eq(column, ScalarValue::UInt64(n)));
+                    }
+                }
             }
             continue;
         }
