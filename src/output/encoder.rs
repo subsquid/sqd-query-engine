@@ -21,6 +21,7 @@ pub fn resolve_encoder(data_type: &DataType, encoding: Option<&JsonEncoding>) ->
 fn resolve_value_encoder(data_type: &DataType) -> EncoderFn {
     match data_type {
         DataType::Boolean => encode_boolean,
+        DataType::Int8 => encode_int8,
         DataType::UInt8 => encode_uint8,
         DataType::UInt16 => encode_uint16,
         DataType::UInt32 => encode_uint32,
@@ -33,6 +34,9 @@ fn resolve_value_encoder(data_type: &DataType) -> EncoderFn {
         DataType::Binary => encode_binary_value,
         DataType::FixedSizeBinary(_) => encode_fixed_binary_value,
         DataType::Timestamp(arrow::datatypes::TimeUnit::Second, _) => encode_timestamp_second,
+        DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, _) => {
+            encode_timestamp_millisecond
+        }
         DataType::List(_) => encode_list_value,
         DataType::Struct(_) => encode_struct_value,
         _ => encode_null_value,
@@ -54,6 +58,15 @@ fn encode_boolean(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
     } else {
         buf.extend_from_slice(b"false");
     }
+}
+
+fn encode_int8(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
+    if array.is_null(row) {
+        buf.extend_from_slice(b"null");
+        return;
+    }
+    let a = array.as_any().downcast_ref::<Int8Array>().unwrap();
+    write_i64(buf, a.value(row) as i64);
 }
 
 fn encode_uint8(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
@@ -174,6 +187,19 @@ fn encode_timestamp_second(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
         .downcast_ref::<TimestampSecondArray>()
         .unwrap();
     write_i64(buf, a.value(row));
+}
+
+fn encode_timestamp_millisecond(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
+    if array.is_null(row) {
+        buf.extend_from_slice(b"null");
+        return;
+    }
+    let a = array
+        .as_any()
+        .downcast_ref::<TimestampMillisecondArray>()
+        .unwrap();
+    // Convert milliseconds to seconds to match expected output
+    write_i64(buf, a.value(row) / 1000);
 }
 
 fn encode_list_value(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {

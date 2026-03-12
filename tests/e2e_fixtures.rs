@@ -217,3 +217,20 @@ macro_rules! fuel_fixture {
 fuel_fixture!(asset_transfers);
 fuel_fixture!(created_contracts);
 fuel_fixture!(log_data_from_contract);
+
+// ---------------------------------------------------------------------------
+// Optimism fixtures (uses EVM metadata)
+// ---------------------------------------------------------------------------
+
+macro_rules! optimism_fixture {
+    ($name:ident) => {
+        paste::paste! {
+            #[test]
+            fn [<optimism_ $name>]() {
+                test_fixture("optimism", "metadata/evm.yaml", stringify!($name));
+            }
+        }
+    };
+}
+
+optimism_fixture!(all);
