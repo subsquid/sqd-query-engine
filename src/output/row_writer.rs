@@ -69,7 +69,10 @@ impl<'a> TypedSortColumn<'a> {
             (Self::Int16(a), Self::Int16(b)) => a.value(row_a).cmp(&b.value(row_b)),
             (Self::Utf8(a), Self::Utf8(b)) => a.value(row_a).cmp(b.value(row_b)),
             (Self::List(a), Self::List(b)) => compare_list_values(a, row_a, b, row_b),
-            _ => std::cmp::Ordering::Equal,
+            _ => {
+                debug_assert!(false, "TypedSortColumn type mismatch in cmp_rows");
+                std::cmp::Ordering::Equal
+            }
         }
     }
 }
@@ -740,4 +743,31 @@ pub(crate) fn json_close(end: u8, buf: &mut Vec<u8>) {
         }
     }
     buf.push(end);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_typed_sort_column_same_type_comparison() {
+        let a = UInt32Array::from(vec![10, 20, 30]);
+        let b = UInt32Array::from(vec![15, 25, 5]);
+        let col_a = TypedSortColumn::UInt32(&a);
+        let col_b = TypedSortColumn::UInt32(&b);
+        assert_eq!(col_a.cmp_rows(0, &col_b, 0), std::cmp::Ordering::Less); // 10 < 15
+        assert_eq!(col_a.cmp_rows(1, &col_b, 2), std::cmp::Ordering::Greater); // 20 > 5
+        assert_eq!(col_a.cmp_rows(0, &col_b, 2), std::cmp::Ordering::Greater); // 10 > 5
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "TypedSortColumn type mismatch")]
+    fn test_typed_sort_column_type_mismatch_panics_in_debug() {
+        let a = UInt32Array::from(vec![10]);
+        let b = Int32Array::from(vec![10]);
+        let col_a = TypedSortColumn::UInt32(&a);
+        let col_b = TypedSortColumn::Int32(&b);
+        col_a.cmp_rows(0, &col_b, 0);
+    }
 }

@@ -275,8 +275,7 @@ pub fn encode_bignum(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
             if *scale == 0 {
                 write_i128(buf, v);
             } else {
-                // For non-zero scale, output the unscaled integer
-                write_i128(buf, v);
+                write_decimal128(buf, v, *scale);
             }
         }
         _ => {
@@ -450,6 +449,32 @@ fn write_i64(buf: &mut Vec<u8>, v: i64) {
 fn write_i128(buf: &mut Vec<u8>, v: i128) {
     let mut tmp = itoa::Buffer::new();
     buf.extend_from_slice(tmp.format(v).as_bytes());
+}
+
+fn write_decimal128(buf: &mut Vec<u8>, v: i128, scale: i8) {
+    if scale <= 0 {
+        write_i128(buf, v);
+        return;
+    }
+    let s = scale as u32;
+    let divisor = 10i128.pow(s);
+    let int_part = v / divisor;
+    let frac_abs = (v % divisor).unsigned_abs();
+
+    if v < 0 && int_part == 0 {
+        buf.push(b'-');
+    }
+
+    let mut tmp = itoa::Buffer::new();
+    buf.extend_from_slice(tmp.format(int_part).as_bytes());
+    buf.push(b'.');
+
+    let mut tmp2 = itoa::Buffer::new();
+    let frac_str = tmp2.format(frac_abs);
+    for _ in 0..(s as usize).saturating_sub(frac_str.len()) {
+        buf.push(b'0');
+    }
+    buf.extend_from_slice(frac_str.as_bytes());
 }
 
 /// Convert snake_case to camelCase.
@@ -637,5 +662,47 @@ mod tests {
         let mut buf = Vec::new();
         encode_value(&arr, 0, &mut buf);
         assert_eq!(String::from_utf8(buf).unwrap(), "[0,1,2]");
+    }
+
+    #[test]
+    fn test_decimal128_scale_zero() {
+        let arr = Decimal128Array::from(vec![12345i128]).with_precision_and_scale(38, 0).unwrap();
+        let mut buf = Vec::new();
+        encode_bignum(&arr, 0, &mut buf);
+        assert_eq!(String::from_utf8(buf).unwrap(), "\"12345\"");
+    }
+
+    #[test]
+    fn test_decimal128_scale_nonzero() {
+        let arr = Decimal128Array::from(vec![12345i128]).with_precision_and_scale(38, 2).unwrap();
+        let mut buf = Vec::new();
+        encode_bignum(&arr, 0, &mut buf);
+        assert_eq!(String::from_utf8(buf).unwrap(), "\"123.45\"");
+    }
+
+    #[test]
+    fn test_decimal128_scale_negative_value() {
+        let arr = Decimal128Array::from(vec![-12345i128]).with_precision_and_scale(38, 3).unwrap();
+        let mut buf = Vec::new();
+        encode_bignum(&arr, 0, &mut buf);
+        assert_eq!(String::from_utf8(buf).unwrap(), "\"-12.345\"");
+    }
+
+    #[test]
+    fn test_decimal128_scale_small_value() {
+        // 5 with scale 3 → "0.005"
+        let arr = Decimal128Array::from(vec![5i128]).with_precision_and_scale(38, 3).unwrap();
+        let mut buf = Vec::new();
+        encode_bignum(&arr, 0, &mut buf);
+        assert_eq!(String::from_utf8(buf).unwrap(), "\"0.005\"");
+    }
+
+    #[test]
+    fn test_decimal128_negative_small_value() {
+        // -5 with scale 3 → "-0.005"
+        let arr = Decimal128Array::from(vec![-5i128]).with_precision_and_scale(38, 3).unwrap();
+        let mut buf = Vec::new();
+        encode_bignum(&arr, 0, &mut buf);
+        assert_eq!(String::from_utf8(buf).unwrap(), "\"-0.005\"");
     }
 }

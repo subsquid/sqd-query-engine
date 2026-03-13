@@ -113,14 +113,7 @@ pub fn parse_query(json_bytes: &[u8], metadata: &DatasetDescription) -> Result<Q
         }
 
         // Resolve table name (try query_name, snake_case, then query_aliases)
-        let table_name = query_name_to_table.get(key.as_str()).copied().or_else(|| {
-            let snake = camel_to_snake(key);
-            if metadata.tables.contains_key(&snake) {
-                None
-            } else {
-                None
-            }
-        });
+        let table_name = query_name_to_table.get(key.as_str()).copied();
         let snake_key = camel_to_snake(key);
         let alias_name: Option<&str> = None;
         let (table_name, alias_name) = if let Some(tn) = table_name {
@@ -460,5 +453,20 @@ mod tests {
             "toBlock": 50
         }"#;
         assert!(parse_query(json, &meta).is_err());
+    }
+
+    #[test]
+    fn test_table_name_fallback_resolution() {
+        // "blocks" has no query_name in EVM metadata, so it resolves via the
+        // snake_case table name fallback (line 128), not via query_name lookup.
+        let meta = evm_metadata();
+        assert!(meta.tables.get("blocks").unwrap().query_name.is_none());
+        let json = br#"{
+            "type": "evm",
+            "fromBlock": 0,
+            "blocks": [{}]
+        }"#;
+        let query = parse_query(json, &meta).unwrap();
+        assert!(query.items.contains_key("blocks"));
     }
 }

@@ -340,11 +340,17 @@ fn extract_block_numbers(col: &dyn Array, out: &mut HashSet<u64>) {
         }
     } else if let Some(a) = col.as_any().downcast_ref::<Int32Array>() {
         for i in 0..a.len() {
-            out.insert(a.value(i) as u64);
+            let v = a.value(i);
+            if v >= 0 {
+                out.insert(v as u64);
+            }
         }
     } else if let Some(a) = col.as_any().downcast_ref::<Int64Array>() {
         for i in 0..a.len() {
-            out.insert(a.value(i) as u64);
+            let v = a.value(i);
+            if v >= 0 {
+                out.insert(v as u64);
+            }
         }
     }
 }
@@ -904,23 +910,33 @@ fn block_range_mask(
     } else if let Some(arr) = column.as_any().downcast_ref::<UInt32Array>() {
         let mut mask = BooleanArray::from(vec![true; arr.len()]);
         if let Some(from) = from_block {
+            if from > u32::MAX as u64 {
+                return BooleanArray::from(vec![false; arr.len()]);
+            }
             let ge = gt_eq(&arr, &UInt32Array::new_scalar(from as u32)).unwrap();
             mask = and(&mask, &ge).unwrap();
         }
         if let Some(to) = to_block {
-            let le = lt_eq(&arr, &UInt32Array::new_scalar(to as u32)).unwrap();
-            mask = and(&mask, &le).unwrap();
+            if to <= u32::MAX as u64 {
+                let le = lt_eq(&arr, &UInt32Array::new_scalar(to as u32)).unwrap();
+                mask = and(&mask, &le).unwrap();
+            }
         }
         mask
     } else if let Some(arr) = column.as_any().downcast_ref::<Int32Array>() {
         let mut mask = BooleanArray::from(vec![true; arr.len()]);
         if let Some(from) = from_block {
+            if from > i32::MAX as u64 {
+                return BooleanArray::from(vec![false; arr.len()]);
+            }
             let ge = gt_eq(&arr, &Int32Array::new_scalar(from as i32)).unwrap();
             mask = and(&mask, &ge).unwrap();
         }
         if let Some(to) = to_block {
-            let le = lt_eq(&arr, &Int32Array::new_scalar(to as i32)).unwrap();
-            mask = and(&mask, &le).unwrap();
+            if to <= i32::MAX as u64 {
+                let le = lt_eq(&arr, &Int32Array::new_scalar(to as i32)).unwrap();
+                mask = and(&mask, &le).unwrap();
+            }
         }
         mask
     } else {
