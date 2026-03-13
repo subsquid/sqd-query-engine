@@ -104,64 +104,75 @@ Queries are JSON objects specifying block ranges, table filters, relations, and 
 
 ## Benchmarks
 
-All benchmarks run on the same fixture data (EVM: 1397 blocks, 391 MB parquet; Solana: 200 blocks, 51 MB parquet).
+Data: R2 production chunks (EVM: 224 blocks, ~70 MB; Solana: 48 blocks, ~27 MB).
 Jemalloc allocator, pre-cached ParquetTable, Apple M2 Pro 12-core.
 
-### Throughput (rps, 5s per concurrency level)
+### Throughput (requests/sec, 5s per concurrency level)
 
-| Benchmark               | CPU | New        | Legacy  | Diff            |
-|-------------------------|-----|------------|---------|-----------------|
-| evm/usdc_transfers      | 4   | 588        | **636** | 8% slower       |
-|                         | 8   | **986**    | 815     | **21% faster**  |
-|                         | 12  | **1120**   | 889     | **26% faster**  |
-| evm/contract_calls+logs | 4   | **215**    | 158     | **36% faster**  |
-|                         | 8   | **217**    | 166     | **31% faster**  |
-|                         | 12  | **222**    | 174     | **28% faster**  |
-| evm/bayc_traces+diffs   | 4   | **209**    | 179     | **17% faster**  |
-|                         | 8   | **209**    | 181     | **15% faster**  |
-|                         | 12  | **217**    | 180     | **21% faster**  |
-| evm/all_blocks          | 4   | **5298**   | 3593    | **47% faster**  |
-|                         | 8   | **10102**  | 5079    | **99% faster**  |
-|                         | 12  | **11991**  | 5468    | **119% faster** |
-| sol/whirlpool_swap      | 4   | **127**    | 95      | **34% faster**  |
-|                         | 8   | **138**    | 99      | **39% faster**  |
-|                         | 12  | **139**    | 99      | **40% faster**  |
-| sol/instr+logs          | 4   | **116**    | 108     | **7% faster**   |
-|                         | 8   | **121**    | 112     | **8% faster**   |
-|                         | 12  | **118**    | 113     | **4% faster**   |
-| sol/instr+balances      | 4   | **277**    | 236     | **17% faster**  |
-|                         | 8   | **331**    | 246     | **35% faster**  |
-|                         | 12  | **338**    | 256     | **32% faster**  |
-| sol/all_blocks          | 4   | **9278**   | 5212    | **78% faster**  |
-|                         | 8   | **17896**  | 7575    | **136% faster** |
-|                         | 12  | **20516**  | 8768    | **134% faster** |
+| Benchmark                  | CPU | New       | Legacy  | Diff            |
+|----------------------------|-----|-----------|---------|-----------------|
+| evm/usdc_transfers         | 4   | 324       | **357** | 9% slower       |
+|                            | 8   | **538**   | 503     | **7% faster**   |
+|                            | 12  | **602**   | 536     | **12% faster**  |
+| evm/contract_calls+logs    | 4   | **189**   | 159     | **19% faster**  |
+|                            | 8   | **272**   | 184     | **48% faster**  |
+|                            | 12  | **281**   | 198     | **42% faster**  |
+| evm/usdc_traces+statediffs | 4   | **39**    | 31      | **26% faster**  |
+|                            | 8   | **48**    | 30      | **60% faster**  |
+|                            | 12  | **48**    | 34      | **41% faster**  |
+| evm/all_blocks             | 4   | **22445** | 9035    | **148% faster** |
+|                            | 8   | **36310** | 14075   | **158% faster** |
+|                            | 12  | **35891** | 17555   | **104% faster** |
+| sol/whirlpool_swap         | 4   | **327**   | 250     | **31% faster**  |
+|                            | 8   | **387**   | 272     | **42% faster**  |
+|                            | 12  | **395**   | 281     | **41% faster**  |
+| sol/hard (Meteora DLMM)    | 4   | **186**   | 143     | **30% faster**  |
+|                            | 8   | **227**   | 146     | **55% faster**  |
+|                            | 12  | **236**   | 147     | **61% faster**  |
+| sol/instr+logs             | 4   | **144**   | 127     | **13% faster**  |
+|                            | 8   | **203**   | 145     | **40% faster**  |
+|                            | 12  | **210**   | 142     | **48% faster**  |
+| sol/instr+balances         | 4   | **1085**  | 670     | **62% faster**  |
+|                            | 8   | **1234**  | 719     | **72% faster**  |
+|                            | 12  | **1217**  | 729     | **67% faster**  |
+| sol/all_blocks             | 4   | **47701** | 15817   | **202% faster** |
+|                            | 8   | **48458** | 26872   | **80% faster**  |
+|                            | 12  | **42726** | 32443   | **32% faster**  |
 
-| Median          | CPU=4          | CPU=8           | CPU=12          |
-|-----------------|----------------|-----------------|-----------------|
-| Queries         | **17% faster** | **26% faster**  | **27% faster**  |
-| All blocks      | **63% faster** | **118% faster** | **127% faster** |
+| Median           | CPU=4           | CPU=8           | CPU=12         |
+|------------------|-----------------|-----------------|----------------|
+| General queries  | **26% faster**  | **48% faster**  | **42% faster** |
+| Only full blocks | **175% faster** | **119% faster** | **68% faster** |
 
 ```bash
-# Run benchmarks (latency + throughput)
+# Run latency benchmarks
+cargo bench --bench latency
+
+# Run throughput benchmarks (CPU=4,8,12)
 cargo bench --bench throughput
 ```
 
-Legacy engine benchmark (same queries, same data):
+## Supported Datasets
 
-```bash
-cd /path/to/legacy/data
-git checkout benchmark-comparison
-cargo bench --bench throughput -p sqd-query --features parquet
-```
+- **EVM** (Ethereum, Optimism, Binance) — `metadata/evm.yaml`
+- **Solana** — `metadata/solana.yaml`
+- **Substrate** (Kusama, Moonbeam) — `metadata/substrate.yaml`
+- **Bitcoin** — `metadata/bitcoin.yaml`
+- **Fuel** — `metadata/fuel.yaml`
+- **Hyperliquid Fills** — `metadata/hyperliquid_fills.yaml`
+- **Hyperliquid Replica Commands** — `metadata/hyperliquid_replica_cmds.yaml`
 
 ## Tests
 
 ```bash
-# Unit tests (72 tests)
+# Unit tests (82 tests)
 cargo test --lib
 
 # E2E fixture tests (46 tests, compare output against legacy engine)
 cargo test --test e2e_fixtures
+
+# All tests
+cargo test
 ```
 
 ## Changelog

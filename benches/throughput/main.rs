@@ -120,12 +120,12 @@ fn main() {
     cases.extend(build_cases(
         EVM_QUERIES,
         &EVM_META,
-        Path::new("tests/fixtures/ethereum/chunk"),
+        Path::new("data/evm/chunk"),
     ));
     cases.extend(build_cases(
         SOL_QUERIES,
         &SOLANA_META,
-        Path::new("tests/fixtures/solana/chunk"),
+        Path::new("data/solana/chunk"),
     ));
 
     if cases.is_empty() {
@@ -147,6 +147,11 @@ fn main() {
             levels.push(cpus);
         }
         levels
+    } else if let Some(pos) = args.iter().position(|a| a == "--cpu") {
+        args.get(pos + 1)
+            .and_then(|v| v.parse::<usize>().ok())
+            .map(|c| vec![c])
+            .unwrap_or(vec![8])
     } else {
         vec![8]
     };

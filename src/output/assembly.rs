@@ -721,7 +721,7 @@ mod tests {
         let query = parse_query(json, &meta).unwrap();
         let plan = compile(&query, &meta).unwrap();
 
-        let chunk_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/200");
+        let chunk_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/chunk");
         let output = Vec::new();
         let result = execute_plan(&plan, &meta, &chunk_dir, output).unwrap();
 
@@ -773,7 +773,7 @@ mod tests {
         let query = parse_query(json, &meta).unwrap();
         let plan = compile(&query, &meta).unwrap();
 
-        let chunk_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/evm/large");
+        let chunk_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/evm/chunk");
         let output = Vec::new();
         let result = execute_plan(&plan, &meta, &chunk_dir, output).unwrap();
 
@@ -818,7 +818,7 @@ mod tests {
         let query = parse_query(json, &meta).unwrap();
         let plan = compile(&query, &meta).unwrap();
 
-        let chunk_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/200");
+        let chunk_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/chunk");
         let output = Vec::new();
         let result = execute_plan(&plan, &meta, &chunk_dir, output).unwrap();
 
@@ -846,7 +846,7 @@ mod tests {
         let query = parse_query(json, &meta).unwrap();
         let plan = compile(&query, &meta).unwrap();
 
-        let chunk_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/200");
+        let chunk_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/chunk");
         let output = Vec::new();
         let result = execute_plan(&plan, &meta, &chunk_dir, output).unwrap();
 

@@ -17,7 +17,7 @@ pub static EVM_USDC_TRANSFERS: &[u8] = br#"{
     }]
 }"#;
 
-/// Transaction filter with log relation (all events from Aave calls)
+/// Transaction filter with log relation (all events from USDT calls)
 pub static EVM_CONTRACT_CALLS_WITH_LOGS: &[u8] = br#"{
     "type": "evm",
     "fromBlock": 0,
@@ -27,13 +27,13 @@ pub static EVM_CONTRACT_CALLS_WITH_LOGS: &[u8] = br#"{
         "log": { "address": true, "topics": true, "data": true, "logIndex": true, "transactionIndex": true }
     },
     "transactions": [{
-        "to": ["0x7d2768de32b0b80b7a3454c06bdac94a69ddc7a9"],
+        "to": ["0xdac17f958d2ee523a2206206994597c13d831ec7"],
         "logs": true
     }]
 }"#;
 
-/// Multi-table: BAYC traces + state diffs with transaction relations
-pub static EVM_BAYC_TRACES_AND_STATEDIFFS: &[u8] = br#"{
+/// Multi-table: USDC traces + state diffs with transaction relations
+pub static EVM_USDC_TRACES_AND_STATEDIFFS: &[u8] = br#"{
     "type": "evm",
     "fromBlock": 0,
     "fields": {
@@ -44,11 +44,11 @@ pub static EVM_BAYC_TRACES_AND_STATEDIFFS: &[u8] = br#"{
     },
     "traces": [{
         "type": ["call"],
-        "callTo": ["0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d"],
+        "callTo": ["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"],
         "transaction": true
     }],
     "stateDiffs": [{
-        "address": ["0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d"],
+        "address": ["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"],
         "transaction": true
     }]
 }"#;
@@ -83,7 +83,7 @@ pub static SOL_WHIRLPOOL_SWAP: &[u8] = br#"{
     }]
 }"#;
 
-/// Instruction filter with logs relation
+/// Instruction filter with logs relation (Jupiter aggregator)
 pub static SOL_INSTRUCTION_WITH_LOGS: &[u8] = br#"{
     "type": "solana",
     "fromBlock": 0,
@@ -94,7 +94,7 @@ pub static SOL_INSTRUCTION_WITH_LOGS: &[u8] = br#"{
         "log": { "instructionAddress": true, "kind": true, "message": true, "transactionIndex": true, "logIndex": true }
     },
     "instructions": [{
-        "programId": ["SSwpkEEcbUqx4vtoEByFjSkhKdCT862DNVb52nZg1UZ"],
+        "programId": ["JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"],
         "transaction": true,
         "logs": true
     }]
@@ -117,6 +117,34 @@ pub static SOL_BALANCES_FROM_INSTRUCTION: &[u8] = br#"{
     }]
 }"#;
 
+/// Solana hard: Meteora DLMM with all relations (matches legacy solana_hard)
+pub static SOL_HARD: &[u8] = br#"{
+    "type": "solana",
+    "fromBlock": 0,
+    "fields": {
+        "block": { "number": true, "parentNumber": true, "parentHash": true, "height": true, "timestamp": true },
+        "transaction": { "signatures": true, "err": true, "feePayer": true },
+        "instruction": { "programId": true, "accounts": true, "data": true, "isCommitted": true },
+        "log": { "instructionAddress": true, "programId": true, "kind": true, "message": true },
+        "balance": { "pre": true, "post": true },
+        "tokenBalance": { "preMint": true, "postMint": true, "preDecimals": true, "postDecimals": true, "preOwner": true, "postOwner": true, "preAmount": true, "postAmount": true },
+        "reward": { "lamports": true, "postBalance": true, "rewardType": true, "commission": true }
+    },
+    "instructions": [{
+        "programId": ["LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo"],
+        "d8": [
+            "0xf8c69e91e17587c8", "0xb59d59438fb63448", "0x1c8cee63e7a21595",
+            "0x0703967f94283dc8", "0x2905eeaf64e106cd", "0x5e9b6797465fdca5",
+            "0xa1c26754ab47fa9a", "0x5055d14818ceb16c", "0x0a333d2370691855",
+            "0x1a526698f04a691a", "0x2d9aedd2dd0fa65c"
+        ],
+        "isCommitted": true,
+        "transaction": true,
+        "transactionTokenBalances": true,
+        "innerInstructions": true
+    }]
+}"#;
+
 /// Full scan: all blocks with header fields
 pub static SOL_ALL_BLOCKS: &[u8] = br#"{
     "type": "solana",
@@ -131,12 +159,13 @@ pub static SOL_ALL_BLOCKS: &[u8] = br#"{
 pub static EVM_QUERIES: &[(&str, &[u8])] = &[
     ("evm/usdc_transfers", EVM_USDC_TRANSFERS),
     ("evm/contract_calls+logs", EVM_CONTRACT_CALLS_WITH_LOGS),
-    ("evm/bayc_traces+diffs", EVM_BAYC_TRACES_AND_STATEDIFFS),
+    ("evm/usdc_traces+diffs", EVM_USDC_TRACES_AND_STATEDIFFS),
     ("evm/all_blocks", EVM_ALL_BLOCKS),
 ];
 
 pub static SOL_QUERIES: &[(&str, &[u8])] = &[
     ("sol/whirlpool_swap", SOL_WHIRLPOOL_SWAP),
+    ("sol/hard", SOL_HARD),
     ("sol/instr+logs", SOL_INSTRUCTION_WITH_LOGS),
     ("sol/instr+balances", SOL_BALANCES_FROM_INSTRUCTION),
     ("sol/all_blocks", SOL_ALL_BLOCKS),

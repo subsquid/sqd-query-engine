@@ -771,7 +771,7 @@ mod tests {
         let plan = compile(&query, &meta).unwrap();
 
         // Execute the plan against real data
-        let evm_chunk_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/evm/large");
+        let evm_chunk_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/evm/chunk");
         let table_path = evm_chunk_path.join("logs.parquet");
         let parquet_table = crate::scan::ParquetTable::open(&table_path).unwrap();
 
@@ -828,7 +828,7 @@ mod tests {
         let query = parse_query(json, &meta).unwrap();
         let plan = compile(&query, &meta).unwrap();
 
-        let chunk_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/200");
+        let chunk_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/chunk");
         let table_path = chunk_path.join("instructions.parquet");
         let parquet_table = crate::scan::ParquetTable::open(&table_path).unwrap();
 

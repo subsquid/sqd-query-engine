@@ -283,11 +283,11 @@ mod tests {
     use super::*;
 
     fn solana_chunk_path() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/200")
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/chunk")
     }
 
     fn evm_chunk_path() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("data/evm/large")
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("data/evm/chunk")
     }
 
     #[test]

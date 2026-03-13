@@ -508,7 +508,7 @@ mod tests {
         use crate::scan::ParquetTable;
         use std::path::Path;
 
-        let chunk = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/200");
+        let chunk = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/chunk");
         let instructions = ParquetTable::open(&chunk.join("instructions.parquet")).unwrap();
 
         // Read all instructions with address info

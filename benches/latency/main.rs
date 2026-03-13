@@ -66,28 +66,28 @@ mod evm {
 
     #[divan::bench]
     fn usdc_transfers(bench: divan::Bencher) {
-        let chunk = Path::new("tests/fixtures/ethereum/chunk");
+        let chunk = Path::new("data/evm/chunk");
         let mut cache = open_cache(chunk);
         bench.bench_local(|| run_query(EVM_USDC_TRANSFERS, &EVM_META, chunk, &mut cache));
     }
 
     #[divan::bench]
     fn contract_calls_with_logs(bench: divan::Bencher) {
-        let chunk = Path::new("tests/fixtures/ethereum/chunk");
+        let chunk = Path::new("data/evm/chunk");
         let mut cache = open_cache(chunk);
         bench.bench_local(|| run_query(EVM_CONTRACT_CALLS_WITH_LOGS, &EVM_META, chunk, &mut cache));
     }
 
     #[divan::bench]
-    fn bayc_traces_and_statediffs(bench: divan::Bencher) {
-        let chunk = Path::new("tests/fixtures/ethereum/chunk");
+    fn usdc_traces_and_statediffs(bench: divan::Bencher) {
+        let chunk = Path::new("data/evm/chunk");
         let mut cache = open_cache(chunk);
-        bench.bench_local(|| run_query(EVM_BAYC_TRACES_AND_STATEDIFFS, &EVM_META, chunk, &mut cache));
+        bench.bench_local(|| run_query(EVM_USDC_TRACES_AND_STATEDIFFS, &EVM_META, chunk, &mut cache));
     }
 
     #[divan::bench]
     fn all_blocks(bench: divan::Bencher) {
-        let chunk = Path::new("tests/fixtures/ethereum/chunk");
+        let chunk = Path::new("data/evm/chunk");
         let mut cache = open_cache(chunk);
         bench.bench_local(|| run_query(EVM_ALL_BLOCKS, &EVM_META, chunk, &mut cache));
     }
@@ -103,28 +103,35 @@ mod solana {
 
     #[divan::bench]
     fn whirlpool_swap(bench: divan::Bencher) {
-        let chunk = Path::new("tests/fixtures/solana/chunk");
+        let chunk = Path::new("data/solana/chunk");
         let mut cache = open_cache(chunk);
         bench.bench_local(|| run_query(SOL_WHIRLPOOL_SWAP, &SOLANA_META, chunk, &mut cache));
     }
 
     #[divan::bench]
+    fn hard(bench: divan::Bencher) {
+        let chunk = Path::new("data/solana/chunk");
+        let mut cache = open_cache(chunk);
+        bench.bench_local(|| run_query(SOL_HARD, &SOLANA_META, chunk, &mut cache));
+    }
+
+    #[divan::bench]
     fn instruction_with_logs(bench: divan::Bencher) {
-        let chunk = Path::new("tests/fixtures/solana/chunk");
+        let chunk = Path::new("data/solana/chunk");
         let mut cache = open_cache(chunk);
         bench.bench_local(|| run_query(SOL_INSTRUCTION_WITH_LOGS, &SOLANA_META, chunk, &mut cache));
     }
 
     #[divan::bench]
     fn balances_from_instruction(bench: divan::Bencher) {
-        let chunk = Path::new("tests/fixtures/solana/chunk");
+        let chunk = Path::new("data/solana/chunk");
         let mut cache = open_cache(chunk);
         bench.bench_local(|| run_query(SOL_BALANCES_FROM_INSTRUCTION, &SOLANA_META, chunk, &mut cache));
     }
 
     #[divan::bench]
     fn all_blocks(bench: divan::Bencher) {
-        let chunk = Path::new("tests/fixtures/solana/chunk");
+        let chunk = Path::new("data/solana/chunk");
         let mut cache = open_cache(chunk);
         bench.bench_local(|| run_query(SOL_ALL_BLOCKS, &SOLANA_META, chunk, &mut cache));
     }

@@ -1010,11 +1010,11 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     fn solana_chunk_path() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/200")
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/chunk")
     }
 
     fn evm_chunk_path() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("data/evm/large")
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("data/evm/chunk")
     }
 
     #[test]
@@ -1038,8 +1038,8 @@ mod tests {
         let mut request = ScanRequest::new(vec!["block_number", "program_id"]);
         request.block_number_column = Some("block_number");
         // Use a range that's a subset of the data
-        request.from_block = Some(323024920);
-        request.to_block = Some(323024940);
+        request.from_block = Some(406021650);
+        request.to_block = Some(406021670);
 
         let batches = scan(&table, &request).unwrap();
         let filtered_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
@@ -1104,8 +1104,8 @@ mod tests {
         let mut request = ScanRequest::new(vec!["block_number", "program_id"]);
         request.predicates = vec![&pred];
         request.block_number_column = Some("block_number");
-        request.from_block = Some(323024920);
-        request.to_block = Some(323024940);
+        request.from_block = Some(406021650);
+        request.to_block = Some(406021670);
 
         let batches = scan(&table, &request).unwrap();
         let filtered_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
@@ -1124,12 +1124,12 @@ mod tests {
             if let Some(arr) = block_num.as_any().downcast_ref::<UInt32Array>() {
                 for i in 0..arr.len() {
                     let bn = arr.value(i) as u64;
-                    assert!(bn >= 323024920 && bn <= 323024940);
+                    assert!(bn >= 406021650 && bn <= 406021670);
                 }
             } else if let Some(arr) = block_num.as_any().downcast_ref::<UInt64Array>() {
                 for i in 0..arr.len() {
                     let bn = arr.value(i);
-                    assert!(bn >= 323024920 && bn <= 323024940);
+                    assert!(bn >= 406021650 && bn <= 406021670);
                 }
             }
 
