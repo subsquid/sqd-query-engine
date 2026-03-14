@@ -1,8 +1,7 @@
 use sqd_query_engine::metadata::load_dataset_description;
-use sqd_query_engine::output::{execute_plan_cached, execute_plan_profiled};
+use sqd_query_engine::output::{execute_chunk, execute_plan_profiled};
 use sqd_query_engine::query::{compile, parse_query};
-use sqd_query_engine::scan::ParquetTable;
-use std::collections::HashMap;
+use sqd_query_engine::scan::ParquetChunkReader;
 use std::path::Path;
 use std::time::Instant;
 
@@ -10,42 +9,21 @@ use std::time::Instant;
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-fn open_cache(chunk_dir: &Path) -> HashMap<String, ParquetTable> {
-    let mut cache = HashMap::new();
-    if let Ok(entries) = std::fs::read_dir(chunk_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("parquet") {
-                let name = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .to_string();
-                if let Ok(table) = ParquetTable::open(&path) {
-                    cache.insert(name, table);
-                }
-            }
-        }
-    }
-    cache
-}
-
 fn profile_query(label: &str, json: &[u8], meta_path: &str, chunk_path: &str) {
     let meta = load_dataset_description(Path::new(meta_path)).unwrap();
     let parsed = parse_query(json, &meta).unwrap();
     let plan = compile(&parsed, &meta).unwrap();
-    let chunk = Path::new(chunk_path);
-    let mut cache = open_cache(chunk);
+    let chunk = ParquetChunkReader::open(Path::new(chunk_path)).unwrap();
 
     // Warmup
-    let _ = execute_plan_cached(&plan, &meta, chunk, &mut cache, Vec::new()).unwrap();
+    let _ = execute_chunk(&plan, &meta, &chunk, Vec::new(), false).unwrap();
 
     // Timed runs
     let n = 10;
     let mut times = Vec::with_capacity(n);
     for _ in 0..n {
         let t = Instant::now();
-        let _ = execute_plan_cached(&plan, &meta, chunk, &mut cache, Vec::new()).unwrap();
+        let _ = execute_chunk(&plan, &meta, &chunk, Vec::new(), false).unwrap();
         times.push(t.elapsed());
     }
     times.sort();
@@ -56,8 +34,8 @@ fn profile_query(label: &str, json: &[u8], meta_path: &str, chunk_path: &str) {
         times[n - 1]
     );
 
-    // Detailed breakdown (profiled uses its own cache internally)
-    let _ = execute_plan_profiled(&plan, &meta, chunk, Vec::new()).unwrap();
+    // Detailed breakdown
+    let _ = execute_plan_profiled(&plan, &meta, Path::new(chunk_path), Vec::new()).unwrap();
     eprintln!();
 }
 

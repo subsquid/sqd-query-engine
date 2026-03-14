@@ -104,52 +104,25 @@ Queries are JSON objects specifying block ranges, table filters, relations, and 
 
 ## Benchmarks
 
-Data: R2 production chunks (EVM: 224 blocks, ~70 MB; Solana: 48 blocks, ~27 MB).
-Jemalloc allocator, pre-cached ParquetTable, Apple M2 Pro 12-core.
+Throughput improvement vs legacy engine (median across query types). See [BENCHMARKS.md](BENCHMARKS.md) for full results.
 
-### Throughput (requests/sec, 5s per concurrency level)
+### x86_64: Intel Xeon E-2136 (6C/12T @ 3.3GHz), 64GB DDR4, Linux
 
-| Benchmark                  | CPU | New       | Legacy  | Diff            |
-|----------------------------|-----|-----------|---------|-----------------|
-| evm/usdc_transfers         | 4   | 324       | **357** | 9% slower       |
-|                            | 8   | **538**   | 503     | **7% faster**   |
-|                            | 12  | **602**   | 536     | **12% faster**  |
-| evm/contract_calls+logs    | 4   | **189**   | 159     | **19% faster**  |
-|                            | 8   | **272**   | 184     | **48% faster**  |
-|                            | 12  | **281**   | 198     | **42% faster**  |
-| evm/usdc_traces+statediffs | 4   | **39**    | 31      | **26% faster**  |
-|                            | 8   | **48**    | 30      | **60% faster**  |
-|                            | 12  | **48**    | 34      | **41% faster**  |
-| evm/all_blocks             | 4   | **22445** | 9035    | **148% faster** |
-|                            | 8   | **36310** | 14075   | **158% faster** |
-|                            | 12  | **35891** | 17555   | **104% faster** |
-| sol/whirlpool_swap         | 4   | **327**   | 250     | **31% faster**  |
-|                            | 8   | **387**   | 272     | **42% faster**  |
-|                            | 12  | **395**   | 281     | **41% faster**  |
-| sol/hard (Meteora DLMM)    | 4   | **186**   | 143     | **30% faster**  |
-|                            | 8   | **227**   | 146     | **55% faster**  |
-|                            | 12  | **236**   | 147     | **61% faster**  |
-| sol/instr+logs             | 4   | **144**   | 127     | **13% faster**  |
-|                            | 8   | **203**   | 145     | **40% faster**  |
-|                            | 12  | **210**   | 142     | **48% faster**  |
-| sol/instr+balances         | 4   | **1085**  | 670     | **62% faster**  |
-|                            | 8   | **1234**  | 719     | **72% faster**  |
-|                            | 12  | **1217**  | 729     | **67% faster**  |
-| sol/all_blocks             | 4   | **47701** | 15817   | **202% faster** |
-|                            | 8   | **48458** | 26872   | **80% faster**  |
-|                            | 12  | **42726** | 32443   | **32% faster**  |
+| Median           | CPU=1           | CPU=4           | CPU=8           | CPU=12          |
+|------------------|-----------------|-----------------|-----------------|-----------------|
+| General queries  | **17% faster**  | **56% faster**  | **67% faster**  | **73% faster**  |
+| Only full blocks | **485% faster** | **599% faster** | **522% faster** | **455% faster** |
 
-| Median           | CPU=4           | CPU=8           | CPU=12         |
-|------------------|-----------------|-----------------|----------------|
-| General queries  | **26% faster**  | **48% faster**  | **42% faster** |
-| Only full blocks | **175% faster** | **119% faster** | **68% faster** |
+### Apple M2 Pro (12-core), 32GB, macOS
+
+| Median           | CPU=1           | CPU=4           | CPU=8           | CPU=12          |
+|------------------|-----------------|-----------------|-----------------|-----------------|
+| General queries  | **7% faster**   | **40% faster**  | **53% faster**  | **49% faster**  |
+| Only full blocks | **337% faster** | **139% faster** | **99% faster**  | **64% faster**  |
 
 ```bash
-# Run latency benchmarks
-cargo bench --bench latency
-
-# Run throughput benchmarks (CPU=4,8,12)
-cargo bench --bench throughput
+cargo bench --bench latency               # latency (divan)
+cargo bench --bench throughput -- --all    # throughput (all CPU levels)
 ```
 
 ## Supported Datasets

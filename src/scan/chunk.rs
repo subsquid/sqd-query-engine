@@ -1,3 +1,6 @@
+use super::scanner;
+use super::ChunkReader;
+use super::ScanRequest;
 use anyhow::{Context, Result};
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
@@ -91,6 +94,49 @@ impl ParquetChunk {
     /// List all table names in this chunk.
     pub fn table_names(&self) -> Vec<&str> {
         self.tables.keys().map(|s| s.as_str()).collect()
+    }
+}
+
+/// A `ChunkReader` backed by a directory of parquet files.
+/// Caches opened `ParquetTable` instances for reuse across scans.
+pub struct ParquetChunkReader {
+    chunk_dir: PathBuf,
+    cache: HashMap<String, ParquetTable>,
+}
+
+impl ParquetChunkReader {
+    /// Create a reader for a chunk directory, pre-opening all parquet files.
+    pub fn open(chunk_dir: &Path) -> Result<Self> {
+        let chunk = ParquetChunk::open(chunk_dir)?;
+        Ok(Self {
+            chunk_dir: chunk_dir.to_path_buf(),
+            cache: chunk.tables,
+        })
+    }
+
+    /// Create a reader from an existing table cache (for benchmark reuse).
+    pub fn from_cache(chunk_dir: PathBuf, cache: HashMap<String, ParquetTable>) -> Self {
+        Self { chunk_dir, cache }
+    }
+
+}
+
+impl ChunkReader for ParquetChunkReader {
+    fn scan(&self, table: &str, request: &ScanRequest) -> Result<Vec<RecordBatch>> {
+        let parquet_table = match self.cache.get(table) {
+            Some(t) => t,
+            None => return Ok(Vec::new()),
+        };
+        scanner::scan(parquet_table, request)
+    }
+
+    fn has_table(&self, table: &str) -> bool {
+        self.cache.contains_key(table)
+            || self.chunk_dir.join(format!("{}.parquet", table)).exists()
+    }
+
+    fn table_schema(&self, table: &str) -> Option<SchemaRef> {
+        self.cache.get(table).map(|t| t.schema().clone())
     }
 }
 

@@ -1,6 +1,7 @@
 use crate::metadata::{FieldGrouping, JsonEncoding, TableDescription, VirtualField};
 use crate::output::encoder::{
     encode_json_string, encode_roll, resolve_encoder, snake_to_camel, EncoderFn,
+    ResolvedRollEncoder,
 };
 use arrow::array::*;
 use arrow::record_batch::RecordBatch;
@@ -99,6 +100,8 @@ pub(crate) struct ResolvedFieldWriter<'a> {
     indices: ResolvedIndices,
     /// Pre-resolved encoder function for Regular fields (eliminates per-row DataType dispatch).
     encoder: Option<EncoderFn>,
+    /// Pre-resolved roll encoder (eliminates per-row DataType dispatch for Roll fields).
+    roll_encoder: Option<ResolvedRollEncoder>,
 }
 
 pub(crate) enum ResolvedIndices {
@@ -141,10 +144,12 @@ pub(crate) fn resolve_writers<'a>(
                     .iter()
                     .filter_map(|c| batch.schema().index_of(c).ok())
                     .collect();
+                let roll_encoder = ResolvedRollEncoder::resolve(batch, &idxs);
                 ResolvedFieldWriter {
                     writer: w,
                     indices: ResolvedIndices::Multi(idxs),
                     encoder: None,
+                    roll_encoder: Some(roll_encoder),
                 }
             }
             FieldWriter::Regular {
@@ -160,6 +165,7 @@ pub(crate) fn resolve_writers<'a>(
                     writer: w,
                     indices: ResolvedIndices::Single(idx),
                     encoder,
+                    roll_encoder: None,
                 }
             }
         })
@@ -357,7 +363,11 @@ fn write_row_fields_resolved(
             ) => {
                 if !indices.is_empty() {
                     buf.extend_from_slice(json_key_prefix);
-                    encode_roll(batch, row, indices, buf);
+                    if let Some(ref roll_enc) = rw.roll_encoder {
+                        roll_enc.encode(batch, row, buf);
+                    } else {
+                        encode_roll(batch, row, indices, buf);
+                    }
                     buf.push(b',');
                 }
             }
@@ -369,7 +379,6 @@ fn write_row_fields_resolved(
             ) => {
                 let col = batch.column(*idx);
                 buf.extend_from_slice(json_key_prefix);
-                // Use pre-resolved encoder (no per-row DataType match)
                 (rw.encoder.unwrap())(col.as_ref(), row, buf);
                 buf.push(b',');
             }

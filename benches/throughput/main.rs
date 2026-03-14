@@ -3,13 +3,12 @@ mod queries;
 
 use queries::*;
 use sqd_query_engine::metadata::load_dataset_description;
-use sqd_query_engine::output::execute_plan_cached;
+use sqd_query_engine::output::execute_chunk;
 use sqd_query_engine::query::{compile, parse_query};
-use sqd_query_engine::scan::ParquetTable;
-use std::collections::HashMap;
+use sqd_query_engine::scan::ParquetChunkReader;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 #[cfg(not(target_env = "msvc"))]
@@ -22,44 +21,23 @@ static SOLANA_META: LazyLock<sqd_query_engine::metadata::DatasetDescription> =
 static EVM_META: LazyLock<sqd_query_engine::metadata::DatasetDescription> =
     LazyLock::new(|| load_dataset_description(Path::new("metadata/evm.yaml")).unwrap());
 
-fn open_cache(chunk_dir: &Path) -> HashMap<String, ParquetTable> {
-    let mut cache = HashMap::new();
-    if let Ok(entries) = std::fs::read_dir(chunk_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("parquet") {
-                let name = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .to_string();
-                if let Ok(table) = ParquetTable::open(&path) {
-                    cache.insert(name, table);
-                }
-            }
-        }
-    }
-    cache
-}
-
-/// Full pipeline: parse → compile → execute (no plan caching)
+/// Full pipeline: parse → compile → execute
 fn run_query(
     query_json: &[u8],
     meta: &sqd_query_engine::metadata::DatasetDescription,
-    chunk_dir: &Path,
-    cache: &mut HashMap<String, ParquetTable>,
+    chunk: &ParquetChunkReader,
     buf: Vec<u8>,
 ) -> Vec<u8> {
     let parsed = parse_query(query_json, meta).unwrap();
     let plan = compile(&parsed, meta).unwrap();
-    execute_plan_cached(&plan, meta, chunk_dir, cache, buf).unwrap()
+    execute_chunk(&plan, meta, chunk, buf, false).unwrap()
 }
 
 struct BenchCase {
     name: &'static str,
     query_json: &'static [u8],
     meta: &'static sqd_query_engine::metadata::DatasetDescription,
-    chunk: &'static Path,
+    chunk: Arc<ParquetChunkReader>,
 }
 
 fn measure_throughput(case: &BenchCase, concurrency: usize, duration: Duration) -> f64 {
@@ -71,10 +49,9 @@ fn measure_throughput(case: &BenchCase, concurrency: usize, duration: Duration) 
     std::thread::scope(|s| {
         for _ in 0..concurrency {
             s.spawn(|| {
-                let mut cache = open_cache(case.chunk);
                 let mut buf = Vec::new();
                 while !stop.load(Ordering::Relaxed) {
-                    buf = run_query(case.query_json, case.meta, case.chunk, &mut cache, buf);
+                    buf = run_query(case.query_json, case.meta, &case.chunk, buf);
                     total.fetch_add(1, Ordering::Relaxed);
                     buf.clear();
                 }
@@ -93,19 +70,19 @@ fn measure_throughput(case: &BenchCase, concurrency: usize, duration: Duration) 
 fn build_cases(
     queries: &'static [(&'static str, &'static [u8])],
     meta: &'static sqd_query_engine::metadata::DatasetDescription,
-    chunk: &Path,
+    chunk_dir: &Path,
 ) -> Vec<BenchCase> {
-    if !chunk.exists() {
+    if !chunk_dir.exists() {
         return Vec::new();
     }
-    let chunk: &'static Path = Box::leak(chunk.to_path_buf().into_boxed_path());
+    let chunk = Arc::new(ParquetChunkReader::open(chunk_dir).unwrap());
     queries
         .iter()
         .map(|(name, json)| BenchCase {
             name,
             query_json: json,
             meta,
-            chunk,
+            chunk: chunk.clone(),
         })
         .collect()
 }
@@ -161,8 +138,7 @@ fn main() {
     // Warmup
     eprintln!("Warming up...");
     for case in &cases {
-        let mut cache = open_cache(case.chunk);
-        run_query(case.query_json, case.meta, case.chunk, &mut cache, Vec::new());
+        run_query(case.query_json, case.meta, &case.chunk, Vec::new());
     }
 
     // Throughput

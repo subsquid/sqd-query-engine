@@ -35,3 +35,7 @@ harness = false
 [[bench]]
 name = "throughput"
 harness = false
+
+[[bench]]
+name = "profile"
+harness = false

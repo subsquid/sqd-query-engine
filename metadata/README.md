@@ -4,6 +4,25 @@ This module defines and loads dataset metadata from YAML files. Metadata drives 
 
 YAML files live in [`metadata/`](../../metadata/).
 
+## Table of Contents
+
+1. [Top-Level Structure](#top-level-structure)
+2. [Table Properties](#table-properties)
+3. [Columns](#columns)
+   - [Column Properties](#column-properties)
+   - [Column Types](#column-types)
+   - [JSON Encodings](#json-encodings)
+   - [Weight](#weight)
+   - [System Columns](#system-columns)
+4. [Relations](#relations)
+5. [Special Filters](#special-filters)
+6. [Virtual Fields](#virtual-fields)
+7. [Field Groups (Polymorphic Output)](#field-groups-polymorphic-output)
+8. [Query Aliases](#query-aliases)
+9. [Complete Minimal Example](#complete-minimal-example)
+
+---
+
 ## Top-Level Structure
 
 ```yaml
@@ -14,6 +33,9 @@ tables:
     ...
   transactions:
     ...
+
+query_aliases:                   # Optional: virtual query names mapped to existing tables
+  ...
 ```
 
 `tables` is an **ordered map** — insertion order determines the output ordering of table arrays within each block JSON object.
@@ -102,9 +124,11 @@ columns:
 | `int16` | Int16 | |
 | `int64` | Int64 | |
 | `float64` | Float64 | |
+| `decimal128` | Decimal128 | High-precision decimal (used for large numeric values) |
 | `boolean` | Boolean | |
 | `string` | Utf8 | |
-| `timestamp_second` | TimestampSecond | Unix timestamp, output as integer |
+| `timestamp_second` | TimestampSecond | Unix timestamp in seconds, output as integer |
+| `timestamp_millisecond` | TimestampMillisecond | Unix timestamp in milliseconds |
 | `list_uint8` | List\<UInt8\> | |
 | `list_uint32` | List\<UInt32\> | |
 | `list_string` | List\<Utf8\> | |
@@ -125,6 +149,7 @@ The `json_encoding` field controls how a column's value is serialized to JSON ou
 | `string` | Integer as quoted decimal string (avoids JS precision loss for >2^53) | `5000` → `"5000"` |
 | `json` | String containing JSON — parsed and embedded as raw JSON in output | `"{\"a\":1}"` → `{"a":1}` |
 | `solana_tx_version` | Solana transaction version: `-1` → `"legacy"`, otherwise the number | `-1` → `"legacy"`, `0` → `0` |
+| `timestamp_millisecond` | Millisecond timestamp, output as integer | `1710000000000` |
 
 ### Weight
 
@@ -245,6 +270,10 @@ special_filters:
   last_nonce:                    # Range filter: nonce <= value
     type: range_lte
     column: nonce
+
+  type:                          # Column alias: query key maps to different column
+    type: column_alias
+    column: receipt_type
 ```
 
 ### Special Filter Types
@@ -255,6 +284,7 @@ special_filters:
 | `bloom_filter` | Tests membership in a pre-computed bloom filter column. Used for "mentions account" queries without scanning all account columns. |
 | `range_gte` | Maps to a `column >= value` predicate. |
 | `range_lte` | Maps to a `column <= value` predicate. |
+| `column_alias` | Maps a query filter key to a different physical column name (e.g., `type` → `receipt_type`). |
 
 ---
 
@@ -283,7 +313,7 @@ Example: if `a0="X"`, `a1="Y"`, `a2=null`, then `accounts` outputs `["X","Y"]`.
 
 ## Field Groups (Polymorphic Output)
 
-Field groups handle tables where the output JSON structure depends on a tag column value. Used for EVM traces where `type` determines which nested objects appear.
+Field groups handle tables where the output JSON structure depends on a tag column value. Used for EVM traces and Fuel inputs/outputs where `type` determines which nested objects appear.
 
 ```yaml
 field_groups:
@@ -317,6 +347,52 @@ field_groups:
 ```
 
 Each variant maps its physical `column` to a display `field` name within a group. The group name becomes a nested JSON key. A group is emitted in the output if the user selected at least one field from it, even if all values are null.
+
+Use `_` as the group name to flatten fields directly into the top-level object instead of nesting:
+
+```yaml
+variants:
+  InputCoin:
+    _:                           # Underscore = no nesting, fields go at top level
+      - { column: coin_utxo_id, field: utxoId }
+      - { column: coin_owner, field: owner }
+```
+
+---
+
+## Query Aliases
+
+Query aliases create virtual query names that map to existing tables with implicit predicates and column remapping. This allows a single physical table to be queried as if it were multiple specialized tables.
+
+```yaml
+query_aliases:
+  evmLogs:
+    table: events                          # Physical table to query
+    implicit_predicates:                   # Always-applied filters
+      name: [ "EVM.Log" ]
+    filter_aliases:                        # Remap query filter keys to physical columns
+      topic0: _evm_log_topic0
+      address: _evm_log_address
+    relations:                             # Relations available for this alias
+      extrinsic:
+        table: extrinsics
+        left_key: [ block_number, extrinsic_index ]
+        right_key: [ block_number, index ]
+```
+
+### Query Alias Properties
+
+| Property | Type | Required | Description |
+|---|---|---|---|
+| `table` | string | **yes** | Physical table this alias queries. |
+| `implicit_predicates` | map | no | Column → values filters automatically applied to every query through this alias. |
+| `filter_aliases` | map | no | Maps query filter keys to physical column names (e.g., `topic0` → `_evm_log_topic0`). |
+| `relations` | map | no | Relations available when querying via this alias. Same structure as table-level relations. |
+
+### Use Cases
+
+- **Substrate `evmLogs`**: Queries the `events` table with `name: ["EVM.Log"]` implicit filter, remapping EVM-style filter keys (`topic0`, `address`) to the physical columns (`_evm_log_topic0`, `_evm_log_address`).
+- **Hyperliquid `orderActions`/`cancelActions`**: Queries the `actions` table with `action_type` implicit filter, remapping `contains_asset` to type-specific columns (`order_asset`, `cancel_asset`).
 
 ---
 

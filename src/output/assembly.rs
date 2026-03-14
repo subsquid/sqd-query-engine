@@ -14,7 +14,7 @@ use crate::output::writer::JsonArrayWriter;
 use crate::query::{Plan, RelationKind};
 use crate::scan::predicate::{evaluate_predicates_on_batch, RowPredicate};
 use crate::scan::{
-    scan, HierarchicalFilter, HierarchicalMode, KeyFilter, ParquetTable, ScanRequest,
+    ChunkReader, HierarchicalFilter, HierarchicalMode, KeyFilter, ParquetChunkReader, ScanRequest,
 };
 use anyhow::{anyhow, Result};
 use arrow::record_batch::RecordBatch;
@@ -23,17 +23,6 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::Path;
 
-/// Execute a plan with timing instrumentation printed to stderr.
-pub fn execute_plan_profiled<W: Write>(
-    plan: &Plan,
-    metadata: &DatasetDescription,
-    chunk_dir: &Path,
-    writer: W,
-) -> Result<W> {
-    let mut cache = HashMap::new();
-    execute_plan_inner(plan, metadata, chunk_dir, &mut cache, writer, true)
-}
-
 /// Execute a plan against a chunk directory and write JSON output.
 pub fn execute_plan<W: Write>(
     plan: &Plan,
@@ -41,27 +30,26 @@ pub fn execute_plan<W: Write>(
     chunk_dir: &Path,
     writer: W,
 ) -> Result<W> {
-    let mut cache = HashMap::new();
-    execute_plan_inner(plan, metadata, chunk_dir, &mut cache, writer, false)
+    let chunk = ParquetChunkReader::open(chunk_dir)?;
+    execute_chunk(plan, metadata, &chunk, writer, false)
 }
 
-/// Execute a plan with a pre-populated parquet table cache.
-/// Tables in the cache are reused; missing tables are opened and added to the cache.
-pub fn execute_plan_cached<W: Write>(
+/// Execute a plan with timing instrumentation printed to stderr.
+pub fn execute_plan_profiled<W: Write>(
     plan: &Plan,
     metadata: &DatasetDescription,
     chunk_dir: &Path,
-    cache: &mut HashMap<String, ParquetTable>,
     writer: W,
 ) -> Result<W> {
-    execute_plan_inner(plan, metadata, chunk_dir, cache, writer, false)
+    let chunk = ParquetChunkReader::open(chunk_dir)?;
+    execute_chunk(plan, metadata, &chunk, writer, true)
 }
 
-fn execute_plan_inner<W: Write>(
+/// Execute a plan against any ChunkReader implementation.
+pub fn execute_chunk<W: Write>(
     plan: &Plan,
     metadata: &DatasetDescription,
-    chunk_dir: &Path,
-    parquet_cache: &mut HashMap<String, ParquetTable>,
+    chunk: &dyn ChunkReader,
     writer: W,
     profile: bool,
 ) -> Result<W> {
@@ -96,14 +84,9 @@ fn execute_plan_inner<W: Write>(
             .table(&table_plan.table)
             .ok_or_else(|| anyhow!("table '{}' not found", table_plan.table))?;
 
-        let table_path = chunk_dir.join(format!("{}.parquet", table_plan.table));
-        if !table_path.exists() {
+        if !chunk.has_table(&table_plan.table) {
             continue;
         }
-        if !parquet_cache.contains_key(&table_plan.table) {
-            parquet_cache.insert(table_plan.table.clone(), ParquetTable::open(&table_path)?);
-        }
-        let parquet_table = parquet_cache.get(&table_plan.table).unwrap();
 
         // Determine all columns needed for output (including virtual field sources)
         let output_cols = resolve_output_columns(table_plan, table_desc);
@@ -117,7 +100,7 @@ fn execute_plan_inner<W: Write>(
         request.block_number_column = Some(table_desc.block_number_column.as_str());
 
         let t_primary = timer!();
-        let batches = scan(&parquet_table, &request)?;
+        let batches = chunk.scan(&table_plan.table, &request)?;
         let primary_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         elapsed!(t_primary, "primary scan", "{} rows", primary_rows);
 
@@ -130,18 +113,7 @@ fn execute_plan_inner<W: Write>(
 
         let has_primary_rows = batches.iter().any(|b| b.num_rows() > 0);
         if has_primary_rows && !table_plan.relations.is_empty() {
-            // Pre-open all relation parquet files
-            for rel in &table_plan.relations {
-                if !parquet_cache.contains_key(&rel.target_table) {
-                    let rel_table_path = chunk_dir.join(format!("{}.parquet", rel.target_table));
-                    if rel_table_path.exists() {
-                        parquet_cache.insert(
-                            rel.target_table.clone(),
-                            ParquetTable::open(&rel_table_path)?,
-                        );
-                    }
-                }
-            }
+            // (relation tables are accessed via chunk.scan() — no pre-opening needed)
 
             // Build key filters for each relation (before parallel scan)
             let t_kf = timer!();
@@ -269,7 +241,9 @@ fn execute_plan_inner<W: Write>(
                     let kf_opt = &key_filters[rel_idx];
                     let hf_opt = &hierarchical_filters[rel_idx];
 
-                    let rel_parquet = parquet_cache.get(&rel.target_table)?;
+                    if !chunk.has_table(&rel.target_table) {
+                        return None;
+                    }
                     let rel_table_desc = metadata.table(&rel.target_table);
 
                     let rel_output_cols =
@@ -292,7 +266,7 @@ fn execute_plan_inner<W: Write>(
                     } else {
                         None
                     };
-                    let rel_all_batches = match scan(rel_parquet, &rel_request) {
+                    let rel_all_batches = match chunk.scan(&rel.target_table, &rel_request) {
                         Ok(b) => b,
                         Err(e) => return Some((rel.target_table.clone(), Err(e))),
                     };
@@ -423,13 +397,8 @@ fn execute_plan_inner<W: Write>(
     // 2. Read blocks table header
     let t_blocks = timer!();
     let block_table_desc = metadata.table(&plan.block_table);
-    let block_path = chunk_dir.join(format!("{}.parquet", plan.block_table));
-    let block_batches = if block_path.exists() && block_table_desc.is_some() {
+    let block_batches = if chunk.has_table(&plan.block_table) && block_table_desc.is_some() {
         let block_desc = block_table_desc.unwrap();
-        if !parquet_cache.contains_key(&plan.block_table) {
-            parquet_cache.insert(plan.block_table.clone(), ParquetTable::open(&block_path)?);
-        }
-        let block_parquet = parquet_cache.get(&plan.block_table).unwrap();
 
         // Always read block_number column + requested output columns
         let bn_col = block_desc.block_number_column.as_str();
@@ -445,7 +414,7 @@ fn execute_plan_inner<W: Write>(
         request.to_block = plan.to_block;
         request.block_number_column = Some(bn_col);
 
-        scan(&block_parquet, &request)?
+        chunk.scan(&plan.block_table, &request)?
     } else {
         Vec::new()
     };

@@ -3,10 +3,9 @@ mod queries;
 
 use queries::*;
 use sqd_query_engine::metadata::load_dataset_description;
-use sqd_query_engine::output::execute_plan_cached;
+use sqd_query_engine::output::execute_chunk;
 use sqd_query_engine::query::{compile, parse_query};
-use sqd_query_engine::scan::ParquetTable;
-use std::collections::HashMap;
+use sqd_query_engine::scan::ParquetChunkReader;
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -24,36 +23,15 @@ static SOLANA_META: LazyLock<sqd_query_engine::metadata::DatasetDescription> =
 static EVM_META: LazyLock<sqd_query_engine::metadata::DatasetDescription> =
     LazyLock::new(|| load_dataset_description(Path::new("metadata/evm.yaml")).unwrap());
 
-fn open_cache(chunk_dir: &Path) -> HashMap<String, ParquetTable> {
-    let mut cache = HashMap::new();
-    if let Ok(entries) = std::fs::read_dir(chunk_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("parquet") {
-                let name = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .to_string();
-                if let Ok(table) = ParquetTable::open(&path) {
-                    cache.insert(name, table);
-                }
-            }
-        }
-    }
-    cache
-}
-
-/// Full pipeline: parse → compile → execute (no plan caching)
+/// Full pipeline: parse → compile → execute
 fn run_query(
     query_json: &[u8],
     meta: &sqd_query_engine::metadata::DatasetDescription,
-    chunk_dir: &Path,
-    cache: &mut HashMap<String, ParquetTable>,
+    chunk: &ParquetChunkReader,
 ) -> Vec<u8> {
     let parsed = parse_query(query_json, meta).unwrap();
     let plan = compile(&parsed, meta).unwrap();
-    execute_plan_cached(&plan, meta, chunk_dir, cache, Vec::new()).unwrap()
+    execute_chunk(&plan, meta, chunk, Vec::new(), false).unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -66,30 +44,26 @@ mod evm {
 
     #[divan::bench]
     fn usdc_transfers(bench: divan::Bencher) {
-        let chunk = Path::new("data/evm/chunk");
-        let mut cache = open_cache(chunk);
-        bench.bench_local(|| run_query(EVM_USDC_TRANSFERS, &EVM_META, chunk, &mut cache));
+        let chunk = ParquetChunkReader::open(Path::new("data/evm/chunk")).unwrap();
+        bench.bench_local(|| run_query(EVM_USDC_TRANSFERS, &EVM_META, &chunk));
     }
 
     #[divan::bench]
     fn contract_calls_with_logs(bench: divan::Bencher) {
-        let chunk = Path::new("data/evm/chunk");
-        let mut cache = open_cache(chunk);
-        bench.bench_local(|| run_query(EVM_CONTRACT_CALLS_WITH_LOGS, &EVM_META, chunk, &mut cache));
+        let chunk = ParquetChunkReader::open(Path::new("data/evm/chunk")).unwrap();
+        bench.bench_local(|| run_query(EVM_CONTRACT_CALLS_WITH_LOGS, &EVM_META, &chunk));
     }
 
     #[divan::bench]
     fn usdc_traces_and_statediffs(bench: divan::Bencher) {
-        let chunk = Path::new("data/evm/chunk");
-        let mut cache = open_cache(chunk);
-        bench.bench_local(|| run_query(EVM_USDC_TRACES_AND_STATEDIFFS, &EVM_META, chunk, &mut cache));
+        let chunk = ParquetChunkReader::open(Path::new("data/evm/chunk")).unwrap();
+        bench.bench_local(|| run_query(EVM_USDC_TRACES_AND_STATEDIFFS, &EVM_META, &chunk));
     }
 
     #[divan::bench]
     fn all_blocks(bench: divan::Bencher) {
-        let chunk = Path::new("data/evm/chunk");
-        let mut cache = open_cache(chunk);
-        bench.bench_local(|| run_query(EVM_ALL_BLOCKS, &EVM_META, chunk, &mut cache));
+        let chunk = ParquetChunkReader::open(Path::new("data/evm/chunk")).unwrap();
+        bench.bench_local(|| run_query(EVM_ALL_BLOCKS, &EVM_META, &chunk));
     }
 }
 
@@ -103,36 +77,31 @@ mod solana {
 
     #[divan::bench]
     fn whirlpool_swap(bench: divan::Bencher) {
-        let chunk = Path::new("data/solana/chunk");
-        let mut cache = open_cache(chunk);
-        bench.bench_local(|| run_query(SOL_WHIRLPOOL_SWAP, &SOLANA_META, chunk, &mut cache));
+        let chunk = ParquetChunkReader::open(Path::new("data/solana/chunk")).unwrap();
+        bench.bench_local(|| run_query(SOL_WHIRLPOOL_SWAP, &SOLANA_META, &chunk));
     }
 
     #[divan::bench]
     fn hard(bench: divan::Bencher) {
-        let chunk = Path::new("data/solana/chunk");
-        let mut cache = open_cache(chunk);
-        bench.bench_local(|| run_query(SOL_HARD, &SOLANA_META, chunk, &mut cache));
+        let chunk = ParquetChunkReader::open(Path::new("data/solana/chunk")).unwrap();
+        bench.bench_local(|| run_query(SOL_HARD, &SOLANA_META, &chunk));
     }
 
     #[divan::bench]
     fn instruction_with_logs(bench: divan::Bencher) {
-        let chunk = Path::new("data/solana/chunk");
-        let mut cache = open_cache(chunk);
-        bench.bench_local(|| run_query(SOL_INSTRUCTION_WITH_LOGS, &SOLANA_META, chunk, &mut cache));
+        let chunk = ParquetChunkReader::open(Path::new("data/solana/chunk")).unwrap();
+        bench.bench_local(|| run_query(SOL_INSTRUCTION_WITH_LOGS, &SOLANA_META, &chunk));
     }
 
     #[divan::bench]
     fn balances_from_instruction(bench: divan::Bencher) {
-        let chunk = Path::new("data/solana/chunk");
-        let mut cache = open_cache(chunk);
-        bench.bench_local(|| run_query(SOL_BALANCES_FROM_INSTRUCTION, &SOLANA_META, chunk, &mut cache));
+        let chunk = ParquetChunkReader::open(Path::new("data/solana/chunk")).unwrap();
+        bench.bench_local(|| run_query(SOL_BALANCES_FROM_INSTRUCTION, &SOLANA_META, &chunk));
     }
 
     #[divan::bench]
     fn all_blocks(bench: divan::Bencher) {
-        let chunk = Path::new("data/solana/chunk");
-        let mut cache = open_cache(chunk);
-        bench.bench_local(|| run_query(SOL_ALL_BLOCKS, &SOLANA_META, chunk, &mut cache));
+        let chunk = ParquetChunkReader::open(Path::new("data/solana/chunk")).unwrap();
+        bench.bench_local(|| run_query(SOL_ALL_BLOCKS, &SOLANA_META, &chunk));
     }
 }

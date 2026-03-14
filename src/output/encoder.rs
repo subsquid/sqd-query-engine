@@ -1,6 +1,7 @@
 use crate::metadata::JsonEncoding;
 use arrow::array::*;
 use arrow::datatypes::DataType;
+use serde::Serializer;
 
 /// Function pointer type for pre-resolved encoders.
 pub type EncoderFn = fn(&dyn Array, usize, &mut Vec<u8>);
@@ -13,6 +14,11 @@ pub fn resolve_encoder(data_type: &DataType, encoding: Option<&JsonEncoding>) ->
         Some(JsonEncoding::Json) => encode_json_passthrough,
         Some(JsonEncoding::SolanaTxVersion) => encode_solana_tx_version,
         Some(JsonEncoding::TimestampMillisecond) => encode_timestamp_millisecond_raw,
+        // Disabled: ~11% faster but not 100% safe — malformed data could produce invalid JSON
+        // Some(JsonEncoding::Hex) | Some(JsonEncoding::Base58) => match data_type {
+        //     DataType::Utf8 => encode_utf8_safe,
+        //     _ => resolve_value_encoder(data_type),
+        // },
         Some(JsonEncoding::Hex) | Some(JsonEncoding::Base58) | None => {
             resolve_value_encoder(data_type)
         }
@@ -155,6 +161,21 @@ fn encode_utf8_value(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
     }
     let a = array.as_any().downcast_ref::<StringArray>().unwrap();
     encode_json_string(a.value(row), buf);
+}
+
+/// Encode a Utf8 string without JSON escaping.
+/// SAFETY: assumes hex/base58 values contain only safe ASCII chars.
+/// This is not 100% safe — malformed data could produce invalid JSON.
+fn encode_utf8_safe(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
+    if array.is_null(row) {
+        buf.extend_from_slice(b"null");
+        return;
+    }
+    let a = array.as_any().downcast_ref::<StringArray>().unwrap();
+    let s = a.value(row);
+    buf.push(b'"');
+    buf.extend_from_slice(s.as_bytes());
+    buf.push(b'"');
 }
 
 fn encode_binary_value(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
@@ -329,11 +350,9 @@ pub fn encode_roll(batch: &RecordBatch, row: usize, column_indices: &[usize], bu
         let is_last = i == column_indices.len() - 1;
 
         if col.is_null(row) {
-            // Stop at first null (unless it's a list column at end)
             break;
         }
 
-        // Check if last column is a list → spread
         if is_last && matches!(col.data_type(), DataType::List(_)) {
             let list = col
                 .as_any()
@@ -359,45 +378,75 @@ pub fn encode_roll(batch: &RecordBatch, row: usize, column_indices: &[usize], bu
     buf.push(b']');
 }
 
-/// Encode a JSON-escaped string with quotes.
-/// Optimized: copies chunks of safe bytes in bulk, only escaping when needed.
-pub fn encode_json_string(s: &str, buf: &mut Vec<u8>) {
-    buf.push(b'"');
-    let bytes = s.as_bytes();
-    let mut start = 0;
-    for (i, &b) in bytes.iter().enumerate() {
-        let escape = match b {
-            b'"' => Some(b"\\\"" as &[u8]),
-            b'\\' => Some(b"\\\\" as &[u8]),
-            b'\n' => Some(b"\\n" as &[u8]),
-            b'\r' => Some(b"\\r" as &[u8]),
-            b'\t' => Some(b"\\t" as &[u8]),
-            b if b < 0x20 => {
-                // Flush pending safe bytes
-                if start < i {
-                    buf.extend_from_slice(&bytes[start..i]);
+/// Pre-resolved encoder for a Roll column. Resolves once per batch, reused per row.
+pub struct ResolvedRollEncoder {
+    /// Per-column: (column_index, encoder_fn, is_last_and_list)
+    columns: Vec<(usize, EncoderFn, bool)>,
+}
+
+impl ResolvedRollEncoder {
+    /// Resolve encoders for a Roll's column indices against a specific batch.
+    pub fn resolve(batch: &RecordBatch, column_indices: &[usize]) -> Self {
+        let columns = column_indices
+            .iter()
+            .enumerate()
+            .map(|(i, &col_idx)| {
+                let col = batch.column(col_idx);
+                let is_last = i == column_indices.len() - 1;
+                let is_list = matches!(col.data_type(), DataType::List(_));
+                let encoder = resolve_value_encoder(col.data_type());
+                (col_idx, encoder, is_last && is_list)
+            })
+            .collect();
+        Self { columns }
+    }
+
+    /// Encode the roll for a given row using pre-resolved encoders.
+    #[inline]
+    pub fn encode(&self, batch: &RecordBatch, row: usize, buf: &mut Vec<u8>) {
+        buf.push(b'[');
+        let mut has_items = false;
+
+        for &(col_idx, encoder, is_last_list) in &self.columns {
+            let col = batch.column(col_idx);
+
+            if col.is_null(row) {
+                break;
+            }
+
+            if is_last_list {
+                let list = col
+                    .as_any()
+                    .downcast_ref::<GenericListArray<i32>>()
+                    .unwrap();
+                let values = list.value(row);
+                // List elements need per-element dispatch (heterogeneous types possible)
+                let elem_encoder = resolve_value_encoder(values.data_type());
+                for j in 0..values.len() {
+                    if has_items {
+                        buf.push(b',');
+                    }
+                    elem_encoder(values.as_ref(), j, buf);
+                    has_items = true;
                 }
-                buf.extend_from_slice(b"\\u00");
-                buf.push(HEX_CHARS[(b >> 4) as usize]);
-                buf.push(HEX_CHARS[(b & 0x0f) as usize]);
-                start = i + 1;
-                continue;
+            } else {
+                if has_items {
+                    buf.push(b',');
+                }
+                encoder(col.as_ref(), row, buf);
+                has_items = true;
             }
-            _ => None,
-        };
-        if let Some(esc) = escape {
-            if start < i {
-                buf.extend_from_slice(&bytes[start..i]);
-            }
-            buf.extend_from_slice(esc);
-            start = i + 1;
         }
+
+        buf.push(b']');
     }
-    // Flush remaining safe bytes (common case: entire string is safe)
-    if start < bytes.len() {
-        buf.extend_from_slice(&bytes[start..]);
-    }
-    buf.push(b'"');
+}
+
+/// Encode a JSON-escaped string with quotes.
+/// Uses serde_json's Serializer directly (same as legacy engine).
+#[inline]
+pub fn encode_json_string(s: &str, buf: &mut Vec<u8>) {
+    serde_json::Serializer::new(buf).serialize_str(s).unwrap();
 }
 
 fn encode_hex_bytes(bytes: &[u8], buf: &mut Vec<u8>) {
