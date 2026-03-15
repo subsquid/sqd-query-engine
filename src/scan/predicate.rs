@@ -1,5 +1,5 @@
 use arrow::array::*;
-use arrow::compute::kernels::boolean::{and, or};
+use arrow::compute::kernels::boolean::{and, or_kleene};
 use arrow::compute::kernels::cmp::eq;
 use arrow::datatypes::*;
 use std::collections::HashSet;
@@ -548,7 +548,7 @@ impl ArrayPredicate for OrPredicate {
             let mask = pred.evaluate(array);
             result = Some(match result {
                 None => mask,
-                Some(prev) => or(&prev, &mask).unwrap(),
+                Some(prev) => or_kleene(&prev, &mask).unwrap(),
             });
         }
         result.unwrap_or_else(|| BooleanArray::from(vec![false; array.len()]))
@@ -751,7 +751,7 @@ pub fn or_row_predicates(predicates: &[&RowPredicate], batch: &RecordBatch) -> B
         let mask = pred.evaluate(batch);
         result = Some(match result {
             None => mask,
-            Some(prev) => or(&prev, &mask).unwrap(),
+            Some(prev) => or_kleene(&prev, &mask).unwrap(),
         });
     }
     result.unwrap_or_else(|| BooleanArray::from(vec![false; batch.num_rows()]))
@@ -946,5 +946,90 @@ mod tests {
             &StringArray::from(vec!["bzzz"]) as &dyn Array,
         );
         assert!(!can_skip);
+    }
+
+    /// Regression test: or_row_predicates must use or_kleene (not or) so that
+    /// `true OR null = true`. When two RowPredicates filter on different columns
+    /// and the batch has NULLs in a column not referenced by a predicate, rows
+    /// matching predicate A must NOT be dropped because predicate B's column is
+    /// NULL for that row.
+    #[test]
+    fn test_or_row_predicates_null_propagation() {
+        // Simulate two filter groups on different columns (like d1 and d8).
+        // d1 is UInt8 (nullable), d8 is UInt64 (nullable).
+        // Row 0: d1=1,   d8=NULL → matches pred1 (d1==1), pred2 column is NULL
+        // Row 1: d1=NULL, d8=100 → matches pred2 (d8==100), pred1 column is NULL
+        // Row 2: d1=2,   d8=200 → matches neither
+        // Row 3: d1=1,   d8=100 → matches both
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("d1", DataType::UInt8, true),
+            Field::new("d8", DataType::UInt64, true),
+        ]));
+
+        let d1_array = UInt8Array::from(vec![Some(1), None, Some(2), Some(1)]);
+        let d8_array = UInt64Array::from(vec![None, Some(100), Some(200), Some(100)]);
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(d1_array), Arc::new(d8_array)],
+        )
+        .unwrap();
+
+        let pred1 = RowPredicate::new(vec![ColumnPredicate {
+            column: "d1".to_string(),
+            predicate: Arc::new(EqPredicate::new(ScalarValue::UInt8(1))),
+        }]);
+        let pred2 = RowPredicate::new(vec![ColumnPredicate {
+            column: "d8".to_string(),
+            predicate: Arc::new(EqPredicate::new(ScalarValue::UInt64(100))),
+        }]);
+
+        let mask = or_row_predicates(&[&pred1, &pred2], &batch);
+
+        // With or_kleene: rows 0, 1, 3 match. Row 2 does not.
+        // With plain or: row 0 would be dropped (true OR null = null) — BUG.
+        assert_eq!(
+            mask,
+            BooleanArray::from(vec![true, true, false, true]),
+        );
+    }
+
+    /// Verify that or_row_predicates with all NULLs in one predicate's column
+    /// still selects rows matched by the other predicate.
+    /// Key: or_kleene(true, null) = true, or_kleene(false, null) = null.
+    /// null in a filter mask is treated as false, which is correct.
+    #[test]
+    fn test_or_row_predicates_all_nulls_in_other_column() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::UInt64, true),
+            Field::new("b", DataType::UInt64, true),
+        ]));
+
+        // Column b is entirely NULL
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(UInt64Array::from(vec![Some(1), Some(2), Some(1)])),
+                Arc::new(UInt64Array::from(vec![None, None, None])),
+            ],
+        )
+        .unwrap();
+
+        let pred_a = RowPredicate::new(vec![col_eq("a", ScalarValue::UInt64(1))]);
+        let pred_b = RowPredicate::new(vec![col_eq("b", ScalarValue::UInt64(99))]);
+
+        let mask = or_row_predicates(&[&pred_a, &pred_b], &batch);
+
+        // pred_a: [true, false, true], pred_b: [null, null, null]
+        // or_kleene: [true, null, true]
+        // When used as filter mask, null → false, so rows 0, 2 are selected.
+        // Verify rows 0, 2 are true and row 1 is not true:
+        assert!(mask.value(0));
+        assert!(mask.is_null(1) || !mask.value(1)); // null or false — either way, excluded
+        assert!(mask.value(2));
+
+        // Verify via filter_record_batch that rows are correctly selected
+        let filtered = arrow::compute::filter_record_batch(&batch, &mask).unwrap();
+        assert_eq!(filtered.num_rows(), 2);
     }
 }

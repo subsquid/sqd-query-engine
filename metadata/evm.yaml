@@ -29,12 +29,14 @@ tables:
       logs_bloom:
         type: string
         json_encoding: hex
+        weight: 512
       sha3_uncles:
         type: string
         json_encoding: hex
       extra_data:
         type: string
         json_encoding: hex
+        weight: extra_data_size
       miner:
         type: string
         json_encoding: hex

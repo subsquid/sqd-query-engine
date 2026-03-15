@@ -225,6 +225,7 @@ tables:
       a7:
         type: string
         json_encoding: base58
+        weight: 0
       a8:
         type: string
         json_encoding: base58
