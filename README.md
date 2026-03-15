@@ -23,9 +23,6 @@ Plan -> parallel parquet scan (mmap, RowFilter pushdown)
   instruction_address is List\<UInt16\> (metadata says List\<UInt32\>). All extractors handle multiple integer types.
 - **mmap I/O**: `memmap2::Mmap` + `Bytes::from_owner()` — zero-copy, OS handles paging. Single mmap per file shared
   across all threads.
-- **Pre-built ParquetTable cache**: `execute_plan_cached()` accepts `&mut HashMap<String, ParquetTable>` to reuse across
-  calls.
-
 ## Project Structure
 
 ```
@@ -55,15 +52,6 @@ let meta = load_dataset_description(Path::new("metadata/evm.yaml")) ?;
 let parsed = parse_query(query_json, & meta) ?;
 let plan = compile( & parsed, & meta) ?;
 let result = execute_plan( & plan, & meta, chunk_dir, Vec::new()) ?;
-```
-
-Use `execute_plan_cached()` to reuse `ParquetTable` instances across calls:
-
-```rust
-use sqd_query_engine::output::assembly::execute_plan_cached;
-
-let mut cache: HashMap<String, ParquetTable> = HashMap::new();
-let result = execute_plan_cached( & plan, & meta, chunk_dir, Vec::new(), & mut cache) ?;
 ```
 
 ## Query Format
