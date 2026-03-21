@@ -1,6 +1,19 @@
 mod chunk;
+pub mod composite_reader;
+pub mod crash_log;
+pub mod dataset_store;
+pub(crate) mod kv_scan;
+pub mod memory_backend;
+pub mod parquet_writer;
 pub mod predicate;
 mod scanner;
+
+#[cfg(feature = "lmdb")]
+pub mod lmdb_backend;
+#[cfg(feature = "rocksdb")]
+pub mod rocks_backend;
+#[cfg(feature = "legacy-storage")]
+pub mod legacy_backend;
 
 pub use chunk::*;
 pub use scanner::*;

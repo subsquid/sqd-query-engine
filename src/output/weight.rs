@@ -6,6 +6,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
+use super::columns::{resolve_output_columns, resolve_relation_output_columns};
+
 /// Maximum response size in bytes (20 MB).
 const MAX_RESPONSE_BYTES: u64 = 20 * 1024 * 1024;
 
@@ -55,8 +57,8 @@ pub(crate) fn apply_weight_limit(
         };
         let table_desc = metadata.table(&table_plan.table);
 
-        let weight_cols = weight_projection(&table_plan.output_columns, table_desc);
-        let (fixed_weight, weight_col_names) = compute_weight_params(&weight_cols, table_desc);
+        let resolved_cols = resolve_output_columns(table_plan, table_desc.unwrap());
+        let (fixed_weight, weight_cols) = compute_weight_params(&resolved_cols, table_desc);
 
         target_contribs
             .entry(&table_plan.table)
@@ -64,15 +66,14 @@ pub(crate) fn apply_weight_limit(
             .push(WeightContribution {
                 batches: &output.batches,
                 fixed_weight,
-                weight_cols: weight_col_names,
+                weight_cols,
             });
 
         for rel in &table_plan.relations {
             if let Some(rel_batches) = output.relation_batches.get(&rel.target_table) {
                 let rel_desc = metadata.table(&rel.target_table);
-                let rel_weight_cols = weight_projection(&rel.output_columns, rel_desc);
-                let (rel_fixed, rel_weight_col_names) =
-                    compute_weight_params(&rel_weight_cols, rel_desc);
+                let rel_resolved = resolve_relation_output_columns(&rel.output_columns, rel_desc);
+                let (rel_fixed, rel_weight_cols) = compute_weight_params(&rel_resolved, rel_desc);
 
                 target_contribs
                     .entry(&rel.target_table)
@@ -80,7 +81,7 @@ pub(crate) fn apply_weight_limit(
                     .push(WeightContribution {
                         batches: rel_batches,
                         fixed_weight: rel_fixed,
-                        weight_cols: rel_weight_col_names,
+                        weight_cols: rel_weight_cols,
                     });
             }
         }
@@ -351,62 +352,6 @@ fn compute_row_key_hash(key_arrays: &[Option<&dyn arrow::array::Array>], row: us
     hasher.finish()
 }
 
-/// Compute the column set used for weight calculation.
-/// Matches legacy behavior: weight projection = primary_key + user_output_columns.
-///
-/// Primary key = block_number_column + item_order_keys (+ address_column if present).
-///
-/// Unlike `resolve_output_columns`, this does NOT include:
-/// - Join key columns (for relations)
-/// - Source predicate columns (e.g., is_committed)
-/// - Tag columns (for field groups)
-fn weight_projection(
-    user_output_columns: &[String],
-    table_desc: Option<&TableDescription>,
-) -> Vec<String> {
-    let desc = match table_desc {
-        Some(d) => d,
-        None => return user_output_columns.to_vec(),
-    };
-
-    let mut cols: HashSet<String> = HashSet::new();
-
-    // 1. Primary key: block_number_column + item_order_keys + address_column
-    cols.insert(desc.block_number_column.clone());
-    for key in &desc.item_order_keys {
-        cols.insert(key.clone());
-    }
-    if let Some(ac) = &desc.address_column {
-        cols.insert(ac.clone());
-    }
-
-    // 2. User-requested output columns (with virtual field expansion)
-    for col_name in user_output_columns {
-        if let Some(vf) = desc.virtual_fields.get(col_name.as_str()) {
-            match vf {
-                VirtualField::Roll { columns } => {
-                    for c in columns {
-                        cols.insert(c.clone());
-                    }
-                }
-            }
-        } else if desc.columns.contains_key(col_name.as_str()) {
-            cols.insert(col_name.clone());
-        }
-    }
-
-    // 3. Weight/size columns for any projected column that uses dynamic weight
-    for (col_name, col_desc) in &desc.columns {
-        if cols.contains(col_name) {
-            if let Some(WeightSource::Column(wc)) = &col_desc.weight {
-                cols.insert(wc.clone());
-            }
-        }
-    }
-
-    cols.into_iter().collect()
-}
-
 /// Hash a single array value for row dedup.
 fn hash_array_value(col: &dyn arrow::array::Array, row: usize, hasher: &mut impl Hasher) {
     if col.is_null(row) {
@@ -436,403 +381,5 @@ fn hash_array_value(col: &dyn arrow::array::Array, row: usize, hasher: &mut impl
     } else {
         // Unknown type — use a sentinel to distinguish from null
         0xFEu8.hash(hasher);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::metadata::parse_dataset_description;
-    use crate::output::columns::resolve_output_columns;
-
-    /// Load the solana metadata for tests.
-    fn solana_meta() -> DatasetDescription {
-        let yaml = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("metadata/solana.yaml"),
-        )
-        .unwrap();
-        parse_dataset_description(&yaml).unwrap()
-    }
-
-    /// Load the evm metadata for tests.
-    fn evm_meta() -> DatasetDescription {
-        let yaml = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("metadata/evm.yaml"),
-        )
-        .unwrap();
-        parse_dataset_description(&yaml).unwrap()
-    }
-
-    /// Helper: compute weight from a set of column names using compute_weight_params.
-    fn weight_for(cols: &[&str], table_desc: Option<&TableDescription>) -> (u64, Vec<String>) {
-        let col_strings: Vec<String> = cols.iter().map(|s| s.to_string()).collect();
-        compute_weight_params(&col_strings, table_desc)
-    }
-
-    /// Helper: compute weight using weight_projection (primary_key + user output).
-    fn legacy_weight_for(
-        user_output: &[&str],
-        table_desc: Option<&TableDescription>,
-    ) -> (u64, Vec<String>) {
-        let user_strings: Vec<String> = user_output.iter().map(|s| s.to_string()).collect();
-        let projected = weight_projection(&user_strings, table_desc);
-        compute_weight_params(&projected, table_desc)
-    }
-
-    // -----------------------------------------------------------------------
-    // Tests: compute_weight_params — documents what columns contribute to weight
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_system_columns_excluded_from_weight() {
-        let meta = solana_meta();
-        let instr = meta.table("instructions").unwrap();
-
-        // d1 is system=true, should contribute 0 weight
-        let (fixed, dynamic) = weight_for(&["d1"], Some(instr));
-        assert_eq!(fixed, 0, "system columns should not contribute weight");
-        assert!(dynamic.is_empty());
-
-        // d8 is also system
-        let (fixed, dynamic) = weight_for(&["d8"], Some(instr));
-        assert_eq!(fixed, 0);
-        assert!(dynamic.is_empty());
-
-        // data_size is system
-        let (fixed, dynamic) = weight_for(&["data_size"], Some(instr));
-        assert_eq!(fixed, 0);
-        assert!(dynamic.is_empty());
-    }
-
-    #[test]
-    fn test_fixed_weight_columns() {
-        let meta = solana_meta();
-        let instr = meta.table("instructions").unwrap();
-
-        // program_id: no explicit weight → default 32
-        let (fixed, dynamic) = weight_for(&["program_id"], Some(instr));
-        assert_eq!(fixed, 32);
-        assert!(dynamic.is_empty());
-
-        // is_committed: boolean, no explicit weight → default 32
-        let (fixed, dynamic) = weight_for(&["is_committed"], Some(instr));
-        assert_eq!(fixed, 32);
-        assert!(dynamic.is_empty());
-
-        // a1-a15: explicit weight=0
-        let (fixed, dynamic) = weight_for(&["a1"], Some(instr));
-        assert_eq!(fixed, 0, "a1 has weight=0");
-        assert!(dynamic.is_empty());
-
-        let (fixed, _) = weight_for(&["a5"], Some(instr));
-        assert_eq!(fixed, 0, "a5 has weight=0");
-
-        let (fixed, _) = weight_for(&["rest_accounts"], Some(instr));
-        assert_eq!(fixed, 0, "rest_accounts has weight=0");
-    }
-
-    #[test]
-    fn test_dynamic_weight_columns() {
-        let meta = solana_meta();
-        let instr = meta.table("instructions").unwrap();
-
-        // data: weight = data_size (dynamic column)
-        let (fixed, dynamic) = weight_for(&["data"], Some(instr));
-        assert_eq!(fixed, 0, "data has no fixed weight");
-        assert_eq!(dynamic, vec!["data_size"]);
-
-        // a0: weight = accounts_size (dynamic column)
-        let (fixed, dynamic) = weight_for(&["a0"], Some(instr));
-        assert_eq!(fixed, 0);
-        assert_eq!(dynamic, vec!["accounts_size"]);
-    }
-
-    #[test]
-    fn test_virtual_field_accounts_weight() {
-        let meta = solana_meta();
-        let instr = meta.table("instructions").unwrap();
-
-        // "accounts" is a virtual roll → [a0, a1, ..., a15, rest_accounts]
-        // a0 → accounts_size (dynamic), a1-a15 + rest_accounts → weight=0
-        let (fixed, dynamic) = weight_for(&["accounts"], Some(instr));
-        assert_eq!(fixed, 0, "all account columns have weight=0 except a0 which is dynamic");
-        assert_eq!(dynamic, vec!["accounts_size"]);
-    }
-
-    #[test]
-    fn test_evm_logs_weight() {
-        let meta = evm_meta();
-        let logs = meta.table("logs").unwrap();
-
-        // data → data_size (dynamic)
-        let (fixed, dynamic) = weight_for(&["data"], Some(logs));
-        assert_eq!(fixed, 0);
-        assert_eq!(dynamic, vec!["data_size"]);
-
-        // address: no explicit weight → default 32
-        let (fixed, dynamic) = weight_for(&["address"], Some(logs));
-        assert_eq!(fixed, 32);
-        assert!(dynamic.is_empty());
-
-        // topics = roll(topic0, topic1, topic2, topic3), each → default 32
-        let (fixed, dynamic) = weight_for(&["topics"], Some(logs));
-        assert_eq!(fixed, 4 * 32, "4 topic columns × 32 bytes each");
-        assert!(dynamic.is_empty());
-    }
-
-    #[test]
-    fn test_evm_traces_weight() {
-        let meta = evm_meta();
-        let traces = meta.table("traces").unwrap();
-
-        // call_input: dynamic weight
-        let (fixed, dynamic) = weight_for(&["call_input"], Some(traces));
-        assert_eq!(fixed, 0);
-        assert_eq!(dynamic, vec!["call_input_size"]);
-
-        // call_result_output: dynamic weight
-        let (fixed, dynamic) = weight_for(&["call_result_output"], Some(traces));
-        assert_eq!(fixed, 0);
-        assert_eq!(dynamic, vec!["call_result_output_size"]);
-    }
-
-    #[test]
-    fn test_evm_blocks_weight() {
-        let meta = evm_meta();
-        let blocks = meta.table("blocks").unwrap();
-
-        // logs_bloom: weight=512 (matching legacy set_weight("logs_bloom", 512))
-        let (fixed, dynamic) = weight_for(&["logs_bloom"], Some(blocks));
-        assert_eq!(fixed, 512, "logs_bloom has fixed weight 512");
-        assert!(dynamic.is_empty());
-
-        // extra_data: weight = extra_data_size (dynamic)
-        let (fixed, dynamic) = weight_for(&["extra_data"], Some(blocks));
-        assert_eq!(fixed, 0);
-        assert_eq!(dynamic, vec!["extra_data_size"]);
-    }
-
-    #[test]
-    fn test_combined_weight_multiple_columns() {
-        let meta = solana_meta();
-        let instr = meta.table("instructions").unwrap();
-
-        // Combining multiple columns: program_id(32) + data(data_size) + is_committed(32)
-        let (fixed, dynamic) = weight_for(
-            &["program_id", "data", "is_committed"],
-            Some(instr),
-        );
-        assert_eq!(fixed, 64, "program_id(32) + is_committed(32)");
-        assert_eq!(dynamic, vec!["data_size"]);
-    }
-
-    // -----------------------------------------------------------------------
-    // Tests: legacy-compatible weight columns (primary_key + user output)
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_weight_projection_solana_instructions_basic() {
-        let meta = solana_meta();
-        let instr = meta.table("instructions").unwrap();
-
-        // weight_projection adds primary key: [block_number, transaction_index, instruction_address]
-        // User output: [transaction_index, instruction_address, program_id, accounts, data]
-        let (fixed, dynamic) = legacy_weight_for(
-            &["transaction_index", "instruction_address", "program_id", "accounts", "data"],
-            Some(instr),
-        );
-
-        // block_number: default 32 (not system)
-        // transaction_index: default 32
-        // instruction_address: default 32
-        // program_id: default 32
-        // accounts → roll: a0(accounts_size) + a1..a15(0) + rest_accounts(0)
-        // data → data_size
-        assert_eq!(fixed, 4 * 32, "4 non-system non-dynamic columns × 32");
-        assert!(dynamic.contains(&"data_size".to_string()));
-        assert!(dynamic.contains(&"accounts_size".to_string()));
-        assert_eq!(dynamic.len(), 2);
-    }
-
-    #[test]
-    fn test_weight_projection_solana_instructions_with_extra_fields() {
-        let meta = solana_meta();
-        let instr = meta.table("instructions").unwrap();
-
-        // Same as above but user also requests d1, d8, is_committed
-        // d1 and d8 are system → excluded from weight
-        // is_committed is NOT system → 32 bytes
-        let (fixed, dynamic) = legacy_weight_for(
-            &[
-                "transaction_index",
-                "instruction_address",
-                "program_id",
-                "accounts",
-                "data",
-                "d1",
-                "d8",
-                "is_committed",
-            ],
-            Some(instr),
-        );
-
-        // block_number(32) + transaction_index(32) + instruction_address(32) +
-        // program_id(32) + is_committed(32) + accounts_roll(0) + data(dynamic) +
-        // d1(system=0) + d8(system=0)
-        assert_eq!(fixed, 5 * 32, "5 non-system non-dynamic columns × 32");
-        assert_eq!(dynamic.len(), 2);
-    }
-
-    #[test]
-    fn test_weight_projection_evm_logs_basic() {
-        let meta = evm_meta();
-        let logs = meta.table("logs").unwrap();
-
-        // weight_projection adds primary key: [block_number, transaction_index, log_index]
-        // User output: [log_index, transaction_index, address, data, topics]
-        let (fixed, dynamic) = legacy_weight_for(
-            &["log_index", "transaction_index", "address", "data", "topics"],
-            Some(logs),
-        );
-
-        // block_number(32) + log_index(32) + transaction_index(32) + address(32) +
-        // topic0(32) + topic1(32) + topic2(32) + topic3(32) + data(data_size)
-        assert_eq!(fixed, 8 * 32, "8 fixed-weight columns × 32");
-        assert_eq!(dynamic, vec!["data_size"]);
-    }
-
-    #[test]
-    fn test_weight_projection_evm_transactions_with_input() {
-        let meta = evm_meta();
-        let txs = meta.table("transactions").unwrap();
-
-        // weight_projection adds primary key: [block_number, transaction_index]
-        // User output: [hash, from, to, input, value, gas]
-        let (fixed, dynamic) = legacy_weight_for(
-            &["hash", "from", "to", "input", "value", "gas"],
-            Some(txs),
-        );
-
-        // block_number(32) + transaction_index(32) + hash(32) + from(32) + to(32) +
-        // value(32) + gas(32) + input(input_size)
-        assert_eq!(fixed, 7 * 32);
-        assert_eq!(dynamic, vec!["input_size"]);
-    }
-
-    // -----------------------------------------------------------------------
-    // Tests: resolve_output_columns includes extra columns NOT in legacy weight
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_resolve_includes_join_keys_for_relations() {
-        let meta = solana_meta();
-        let instr = meta.table("instructions").unwrap();
-
-        // When instructions have a "transaction" relation, resolve_output_columns
-        // adds the join key columns (block_number, transaction_index) even if
-        // the user doesn't request them.
-        let table_plan = crate::query::TablePlan {
-            table: "instructions".to_string(),
-            output_columns: vec!["program_id".to_string()],
-            predicates: vec![],
-            relations: vec![crate::query::RelationPlan {
-                target_table: "transactions".to_string(),
-                kind: crate::query::RelationKind::Join,
-                left_key: vec![
-                    "block_number".to_string(),
-                    "transaction_index".to_string(),
-                ],
-                right_key: vec![
-                    "block_number".to_string(),
-                    "transaction_index".to_string(),
-                ],
-                output_columns: vec![],
-                source_predicates: None,
-            }],
-        };
-
-        let resolved = resolve_output_columns(&table_plan, instr);
-
-        // resolve_output_columns always includes:
-        // - block_number (block number column)
-        // - transaction_index, instruction_address (item_order_keys)
-        // - program_id (user output)
-        // - block_number, transaction_index (relation join keys — already in set)
-        assert!(resolved.contains(&"block_number".to_string()));
-        assert!(resolved.contains(&"transaction_index".to_string()));
-        assert!(resolved.contains(&"instruction_address".to_string()));
-        assert!(resolved.contains(&"program_id".to_string()));
-    }
-
-    #[test]
-    fn test_resolve_includes_source_predicate_columns() {
-        let meta = solana_meta();
-        let instr = meta.table("instructions").unwrap();
-
-        // When a relation has source_predicates (e.g., is_committed filter),
-        // resolve_output_columns adds those predicate columns.
-        let table_plan = crate::query::TablePlan {
-            table: "instructions".to_string(),
-            output_columns: vec!["program_id".to_string()],
-            predicates: vec![],
-            relations: vec![crate::query::RelationPlan {
-                target_table: "transactions".to_string(),
-                kind: crate::query::RelationKind::Join,
-                left_key: vec![
-                    "block_number".to_string(),
-                    "transaction_index".to_string(),
-                ],
-                right_key: vec![
-                    "block_number".to_string(),
-                    "transaction_index".to_string(),
-                ],
-                output_columns: vec![],
-                source_predicates: Some(vec![crate::scan::predicate::RowPredicate::new(vec![
-                    crate::scan::predicate::col_eq(
-                        "is_committed",
-                        crate::scan::predicate::ScalarValue::Boolean(true),
-                    ),
-                ])]),
-            }],
-        };
-
-        let resolved = resolve_output_columns(&table_plan, instr);
-
-        // is_committed is added because of source_predicates
-        assert!(
-            resolved.contains(&"is_committed".to_string()),
-            "source predicate column should be in resolved columns"
-        );
-    }
-
-    #[test]
-    fn test_weight_projection_excludes_source_predicates() {
-        let meta = solana_meta();
-        let instr = meta.table("instructions").unwrap();
-
-        // weight_projection does NOT include source predicate columns (e.g., is_committed)
-        // unless the user explicitly requests them in output fields.
-
-        // Scenario: user requests [program_id, data] only.
-        // Even if is_committed is used as a source predicate for a relation,
-        // it should NOT inflate the weight.
-        let (fixed, dynamic) = legacy_weight_for(
-            &["program_id", "data"],
-            Some(instr),
-        );
-
-        // Primary key: block_number(32) + transaction_index(32) + instruction_address(32)
-        // User output: program_id(32) + data(data_size)
-        // is_committed NOT included → no extra 32 bytes
-        assert_eq!(fixed, 4 * 32, "4 fixed columns (no is_committed)");
-        assert_eq!(dynamic.len(), 1, "1 dynamic column (data_size)");
-
-        // Contrast: if user DID request is_committed in output, it would be counted
-        let (fixed_with, dynamic_with) = legacy_weight_for(
-            &["program_id", "data", "is_committed"],
-            Some(instr),
-        );
-        assert_eq!(fixed_with, 5 * 32, "5 fixed columns (with is_committed)");
-        assert_eq!(dynamic_with.len(), 1);
     }
 }

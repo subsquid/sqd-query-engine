@@ -119,6 +119,19 @@ impl ParquetChunkReader {
         Self { chunk_dir, cache }
     }
 
+    /// List all table names in this reader.
+    pub fn table_names(&self) -> Vec<String> {
+        self.cache.keys().cloned().collect()
+    }
+
+    /// Read all rows from a table (no filtering). Used for data loading.
+    pub fn read_all(&self, table: &str) -> Result<Vec<RecordBatch>> {
+        let parquet_table = match self.cache.get(table) {
+            Some(t) => t,
+            None => return Ok(Vec::new()),
+        };
+        parquet_table.read(&[], None, 50_000)
+    }
 }
 
 impl ChunkReader for ParquetChunkReader {
@@ -418,4 +431,5 @@ mod tests {
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, logs.num_rows() as usize);
     }
+
 }

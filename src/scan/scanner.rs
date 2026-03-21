@@ -56,11 +56,11 @@ pub struct KeyFilter {
     /// Column names forming the composite key (in the target/relation table).
     pub columns: Vec<String>,
     /// Pre-built set of serialized composite keys (Arc for cheap clone into closures).
-    key_set: Arc<HashSet<Vec<u8>>>,
+    pub(crate) key_set: Arc<HashSet<Vec<u8>>>,
     /// Sorted unique block numbers for efficient row group pruning.
-    sorted_blocks: Vec<u64>,
+    pub(crate) sorted_blocks: Vec<u64>,
     /// Block number column name in the target table.
-    block_number_column: String,
+    pub(crate) block_number_column: String,
 }
 
 impl KeyFilter {
@@ -146,21 +146,21 @@ pub enum HierarchicalMode {
 /// applied as a RowFilter stage, avoiding decode of data columns for non-matching rows.
 pub struct HierarchicalFilter {
     /// Source addresses indexed by group key (serialized block_number + transaction_index).
-    source_addresses: Arc<HashMap<Vec<u8>, Vec<Vec<u32>>>>,
+    pub(crate) source_addresses: Arc<HashMap<Vec<u8>, Vec<Vec<u32>>>>,
     /// Set of first-key values (block_number as u64) for fast pre-filtering.
     /// Most rows don't match any source block, so this cheap check skips ~85-99% of rows
     /// before the expensive composite key build + HashMap lookup.
-    first_key_set: Arc<rustc_hash::FxHashSet<u64>>,
+    pub(crate) first_key_set: Arc<rustc_hash::FxHashSet<u64>>,
     /// Group key column names in the target table (e.g., ["block_number", "transaction_index"]).
     pub group_key_columns: Vec<String>,
     /// Address column name in target table (e.g., "instruction_address", "call_address").
     pub address_column: String,
     /// Whether to find children or parents.
-    mode: HierarchicalMode,
+    pub(crate) mode: HierarchicalMode,
     /// When `true`, same-depth addresses count as a match (cross-table relations).
     /// When `false`, only strictly deeper/shallower addresses match (self-join).
     /// See `find_children` in `hierarchical.rs` for full explanation.
-    inclusive: bool,
+    pub(crate) inclusive: bool,
 }
 
 impl HierarchicalFilter {
@@ -262,7 +262,7 @@ fn extract_address_values(array: &GenericListArray<i32>, row: usize) -> Vec<u32>
 
 /// Build a boolean mask for hierarchical filtering.
 /// Also performs key-in-set check inline, so this can replace a separate KeyFilter stage.
-fn hierarchical_mask(
+pub(crate) fn hierarchical_mask(
     batch: &RecordBatch,
     source_addresses: &HashMap<Vec<u8>, Vec<Vec<u32>>>,
     first_key_set: &rustc_hash::FxHashSet<u64>,
@@ -574,7 +574,7 @@ impl<'a> TypedKeyColumn<'a> {
 
 /// Build a boolean mask: true for rows where composite key is in the set.
 /// Resolves column types once per batch, then uses tight typed loops.
-fn composite_key_in_set_mask(
+pub(crate) fn composite_key_in_set_mask(
     batch: &RecordBatch,
     key_columns: &[String],
     key_set: &HashSet<Vec<u8>>,
@@ -1110,7 +1110,7 @@ fn block_number_in_set_mask(
     BooleanArray::from(vec![true; len])
 }
 
-fn block_range_mask(
+pub(crate) fn block_range_mask(
     column: &Arc<dyn Array>,
     from_block: Option<u64>,
     to_block: Option<u64>,
@@ -1182,7 +1182,7 @@ fn project_batch(batch: &RecordBatch, output_schema: &SchemaRef) -> Result<Recor
 }
 
 /// Build the output Arrow schema from requested column names.
-fn build_output_schema(table_schema: &SchemaRef, columns: &[&str]) -> SchemaRef {
+pub(crate) fn build_output_schema(table_schema: &SchemaRef, columns: &[&str]) -> SchemaRef {
     let fields: Vec<_> = columns
         .iter()
         .filter_map(|name| table_schema.field_with_name(name).ok().cloned())

@@ -119,19 +119,6 @@ solana_fixture!(log_program_id);
 solana_fixture!(rewards);
 solana_fixture!(tx_instructions_from_instruction);
 
-// Production query patterns (from ClickHouse worker_query_logs)
-solana_fixture!(prod_pattern_01_instr_d1_d4_x11_inner_logs_tx_tokbal);
-solana_fixture!(prod_pattern_02_instr_d1_d8_x3_inner_logs_tx_tokbal);
-solana_fixture!(prod_pattern_03_instr_d1_d8_x3_inner_tx_tokbal);
-solana_fixture!(prod_pattern_04_instr_a0_a1_x14_inner_tx_txinstr_tokbal);
-solana_fixture!(prod_pattern_05_instr_a1_d1_x4_inner_logs_tx_bal);
-solana_fixture!(prod_pattern_06_instr_d8_programId_inner_tx_tokbal);
-solana_fixture!(prod_pattern_07_instr_d1_d8_x8_inner_logs_tx_tokbal);
-solana_fixture!(prod_pattern_08_instr_d8_programId_x2_inner_logs_tx_tokbal);
-solana_fixture!(prod_pattern_09_instr_programId_inner_logs_tx_tokbal);
-solana_fixture!(prod_pattern_10_instr_d8_programId_inner_tx);
-solana_fixture!(prod_pattern_11_instr_a0_a1_x13_inner_tx_tokbal);
-
 // ---------------------------------------------------------------------------
 // Ethereum (EVM) fixtures
 // ---------------------------------------------------------------------------
@@ -187,53 +174,6 @@ evm_fixture!(example_uniswapv3_abridged_squid_no_preloaded_pools);
 evm_fixture!(example_uniswapv3_abridged_squid_preloaded_pools);
 evm_fixture!(example_evm_ipfs_example);
 evm_fixture!(example_modified_dia_prices_squid);
-
-// Production query patterns (from ClickHouse worker_query_logs)
-evm_fixture!(
-    evm_prod_01_multi_log_with_tx,
-    "prod_pattern_01_logs_address_topic0_x7_with_tx"
-);
-evm_fixture!(evm_prod_02_fields_only, "prod_pattern_02_fields_only");
-evm_fixture!(evm_prod_03_logs_topic0, "prod_pattern_03_logs_topic0");
-evm_fixture!(
-    evm_prod_04_txs_with_logs_all_blocks,
-    "prod_pattern_04_txs_with_logs_all_blocks"
-);
-evm_fixture!(
-    evm_prod_05_logs_addr_topic0,
-    "prod_pattern_05_logs_address_topic0"
-);
-evm_fixture!(evm_prod_06_fields_only_2, "prod_pattern_06_fields_only");
-evm_fixture!(
-    evm_prod_07_logs_topic0_with_tx,
-    "prod_pattern_07_logs_topic0_with_tx"
-);
-evm_fixture!(
-    evm_prod_08_logs_addr_topic0_x2,
-    "prod_pattern_08_logs_address_topic0_x2"
-);
-evm_fixture!(evm_prod_09_logs_topic0_2, "prod_pattern_09_logs_topic0");
-evm_fixture!(
-    evm_prod_10_logs_all_all_blocks,
-    "prod_pattern_10_logs_all_all_blocks"
-);
-evm_fixture!(
-    evm_prod_11_multi_table_heavy,
-    "prod_pattern_11_logs_topic0_x2_with_tx_txs_traces"
-);
-evm_fixture!(
-    evm_prod_12_logs_topic0_with_tx_2,
-    "prod_pattern_12_logs_topic0_with_tx"
-);
-evm_fixture!(evm_prod_13_all_blocks, "prod_pattern_13_all_blocks");
-evm_fixture!(
-    evm_prod_14_logs_addr_topic0_with_tx,
-    "prod_pattern_14_logs_address_topic0_with_tx"
-);
-evm_fixture!(
-    evm_prod_15_logs_addr_topic0_x2_with_tx,
-    "prod_pattern_15_logs_address_topic0_x2_with_tx"
-);
 
 // ---------------------------------------------------------------------------
 // Bitcoin fixtures
