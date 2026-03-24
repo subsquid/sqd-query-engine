@@ -57,6 +57,9 @@ pub struct KeyFilter {
     pub columns: Vec<String>,
     /// Pre-built set of serialized composite keys (Arc for cheap clone into closures).
     pub(crate) key_set: Arc<HashSet<Vec<u8>>>,
+    /// Fast set for 2-column keys: u128 = (col0 as u64) << 64 | (col1 as u64).
+    /// Uses FxHash instead of SipHash — ~3x faster for integer keys.
+    pub(crate) key_set_fast: Option<Arc<rustc_hash::FxHashSet<u128>>>,
     /// Sorted unique block numbers for efficient row group pruning.
     pub(crate) sorted_blocks: Vec<u64>,
     /// Block number column name in the target table.
@@ -120,9 +123,28 @@ impl KeyFilter {
         let mut sorted_blocks: Vec<u64> = block_numbers.iter().copied().collect();
         sorted_blocks.sort_unstable();
 
+        // Build fast u128 set for 2-column integer keys (most common pattern)
+        let key_set_fast = if left_keys.len() == 2 {
+            let mut fast_set = rustc_hash::FxHashSet::default();
+            for key in &key_set {
+                if key.len() == 16 {
+                    let k = u128::from_le_bytes(key[..16].try_into().unwrap());
+                    fast_set.insert(k);
+                }
+            }
+            if fast_set.len() == key_set.len() {
+                Some(Arc::new(fast_set))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         KeyFilter {
             columns: right_keys.iter().map(|s| s.to_string()).collect(),
             key_set: Arc::new(key_set),
+            key_set_fast,
             sorted_blocks,
             block_number_column: target_bn_col.to_string(),
         }
@@ -579,6 +601,25 @@ pub(crate) fn composite_key_in_set_mask(
     key_columns: &[String],
     key_set: &HashSet<Vec<u8>>,
 ) -> BooleanArray {
+    composite_key_in_set_mask_impl(batch, key_columns, key_set, None)
+}
+
+/// Same as `composite_key_in_set_mask` but uses FxHashSet<u128> fast path when available.
+pub(crate) fn composite_key_in_set_mask_fast(
+    batch: &RecordBatch,
+    key_columns: &[String],
+    key_set: &HashSet<Vec<u8>>,
+    fast_set: Option<&rustc_hash::FxHashSet<u128>>,
+) -> BooleanArray {
+    composite_key_in_set_mask_impl(batch, key_columns, key_set, fast_set)
+}
+
+fn composite_key_in_set_mask_impl(
+    batch: &RecordBatch,
+    key_columns: &[String],
+    key_set: &HashSet<Vec<u8>>,
+    fast_set: Option<&rustc_hash::FxHashSet<u128>>,
+) -> BooleanArray {
     let len = batch.num_rows();
     let mut builder = BooleanBufferBuilder::new(len);
 
@@ -592,10 +633,20 @@ pub(crate) fn composite_key_in_set_mask(
         })
         .collect();
 
-    // Fast path for 2-column composite key (most common: block_number + transaction_index)
-    // Uses a fixed-size stack buffer instead of heap-allocated Vec.
+    // Fast path for 2-column composite key with FxHashSet<u128> (~3x faster than SipHash)
     if typed_cols.len() == 2 {
         if let (Some(ref c0), Some(ref c1)) = (&typed_cols[0], &typed_cols[1]) {
+            if let Some(fast) = fast_set {
+                let mut key_buf = [0u8; 16];
+                for row in 0..len {
+                    c0.write_to_buf(&mut key_buf[..8], row);
+                    c1.write_to_buf(&mut key_buf[8..16], row);
+                    let k = u128::from_le_bytes(key_buf);
+                    builder.append(fast.contains(&k));
+                }
+                return BooleanArray::new(builder.finish(), None);
+            }
+            // Fallback: 2-column with std HashSet
             let mut key_buf = [0u8; 16];
             for row in 0..len {
                 c0.write_to_buf(&mut key_buf[..8], row);
@@ -854,10 +905,14 @@ fn scan_row_groups(
                 let key_proj = ProjectionMask::roots(parquet_schema, key_col_indices);
                 let key_columns = Arc::new(kf.columns.clone());
                 let key_set = kf.key_set.clone();
+                let key_set_fast = kf.key_set_fast.clone();
                 filter_stages.push(Box::new(ArrowPredicateFn::new(
                     key_proj,
                     move |batch: RecordBatch| {
-                        Ok(composite_key_in_set_mask(&batch, &key_columns, &key_set))
+                        Ok(composite_key_in_set_mask_fast(
+                            &batch, &key_columns, &key_set,
+                            key_set_fast.as_deref(),
+                        ))
                     },
                 )));
             }

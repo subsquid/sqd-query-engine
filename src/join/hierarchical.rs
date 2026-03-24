@@ -116,12 +116,7 @@ pub fn find_children(
             .column(addr_idx)
             .as_any()
             .downcast_ref::<GenericListArray<i32>>()
-            .ok_or_else(|| {
-                anyhow!(
-                    "'{}' must be a List<UInt32> column",
-                    source_address_column
-                )
-            })?;
+            .ok_or_else(|| anyhow!("'{}' must be a List<UInt32> column", source_address_column))?;
 
         for row in 0..batch.num_rows() {
             let Some(gk) = make_group_key(batch, row, &key_indices)? else {
@@ -144,12 +139,7 @@ pub fn find_children(
             .column(addr_idx)
             .as_any()
             .downcast_ref::<GenericListArray<i32>>()
-            .ok_or_else(|| {
-                anyhow!(
-                    "'{}' must be a List<UInt32> column",
-                    target_address_column
-                )
-            })?;
+            .ok_or_else(|| anyhow!("'{}' must be a List<UInt32> column", target_address_column))?;
 
         let mut matches = Vec::with_capacity(batch.num_rows());
         for row in 0..batch.num_rows() {
@@ -231,12 +221,7 @@ pub fn find_parents(
             .column(addr_idx)
             .as_any()
             .downcast_ref::<GenericListArray<i32>>()
-            .ok_or_else(|| {
-                anyhow!(
-                    "'{}' must be a List<UInt32> column",
-                    source_address_column
-                )
-            })?;
+            .ok_or_else(|| anyhow!("'{}' must be a List<UInt32> column", source_address_column))?;
 
         for row in 0..batch.num_rows() {
             let Some(gk) = make_group_key(batch, row, &key_indices)? else {
@@ -259,12 +244,7 @@ pub fn find_parents(
             .column(addr_idx)
             .as_any()
             .downcast_ref::<GenericListArray<i32>>()
-            .ok_or_else(|| {
-                anyhow!(
-                    "'{}' must be a List<UInt32> column",
-                    target_address_column
-                )
-            })?;
+            .ok_or_else(|| anyhow!("'{}' must be a List<UInt32> column", target_address_column))?;
 
         let mut matches = Vec::with_capacity(batch.num_rows());
         for row in 0..batch.num_rows() {

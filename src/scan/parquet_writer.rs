@@ -33,9 +33,43 @@ pub fn flush_to_parquet(
         return Ok(());
     }
 
-    fs::create_dir_all(chunk_dir)
-        .with_context(|| format!("creating chunk dir {}", chunk_dir.display()))?;
+    // Write to a temp directory, then atomically rename.
+    // If killed mid-write, only the temp dir is left (cleaned up on next startup).
+    let parent = chunk_dir.parent().unwrap_or(Path::new("."));
+    let chunk_name = chunk_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("chunk");
+    let tmp_dir = parent.join(format!(".tmp-{}", chunk_name));
 
+    // Clean up any leftover temp dir from a previous crash
+    if tmp_dir.exists() {
+        fs::remove_dir_all(&tmp_dir)
+            .with_context(|| format!("removing stale temp dir {}", tmp_dir.display()))?;
+    }
+
+    fs::create_dir_all(&tmp_dir)
+        .with_context(|| format!("creating temp chunk dir {}", tmp_dir.display()))?;
+
+    let result = write_chunk_tables(blocks, &tmp_dir, metadata);
+
+    if let Err(e) = result {
+        let _ = fs::remove_dir_all(&tmp_dir);
+        return Err(e);
+    }
+
+    // Atomic rename: temp dir → final dir
+    fs::rename(&tmp_dir, chunk_dir)
+        .with_context(|| format!("renaming {} → {}", tmp_dir.display(), chunk_dir.display()))?;
+
+    Ok(())
+}
+
+fn write_chunk_tables(
+    blocks: &[Arc<BlockData>],
+    chunk_dir: &Path,
+    metadata: &DatasetDescription,
+) -> Result<()> {
     // Collect all batches per table across all blocks
     let mut table_batches: HashMap<String, Vec<RecordBatch>> = HashMap::new();
     for block in blocks {
@@ -123,7 +157,7 @@ fn write_parquet(batch: &RecordBatch, path: &Path) -> Result<()> {
         .with_context(|| format!("creating parquet file {}", path.display()))?;
 
     let props = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(Default::default()))
+        .set_compression(Compression::LZ4)
         .set_max_row_group_size(8_192) // small RGs for selective row group pruning
         .set_statistics_enabled(parquet::file::properties::EnabledStatistics::Page)
         .build();

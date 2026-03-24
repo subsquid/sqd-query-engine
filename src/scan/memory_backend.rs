@@ -42,6 +42,7 @@ pub struct MemoryChunkReader {
 /// A frozen point-in-time snapshot of the memory buffer.
 /// Cheap to create (Arc clones only). Implements ChunkReader for queries.
 /// Concurrent push_block() on the original buffer does not affect the snapshot.
+#[derive(Clone)]
 pub struct MemorySnapshot {
     blocks: Vec<Arc<BlockData>>,
     schemas: HashMap<String, SchemaRef>,
@@ -111,7 +112,7 @@ impl MemoryChunkReader {
     }
 
     /// Iterate over all blocks in the buffer.
-    pub fn iter_blocks(&self) -> impl Iterator<Item = &Arc<BlockData>> {
+    pub fn iter_blocks(&self) -> impl DoubleEndedIterator<Item = &Arc<BlockData>> {
         self.blocks.iter()
     }
 
@@ -202,6 +203,14 @@ impl ChunkReader for MemoryChunkReader {
 }
 
 impl MemorySnapshot {
+    /// Create a snapshot from pre-existing blocks and schemas.
+    pub fn from_blocks(
+        blocks: Vec<Arc<BlockData>>,
+        schemas: HashMap<String, SchemaRef>,
+    ) -> Self {
+        Self { blocks, schemas }
+    }
+
     pub fn head(&self) -> Option<u64> {
         self.blocks.last().map(|b| b.block_number)
     }

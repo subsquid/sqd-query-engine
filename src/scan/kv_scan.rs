@@ -4,12 +4,14 @@
 //! On scan, they read all relevant batches and apply filters in-memory using the
 //! same predicate/key-filter/hierarchical-filter logic as the parquet scanner.
 
-use crate::scan::predicate::{evaluate_predicates_on_batch, RowPredicate};
+use crate::scan::predicate::or_row_predicates;
 use crate::scan::scanner::{
-    block_range_mask, build_output_schema, composite_key_in_set_mask, hierarchical_mask,
+    block_range_mask, build_output_schema, composite_key_in_set_mask_fast, hierarchical_mask,
 };
 use crate::scan::ScanRequest;
 use anyhow::Result;
+use arrow::array::BooleanArray;
+use arrow::compute::kernels::boolean::and;
 use arrow::datatypes::SchemaRef;
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
@@ -88,72 +90,94 @@ pub fn apply_scan_filters(
         }
 
         // Project to needed columns before filtering (fewer columns to copy through masks)
-        let mut current = if do_early_project {
+        let current = if do_early_project {
             batch.project(&needed_indices)?
         } else {
             batch
         };
 
-        // 1. Block range filter
-        if let Some(bn_col) = request.block_number_column {
-            if request.from_block.is_some() || request.to_block.is_some() {
-                if let Some(col) = current.column_by_name(bn_col) {
-                    let mask = block_range_mask(col, request.from_block, request.to_block);
-                    current = arrow::compute::filter_record_batch(&current, &mask)?;
-                    if current.num_rows() == 0 {
-                        continue;
-                    }
+        // Compute combined mask (single pass — no intermediate RecordBatches)
+        let mask = compute_combined_mask(&current, request);
+
+        let filtered = match mask {
+            Some(ref m) => {
+                if m.true_count() == 0 {
+                    continue;
+                }
+                if m.true_count() == current.num_rows() {
+                    current // all rows match
+                } else {
+                    arrow::compute::filter_record_batch(&current, m)?
                 }
             }
-        }
+            None => current, // no filters
+        };
 
-        // 2. Predicates (OR across items)
-        if !request.predicates.is_empty() {
-            let preds: Vec<RowPredicate> = request
-                .predicates
-                .iter()
-                .map(|p| (*p).clone())
-                .collect();
-            match evaluate_predicates_on_batch(&current, &preds) {
-                Some(filtered) => current = filtered,
-                None => continue,
-            }
-        }
-
-        // 3. Key filter
-        if let Some(kf) = &request.key_filter {
-            let mask = composite_key_in_set_mask(&current, &kf.columns, &kf.key_set);
-            current = arrow::compute::filter_record_batch(&current, &mask)?;
-            if current.num_rows() == 0 {
-                continue;
-            }
-        }
-
-        // 4. Hierarchical filter
-        if let Some(hf) = &request.hierarchical_filter {
-            let mask = hierarchical_mask(
-                &current,
-                &hf.source_addresses,
-                &hf.first_key_set,
-                &hf.group_key_columns,
-                &hf.address_column,
-                hf.mode,
-                hf.inclusive,
-            );
-            current = arrow::compute::filter_record_batch(&current, &mask)?;
-            if current.num_rows() == 0 {
-                continue;
-            }
-        }
-
-        // 5. Project to output columns
-        let projected = project_batch(&current, &output_schema)?;
+        // Project to output columns
+        let projected = project_batch(&filtered, &output_schema)?;
         if projected.num_rows() > 0 {
             result.push(projected);
         }
     }
 
     Ok(result)
+}
+
+/// Compute a single combined boolean mask from all filters (block range, predicates,
+/// key filter, hierarchical filter). Returns None if no filters are active.
+/// This avoids creating intermediate RecordBatches at each filter stage.
+fn compute_combined_mask(batch: &RecordBatch, request: &ScanRequest) -> Option<BooleanArray> {
+    let mut mask: Option<BooleanArray> = None;
+
+    // 1. Block range
+    if let Some(bn_col) = request.block_number_column {
+        if request.from_block.is_some() || request.to_block.is_some() {
+            if let Some(col) = batch.column_by_name(bn_col) {
+                let br_mask = block_range_mask(col, request.from_block, request.to_block);
+                mask = Some(br_mask);
+            }
+        }
+    }
+
+    // 2. Predicates (OR across items) — no clone, use refs directly
+    if !request.predicates.is_empty() {
+        let pred_mask = or_row_predicates(&request.predicates, batch);
+        mask = Some(match mask {
+            None => pred_mask,
+            Some(m) => and(&m, &pred_mask).unwrap(),
+        });
+    }
+
+    // 3. Key filter
+    if let Some(kf) = &request.key_filter {
+        let kf_mask = composite_key_in_set_mask_fast(
+            batch, &kf.columns, &kf.key_set,
+            kf.key_set_fast.as_deref(),
+        );
+        mask = Some(match mask {
+            None => kf_mask,
+            Some(m) => and(&m, &kf_mask).unwrap(),
+        });
+    }
+
+    // 4. Hierarchical filter
+    if let Some(hf) = &request.hierarchical_filter {
+        let hf_mask = hierarchical_mask(
+            batch,
+            &hf.source_addresses,
+            &hf.first_key_set,
+            &hf.group_key_columns,
+            &hf.address_column,
+            hf.mode,
+            hf.inclusive,
+        );
+        mask = Some(match mask {
+            None => hf_mask,
+            Some(m) => and(&m, &hf_mask).unwrap(),
+        });
+    }
+
+    mask
 }
 
 /// Project a RecordBatch to only the columns in the output schema.

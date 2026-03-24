@@ -57,31 +57,77 @@ const KNOWN_TOP_KEYS: &[&str] = &[
     "parentBlockHash",
 ];
 
-/// Parse a JSON query against a dataset description.
-pub fn parse_query(json_bytes: &[u8], metadata: &DatasetDescription) -> Result<Query> {
+/// Lightweight header extracted from a query JSON without full parsing.
+/// Used for validation and routing before the full parse+compile step.
+#[derive(Debug)]
+pub struct RawQuery {
+    pub dataset_type: String,
+    pub from_block: u64,
+    pub to_block: Option<u64>,
+    pub parent_block_hash: Option<String>,
+    /// The parsed JSON value — kept so we don't deserialize twice.
+    raw: serde_json::Value,
+}
+
+/// Parse JSON bytes into a RawQuery (cheap, no metadata needed).
+/// The parsed JSON is kept inside for later use by `parse_query`.
+pub fn parse_raw_query(json_bytes: &[u8]) -> Result<RawQuery> {
     let raw: serde_json::Value = serde_json::from_slice(json_bytes)?;
     let obj = raw
         .as_object()
         .ok_or_else(|| anyhow!("query must be a JSON object"))?;
 
-    // Validate type
     let dataset_type = obj
         .get("type")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("missing 'type' field"))?;
-    ensure!(
-        dataset_type == metadata.name,
-        "query type '{}' doesn't match metadata '{}'",
-        dataset_type,
-        metadata.name
-    );
+        .ok_or_else(|| anyhow!("missing 'type' field"))?
+        .to_string();
 
-    // Block range
     let from_block = obj.get("fromBlock").and_then(|v| v.as_u64()).unwrap_or(0);
     let to_block = obj.get("toBlock").and_then(|v| v.as_u64());
+
     if let Some(to) = to_block {
         ensure!(from_block <= to, "'toBlock' must be >= 'fromBlock'");
     }
+
+    let parent_block_hash = obj
+        .get("parentBlockHash")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    Ok(RawQuery {
+        dataset_type,
+        from_block,
+        to_block,
+        parent_block_hash,
+        raw,
+    })
+}
+
+/// Parse a JSON query from raw bytes.
+pub fn parse_query(json_bytes: &[u8], metadata: &DatasetDescription) -> Result<Query> {
+    let raw = parse_raw_query(json_bytes)?;
+    parse_query_raw(raw, metadata)
+}
+
+/// Parse a full query from a pre-parsed RawQuery.
+/// Use when you already called `parse_raw_query` for validation/routing.
+pub fn parse_query_raw(raw: RawQuery, metadata: &DatasetDescription) -> Result<Query> {
+    let obj = raw
+        .raw
+        .as_object()
+        .ok_or_else(|| anyhow!("query must be a JSON object"))?;
+
+    // Validate type
+    ensure!(
+        raw.dataset_type == metadata.name,
+        "query type '{}' doesn't match metadata '{}'",
+        raw.dataset_type,
+        metadata.name
+    );
+
+    let from_block = raw.from_block;
+    let to_block = raw.to_block;
 
     let include_all_blocks = obj
         .get("includeAllBlocks")
@@ -120,9 +166,11 @@ pub fn parse_query(json_bytes: &[u8], metadata: &DatasetDescription) -> Result<Q
             (tn, alias_name)
         } else if metadata.tables.contains_key(&snake_key) {
             (snake_key.as_str(), alias_name)
-        } else if let Some(alias) = metadata.query_aliases.get(key.as_str()).or_else(|| {
-            metadata.query_aliases.get(&snake_key)
-        }) {
+        } else if let Some(alias) = metadata
+            .query_aliases
+            .get(key.as_str())
+            .or_else(|| metadata.query_aliases.get(&snake_key))
+        {
             // Query alias → resolve to the real table
             (alias.table.as_str(), Some(key.as_str()))
         } else {
@@ -268,8 +316,10 @@ fn parse_query_item(
     // Add implicit predicates from alias (e.g., name: ["EVM.Log"])
     if let Some(alias_def) = alias {
         for (col_name, values) in &alias_def.implicit_predicates {
-            let json_values: Vec<serde_json::Value> =
-                values.iter().map(|v| serde_json::Value::String(v.clone())).collect();
+            let json_values: Vec<serde_json::Value> = values
+                .iter()
+                .map(|v| serde_json::Value::String(v.clone()))
+                .collect();
             filters.push((col_name.clone(), serde_json::Value::Array(json_values)));
         }
     }

@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Tracks the file offset after each block write, for truncation on reorg.
 #[derive(Clone, Debug)]
@@ -36,19 +37,29 @@ struct TableLog {
 }
 
 /// Crash log writer: one IPC file per table.
+/// Writes are buffered and flushed periodically via `maybe_flush()`.
+/// Also persists finalized_head alongside flush — no separate IO.
 pub struct CrashLogWriter {
     dir: PathBuf,
     tables: HashMap<String, TableLog>,
+    dirty: bool,
+    last_flush: std::time::Instant,
+    flush_interval: Duration,
+    finalized_head: Option<u64>,
 }
 
 impl CrashLogWriter {
     /// Create a new crash log in the given directory.
-    /// Creates the directory if it doesn't exist.
-    pub fn open(dir: &Path) -> Result<Self> {
+    /// `flush_interval` controls how often buffered writes are flushed to disk.
+    pub fn open(dir: &Path, flush_interval: Duration) -> Result<Self> {
         fs::create_dir_all(dir).context("creating crash log directory")?;
         Ok(Self {
             dir: dir.to_path_buf(),
             tables: HashMap::new(),
+            dirty: false,
+            last_flush: std::time::Instant::now(),
+            flush_interval,
+            finalized_head: None,
         })
     }
 
@@ -73,7 +84,7 @@ impl CrashLogWriter {
                 .truncate(true)
                 .open(&path)
                 .with_context(|| format!("creating crash log file {}", path.display()))?;
-            let buf_writer = BufWriter::new(file);
+            let buf_writer = BufWriter::with_capacity(1024 * 1024, file); // 1 MB buffer
             let writer = StreamWriter::try_new(buf_writer, &batch.schema())
                 .context("creating IPC stream writer")?;
 
@@ -85,26 +96,83 @@ impl CrashLogWriter {
         };
 
         log.writer.write(batch).context("writing IPC batch")?;
-        log.writer.get_mut().flush().context("flushing IPC")?;
 
-        let offset = log
-            .writer
-            .get_ref()
-            .get_ref()
-            .metadata()
-            .map(|m| m.len())
-            .unwrap_or(0);
-
+        // Track offset (BufWriter may not have flushed yet, so use writer position)
         log.block_offsets.push(BlockOffset {
             block_number,
-            end_offset: offset,
+            end_offset: 0, // updated on flush
         });
 
+        self.dirty = true;
+        self.maybe_flush()?;
+        Ok(())
+    }
+
+    /// Update finalized_head. Monotonic: ignores values <= current.
+    /// Always persisted immediately (one small file write, no IPC flush).
+    pub fn set_finalized_head(&mut self, block_number: u64) -> Result<()> {
+        if self.finalized_head.map_or(true, |c| block_number > c) {
+            self.finalized_head = Some(block_number);
+            let path = self.dir.join("finalized_head");
+            let tmp = self.dir.join("finalized_head.tmp");
+            std::fs::write(&tmp, block_number.to_string().as_bytes())
+                .context("writing finalized_head")?;
+            std::fs::rename(&tmp, &path).context("renaming finalized_head")?;
+        }
+        Ok(())
+    }
+
+    pub fn finalized_head(&self) -> Option<u64> {
+        self.finalized_head
+    }
+
+    /// Flush buffered writes to disk if enough time has elapsed.
+    pub fn maybe_flush(&mut self) -> Result<()> {
+        if !self.dirty {
+            return Ok(());
+        }
+        if self.last_flush.elapsed() < self.flush_interval {
+            return Ok(());
+        }
+        self.flush()
+    }
+
+    /// Force flush all buffered writes to disk.
+    pub fn flush(&mut self) -> Result<()> {
+        if !self.dirty {
+            return Ok(());
+        }
+        for log in self.tables.values_mut() {
+            log.writer.get_mut().flush().context("flushing IPC")?;
+
+            // Update block offsets with actual file position
+            let offset = log
+                .writer
+                .get_ref()
+                .get_ref()
+                .metadata()
+                .map(|m| m.len())
+                .unwrap_or(0);
+
+            // Set all pending offsets to current position
+            // (conservative: truncation will remove all blocks after the last flush)
+            for bo in log.block_offsets.iter_mut().rev() {
+                if bo.end_offset == 0 {
+                    bo.end_offset = offset;
+                } else {
+                    break;
+                }
+            }
+        }
+        self.dirty = false;
+        self.last_flush = std::time::Instant::now();
         Ok(())
     }
 
     /// Truncate all table logs to remove blocks >= fork_point.
     pub fn truncate(&mut self, fork_point: u64) -> Result<()> {
+        // Flush pending writes so offsets are valid for truncation
+        self.flush()?;
         let table_names: Vec<String> = self.tables.keys().cloned().collect();
 
         for table in table_names {
@@ -170,6 +238,14 @@ impl CrashLogWriter {
     }
 }
 
+/// Recover persisted finalized_head from crash log directory.
+pub fn recover_finalized_head(dir: &Path) -> Option<u64> {
+    let path = dir.join("finalized_head");
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+}
+
 /// Read crash log files and recover blocks.
 /// Returns blocks in order, grouped by block_number.
 pub fn recover_crash_log(
@@ -208,40 +284,23 @@ pub fn recover_crash_log(
     }
 
     // Group by block_number across all tables.
-    // Each IPC file has one RecordBatch per block, in order.
-    // We need to find the block_number column to correlate.
-    // Since blocks arrive in order and each batch = one block,
-    // we zip by index: batch[0] from all tables = block 0, etc.
+    // Each batch has a block_number column — use it to correlate,
+    // since not all tables have data for every block.
+    use std::collections::BTreeMap;
+    let mut by_block: BTreeMap<u64, HashMap<String, RecordBatch>> = BTreeMap::new();
 
-    // Find max batch count across tables
-    let max_batches = table_batches.values().map(|v| v.len()).max().unwrap_or(0);
-
-    let mut result: Vec<(u64, HashMap<String, RecordBatch>)> = Vec::new();
-
-    for i in 0..max_batches {
-        let mut block_tables: HashMap<String, RecordBatch> = HashMap::new();
-        let mut block_number: Option<u64> = None;
-
-        for (table_name, batches) in &table_batches {
-            if i < batches.len() {
-                let batch = &batches[i];
-
-                // Try to extract block_number from the batch
-                if block_number.is_none() {
-                    block_number = extract_block_number(batch, table_name);
-                }
-
-                block_tables.insert(table_name.clone(), batch.clone());
-            }
-        }
-
-        if !block_tables.is_empty() {
-            let bn = block_number.unwrap_or(i as u64);
-            result.push((bn, block_tables));
+    for (table_name, batches) in &table_batches {
+        for batch in batches {
+            let bn = extract_block_number(batch, table_name)
+                .unwrap_or(0);
+            by_block
+                .entry(bn)
+                .or_default()
+                .insert(table_name.clone(), batch.clone());
         }
     }
 
-    Ok(result)
+    Ok(by_block.into_iter().collect())
 }
 
 /// Read an IPC stream file, handling incomplete trailing messages gracefully.
@@ -334,7 +393,7 @@ mod tests {
 
         // Write blocks
         {
-            let mut writer = CrashLogWriter::open(&log_dir).unwrap();
+            let mut writer = CrashLogWriter::open(&log_dir, Duration::ZERO).unwrap();
             writer
                 .append("logs", 100, &make_batch(100, &["0xaaa", "0xbbb"]))
                 .unwrap();
@@ -370,7 +429,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let log_dir = tmp.path().join("crash_log");
 
-        let mut writer = CrashLogWriter::open(&log_dir).unwrap();
+        let mut writer = CrashLogWriter::open(&log_dir, Duration::ZERO).unwrap();
         writer
             .append("logs", 100, &make_batch(100, &["0xaaa"]))
             .unwrap();
@@ -395,7 +454,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let log_dir = tmp.path().join("crash_log");
 
-        let mut writer = CrashLogWriter::open(&log_dir).unwrap();
+        let mut writer = CrashLogWriter::open(&log_dir, Duration::ZERO).unwrap();
         writer
             .append("logs", 100, &make_batch(100, &["0xaaa"]))
             .unwrap();
@@ -426,7 +485,7 @@ mod tests {
 
         // Write valid blocks
         {
-            let mut writer = CrashLogWriter::open(&log_dir).unwrap();
+            let mut writer = CrashLogWriter::open(&log_dir, Duration::ZERO).unwrap();
             writer
                 .append("logs", 100, &make_batch(100, &["0xaaa"]))
                 .unwrap();
@@ -472,7 +531,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let log_dir = tmp.path().join("crash_log");
 
-        let mut writer = CrashLogWriter::open(&log_dir).unwrap();
+        let mut writer = CrashLogWriter::open(&log_dir, Duration::ZERO).unwrap();
         writer
             .append("logs", 100, &make_batch(100, &["0xaaa"]))
             .unwrap();
@@ -485,5 +544,132 @@ mod tests {
 
         let recovered = recover_crash_log(&log_dir).unwrap();
         assert!(recovered.is_empty());
+    }
+
+    /// Regression: tables with different block counts must recover correctly.
+    /// Before the fix, recovery zipped by index — if "logs" had blocks [100,101,102]
+    /// but "traces" only had [100,102] (block 101 had no traces), the index-based
+    /// zip would misalign: traces batch[1] (block 102) would be paired with
+    /// logs batch[1] (block 101), producing wrong block_numbers.
+    #[test]
+    fn test_recover_sparse_tables() {
+        let tmp = TempDir::new().unwrap();
+        let log_dir = tmp.path().join("crash_log");
+
+        {
+            let mut writer = CrashLogWriter::open(&log_dir, Duration::ZERO).unwrap();
+            // "logs" has data for blocks 100, 101, 102
+            writer.append("logs", 100, &make_batch(100, &["0xaaa"])).unwrap();
+            writer.append("logs", 101, &make_batch(101, &["0xbbb"])).unwrap();
+            writer.append("logs", 102, &make_batch(102, &["0xccc"])).unwrap();
+
+            // "traces" only has data for blocks 100 and 102 (block 101 had no traces)
+            writer.append("traces", 100, &make_batch(100, &["0x111"])).unwrap();
+            writer.append("traces", 102, &make_batch(102, &["0x333"])).unwrap();
+        }
+
+        let recovered = recover_crash_log(&log_dir).unwrap();
+        assert_eq!(recovered.len(), 3, "should have 3 blocks");
+
+        // Block 100: both tables
+        assert_eq!(recovered[0].0, 100);
+        assert!(recovered[0].1.contains_key("logs"));
+        assert!(recovered[0].1.contains_key("traces"));
+
+        // Block 101: only logs (no traces)
+        assert_eq!(recovered[1].0, 101);
+        assert!(recovered[1].1.contains_key("logs"));
+        assert!(!recovered[1].1.contains_key("traces"));
+
+        // Block 102: both tables
+        assert_eq!(recovered[2].0, 102);
+        assert!(recovered[2].1.contains_key("logs"));
+        assert!(recovered[2].1.contains_key("traces"));
+    }
+
+    #[test]
+    fn test_finalized_head_persisted_immediately() {
+        let tmp = TempDir::new().unwrap();
+        let log_dir = tmp.path().join("crash_log");
+
+        let mut writer = CrashLogWriter::open(&log_dir, Duration::from_secs(600)).unwrap();
+
+        // Written immediately on set (no flush needed)
+        writer.set_finalized_head(100).unwrap();
+        assert_eq!(writer.finalized_head(), Some(100));
+        assert_eq!(recover_finalized_head(&log_dir), Some(100));
+
+        writer.set_finalized_head(200).unwrap();
+        assert_eq!(recover_finalized_head(&log_dir), Some(200));
+    }
+
+    #[test]
+    fn test_finalized_head_monotonic() {
+        let tmp = TempDir::new().unwrap();
+        let log_dir = tmp.path().join("crash_log");
+
+        let mut writer = CrashLogWriter::open(&log_dir, Duration::ZERO).unwrap();
+
+        writer.set_finalized_head(100);
+        assert_eq!(writer.finalized_head(), Some(100));
+
+        // Can go forward
+        writer.set_finalized_head(200);
+        assert_eq!(writer.finalized_head(), Some(200));
+
+        // Cannot go backward
+        writer.set_finalized_head(150);
+        assert_eq!(writer.finalized_head(), Some(200));
+
+        // Cannot go to same value (no-op)
+        writer.set_finalized_head(200);
+        assert_eq!(writer.finalized_head(), Some(200));
+    }
+
+    #[test]
+    fn test_finalized_head_survives_crash() {
+        let tmp = TempDir::new().unwrap();
+        let log_dir = tmp.path().join("crash_log");
+
+        // Phase 1: write finalized_head and crash
+        {
+            let mut writer = CrashLogWriter::open(&log_dir, Duration::ZERO).unwrap();
+            writer.append("logs", 100, &make_batch(100, &["0xaaa"])).unwrap();
+            writer.set_finalized_head(500);
+            // flush triggered by Duration::ZERO in append's maybe_flush
+            // drop — simulates crash
+        }
+
+        // Phase 2: recover
+        let recovered_fh = recover_finalized_head(&log_dir);
+        assert_eq!(recovered_fh, Some(500));
+
+        // Reopen writer — finalized_head should be loadable
+        let mut writer = CrashLogWriter::open(&log_dir, Duration::ZERO).unwrap();
+        // Writer starts fresh (doesn't auto-load), but file is on disk
+        // DatasetStore loads it via recover_finalized_head()
+        assert_eq!(recover_finalized_head(&log_dir), Some(500));
+
+        // New writes should not regress it
+        writer.set_finalized_head(600);
+        writer.append("logs", 101, &make_batch(101, &["0xbbb"])).unwrap();
+        assert_eq!(recover_finalized_head(&log_dir), Some(600));
+    }
+
+    #[test]
+    fn test_finalized_head_not_lost_on_clear() {
+        let tmp = TempDir::new().unwrap();
+        let log_dir = tmp.path().join("crash_log");
+
+        let mut writer = CrashLogWriter::open(&log_dir, Duration::ZERO).unwrap();
+        writer.append("logs", 100, &make_batch(100, &["0xaaa"])).unwrap();
+        writer.set_finalized_head(100);
+
+        assert_eq!(recover_finalized_head(&log_dir), Some(100));
+
+        // clear() removes IPC files but should preserve finalized_head
+        writer.clear().unwrap();
+
+        assert_eq!(recover_finalized_head(&log_dir), Some(100));
     }
 }

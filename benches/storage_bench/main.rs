@@ -529,6 +529,18 @@ fn main() {
         }
     }
 
+    // Profile New+Legacy scan breakdown
+    eprintln!("\n=== Scan profiling (New+Legacy) ===");
+    sqd_query_engine::scan::legacy_backend::PROFILE_SCANS.store(true, std::sync::atomic::Ordering::Relaxed);
+    for (case, is_evm) in &all_cases {
+        eprintln!("--- {} ---", case.name);
+        // Find New+Legacy backend
+        if let Some(backend) = backends.iter().find(|b| b.name == "New+Legacy") {
+            let _ = backend.run_query(case, *is_evm);
+        }
+    }
+    sqd_query_engine::scan::legacy_backend::PROFILE_SCANS.store(false, std::sync::atomic::Ordering::Relaxed);
+
     // Latency benchmark
     let n = 20;
     let backend_names: Vec<&str> = backends.iter().map(|b| b.name).collect();

@@ -300,7 +300,22 @@ fn build_legacy_storage(
         let schema = parquet.table_schema(&table_name).unwrap();
         let batches = parquet.read_all(&table_name)?;
 
-        let mut builder = db.new_table_builder(schema);
+        let mut builder = db.new_table_builder(schema.clone());
+        // Enable stats for all stats-capable columns (enables row pruning during query)
+        {
+            use arrow::datatypes::DataType;
+            let stat_cols: Vec<usize> = schema.fields().iter().enumerate()
+                .filter(|(_, f)| matches!(f.data_type(),
+                    DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64
+                    | DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64
+                    | DataType::Binary | DataType::FixedSizeBinary(_) | DataType::Utf8
+                ))
+                .map(|(i, _)| i)
+                .collect();
+            if !stat_cols.is_empty() {
+                let _ = builder.set_stats(stat_cols);
+            }
+        }
         for batch in &batches {
             if batch.num_rows() > 0 {
                 builder.write_record_batch(batch)?;

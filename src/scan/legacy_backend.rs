@@ -11,7 +11,7 @@
 use crate::scan::kv_scan::apply_scan_filters;
 use crate::scan::predicate::RowPredicate;
 use crate::scan::scanner::{
-    block_range_mask, build_output_schema, composite_key_in_set_mask, hierarchical_mask,
+    block_range_mask, build_output_schema, composite_key_in_set_mask_fast, hierarchical_mask,
 };
 use crate::scan::{ChunkReader, ScanRequest};
 use anyhow::{Context, Result};
@@ -19,17 +19,35 @@ use arrow::array::Array;
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
 use sqd_primitives::range::RangeList;
-use sqd_storage::db::{Chunk, Database, DatabaseSettings};
+use sqd_storage::db::{Chunk, ChunkReader as SqdChunkReader, Database, DatabaseSettings, ReadSnapshot};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 
+/// Enable detailed scan profiling to stderr.
+pub static PROFILE_SCANS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Per-thread snapshot + chunk_reader with warm table reader cache.
+///
+/// SAFETY: `chunk_reader` borrows from `snapshot`, which borrows from the `Database`
+/// in `LegacyStorageChunkReader::db` (heap-pinned via Box).
+/// Field drop order (top to bottom): chunk_reader → snapshot. Both valid since db outlives them.
+struct PooledReader {
+    chunk_reader: SqdChunkReader<'static>,
+    snapshot: Box<ReadSnapshot<'static>>,
+}
+
 pub struct LegacyStorageChunkReader {
-    db: Database,
+    // IMPORTANT: field order = drop order. `pool` must drop before `db`.
+    pool: std::sync::Mutex<Vec<PooledReader>>,
+    db: Box<Database>,
     chunk: Chunk,
     schemas: HashMap<String, SchemaRef>,
 }
+
+unsafe impl Sync for LegacyStorageChunkReader {}
+unsafe impl Send for LegacyStorageChunkReader {}
 
 impl LegacyStorageChunkReader {
     /// Open a legacy sqd_storage database and prepare for reading a specific chunk.
@@ -43,48 +61,75 @@ impl LegacyStorageChunkReader {
 
     /// Create from an already-opened database (avoids lock conflicts).
     pub fn from_database(db: Database, chunk: Chunk) -> Result<Self> {
-        let mut this = Self {
-            db,
-            chunk,
-            schemas: HashMap::new(),
-        };
+        let db = Box::new(db);
 
-        this.load_schemas()?;
-
-        Ok(this)
-    }
-
-    fn load_schemas(&mut self) -> Result<()> {
-        let snapshot = self.db.snapshot();
-        let chunk_reader = snapshot.create_chunk_reader(self.chunk.clone());
-
-        for table_name in self.chunk.tables().keys() {
-            if let Ok(table_reader) = chunk_reader.get_table_reader(table_name) {
-                self.schemas
-                    .insert(table_name.clone(), table_reader.schema());
+        // Load schemas using a temporary snapshot
+        let mut schemas = HashMap::new();
+        {
+            let snapshot = db.snapshot();
+            let chunk_reader = snapshot.create_chunk_reader(chunk.clone());
+            for table_name in chunk.tables().keys() {
+                if let Ok(table_reader) = chunk_reader.get_table_reader(table_name) {
+                    schemas.insert(table_name.clone(), table_reader.schema());
+                }
             }
         }
 
-        Ok(())
+        Ok(Self {
+            pool: std::sync::Mutex::new(Vec::new()),
+            db,
+            chunk,
+            schemas,
+        })
+    }
+
+    /// Borrow a reader from the pool, or create a new one with warm cache.
+    fn acquire_reader(&self) -> PooledReader {
+        // Fast path: reuse from pool
+        if let Some(reader) = self.pool.lock().unwrap().pop() {
+            return reader;
+        }
+
+        // Slow path: create new snapshot + chunk_reader, pre-warm cache
+        // SAFETY: db is Box<Database> (heap-pinned, stable address).
+        // snapshot borrows from db, chunk_reader borrows from snapshot (also heap-pinned).
+        // PooledReader drop order: chunk_reader first, snapshot second.
+        let snapshot = Box::new(self.db.snapshot());
+        let snapshot: Box<ReadSnapshot<'static>> = unsafe { std::mem::transmute(snapshot) };
+        let chunk_reader = snapshot.create_chunk_reader(self.chunk.clone());
+        let chunk_reader: SqdChunkReader<'static> =
+            unsafe { std::mem::transmute(chunk_reader) };
+
+        // Pre-warm table reader cache
+        for table_name in self.chunk.tables().keys() {
+            let _ = chunk_reader.get_table_reader(table_name);
+        }
+
+        PooledReader {
+            chunk_reader,
+            snapshot,
+        }
+    }
+
+    /// Return a reader to the pool for reuse.
+    fn release_reader(&self, reader: PooledReader) {
+        self.pool.lock().unwrap().push(reader);
     }
 }
 
-impl ChunkReader for LegacyStorageChunkReader {
-    fn scan(&self, table: &str, request: &ScanRequest) -> Result<Vec<RecordBatch>> {
-        let schema = match self.schemas.get(table) {
-            Some(s) => s,
-            None => return Ok(Vec::new()),
-        };
-
-        if !self.chunk.tables().contains_key(table) {
-            return Ok(Vec::new());
-        }
-
-        let snapshot = self.db.snapshot();
-        let chunk_reader = snapshot.create_chunk_reader(self.chunk.clone());
-        let table_reader = chunk_reader
+impl LegacyStorageChunkReader {
+    fn scan_inner(
+        &self,
+        pooled: &PooledReader,
+        table: &str,
+        schema: &SchemaRef,
+        request: &ScanRequest,
+    ) -> Result<Vec<RecordBatch>> {
+        let t0 = std::time::Instant::now();
+        let table_reader = pooled.chunk_reader
             .get_table_reader(table)
             .context("getting legacy table reader")?;
+        let t_get_reader = t0.elapsed();
 
         let has_filters = !request.predicates.is_empty()
             || request.key_filter.is_some()
@@ -100,80 +145,161 @@ impl ChunkReader for LegacyStorageChunkReader {
 
         if !has_deferred_columns {
             // Single-phase: no benefit from deferring, read everything at once
+            let t1 = std::time::Instant::now();
             let stats_ranges = compute_all_row_ranges(&table_reader, request, schema);
+            let t_stats = t1.elapsed();
 
             if stats_ranges.as_ref().map_or(false, |r| r.is_empty()) {
                 return Ok(Vec::new());
             }
 
+            let t2 = std::time::Instant::now();
             let batch = table_reader
                 .read_table(Some(&all_columns), stats_ranges.as_ref())
                 .context("reading legacy table")?;
+            let t_read = t2.elapsed();
 
             if batch.num_rows() == 0 {
                 return Ok(Vec::new());
             }
 
-            return apply_scan_filters(vec![batch], request, schema);
+            let t3 = std::time::Instant::now();
+            let result = apply_scan_filters(vec![batch], request, schema);
+            let t_filter = t3.elapsed();
+
+            if PROFILE_SCANS.load(std::sync::atomic::Ordering::Relaxed) {
+                eprintln!(
+                    "  [legacy 1-phase] {}: get_reader={:.2?} stats={:.2?} read={:.2?}({} cols) filter={:.2?} total={:.2?}",
+                    table, t_get_reader, t_stats, t_read, all_columns.len(), t_filter, t0.elapsed()
+                );
+            }
+
+            return result;
         }
 
         // === Two-phase read ===
 
         // Phase 1: read only filter/key columns with stats-based row ranges
+        let t1 = std::time::Instant::now();
         let stats_ranges = compute_all_row_ranges(&table_reader, request, schema);
+        let t_stats = t1.elapsed();
 
         if stats_ranges.as_ref().map_or(false, |r| r.is_empty()) {
             return Ok(Vec::new());
         }
 
+        let t2 = std::time::Instant::now();
         let phase1_batch = table_reader
             .read_table(Some(&filter_columns), stats_ranges.as_ref())
             .context("reading legacy table (phase 1: filter columns)")?;
+        let t_phase1 = t2.elapsed();
 
         if phase1_batch.num_rows() == 0 {
             return Ok(Vec::new());
         }
 
         // Apply all filters to get a boolean mask
+        let t3 = std::time::Instant::now();
         let mask = compute_filter_mask(&phase1_batch, request);
+        let t_mask = t3.elapsed();
 
         let match_count = mask.true_count();
         if match_count == 0 {
             return Ok(Vec::new());
         }
 
-        // If all rows match, skip phase 2 mapping — just read all with stats ranges
-        if match_count == phase1_batch.num_rows() {
-            let batch = table_reader
-                .read_table(Some(&all_columns), stats_ranges.as_ref())
-                .context("reading legacy table (all matched)")?;
+        // Compute deferred columns (output columns not yet read in phase 1)
+        let deferred_columns: HashSet<&str> = all_columns
+            .difference(&filter_columns)
+            .copied()
+            .collect();
+        let output_schema = build_output_schema(schema, &request.output_columns);
 
-            if batch.num_rows() == 0 {
-                return Ok(Vec::new());
+        // If all rows match, read only deferred columns and merge with phase 1
+        if match_count == phase1_batch.num_rows() {
+            let t4 = std::time::Instant::now();
+            if deferred_columns.is_empty() {
+                let r = Ok(vec![project_batch(&phase1_batch, &output_schema)?]);
+                if PROFILE_SCANS.load(std::sync::atomic::Ordering::Relaxed) {
+                    eprintln!(
+                        "  [legacy 2-phase all-match] {}: get_reader={:.2?} stats={:.2?} p1_read={:.2?}({} cols, {} rows) mask={:.2?} total={:.2?}",
+                        table, t_get_reader, t_stats, t_phase1, filter_columns.len(), phase1_batch.num_rows(), t_mask, t0.elapsed()
+                    );
+                }
+                return r;
             }
 
-            // Still need to project to output schema
-            let output_schema = build_output_schema(schema, &request.output_columns);
-            return Ok(vec![project_batch(&batch, &output_schema)?]);
+            let deferred_batch = table_reader
+                .read_table(Some(&deferred_columns), stats_ranges.as_ref())
+                .context("reading legacy table (deferred columns, all matched)")?;
+            let t_phase2 = t4.elapsed();
+
+            if PROFILE_SCANS.load(std::sync::atomic::Ordering::Relaxed) {
+                eprintln!(
+                    "  [legacy 2-phase all-match] {}: get_reader={:.2?} stats={:.2?} p1_read={:.2?}({} cols, {} rows) mask={:.2?} p2_read={:.2?}({} cols) total={:.2?}",
+                    table, t_get_reader, t_stats, t_phase1, filter_columns.len(), phase1_batch.num_rows(), t_mask, t_phase2, deferred_columns.len(), t0.elapsed()
+                );
+            }
+
+            return Ok(vec![merge_and_project(
+                &phase1_batch,
+                &deferred_batch,
+                &output_schema,
+            )?]);
         }
 
-        // Phase 2: map filtered rows back to absolute indices, read all columns
+        // Phase 2: map filtered rows back to absolute indices
+        let t4 = std::time::Instant::now();
         let final_ranges = mask_to_absolute_ranges(&mask, stats_ranges.as_ref());
 
         if final_ranges.is_empty() {
             return Ok(Vec::new());
         }
 
-        let batch = table_reader
-            .read_table(Some(&all_columns), Some(&final_ranges))
-            .context("reading legacy table (phase 2: data columns)")?;
+        // Filter phase 1 batch, read only deferred columns for matched rows
+        let filtered_phase1 =
+            arrow::compute::filter_record_batch(&phase1_batch, &mask)?;
 
-        if batch.num_rows() == 0 {
+        if deferred_columns.is_empty() {
+            return Ok(vec![project_batch(&filtered_phase1, &output_schema)?]);
+        }
+
+        let deferred_batch = table_reader
+            .read_table(Some(&deferred_columns), Some(&final_ranges))
+            .context("reading legacy table (phase 2: deferred columns)")?;
+        let t_phase2 = t4.elapsed();
+
+        if PROFILE_SCANS.load(std::sync::atomic::Ordering::Relaxed) {
+            eprintln!(
+                "  [legacy 2-phase partial] {}: get_reader={:.2?} stats={:.2?} p1_read={:.2?}({} cols, {} rows) mask={:.2?}({}/{}) p2_read={:.2?}({} cols, {} rows) total={:.2?}",
+                table, t_get_reader, t_stats, t_phase1, filter_columns.len(), phase1_batch.num_rows(),
+                t_mask, match_count, phase1_batch.num_rows(),
+                t_phase2, deferred_columns.len(), deferred_batch.num_rows(), t0.elapsed()
+            );
+        }
+
+        Ok(vec![merge_and_project(
+            &filtered_phase1,
+            &deferred_batch,
+            &output_schema,
+        )?])
+    }
+}
+
+impl ChunkReader for LegacyStorageChunkReader {
+    fn scan(&self, table: &str, request: &ScanRequest) -> Result<Vec<RecordBatch>> {
+        let schema = match self.schemas.get(table) {
+            Some(s) => s,
+            None => return Ok(Vec::new()),
+        };
+        if !self.chunk.tables().contains_key(table) {
             return Ok(Vec::new());
         }
 
-        let output_schema = build_output_schema(schema, &request.output_columns);
-        Ok(vec![project_batch(&batch, &output_schema)?])
+        let pooled = self.acquire_reader();
+        let result = self.scan_inner(&pooled, table, schema, request);
+        self.release_reader(pooled);
+        result
     }
 
     fn has_table(&self, table: &str) -> bool {
@@ -439,12 +565,28 @@ fn compute_single_predicate_ranges(
     for col_pred in &pred.columns {
         let col_index = match schema.index_of(&col_pred.column) {
             Ok(idx) => idx,
-            Err(_) => continue,
+            Err(_) => {
+                if PROFILE_SCANS.load(std::sync::atomic::Ordering::Relaxed) {
+                    eprintln!("    stats: column '{}' not in schema", col_pred.column);
+                }
+                continue;
+            }
         };
 
         let stats = match table_reader.get_column_stats(col_index) {
             Ok(Some(s)) => s,
-            _ => continue,
+            Ok(None) => {
+                if PROFILE_SCANS.load(std::sync::atomic::Ordering::Relaxed) {
+                    eprintln!("    stats: column '{}' (idx={}) has no stats", col_pred.column, col_index);
+                }
+                continue;
+            }
+            Err(e) => {
+                if PROFILE_SCANS.load(std::sync::atomic::Ordering::Relaxed) {
+                    eprintln!("    stats: column '{}' (idx={}) error: {}", col_pred.column, col_index, e);
+                }
+                continue;
+            }
         };
 
         let offsets = stats.offsets.as_ref();
@@ -462,6 +604,12 @@ fn compute_single_predicate_ranges(
             if !col_pred.predicate.can_skip(win_min.as_ref(), win_max.as_ref()) {
                 matching_ranges.push(offsets[w]..offsets[w + 1]);
             }
+        }
+
+        if PROFILE_SCANS.load(std::sync::atomic::Ordering::Relaxed) {
+            let total_rows: u32 = matching_ranges.iter().map(|r| r.end - r.start).sum();
+            eprintln!("    stats: column '{}' {} windows, {}/{} matched ({} rows)",
+                col_pred.column, num_windows, matching_ranges.len(), num_windows, total_rows);
         }
 
         let col_ranges = RangeList::seal(matching_ranges.into_iter());
@@ -506,11 +654,9 @@ fn compute_filter_mask(batch: &RecordBatch, request: &ScanRequest) -> arrow::arr
         }
     }
 
-    // 2. Predicates (OR across items)
+    // 2. Predicates (OR across items) — no clone, use refs directly
     if !request.predicates.is_empty() {
-        let preds: Vec<RowPredicate> = request.predicates.iter().map(|p| (*p).clone()).collect();
-        let pred_refs: Vec<&RowPredicate> = preds.iter().collect();
-        let pred_mask = crate::scan::predicate::or_row_predicates(&pred_refs, batch);
+        let pred_mask = crate::scan::predicate::or_row_predicates(&request.predicates, batch);
         mask = Some(match mask {
             None => pred_mask,
             Some(m) => and(&m, &pred_mask).unwrap(),
@@ -519,7 +665,10 @@ fn compute_filter_mask(batch: &RecordBatch, request: &ScanRequest) -> arrow::arr
 
     // 3. Key filter
     if let Some(kf) = &request.key_filter {
-        let kf_mask = composite_key_in_set_mask(batch, &kf.columns, &kf.key_set);
+        let kf_mask = composite_key_in_set_mask_fast(
+            batch, &kf.columns, &kf.key_set,
+            kf.key_set_fast.as_deref(),
+        );
         mask = Some(match mask {
             None => kf_mask,
             Some(m) => and(&m, &kf_mask).unwrap(),
@@ -605,6 +754,30 @@ fn mask_to_absolute_ranges(
     } else {
         RangeList::seal(result_ranges.into_iter())
     }
+}
+
+/// Merge two batches (phase1 filter columns + deferred data columns) and project to output.
+/// Picks each output column from whichever batch has it; fills nulls for missing columns.
+fn merge_and_project(
+    phase1: &RecordBatch,
+    deferred: &RecordBatch,
+    output_schema: &SchemaRef,
+) -> Result<RecordBatch> {
+    let columns: Vec<_> = output_schema
+        .fields()
+        .iter()
+        .map(|field| {
+            let name = field.name();
+            phase1
+                .column_by_name(name)
+                .or_else(|| deferred.column_by_name(name))
+                .cloned()
+                .unwrap_or_else(|| {
+                    arrow::array::new_null_array(field.data_type(), phase1.num_rows())
+                })
+        })
+        .collect();
+    Ok(RecordBatch::try_new(output_schema.clone(), columns)?)
 }
 
 /// Project a RecordBatch to only the columns in the output schema.

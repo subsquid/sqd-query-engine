@@ -3,16 +3,18 @@
 //! Tests random sequences of operations (push, truncate, compact, query)
 //! and verifies consistency across tiers.
 
-use proptest::prelude::*;
-use sqd_query_engine::scan::memory_backend::{BlockData, MemoryChunkReader};
-use sqd_query_engine::scan::composite_reader::CompositeChunkReader;
-use sqd_query_engine::scan::crash_log::{CrashLogWriter, recover_crash_log};
-use sqd_query_engine::scan::parquet_writer::{flush_to_parquet, chunk_dir_name, parse_chunk_dir_name};
-use sqd_query_engine::scan::{ChunkReader, ParquetChunkReader, ScanRequest};
-use sqd_query_engine::metadata::load_dataset_description;
 use arrow::array::*;
 use arrow::datatypes::*;
 use arrow::record_batch::RecordBatch;
+use proptest::prelude::*;
+use sqd_query_engine::metadata::load_dataset_description;
+use sqd_query_engine::scan::composite_reader::CompositeChunkReader;
+use sqd_query_engine::scan::crash_log::{recover_crash_log, CrashLogWriter};
+use sqd_query_engine::scan::memory_backend::{BlockData, MemoryChunkReader};
+use sqd_query_engine::scan::parquet_writer::{
+    chunk_dir_name, flush_to_parquet, parse_chunk_dir_name,
+};
+use sqd_query_engine::scan::{ChunkReader, ParquetChunkReader, ScanRequest};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -70,8 +72,7 @@ fn query_block_range(reader: &dyn ChunkReader, from: u64, to: u64) -> usize {
 
 fn address_strategy() -> impl Strategy<Value = String> {
     prop::sample::select(vec![
-        "0xaaa", "0xbbb", "0xccc", "0xddd", "0xeee",
-        "0xfff", "0x111", "0x222", "0x333", "0x444",
+        "0xaaa", "0xbbb", "0xccc", "0xddd", "0xeee", "0xfff", "0x111", "0x222", "0x333", "0x444",
     ])
     .prop_map(|s| s.to_string())
 }

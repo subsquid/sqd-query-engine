@@ -2,6 +2,8 @@ mod chunk;
 pub mod composite_reader;
 pub mod crash_log;
 pub mod dataset_store;
+pub mod wal;
+pub use dataset_store::{DatasetSnapshot, DatasetStats, DatasetStatsDetailed};
 pub(crate) mod kv_scan;
 pub mod memory_backend;
 pub mod parquet_writer;

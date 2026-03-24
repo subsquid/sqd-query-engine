@@ -3,15 +3,15 @@
 //! Goal: find crashes, panics, data corruption, and inconsistencies
 //! by feeding unexpected data to the storage layer.
 
-use sqd_query_engine::scan::composite_reader::CompositeChunkReader;
-use sqd_query_engine::scan::crash_log::{CrashLogWriter, recover_crash_log};
-use sqd_query_engine::scan::memory_backend::{BlockData, MemoryChunkReader};
-use sqd_query_engine::scan::parquet_writer::{flush_to_parquet, parse_chunk_dir_name};
-use sqd_query_engine::scan::{ChunkReader, ParquetChunkReader, ScanRequest};
-use sqd_query_engine::metadata::load_dataset_description;
 use arrow::array::*;
 use arrow::datatypes::*;
 use arrow::record_batch::RecordBatch;
+use sqd_query_engine::metadata::load_dataset_description;
+use sqd_query_engine::scan::composite_reader::CompositeChunkReader;
+use sqd_query_engine::scan::crash_log::{recover_crash_log, CrashLogWriter};
+use sqd_query_engine::scan::memory_backend::{BlockData, MemoryChunkReader};
+use sqd_query_engine::scan::parquet_writer::{flush_to_parquet, parse_chunk_dir_name};
+use sqd_query_engine::scan::{ChunkReader, ParquetChunkReader, ScanRequest};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -27,7 +27,9 @@ fn make_batch(schema: &SchemaRef, block_number: i32, n_rows: usize) -> RecordBat
             DataType::Int64 => Arc::new(Int64Array::from(vec![block_number as i64; n_rows])),
             DataType::UInt64 => Arc::new(UInt64Array::from(vec![block_number as u64; n_rows])),
             DataType::Utf8 => Arc::new(StringArray::from(
-                (0..n_rows).map(|i| format!("val_{}", i)).collect::<Vec<_>>(),
+                (0..n_rows)
+                    .map(|i| format!("val_{}", i))
+                    .collect::<Vec<_>>(),
             )),
             _ => Arc::new(Int32Array::from(vec![0; n_rows])),
         };
@@ -55,7 +57,12 @@ fn make_simple_block(bn: u64, rows: usize) -> BlockData {
 
 fn query_rows(reader: &dyn ChunkReader) -> usize {
     let request = ScanRequest::new(vec!["block_number", "address"]);
-    reader.scan("logs", &request).unwrap().iter().map(|b| b.num_rows()).sum()
+    reader
+        .scan("logs", &request)
+        .unwrap()
+        .iter()
+        .map(|b| b.num_rows())
+        .sum()
 }
 
 // =====================================================================
@@ -251,11 +258,17 @@ fn redteam_different_schemas_same_table() {
 
     let mut tables1 = HashMap::new();
     tables1.insert("logs".to_string(), make_batch(&schema1, 100, 2));
-    reader.push(BlockData { block_number: 100, tables: tables1 });
+    reader.push(BlockData {
+        block_number: 100,
+        tables: tables1,
+    });
 
     let mut tables2 = HashMap::new();
     tables2.insert("logs".to_string(), make_batch(&schema2, 101, 3));
-    reader.push(BlockData { block_number: 101, tables: tables2 });
+    reader.push(BlockData {
+        block_number: 101,
+        tables: tables2,
+    });
 
     // Query for "block_number" which exists in both schemas
     let request = ScanRequest::new(vec!["block_number"]);
@@ -280,12 +293,16 @@ fn redteam_nullable_columns() {
             Arc::new(Int32Array::from(vec![100, 100, 100])),
             Arc::new(StringArray::from(vec![Some("0xaaa"), None, Some("0xbbb")])),
         ],
-    ).unwrap();
+    )
+    .unwrap();
 
     let mut reader = MemoryChunkReader::new();
     let mut tables = HashMap::new();
     tables.insert("logs".to_string(), batch);
-    reader.push(BlockData { block_number: 100, tables });
+    reader.push(BlockData {
+        block_number: 100,
+        tables,
+    });
 
     let request = ScanRequest::new(vec!["block_number", "address"]);
     let batches = reader.scan("logs", &request).unwrap();
@@ -301,12 +318,16 @@ fn redteam_empty_string_address() {
             Arc::new(Int32Array::from(vec![100])),
             Arc::new(StringArray::from(vec![""])), // empty string
         ],
-    ).unwrap();
+    )
+    .unwrap();
 
     let mut reader = MemoryChunkReader::new();
     let mut tables = HashMap::new();
     tables.insert("logs".to_string(), batch);
-    reader.push(BlockData { block_number: 100, tables });
+    reader.push(BlockData {
+        block_number: 100,
+        tables,
+    });
 
     assert_eq!(query_rows(&reader), 1);
 }
@@ -351,8 +372,12 @@ fn redteam_crash_log_truncate_then_write() {
 
     // Write, truncate, write again
     let schema = simple_schema();
-    writer.append("logs", 100, &make_batch(&schema, 100, 2)).unwrap();
-    writer.append("logs", 101, &make_batch(&schema, 101, 3)).unwrap();
+    writer
+        .append("logs", 100, &make_batch(&schema, 100, 2))
+        .unwrap();
+    writer
+        .append("logs", 101, &make_batch(&schema, 101, 3))
+        .unwrap();
     writer.truncate(101).unwrap(); // remove 101
 
     // After truncate, the writer for this table is dropped.
@@ -477,7 +502,12 @@ fn redteam_memory_usage_decreases_after_drain() {
 
     reader.drain_up_to(10);
     let after = reader.memory_usage();
-    assert!(after < before, "memory should decrease: before={}, after={}", before, after);
+    assert!(
+        after < before,
+        "memory should decrease: before={}, after={}",
+        before,
+        after
+    );
 }
 
 #[test]
@@ -518,8 +548,10 @@ fn redteam_flush_single_row_block() {
 #[test]
 fn redteam_chunk_dir_name_edge_cases() {
     assert_eq!(parse_chunk_dir_name("0-0"), Some((0, 0)));
-    assert_eq!(parse_chunk_dir_name("18446744073709551615-18446744073709551615"),
-        Some((u64::MAX, u64::MAX)));
+    assert_eq!(
+        parse_chunk_dir_name("18446744073709551615-18446744073709551615"),
+        Some((u64::MAX, u64::MAX))
+    );
     assert_eq!(parse_chunk_dir_name(""), None);
     assert_eq!(parse_chunk_dir_name("-"), None);
     assert_eq!(parse_chunk_dir_name("abc-def"), None);

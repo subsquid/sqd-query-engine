@@ -119,6 +119,11 @@ impl ParquetChunkReader {
         Self { chunk_dir, cache }
     }
 
+    /// Get a table by name.
+    pub fn table(&self, name: &str) -> Option<&ParquetTable> {
+        self.cache.get(name)
+    }
+
     /// List all table names in this reader.
     pub fn table_names(&self) -> Vec<String> {
         self.cache.keys().cloned().collect()
