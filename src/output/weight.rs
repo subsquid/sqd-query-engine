@@ -237,7 +237,7 @@ fn get_block_number(col: &dyn arrow::array::Array, i: usize) -> Option<u64> {
     } else if let Some(a) = col.as_any().downcast_ref::<Int64Array>() {
         Some(a.value(i) as u64)
     } else if let Some(a) = col.as_any().downcast_ref::<Int32Array>() {
-        Some(a.value(i) as u64)
+        Some((a.value(i) as u32) as u64)
     } else {
         None
     }
@@ -252,7 +252,7 @@ fn get_weight_value(col: &dyn arrow::array::Array, i: usize) -> u64 {
     } else if let Some(a) = col.as_any().downcast_ref::<Int64Array>() {
         a.value(i) as u64
     } else if let Some(a) = col.as_any().downcast_ref::<Int32Array>() {
-        a.value(i) as u64
+        (a.value(i) as u32) as u64
     } else {
         0
     }

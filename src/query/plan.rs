@@ -12,6 +12,27 @@ use arrow::array::*;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+/// Convert a JSON numeric value to the appropriate ScalarValue based on column type.
+fn numeric_scalar(n: u64, col_type: &ColumnType) -> Result<ScalarValue> {
+    match col_type {
+        ColumnType::UInt8 => Ok(ScalarValue::UInt8(
+            u8::try_from(n).map_err(|_| anyhow!("value {} out of range for UInt8", n))?,
+        )),
+        ColumnType::UInt16 => Ok(ScalarValue::UInt16(
+            u16::try_from(n).map_err(|_| anyhow!("value {} out of range for UInt16", n))?,
+        )),
+        ColumnType::UInt32 => Ok(ScalarValue::UInt32(
+            u32::try_from(n).map_err(|_| anyhow!("value {} out of range for UInt32", n))?,
+        )),
+        ColumnType::UInt64 => Ok(ScalarValue::UInt64(n)),
+        ColumnType::Int16 => Ok(ScalarValue::Int16(
+            i16::try_from(n).map_err(|_| anyhow!("value {} out of range for Int16", n))?,
+        )),
+        ColumnType::Int64 => Ok(ScalarValue::Int64(n as i64)),
+        _ => Ok(ScalarValue::UInt64(n)),
+    }
+}
+
 /// An execution plan compiled from a query.
 #[derive(Debug)]
 pub struct Plan {
@@ -306,7 +327,7 @@ fn compile_item_predicates(
                         let pred = compile_in_list(column, arr, col_desc)?;
                         col_predicates.push(pred);
                     } else if let Some(n) = value.as_u64() {
-                        col_predicates.push(col_eq(column, ScalarValue::UInt64(n)));
+                        col_predicates.push(col_eq(column, numeric_scalar(n, &col_desc.data_type)?));
                     }
                 }
             }
@@ -324,7 +345,7 @@ fn compile_item_predicates(
             let pred = compile_in_list(key, arr, col_desc)?;
             col_predicates.push(pred);
         } else if let Some(n) = value.as_u64() {
-            col_predicates.push(col_eq(key, ScalarValue::UInt64(n)));
+            col_predicates.push(col_eq(key, numeric_scalar(n, &col_desc.data_type)?));
         } else if let Some(s) = value.as_str() {
             col_predicates.push(col_eq(key, ScalarValue::Utf8(s.to_string())));
         } else {
@@ -809,6 +830,80 @@ mod tests {
             assert!(batch.schema().field_with_name("address").is_ok());
             assert!(batch.schema().field_with_name("topic0").is_ok());
         }
+    }
+
+    #[test]
+    fn test_numeric_scalar_type_dispatch() {
+        assert!(matches!(
+            numeric_scalar(42, &ColumnType::UInt8).unwrap(),
+            ScalarValue::UInt8(42)
+        ));
+        assert!(matches!(
+            numeric_scalar(1000, &ColumnType::UInt16).unwrap(),
+            ScalarValue::UInt16(1000)
+        ));
+        assert!(matches!(
+            numeric_scalar(100000, &ColumnType::UInt32).unwrap(),
+            ScalarValue::UInt32(100000)
+        ));
+        assert!(matches!(
+            numeric_scalar(u64::MAX, &ColumnType::UInt64).unwrap(),
+            ScalarValue::UInt64(u64::MAX)
+        ));
+        // Out of range
+        assert!(numeric_scalar(256, &ColumnType::UInt8).is_err());
+        assert!(numeric_scalar(70000, &ColumnType::UInt16).is_err());
+        assert!(numeric_scalar(u64::MAX, &ColumnType::UInt32).is_err());
+    }
+
+    /// Regression: numeric scalar filters were always compiled as UInt64,
+    /// causing type mismatch on UInt32 columns → zero results.
+    #[test]
+    fn test_numeric_filter_on_uint32_column() {
+        let meta = solana_metadata();
+        // transaction_index is UInt32 in Solana metadata
+        let json = br#"{
+            "type": "solana",
+            "fromBlock": 0,
+            "fields": {
+                "instruction": { "programId": true, "transactionIndex": true }
+            },
+            "instructions": [{
+                "transactionIndex": 0
+            }]
+        }"#;
+
+        let query = parse_query(json, &meta).unwrap();
+        let plan = compile(&query, &meta).unwrap();
+
+        let chunk_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/chunk");
+        let table_path = chunk_path.join("instructions.parquet");
+        let parquet_table = crate::scan::ParquetTable::open(&table_path).unwrap();
+
+        let instr_plan = &plan.table_plans[0];
+        let table_desc = meta.table("instructions").unwrap();
+
+        let output_cols: Vec<&str> = instr_plan
+            .output_columns
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
+        let pred_refs: Vec<&crate::scan::predicate::RowPredicate> =
+            instr_plan.predicates.iter().collect();
+
+        let mut request = crate::scan::ScanRequest::new(output_cols);
+        request.predicates = pred_refs;
+        request.from_block = Some(plan.from_block);
+        request.block_number_column = Some(table_desc.block_number_column.as_str());
+
+        let batches = crate::scan::scan(&parquet_table, &request).unwrap();
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+
+        // Must match instructions with transaction_index=0 (not empty!)
+        assert!(
+            total_rows > 0,
+            "numeric filter on UInt32 column must match rows (was broken when always UInt64)"
+        );
     }
 
     #[test]

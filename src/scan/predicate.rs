@@ -63,6 +63,8 @@ pub struct InListPredicate {
     u16_set: Option<HashSet<u16>>,
     /// Pre-built u8 set.
     u8_set: Option<HashSet<u8>>,
+    /// Pre-built fixed-size binary set (for FixedSizeBinary columns).
+    fixed_binary_set: Option<HashSet<Vec<u8>>>,
 }
 
 /// Bloom filter predicate: check if any of the given values might be in the bloom filter.
@@ -127,36 +129,78 @@ impl ArrayPredicate for EqPredicate {
     fn evaluate(&self, array: &dyn Array) -> BooleanArray {
         match &self.value {
             ScalarValue::Boolean(v) => {
-                let arr = array.as_any().downcast_ref::<BooleanArray>().unwrap();
-                eq(&arr, &BooleanArray::new_scalar(*v)).unwrap()
+                let Some(arr) = array.as_any().downcast_ref::<BooleanArray>() else {
+                    return BooleanArray::from(vec![false; array.len()]);
+                };
+                eq(arr, &BooleanArray::new_scalar(*v)).unwrap()
             }
             ScalarValue::UInt8(v) => {
-                let arr = array.as_any().downcast_ref::<UInt8Array>().unwrap();
-                eq(&arr, &UInt8Array::new_scalar(*v)).unwrap()
+                let Some(arr) = array.as_any().downcast_ref::<UInt8Array>() else {
+                    return BooleanArray::from(vec![false; array.len()]);
+                };
+                eq(arr, &UInt8Array::new_scalar(*v)).unwrap()
             }
             ScalarValue::UInt16(v) => {
-                let arr = array.as_any().downcast_ref::<UInt16Array>().unwrap();
-                eq(&arr, &UInt16Array::new_scalar(*v)).unwrap()
+                let Some(arr) = array.as_any().downcast_ref::<UInt16Array>() else {
+                    return BooleanArray::from(vec![false; array.len()]);
+                };
+                eq(arr, &UInt16Array::new_scalar(*v)).unwrap()
             }
             ScalarValue::UInt32(v) => {
-                let arr = array.as_any().downcast_ref::<UInt32Array>().unwrap();
-                eq(&arr, &UInt32Array::new_scalar(*v)).unwrap()
+                // Try exact type, then parquet physical types (Int32, UInt16, Int16)
+                if let Some(arr) = array.as_any().downcast_ref::<UInt32Array>() {
+                    eq(arr, &UInt32Array::new_scalar(*v)).unwrap()
+                } else if let Some(arr) = array.as_any().downcast_ref::<Int32Array>() {
+                    eq(arr, &Int32Array::new_scalar(*v as i32)).unwrap()
+                } else if let Some(arr) = array.as_any().downcast_ref::<UInt16Array>() {
+                    if let Ok(v16) = u16::try_from(*v) {
+                        eq(arr, &UInt16Array::new_scalar(v16)).unwrap()
+                    } else {
+                        BooleanArray::from(vec![false; array.len()])
+                    }
+                } else {
+                    BooleanArray::from(vec![false; array.len()])
+                }
             }
             ScalarValue::UInt64(v) => {
-                let arr = array.as_any().downcast_ref::<UInt64Array>().unwrap();
-                eq(&arr, &UInt64Array::new_scalar(*v)).unwrap()
+                // Try exact type, then parquet physical types (Int64, UInt32, Int32)
+                if let Some(arr) = array.as_any().downcast_ref::<UInt64Array>() {
+                    eq(arr, &UInt64Array::new_scalar(*v)).unwrap()
+                } else if let Some(arr) = array.as_any().downcast_ref::<Int64Array>() {
+                    eq(arr, &Int64Array::new_scalar(*v as i64)).unwrap()
+                } else if let Some(arr) = array.as_any().downcast_ref::<UInt32Array>() {
+                    if let Ok(v32) = u32::try_from(*v) {
+                        eq(arr, &UInt32Array::new_scalar(v32)).unwrap()
+                    } else {
+                        BooleanArray::from(vec![false; array.len()])
+                    }
+                } else if let Some(arr) = array.as_any().downcast_ref::<Int32Array>() {
+                    if let Ok(v32) = u32::try_from(*v) {
+                        eq(arr, &Int32Array::new_scalar(v32 as i32)).unwrap()
+                    } else {
+                        BooleanArray::from(vec![false; array.len()])
+                    }
+                } else {
+                    BooleanArray::from(vec![false; array.len()])
+                }
             }
             ScalarValue::Int16(v) => {
-                let arr = array.as_any().downcast_ref::<Int16Array>().unwrap();
-                eq(&arr, &Int16Array::new_scalar(*v)).unwrap()
+                let Some(arr) = array.as_any().downcast_ref::<Int16Array>() else {
+                    return BooleanArray::from(vec![false; array.len()]);
+                };
+                eq(arr, &Int16Array::new_scalar(*v)).unwrap()
             }
             ScalarValue::Int64(v) => {
-                let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
-                eq(&arr, &Int64Array::new_scalar(*v)).unwrap()
+                let Some(arr) = array.as_any().downcast_ref::<Int64Array>() else {
+                    return BooleanArray::from(vec![false; array.len()]);
+                };
+                eq(arr, &Int64Array::new_scalar(*v)).unwrap()
             }
             ScalarValue::Utf8(v) => {
-                let arr = array.as_any().downcast_ref::<StringArray>().unwrap();
-                eq(&arr, &StringArray::new_scalar(v)).unwrap()
+                let Some(arr) = array.as_any().downcast_ref::<StringArray>() else {
+                    return BooleanArray::from(vec![false; array.len()]);
+                };
+                eq(arr, &StringArray::new_scalar(v)).unwrap()
             }
         }
     }
@@ -222,6 +266,10 @@ impl InListPredicate {
             .as_any()
             .downcast_ref::<UInt8Array>()
             .map(|arr| arr.values().iter().copied().collect());
+        let fixed_binary_set = values
+            .as_any()
+            .downcast_ref::<FixedSizeBinaryArray>()
+            .map(|arr| (0..arr.len()).map(|i| arr.value(i).to_vec()).collect());
         Self {
             values,
             string_set,
@@ -230,6 +278,7 @@ impl InListPredicate {
             u32_set,
             u16_set,
             u8_set,
+            fixed_binary_set,
         }
     }
 
@@ -302,46 +351,67 @@ impl ArrayPredicate for InListPredicate {
 
         match array.data_type() {
             DataType::Utf8 => {
-                let arr = array.as_any().downcast_ref::<StringArray>().unwrap();
-                let set = self.string_set.as_ref().unwrap();
+                let Some(arr) = array.as_any().downcast_ref::<StringArray>() else {
+                    return BooleanArray::from(vec![false; array.len()]);
+                };
+                let Some(set) = self.string_set.as_ref() else {
+                    return BooleanArray::from(vec![false; array.len()]);
+                };
                 in_list_string_fast(arr, set)
             }
             DataType::UInt8 => {
-                let arr = array.as_any().downcast_ref::<UInt8Array>().unwrap();
-                let set = self.u8_set.as_ref().unwrap();
+                let Some(arr) = array.as_any().downcast_ref::<UInt8Array>() else {
+                    return BooleanArray::from(vec![false; array.len()]);
+                };
+                let Some(set) = self.u8_set.as_ref() else {
+                    return BooleanArray::from(vec![false; array.len()]);
+                };
                 in_list_primitive_fast(arr, set)
             }
             DataType::UInt16 => {
-                let arr = array.as_any().downcast_ref::<UInt16Array>().unwrap();
-                let set = self.u16_set.as_ref().unwrap();
+                let Some(arr) = array.as_any().downcast_ref::<UInt16Array>() else {
+                    return BooleanArray::from(vec![false; array.len()]);
+                };
+                let Some(set) = self.u16_set.as_ref() else {
+                    return BooleanArray::from(vec![false; array.len()]);
+                };
                 in_list_primitive_fast(arr, set)
             }
             DataType::UInt32 => {
-                let arr = array.as_any().downcast_ref::<UInt32Array>().unwrap();
-                let set = self.u32_set.as_ref().unwrap();
+                let Some(arr) = array.as_any().downcast_ref::<UInt32Array>() else {
+                    return BooleanArray::from(vec![false; array.len()]);
+                };
+                let Some(set) = self.u32_set.as_ref() else {
+                    return BooleanArray::from(vec![false; array.len()]);
+                };
                 in_list_primitive_fast(arr, set)
             }
             DataType::UInt64 => {
-                let arr = array.as_any().downcast_ref::<UInt64Array>().unwrap();
-                let set = self.u64_set.as_ref().unwrap();
+                let Some(arr) = array.as_any().downcast_ref::<UInt64Array>() else {
+                    return BooleanArray::from(vec![false; array.len()]);
+                };
+                let Some(set) = self.u64_set.as_ref() else {
+                    return BooleanArray::from(vec![false; array.len()]);
+                };
                 in_list_primitive_fast(arr, set)
             }
             DataType::Int64 => {
-                let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
-                let set = self.i64_set.as_ref().unwrap();
+                let Some(arr) = array.as_any().downcast_ref::<Int64Array>() else {
+                    return BooleanArray::from(vec![false; array.len()]);
+                };
+                let Some(set) = self.i64_set.as_ref() else {
+                    return BooleanArray::from(vec![false; array.len()]);
+                };
                 in_list_primitive_fast(arr, set)
             }
             DataType::FixedSizeBinary(_) => {
-                let arr = array
-                    .as_any()
-                    .downcast_ref::<FixedSizeBinaryArray>()
-                    .unwrap();
-                let list = self
-                    .values
-                    .as_any()
-                    .downcast_ref::<FixedSizeBinaryArray>()
-                    .unwrap();
-                in_list_fixed_binary(arr, list)
+                let Some(arr) = array.as_any().downcast_ref::<FixedSizeBinaryArray>() else {
+                    return BooleanArray::from(vec![false; array.len()]);
+                };
+                let Some(set) = self.fixed_binary_set.as_ref() else {
+                    return BooleanArray::from(vec![false; array.len()]);
+                };
+                in_list_fixed_binary(arr, set)
             }
             _ => BooleanArray::from(vec![false; array.len()]),
         }
@@ -416,9 +486,7 @@ where
     BooleanArray::new(builder.finish(), array.nulls().cloned())
 }
 
-fn in_list_fixed_binary(array: &FixedSizeBinaryArray, list: &FixedSizeBinaryArray) -> BooleanArray {
-    use std::collections::HashSet;
-    let set: HashSet<&[u8]> = (0..list.len()).map(|i| list.value(i)).collect();
+fn in_list_fixed_binary(array: &FixedSizeBinaryArray, set: &HashSet<Vec<u8>>) -> BooleanArray {
     let bools: Vec<bool> = (0..array.len())
         .map(|i| {
             if array.is_null(i) {

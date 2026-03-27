@@ -1188,7 +1188,10 @@ fn build_output_schema(table_schema: &SchemaRef, columns: &[&str]) -> SchemaRef 
 fn stat_value_to_u64(value: &crate::scan::chunk::StatValue) -> Option<u64> {
     use crate::scan::chunk::StatValue;
     match value {
-        StatValue::Int32(v) => Some(*v as u64),
+        // Reinterpret bit pattern as unsigned. Parquet stores UInt32/UInt64 column
+        // statistics as Int32/Int64 physical values, so we must treat the bits as
+        // unsigned to get correct comparisons for block_number range pruning.
+        StatValue::Int32(v) => Some((*v as u32) as u64),
         StatValue::Int64(v) => Some(*v as u64),
         _ => None,
     }
