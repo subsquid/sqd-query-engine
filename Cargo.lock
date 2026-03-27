@@ -2823,7 +2823,6 @@ dependencies = [
  "anyhow",
  "arrow",
  "arrow-buffer",
- "libc",
  "parking_lot",
  "tempfile",
 ]

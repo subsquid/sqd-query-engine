@@ -33,29 +33,29 @@ cold (parquet), hot memory (Arrow RecordBatches), hot spillover (sorted parquet,
 
 | Query | Leg+Pq | New+Pq | diff | | Leg+Rdb | New+Mem | diff | New+Spill | diff |
 |-------|--:|--:|---|---|--:|--:|---|--:|---|
-| evm/usdc_transfers | 276 | 371 | +34% | | 139 | 257 | +85% | 354 | +155% |
-| evm/calls+logs | 129 | 175 | +36% | | 159 | 237 | +49% | 186 | +17% |
-| evm/traces+diffs | 27 | 29 | +7% | | 40 | 61 | +53% | 58 | +45% |
-| evm/all_blocks | 8558 | 30922 | +261% | | 8249 | 9191 | +11% | 31118 | +277% |
-| sol/whirlpool | 167 | 305 | +83% | | 169 | 359 | +112% | 332 | +96% |
-| sol/hard | 96 | 166 | +73% | | 121 | 268 | +121% | 187 | +55% |
-| sol/instr+logs | 93 | 122 | +31% | | 74 | 139 | +88% | 126 | +70% |
-| sol/instr+bal | 511 | 964 | +89% | | 309 | 600 | +94% | 1094 | +254% |
-| sol/all_blocks | 13121 | 92545 | +606% | | 12034 | 42613 | +254% | 69547 | +478% |
+| evm/usdc_transfers | 270 | 377 | +40% | | 141 | 266 | +89% | 378 | +168% |
+| evm/calls+logs | 129 | 186 | +44% | | 155 | 271 | +75% | 231 | +49% |
+| evm/traces+diffs | 27 | 29 | +8% | | 39 | 64 | +64% | 66 | +69% |
+| evm/all_blocks | 8526 | 32180 | +277% | | 9193 | 11478 | +25% | 42847 | +366% |
+| sol/whirlpool | 170 | 312 | +84% | | 169 | 397 | +135% | 458 | +171% |
+| sol/hard | 95 | 177 | +86% | | 128 | 320 | +150% | 287 | +124% |
+| sol/instr+logs | 95 | 119 | +25% | | 73 | 142 | +95% | 141 | +93% |
+| sol/instr+bal | 521 | 1138 | +118% | | 306 | 687 | +125% | 2262 | +639% |
+| sol/all_blocks | 13190 | 92685 | +603% | | 10972 | 51070 | +365% | 114278 | +941% |
 
 ### Latency (single-threaded, median of 20 runs)
 
 | Query | Leg+Pq | New+Pq | diff | | Leg+Rdb | New+Mem | diff | New+Spill | diff |
 |-------|--:|--:|---|---|--:|--:|---|--:|---|
-| evm/usdc_transfers | 14.41ms | 11.67ms | +19% | | 20.25ms | 22.84ms | -13% | 11.10ms | +45% |
-| evm/calls+logs | 21.60ms | 18.76ms | +13% | | 19.05ms | 24.67ms | -29% | 16.04ms | +16% |
-| evm/traces+diffs | 62.00ms | 76.83ms | -24% | | 55.20ms | 98.84ms | -79% | 58.95ms | -7% |
-| evm/all_blocks | 1.05ms | 194µs | +82% | | 914µs | 621µs | +32% | 205µs | +78% |
-| sol/whirlpool | 9.89ms | 6.72ms | +32% | | 11.53ms | 17.29ms | -50% | 5.62ms | +51% |
-| sol/hard | 15.46ms | 11.91ms | +23% | | 13.90ms | 18.18ms | -31% | 9.55ms | +31% |
-| sol/instr+logs | 27.29ms | 24.61ms | +10% | | 27.38ms | 37.96ms | -39% | 23.01ms | +16% |
-| sol/instr+bal | 4.52ms | 2.18ms | +52% | | 8.48ms | 10.81ms | -27% | 2.84ms | +66% |
-| sol/all_blocks | 824µs | 71µs | +91% | | 745µs | 98µs | +87% | 94µs | +87% |
+| evm/usdc_transfers | 14.57ms | 11.35ms | +22% | | 19.35ms | 21.99ms | -14% | 9.83ms | +49% |
+| evm/calls+logs | 22.26ms | 18.95ms | +15% | | 21.03ms | 21.55ms | -2% | 14.73ms | +30% |
+| evm/traces+diffs | 65.16ms | 77.05ms | -18% | | 56.49ms | 95.83ms | -70% | 57.37ms | -2% |
+| evm/all_blocks | 1.11ms | 347µs | +69% | | 844µs | 1.05ms | -24% | 144µs | +83% |
+| sol/whirlpool | 10.25ms | 6.63ms | +35% | | 11.23ms | 16.12ms | -44% | 3.80ms | +66% |
+| sol/hard | 15.00ms | 11.37ms | +24% | | 13.83ms | 17.76ms | -28% | 6.08ms | +56% |
+| sol/instr+logs | 28.15ms | 24.42ms | +13% | | 28.37ms | 37.91ms | -34% | 21.52ms | +24% |
+| sol/instr+bal | 4.48ms | 2.02ms | +55% | | 8.24ms | 9.35ms | -13% | 1.54ms | +81% |
+| sol/all_blocks | 794µs | 72µs | +91% | | 615µs | 70µs | +89% | 55µs | +91% |
 
 ### Throughput scaling (rps)
 
@@ -64,15 +64,15 @@ cold (parquet), hot memory (Arrow RecordBatches), hot spillover (sorted parquet,
 
 | Query | Leg+Pq | New+Pq | diff | | Leg+Rdb | New+Mem | diff | New+Spill | diff |
 |-------|--:|--:|---|---|--:|--:|---|--:|---|
-| evm/usdc_transfers | 72 | 87 | +21% | | 53 | 43 | -19% | 94 | +77% |
-| evm/calls+logs | 47 | 53 | +13% | | 52 | 41 | -21% | 61 | +17% |
-| evm/traces+diffs | 16 | 13 | -19% | | 18 | 10 | -44% | 17 | -6% |
-| evm/all_blocks | 1164 | 5303 | +356% | | 1254 | 1683 | +34% | 5213 | +316% |
-| sol/whirlpool | 105 | 148 | +41% | | 86 | 59 | -31% | 181 | +110% |
-| sol/hard | 68 | 85 | +25% | | 70 | 54 | -23% | 107 | +53% |
-| sol/instr+logs | 37 | 37 | +0% | | 36 | 25 | -31% | 41 | +14% |
-| sol/instr+bal | 240 | 458 | +91% | | 122 | 93 | -24% | 344 | +182% |
-| sol/all_blocks | 1493 | 14895 | +898% | | 1596 | 10413 | +552% | 10423 | +553% |
+| evm/usdc_transfers | 67 | 91 | +36% | | 51 | 44 | -14% | 100 | +96% |
+| evm/calls+logs | 45 | 50 | +11% | | 48 | 46 | -4% | 65 | +35% |
+| evm/traces+diffs | 15 | 13 | -17% | | 17 | 10 | -41% | 17 | -1% |
+| evm/all_blocks | 1143 | 5215 | +356% | | 1273 | 2205 | +73% | 7241 | +469% |
+| sol/whirlpool | 104 | 147 | +41% | | 87 | 62 | -29% | 264 | +204% |
+| sol/hard | 68 | 87 | +28% | | 70 | 58 | -17% | 163 | +133% |
+| sol/instr+logs | 36 | 40 | +11% | | 34 | 26 | -24% | 45 | +32% |
+| sol/instr+bal | 241 | 494 | +105% | | 122 | 108 | -11% | 640 | +425% |
+| sol/all_blocks | 1496 | 14869 | +893% | | 1558 | 14782 | +849% | 18863 | +1111% |
 
 </details>
 
@@ -81,15 +81,15 @@ cold (parquet), hot memory (Arrow RecordBatches), hot spillover (sorted parquet,
 
 | Query | Leg+Pq | New+Pq | diff | | Leg+Rdb | New+Mem | diff | New+Spill | diff |
 |-------|--:|--:|---|---|--:|--:|---|--:|---|
-| evm/usdc_transfers | 201 | 248 | +23% | | 117 | 160 | +37% | 249 | +113% |
-| evm/calls+logs | 106 | 136 | +28% | | 121 | 146 | +21% | 153 | +26% |
-| evm/traces+diffs | 27 | 27 | +0% | | 36 | 38 | +6% | 45 | +25% |
-| evm/all_blocks | 3767 | 20044 | +432% | | 4203 | 5671 | +35% | 19500 | +364% |
-| sol/whirlpool | 151 | 275 | +82% | | 152 | 208 | +37% | 307 | +102% |
-| sol/hard | 92 | 151 | +64% | | 115 | 160 | +39% | 176 | +53% |
-| sol/instr+logs | 81 | 95 | +17% | | 66 | 81 | +23% | 103 | +56% |
-| sol/instr+bal | 440 | 826 | +88% | | 238 | 366 | +54% | 863 | +263% |
-| sol/all_blocks | 5617 | 57403 | +922% | | 5809 | 31156 | +436% | 42769 | +636% |
+| evm/usdc_transfers | 189 | 242 | +28% | | 112 | 164 | +47% | 271 | +143% |
+| evm/calls+logs | 104 | 142 | +37% | | 123 | 172 | +40% | 181 | +47% |
+| evm/traces+diffs | 27 | 27 | +2% | | 35 | 40 | +14% | 50 | +43% |
+| evm/all_blocks | 3697 | 20892 | +465% | | 4394 | 6887 | +57% | 28477 | +548% |
+| sol/whirlpool | 151 | 282 | +87% | | 152 | 222 | +46% | 433 | +185% |
+| sol/hard | 92 | 160 | +74% | | 118 | 179 | +52% | 273 | +131% |
+| sol/instr+logs | 79 | 96 | +23% | | 64 | 83 | +30% | 115 | +80% |
+| sol/instr+bal | 444 | 944 | +113% | | 233 | 416 | +79% | 1652 | +609% |
+| sol/all_blocks | 5701 | 58424 | +924% | | 5595 | 36997 | +561% | 74203 | +1226% |
 
 </details>
 
@@ -98,15 +98,15 @@ cold (parquet), hot memory (Arrow RecordBatches), hot spillover (sorted parquet,
 
 | Query | Leg+Pq | New+Pq | diff | | Leg+Rdb | New+Mem | diff | New+Spill | diff |
 |-------|--:|--:|---|---|--:|--:|---|--:|---|
-| evm/usdc_transfers | 261 | 344 | +32% | | 140 | 239 | +71% | 345 | +146% |
-| evm/calls+logs | 127 | 171 | +35% | | 153 | 217 | +42% | 185 | +21% |
-| evm/traces+diffs | 28 | 30 | +7% | | 38 | 56 | +47% | 56 | +47% |
-| evm/all_blocks | 6924 | 30243 | +337% | | 6868 | 8250 | +20% | 29155 | +324% |
-| sol/whirlpool | 163 | 291 | +79% | | 166 | 320 | +93% | 328 | +98% |
-| sol/hard | 95 | 163 | +72% | | 123 | 246 | +100% | 184 | +50% |
-| sol/instr+logs | 93 | 119 | +28% | | 74 | 120 | +62% | 123 | +66% |
-| sol/instr+bal | 508 | 955 | +88% | | 295 | 552 | +87% | 1027 | +248% |
-| sol/all_blocks | 10452 | 83536 | +699% | | 9758 | 37967 | +289% | 64502 | +561% |
+| evm/usdc_transfers | 251 | 349 | +39% | | 136 | 247 | +81% | 365 | +168% |
+| evm/calls+logs | 125 | 183 | +46% | | 147 | 250 | +70% | 225 | +53% |
+| evm/traces+diffs | 28 | 30 | +8% | | 40 | 59 | +48% | 63 | +60% |
+| evm/all_blocks | 6580 | 28908 | +339% | | 7549 | 9550 | +26% | 40077 | +431% |
+| sol/whirlpool | 164 | 302 | +84% | | 161 | 345 | +114% | 442 | +174% |
+| sol/hard | 95 | 171 | +80% | | 122 | 276 | +126% | 280 | +130% |
+| sol/instr+logs | 91 | 119 | +31% | | 72 | 118 | +64% | 135 | +88% |
+| sol/instr+bal | 499 | 1071 | +115% | | 284 | 612 | +116% | 2078 | +632% |
+| sol/all_blocks | 10380 | 85751 | +726% | | 9123 | 46062 | +405% | 107946 | +1083% |
 
 </details>
 
@@ -115,15 +115,15 @@ cold (parquet), hot memory (Arrow RecordBatches), hot spillover (sorted parquet,
 
 | Query | Leg+Pq | New+Pq | diff | | Leg+Rdb | New+Mem | diff | New+Spill | diff |
 |-------|--:|--:|---|---|--:|--:|---|--:|---|
-| evm/usdc_transfers | 276 | 371 | +34% | | 139 | 257 | +85% | 354 | +155% |
-| evm/calls+logs | 129 | 175 | +36% | | 159 | 237 | +49% | 186 | +17% |
-| evm/traces+diffs | 27 | 29 | +7% | | 40 | 61 | +53% | 58 | +45% |
-| evm/all_blocks | 8558 | 30922 | +261% | | 8249 | 9191 | +11% | 31118 | +277% |
-| sol/whirlpool | 167 | 305 | +83% | | 169 | 359 | +112% | 332 | +96% |
-| sol/hard | 96 | 166 | +73% | | 121 | 268 | +121% | 187 | +55% |
-| sol/instr+logs | 93 | 122 | +31% | | 74 | 139 | +88% | 126 | +70% |
-| sol/instr+bal | 511 | 964 | +89% | | 309 | 600 | +94% | 1094 | +254% |
-| sol/all_blocks | 13121 | 92545 | +606% | | 12034 | 42613 | +254% | 69547 | +478% |
+| evm/usdc_transfers | 270 | 377 | +40% | | 141 | 266 | +89% | 378 | +168% |
+| evm/calls+logs | 129 | 186 | +44% | | 155 | 271 | +75% | 231 | +49% |
+| evm/traces+diffs | 27 | 29 | +8% | | 39 | 64 | +64% | 66 | +69% |
+| evm/all_blocks | 8526 | 32180 | +277% | | 9193 | 11478 | +25% | 42847 | +366% |
+| sol/whirlpool | 170 | 312 | +84% | | 169 | 397 | +135% | 458 | +171% |
+| sol/hard | 95 | 177 | +86% | | 128 | 320 | +150% | 287 | +124% |
+| sol/instr+logs | 95 | 119 | +25% | | 73 | 142 | +95% | 141 | +93% |
+| sol/instr+bal | 521 | 1138 | +118% | | 306 | 687 | +125% | 2262 | +639% |
+| sol/all_blocks | 13190 | 92685 | +603% | | 10972 | 51070 | +365% | 114278 | +941% |
 
 </details>
 
@@ -348,64 +348,64 @@ New query engine vs legacy query engine. Both on the same mmap'd parquet data (n
 
 | Benchmark                  | New           | Legacy    | Diff             |
 |----------------------------|---------------|-----------|------------------|
-| evm/usdc_transfers         | **10.95 ms**  | 12.61 ms  | **1.15x faster** |
-| evm/contract_calls+logs    | **18.53 ms**  | 19.51 ms  | **1.05x faster** |
-| evm/usdc_traces+statediffs | 72.15 ms      | 57.85 ms  | 1.25x slower     |
-| evm/all_blocks             | **0.18 ms**   | 0.62 ms   | **3.44x faster** |
-| sol/whirlpool_swap         | **6.56 ms**   | 8.15 ms   | **1.24x faster** |
-| sol/hard (Meteora DLMM)    | **10.37 ms**  | 12.03 ms  | **1.16x faster** |
-| sol/instr+logs             | 24.01 ms      | 23.94 ms  | ~same            |
-| sol/instr+balances         | **2.07 ms**   | 3.26 ms   | **1.57x faster** |
-| sol/all_blocks             | **0.06 ms**   | 0.50 ms   | **7.69x faster** |
+| evm/usdc_transfers         | **10.47 ms**  | 14.57 ms  | **1.39x faster** |
+| evm/contract_calls+logs    | **18.09 ms**  | 22.26 ms  | **1.23x faster** |
+| evm/usdc_traces+statediffs | 71.64 ms      | 65.16 ms  | 1.10x slower     |
+| evm/all_blocks             | **0.18 ms**   | 1.11 ms   | **6.24x faster** |
+| sol/whirlpool_swap         | **6.51 ms**   | 10.25 ms  | **1.57x faster** |
+| sol/hard (Meteora DLMM)    | **10.34 ms**  | 15.00 ms  | **1.45x faster** |
+| sol/instr+logs             | **24.18 ms**  | 28.15 ms  | **1.16x faster** |
+| sol/instr+balances         | **1.92 ms**   | 4.48 ms   | **2.33x faster** |
+| sol/all_blocks             | **0.07 ms**   | 0.79 ms   | **12.2x faster** |
 
 ### Summary
 
 | Median           | CPU=1           | CPU=4           | CPU=8           | CPU=12          |
 |------------------|-----------------|-----------------|-----------------|-----------------|
-| General queries  | **17% faster**  | **56% faster**  | **67% faster**  | **73% faster**  |
-| Only full blocks | **485% faster** | **599% faster** | **522% faster** | **455% faster** |
+| General queries  | **28% faster**  | **37% faster**  | **46% faster**  | **44% faster**  |
+| Only full blocks | **625% faster** | **695% faster** | **533% faster** | **440% faster** |
 
 <details>
 <summary>Full throughput table (requests/sec, 5s per level)</summary>
 
 | Benchmark                  | CPU | New        | Legacy   | Diff            |
 |----------------------------|-----|------------|----------|-----------------|
-| evm/usdc_transfers         | 1   | **104**    | 80       | **30% faster**  |
-|                            | 4   | **295**    | 202      | **46% faster**  |
-|                            | 8   | **441**    | 268      | **64% faster**  |
-|                            | 12  | **500**    | 289      | **73% faster**  |
-| evm/contract_calls+logs    | 1   | **59**     | 51       | **17% faster**  |
-|                            | 4   | **152**    | 98       | **56% faster**  |
-|                            | 8   | **190**    | 111      | **72% faster**  |
-|                            | 12  | **204**    | 111      | **83% faster**  |
-| evm/usdc_traces+statediffs | 1   | 15         | **17**   | 13% slower      |
-|                            | 4   | **30**     | 24       | **25% faster**  |
-|                            | 8   | **34**     | 25       | **39% faster**  |
-|                            | 12  | **35**     | 25       | **42% faster**  |
-| evm/all_blocks             | 1   | **5969**   | 1514     | **294% faster** |
-|                            | 4   | **23251**  | 4671     | **398% faster** |
-|                            | 8   | **35040**  | 7506     | **367% faster** |
-|                            | 12  | **37468**  | 8528     | **339% faster** |
-| sol/whirlpool_swap         | 1   | **151**    | 124      | **22% faster**  |
-|                            | 4   | **285**    | 172      | **66% faster**  |
-|                            | 8   | **316**    | 185      | **71% faster**  |
-|                            | 12  | **325**    | 181      | **80% faster**  |
-| sol/hard (Meteora DLMM)    | 1   | **94**     | 80       | **17% faster**  |
-|                            | 4   | **160**    | 100      | **59% faster**  |
-|                            | 8   | **174**    | 106      | **65% faster**  |
-|                            | 12  | **168**    | 104      | **62% faster**  |
-| sol/instr+logs             | 1   | **43**     | 41       | **5% faster**   |
-|                            | 4   | **103**    | 75       | **38% faster**  |
-|                            | 8   | **131**    | 78       | **67% faster**  |
-|                            | 12  | **134**    | 86       | **57% faster**  |
-| sol/instr+balances         | 1   | **485**    | 302      | **61% faster**  |
-|                            | 4   | **866**    | 501      | **73% faster**  |
-|                            | 8   | **996**    | 521      | **91% faster**  |
-|                            | 12  | **1060**   | 538      | **97% faster**  |
-| sol/all_blocks             | 1   | **15846**  | 2039     | **677% faster** |
-|                            | 4   | **62810**  | 6979     | **800% faster** |
-|                            | 8   | **95900**  | 12330    | **677% faster** |
-|                            | 12  | **102320** | 15270    | **570% faster** |
+| evm/usdc_transfers         | 1   | **91**     | 67       | **36% faster**  |
+|                            | 4   | **242**    | 189      | **28% faster**  |
+|                            | 8   | **349**    | 251      | **39% faster**  |
+|                            | 12  | **377**    | 270      | **40% faster**  |
+| evm/contract_calls+logs    | 1   | **50**     | 45       | **11% faster**  |
+|                            | 4   | **142**    | 104      | **37% faster**  |
+|                            | 8   | **183**    | 125      | **46% faster**  |
+|                            | 12  | **186**    | 129      | **44% faster**  |
+| evm/usdc_traces+statediffs | 1   | 13         | **15**   | 17% slower      |
+|                            | 4   | **27**     | 27       | **2% faster**   |
+|                            | 8   | **30**     | 28       | **8% faster**   |
+|                            | 12  | **29**     | 27       | **8% faster**   |
+| evm/all_blocks             | 1   | **5215**   | 1143     | **356% faster** |
+|                            | 4   | **20892**  | 3697     | **465% faster** |
+|                            | 8   | **28908**  | 6580     | **339% faster** |
+|                            | 12  | **32180**  | 8526     | **277% faster** |
+| sol/whirlpool_swap         | 1   | **147**    | 104      | **41% faster**  |
+|                            | 4   | **282**    | 151      | **87% faster**  |
+|                            | 8   | **302**    | 164      | **84% faster**  |
+|                            | 12  | **312**    | 170      | **84% faster**  |
+| sol/hard (Meteora DLMM)    | 1   | **87**     | 68       | **28% faster**  |
+|                            | 4   | **160**    | 92       | **74% faster**  |
+|                            | 8   | **171**    | 95       | **80% faster**  |
+|                            | 12  | **177**    | 95       | **86% faster**  |
+| sol/instr+logs             | 1   | **40**     | 36       | **11% faster**  |
+|                            | 4   | **96**     | 79       | **23% faster**  |
+|                            | 8   | **119**    | 91       | **31% faster**  |
+|                            | 12  | **119**    | 95       | **25% faster**  |
+| sol/instr+balances         | 1   | **494**    | 241      | **105% faster** |
+|                            | 4   | **944**    | 444      | **113% faster** |
+|                            | 8   | **1071**   | 499      | **115% faster** |
+|                            | 12  | **1138**   | 521      | **118% faster** |
+| sol/all_blocks             | 1   | **14869**  | 1496     | **893% faster** |
+|                            | 4   | **58424**  | 5701     | **924% faster** |
+|                            | 8   | **85751**  | 10380    | **726% faster** |
+|                            | 12  | **92685**  | 13190    | **603% faster** |
 
 </details>
 

@@ -37,12 +37,18 @@ struct BlockOffset {
 /// Single-file WAL writer for one dataset.
 pub struct WalWriter {
     path: PathBuf,
-    writer: BufWriter<File>,
+    /// None only transiently during truncation/clear while swapping the file handle.
+    writer: Option<BufWriter<File>>,
     block_offsets: Vec<BlockOffset>,
     dirty: bool,
     last_flush: std::time::Instant,
     flush_interval: Duration,
     finalized_head: Option<u64>,
+    /// File byte offset at the time this writer was opened (or after truncation/clear).
+    initial_offset: u64,
+    /// Total bytes written to the BufWriter since last open/truncate/clear.
+    /// Logical file end = initial_offset + logical_offset (accurate before flush too).
+    logical_offset: u64,
 }
 
 const BUF_CAPACITY: usize = 1024 * 1024; // 1 MB
@@ -60,17 +66,33 @@ impl WalWriter {
             .open(path)
             .with_context(|| format!("opening WAL {}", path.display()))?;
 
-        let offset = file.metadata().map(|m| m.len()).unwrap_or(0);
+        let initial_offset = file.metadata().map(|m| m.len()).unwrap_or(0);
 
         Ok(Self {
             path: path.to_path_buf(),
-            writer: BufWriter::with_capacity(BUF_CAPACITY, file),
+            writer: Some(BufWriter::with_capacity(BUF_CAPACITY, file)),
             block_offsets: Vec::new(),
             dirty: false,
             last_flush: std::time::Instant::now(),
             flush_interval,
             finalized_head: None,
+            initial_offset,
+            logical_offset: 0,
         })
+    }
+
+    /// Write bytes to the buffered writer and track the logical byte offset.
+    #[inline]
+    fn write_tracked(&mut self, data: &[u8]) -> Result<()> {
+        self.writer.as_mut().unwrap().write_all(data)?;
+        self.logical_offset += data.len() as u64;
+        Ok(())
+    }
+
+    /// Current logical end offset of the file (initial + all bytes written so far).
+    #[inline]
+    fn current_offset(&self) -> u64 {
+        self.initial_offset + self.logical_offset
     }
 
     /// Append a block with all its tables.
@@ -81,32 +103,33 @@ impl WalWriter {
     ) -> Result<()> {
         let finalized = self.finalized_head.unwrap_or(0);
 
-        // Write block header
-        self.writer.write_all(&block_number.to_le_bytes())?;
-        self.writer.write_all(&finalized.to_le_bytes())?;
-        self.writer
-            .write_all(&(tables.len() as u32).to_le_bytes())?;
+        // Count only non-empty tables — the header must match what is actually written.
+        let non_empty: Vec<(&String, &RecordBatch)> = tables
+            .iter()
+            .filter(|(_, b)| b.num_rows() > 0)
+            .collect();
 
-        // Write each table
-        for (name, batch) in tables {
-            if batch.num_rows() == 0 {
-                continue;
-            }
+        // Write block header
+        self.write_tracked(&block_number.to_le_bytes())?;
+        self.write_tracked(&finalized.to_le_bytes())?;
+        self.write_tracked(&(non_empty.len() as u32).to_le_bytes())?;
+
+        // Write each non-empty table
+        for (name, batch) in &non_empty {
             let name_bytes = name.as_bytes();
-            self.writer
-                .write_all(&(name_bytes.len() as u16).to_le_bytes())?;
-            self.writer.write_all(name_bytes)?;
+            self.write_tracked(&(name_bytes.len() as u16).to_le_bytes())?;
+            self.write_tracked(name_bytes)?;
 
             // Encode RecordBatch as Arrow IPC
             let ipc_data = encode_batch_to_ipc(batch)?;
-            self.writer
-                .write_all(&(ipc_data.len() as u32).to_le_bytes())?;
-            self.writer.write_all(&ipc_data)?;
+            self.write_tracked(&(ipc_data.len() as u32).to_le_bytes())?;
+            self.write_tracked(&ipc_data)?;
         }
 
+        // Record the logical end offset immediately — accurate even before flush.
         self.block_offsets.push(BlockOffset {
             block_number,
-            end_offset: 0, // updated on flush
+            end_offset: self.current_offset(),
         });
 
         self.dirty = true;
@@ -120,10 +143,9 @@ impl WalWriter {
         if self.finalized_head.map_or(true, |c| block_number > c) {
             self.finalized_head = Some(block_number);
             // Write a standalone finalized_head marker (block with 0 tables)
-            self.writer.write_all(&0u64.to_le_bytes())?; // block_number = 0 (marker)
-            self.writer
-                .write_all(&block_number.to_le_bytes())?; // finalized_head
-            self.writer.write_all(&0u32.to_le_bytes())?; // num_tables = 0
+            self.write_tracked(&0u64.to_le_bytes())?; // block_number = 0 (marker)
+            self.write_tracked(&block_number.to_le_bytes())?; // finalized_head
+            self.write_tracked(&0u32.to_le_bytes())?; // num_tables = 0
             self.dirty = true;
             self.maybe_flush()?;
         }
@@ -150,23 +172,11 @@ impl WalWriter {
         if !self.dirty {
             return Ok(());
         }
-        self.writer.flush().context("flushing WAL")?;
-
-        // Update block offsets with actual file position
-        let offset = self
-            .writer
-            .get_ref()
-            .metadata()
-            .map(|m| m.len())
-            .unwrap_or(0);
-        for bo in self.block_offsets.iter_mut().rev() {
-            if bo.end_offset == 0 {
-                bo.end_offset = offset;
-            } else {
-                break;
-            }
-        }
-
+        self.writer
+            .as_mut()
+            .unwrap()
+            .flush()
+            .context("flushing WAL")?;
         self.dirty = false;
         self.last_flush = std::time::Instant::now();
         Ok(())
@@ -192,11 +202,8 @@ impl WalWriter {
 
         self.block_offsets.truncate(keep_count);
 
-        // Reopen file for truncation (BufWriter doesn't support set_len)
-        drop(std::mem::replace(
-            &mut self.writer,
-            BufWriter::with_capacity(BUF_CAPACITY, File::open("/dev/null").unwrap()),
-        ));
+        // Drop the BufWriter (and its underlying File) before truncating.
+        drop(self.writer.take());
 
         let file = OpenOptions::new()
             .write(true)
@@ -209,7 +216,9 @@ impl WalWriter {
             .append(true)
             .open(&self.path)
             .context("reopening WAL after truncation")?;
-        self.writer = BufWriter::with_capacity(BUF_CAPACITY, file);
+        self.writer = Some(BufWriter::with_capacity(BUF_CAPACITY, file));
+        self.initial_offset = truncate_offset;
+        self.logical_offset = 0;
 
         Ok(())
     }
@@ -218,17 +227,17 @@ impl WalWriter {
     pub fn clear(&mut self) -> Result<()> {
         self.block_offsets.clear();
 
-        drop(std::mem::replace(
-            &mut self.writer,
-            BufWriter::with_capacity(BUF_CAPACITY, File::open("/dev/null").unwrap()),
-        ));
+        // Drop the BufWriter before truncating the file.
+        drop(self.writer.take());
 
         let file = OpenOptions::new()
             .write(true)
             .truncate(true)
             .open(&self.path)
             .context("clearing WAL")?;
-        self.writer = BufWriter::with_capacity(BUF_CAPACITY, file);
+        self.writer = Some(BufWriter::with_capacity(BUF_CAPACITY, file));
+        self.initial_offset = 0;
+        self.logical_offset = 0;
         self.dirty = false;
 
         Ok(())
