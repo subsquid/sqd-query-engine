@@ -281,8 +281,9 @@ fn order_columns_by_metadata(
     }
 
     // Third pass: add any remaining columns not found in metadata (shouldn't happen, but safe)
+    let seen: HashSet<String> = result.iter().cloned().collect();
     for col in cols {
-        if !result.contains(col) {
+        if !seen.contains(col) {
             result.push(col.clone());
         }
     }
@@ -501,7 +502,7 @@ fn compile_in_list(
             // List-contains-any: values are integers (possibly JSON numbers)
             let vals: Vec<u32> = values
                 .iter()
-                .filter_map(|v| v.as_u64().map(|n| n as u32))
+                .filter_map(|v| v.as_u64().and_then(|n| u32::try_from(n).ok()))
                 .collect();
             Ok(col_list_contains_any_u32(column, vals))
         }

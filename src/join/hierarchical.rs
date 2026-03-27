@@ -119,6 +119,10 @@ pub fn find_children(
             .ok_or_else(|| anyhow!("'{}' must be a List<UInt32> column", source_address_column))?;
 
         for row in 0..batch.num_rows() {
+            // Skip null addresses — null is not a valid source (#4)
+            if addr_array.is_null(row) {
+                continue;
+            }
             let Some(gk) = make_group_key(batch, row, &key_indices)? else {
                 continue;
             };
@@ -224,6 +228,9 @@ pub fn find_parents(
             .ok_or_else(|| anyhow!("'{}' must be a List<UInt32> column", source_address_column))?;
 
         for row in 0..batch.num_rows() {
+            if addr_array.is_null(row) {
+                continue;
+            }
             let Some(gk) = make_group_key(batch, row, &key_indices)? else {
                 continue;
             };
@@ -515,6 +522,59 @@ mod tests {
 
         let total: usize = result.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total, 0);
+    }
+
+    /// Null source address must be skipped, not indexed as [] (which is a prefix
+    /// of every address and would cause the entire transaction group to match).
+    #[test]
+    fn test_find_children_null_source_address_skipped() {
+        // Source: one row with NULL instruction_address
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("block_number", DataType::UInt64, false),
+            Field::new("transaction_index", DataType::UInt32, false),
+            Field::new(
+                "instruction_address",
+                DataType::List(Arc::new(Field::new("item", DataType::UInt32, true))),
+                true, // nullable
+            ),
+            Field::new("data", DataType::Utf8, false),
+        ]));
+
+        let mut list_builder = ListBuilder::new(UInt32Builder::new())
+            .with_field(Field::new("item", DataType::UInt32, true));
+        list_builder.append_null(); // NULL address
+
+        let source = vec![RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(UInt64Array::from(vec![1])),
+                Arc::new(UInt32Array::from(vec![0])),
+                Arc::new(list_builder.finish()),
+                Arc::new(StringArray::from(vec!["null_source"])),
+            ],
+        )
+        .unwrap()];
+
+        // Target: a real child at [0, 0]
+        let target = vec![make_instruction_batch(
+            vec![1],
+            vec![0],
+            vec![vec![0, 0]],
+            vec!["child"],
+        )];
+
+        let result = find_children(
+            &source,
+            &target,
+            &["block_number", "transaction_index"],
+            "instruction_address",
+            "instruction_address",
+            false,
+        )
+        .unwrap();
+
+        let total: usize = result.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total, 0, "null source address must not match any target");
     }
 
     #[test]

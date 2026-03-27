@@ -165,7 +165,7 @@ pub(crate) fn apply_weight_limit(
 
     for &block_num in sorted_blocks {
         let block_weight = block_weights.get(&block_num).copied().unwrap_or(0);
-        cumulative_weight += block_weight;
+        cumulative_weight = cumulative_weight.saturating_add(block_weight);
 
         if selected.is_empty() || cumulative_weight <= MAX_RESPONSE_BYTES {
             selected.push(block_num);
@@ -283,10 +283,11 @@ fn accumulate_block_weights(
                 let mut row_weight = fixed_weight_per_row;
                 for wc in &wc_arrays {
                     if let Some(arr) = wc {
-                        row_weight += get_weight_value(*arr, i);
+                        row_weight = row_weight.saturating_add(get_weight_value(*arr, i));
                     }
                 }
-                *weights.entry(block_num).or_default() += row_weight;
+                let w = weights.entry(block_num).or_default();
+                *w = w.saturating_add(row_weight);
             }
         }
     }
@@ -331,10 +332,11 @@ fn accumulate_block_weights_dedup(
                 let mut row_weight = fixed_weight_per_row;
                 for wc in &wc_arrays {
                     if let Some(arr) = wc {
-                        row_weight += get_weight_value(*arr, i);
+                        row_weight = row_weight.saturating_add(get_weight_value(*arr, i));
                     }
                 }
-                *weights.entry(block_num).or_default() += row_weight;
+                let w = weights.entry(block_num).or_default();
+                *w = w.saturating_add(row_weight);
             }
         }
     }

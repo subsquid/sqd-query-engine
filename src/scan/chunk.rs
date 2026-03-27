@@ -1,7 +1,7 @@
 use super::scanner;
 use super::ChunkReader;
 use super::ScanRequest;
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use bytes::Bytes;
@@ -263,11 +263,12 @@ impl ParquetTable {
             let parquet_schema = self.metadata.file_metadata().schema_descr();
             let indices: Vec<usize> = columns
                 .iter()
-                .filter_map(|name| {
-                    // Find the column index in the parquet schema (leaf columns)
-                    self.schema.index_of(name).ok()
+                .map(|name| {
+                    self.schema
+                        .index_of(name)
+                        .map_err(|_| anyhow!("column '{}' not found in parquet schema", name))
                 })
-                .collect();
+                .collect::<Result<Vec<_>>>()?;
 
             let mask = ProjectionMask::roots(parquet_schema, indices);
             builder = builder.with_projection(mask);
@@ -275,10 +276,11 @@ impl ParquetTable {
 
         // Row group selection
         if let Some(rg_indices) = row_groups {
+            let rg_set: std::collections::HashSet<usize> = rg_indices.iter().copied().collect();
             let mut selectors = Vec::new();
             for (i, rg) in self.metadata.row_groups().iter().enumerate() {
                 let num_rows = rg.num_rows() as usize;
-                if rg_indices.contains(&i) {
+                if rg_set.contains(&i) {
                     selectors.push(RowSelector::select(num_rows));
                 } else {
                     selectors.push(RowSelector::skip(num_rows));
@@ -422,6 +424,20 @@ mod tests {
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         let rg0_rows = instructions.row_group(0).num_rows() as usize;
         assert_eq!(total_rows, rg0_rows);
+    }
+
+    /// Missing columns should error, not be silently dropped.
+    #[test]
+    fn test_read_missing_column_errors() {
+        let chunk = ParquetChunk::open(&solana_chunk_path()).unwrap();
+        let blocks = chunk.table("blocks").unwrap();
+
+        let err = blocks.read(&["number", "nonexistent_column"], None, 1000);
+        assert!(err.is_err(), "reading a missing column should return Err");
+        assert!(err
+            .unwrap_err()
+            .to_string()
+            .contains("nonexistent_column"));
     }
 
     #[test]
