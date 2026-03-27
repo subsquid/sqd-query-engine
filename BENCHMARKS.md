@@ -348,64 +348,64 @@ New query engine vs legacy query engine. Both on the same mmap'd parquet data (n
 
 | Benchmark                  | New           | Legacy    | Diff             |
 |----------------------------|---------------|-----------|------------------|
-| evm/usdc_transfers         | **10.47 ms**  | 14.57 ms  | **1.39x faster** |
-| evm/contract_calls+logs    | **18.09 ms**  | 22.26 ms  | **1.23x faster** |
-| evm/usdc_traces+statediffs | 71.64 ms      | 65.16 ms  | 1.10x slower     |
-| evm/all_blocks             | **0.18 ms**   | 1.11 ms   | **6.24x faster** |
-| sol/whirlpool_swap         | **6.51 ms**   | 10.25 ms  | **1.57x faster** |
+| evm/usdc_transfers         | **11.18 ms**  | 14.57 ms  | **1.30x faster** |
+| evm/contract_calls+logs    | **18.37 ms**  | 22.26 ms  | **1.21x faster** |
+| evm/usdc_traces+statediffs | 71.76 ms      | 65.16 ms  | 1.10x slower     |
+| evm/all_blocks             | **0.18 ms**   | 1.11 ms   | **6.10x faster** |
+| sol/whirlpool_swap         | **6.61 ms**   | 10.25 ms  | **1.55x faster** |
 | sol/hard (Meteora DLMM)    | **10.34 ms**  | 15.00 ms  | **1.45x faster** |
-| sol/instr+logs             | **24.18 ms**  | 28.15 ms  | **1.16x faster** |
-| sol/instr+balances         | **1.92 ms**   | 4.48 ms   | **2.33x faster** |
+| sol/instr+logs             | **24.65 ms**  | 28.15 ms  | **1.14x faster** |
+| sol/instr+balances         | **1.97 ms**   | 4.48 ms   | **2.27x faster** |
 | sol/all_blocks             | **0.07 ms**   | 0.79 ms   | **12.2x faster** |
 
 ### Summary
 
 | Median           | CPU=1           | CPU=4           | CPU=8           | CPU=12          |
 |------------------|-----------------|-----------------|-----------------|-----------------|
-| General queries  | **28% faster**  | **37% faster**  | **46% faster**  | **44% faster**  |
-| Only full blocks | **625% faster** | **695% faster** | **533% faster** | **440% faster** |
+| General queries  | **41% faster**  | **51% faster**  | **69% faster**  | **79% faster**  |
+| Only full blocks | **681% faster** | **751% faster** | **617% faster** | **505% faster** |
 
 <details>
 <summary>Full throughput table (requests/sec, 5s per level)</summary>
 
 | Benchmark                  | CPU | New        | Legacy   | Diff            |
 |----------------------------|-----|------------|----------|-----------------|
-| evm/usdc_transfers         | 1   | **91**     | 67       | **36% faster**  |
-|                            | 4   | **242**    | 189      | **28% faster**  |
-|                            | 8   | **349**    | 251      | **39% faster**  |
-|                            | 12  | **377**    | 270      | **40% faster**  |
-| evm/contract_calls+logs    | 1   | **50**     | 45       | **11% faster**  |
-|                            | 4   | **142**    | 104      | **37% faster**  |
-|                            | 8   | **183**    | 125      | **46% faster**  |
-|                            | 12  | **186**    | 129      | **44% faster**  |
-| evm/usdc_traces+statediffs | 1   | 13         | **15**   | 17% slower      |
-|                            | 4   | **27**     | 27       | **2% faster**   |
-|                            | 8   | **30**     | 28       | **8% faster**   |
-|                            | 12  | **29**     | 27       | **8% faster**   |
-| evm/all_blocks             | 1   | **5215**   | 1143     | **356% faster** |
-|                            | 4   | **20892**  | 3697     | **465% faster** |
-|                            | 8   | **28908**  | 6580     | **339% faster** |
-|                            | 12  | **32180**  | 8526     | **277% faster** |
-| sol/whirlpool_swap         | 1   | **147**    | 104      | **41% faster**  |
-|                            | 4   | **282**    | 151      | **87% faster**  |
-|                            | 8   | **302**    | 164      | **84% faster**  |
-|                            | 12  | **312**    | 170      | **84% faster**  |
-| sol/hard (Meteora DLMM)    | 1   | **87**     | 68       | **28% faster**  |
-|                            | 4   | **160**    | 92       | **74% faster**  |
-|                            | 8   | **171**    | 95       | **80% faster**  |
-|                            | 12  | **177**    | 95       | **86% faster**  |
-| sol/instr+logs             | 1   | **40**     | 36       | **11% faster**  |
-|                            | 4   | **96**     | 79       | **23% faster**  |
-|                            | 8   | **119**    | 91       | **31% faster**  |
-|                            | 12  | **119**    | 95       | **25% faster**  |
-| sol/instr+balances         | 1   | **494**    | 241      | **105% faster** |
-|                            | 4   | **944**    | 444      | **113% faster** |
-|                            | 8   | **1071**   | 499      | **115% faster** |
-|                            | 12  | **1138**   | 521      | **118% faster** |
-| sol/all_blocks             | 1   | **14869**  | 1496     | **893% faster** |
-|                            | 4   | **58424**  | 5701     | **924% faster** |
-|                            | 8   | **85751**  | 10380    | **726% faster** |
-|                            | 12  | **92685**  | 13190    | **603% faster** |
+| evm/usdc_transfers         | 1   | **103**    | 67       | **54% faster**  |
+|                            | 4   | **285**    | 189      | **51% faster**  |
+|                            | 8   | **425**    | 251      | **69% faster**  |
+|                            | 12  | **482**    | 270      | **79% faster**  |
+| evm/contract_calls+logs    | 1   | **58**     | 45       | **29% faster**  |
+|                            | 4   | **153**    | 104      | **47% faster**  |
+|                            | 8   | **205**    | 125      | **64% faster**  |
+|                            | 12  | **214**    | 129      | **66% faster**  |
+| evm/usdc_traces+statediffs | 1   | 14         | **15**   | 7% slower       |
+|                            | 4   | **30**     | 27       | **11% faster**  |
+|                            | 8   | **34**     | 28       | **21% faster**  |
+|                            | 12  | **35**     | 27       | **30% faster**  |
+| evm/all_blocks             | 1   | **5616**   | 1143     | **391% faster** |
+|                            | 4   | **22329**  | 3697     | **504% faster** |
+|                            | 8   | **33851**  | 6580     | **415% faster** |
+|                            | 12  | **36311**  | 8526     | **326% faster** |
+| sol/whirlpool_swap         | 1   | **151**    | 104      | **45% faster**  |
+|                            | 4   | **281**    | 151      | **86% faster**  |
+|                            | 8   | **316**    | 164      | **93% faster**  |
+|                            | 12  | **322**    | 170      | **89% faster**  |
+| sol/hard (Meteora DLMM)    | 1   | **96**     | 68       | **41% faster**  |
+|                            | 4   | **166**    | 92       | **80% faster**  |
+|                            | 8   | **183**    | 95       | **93% faster**  |
+|                            | 12  | **180**    | 95       | **89% faster**  |
+| sol/instr+logs             | 1   | **42**     | 36       | **17% faster**  |
+|                            | 4   | **103**    | 79       | **30% faster**  |
+|                            | 8   | **130**    | 91       | **43% faster**  |
+|                            | 12  | **134**    | 95       | **41% faster**  |
+| sol/instr+balances         | 1   | **519**    | 241      | **115% faster** |
+|                            | 4   | **970**    | 444      | **118% faster** |
+|                            | 8   | **1145**   | 499      | **129% faster** |
+|                            | 12  | **1196**   | 521      | **130% faster** |
+| sol/all_blocks             | 1   | **16013**  | 1496     | **970% faster** |
+|                            | 4   | **62532**  | 5701     | **997% faster** |
+|                            | 8   | **95423**  | 10380    | **819% faster** |
+|                            | 12  | **103252** | 13190    | **683% faster** |
 
 </details>
 
