@@ -16,7 +16,9 @@ fn extract_address(array: &GenericListArray<i32>, row: usize) -> Vec<u32> {
     } else if let Some(arr) = values.as_any().downcast_ref::<UInt32Array>() {
         (0..arr.len()).map(|i| arr.value(i)).collect()
     } else if let Some(arr) = values.as_any().downcast_ref::<Int32Array>() {
-        (0..arr.len()).map(|i| arr.value(i) as u32).collect()
+        (0..arr.len())
+            .filter_map(|i| u32::try_from(arr.value(i)).ok())
+            .collect()
     } else {
         Vec::new()
     }
@@ -575,6 +577,69 @@ mod tests {
 
         let total: usize = result.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total, 0, "null source address must not match any target");
+    }
+
+    /// Negative Int32 address elements must be dropped, not wrap to huge u32.
+    #[test]
+    fn test_extract_address_negative_int32_dropped() {
+        let list_field = Arc::new(Field::new("item", DataType::Int32, true));
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("block_number", DataType::UInt64, false),
+            Field::new("transaction_index", DataType::UInt32, false),
+            Field::new("addr", DataType::List(list_field.clone()), false),
+            Field::new("data", DataType::Utf8, false),
+        ]));
+
+        // Source: address [0, -1] — the -1 should be filtered out
+        let mut src_list =
+            ListBuilder::new(Int32Builder::new()).with_field((*list_field).clone());
+        src_list.values().append_value(0i32);
+        src_list.values().append_value(-1i32);
+        src_list.append(true);
+
+        let source = vec![RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(UInt64Array::from(vec![1])),
+                Arc::new(UInt32Array::from(vec![0])),
+                Arc::new(src_list.finish()),
+                Arc::new(StringArray::from(vec!["src"])),
+            ],
+        )
+        .unwrap()];
+
+        // Target: address [0] — would match [0, 4294967295] as child if -1 wrapped
+        let mut tgt_list =
+            ListBuilder::new(Int32Builder::new()).with_field((*list_field).clone());
+        tgt_list.values().append_value(0i32);
+        tgt_list.values().append_value(0i32);
+        tgt_list.append(true);
+
+        let target = vec![RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(UInt64Array::from(vec![1])),
+                Arc::new(UInt32Array::from(vec![0])),
+                Arc::new(tgt_list.finish()),
+                Arc::new(StringArray::from(vec!["tgt"])),
+            ],
+        )
+        .unwrap()];
+
+        // Source addr is [0] (after dropping -1), target is [0, 0] → target IS a child of [0]
+        let result = find_children(
+            &source,
+            &target,
+            &["block_number", "transaction_index"],
+            "addr",
+            "addr",
+            false,
+        )
+        .unwrap();
+
+        let total: usize = result.iter().map(|b| b.num_rows()).sum();
+        // [0, 0] is a child of [0] — this should match
+        assert_eq!(total, 1);
     }
 
     #[test]
