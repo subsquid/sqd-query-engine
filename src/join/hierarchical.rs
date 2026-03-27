@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use arrow::array::*;
 use arrow::compute;
 use arrow::datatypes::SchemaRef;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Extract a List value as a Vec<u32> from a row.
 /// Supports List<UInt16>, List<UInt32>, and List<Int32>.
@@ -104,7 +104,7 @@ pub fn find_children(
     }
 
     // Build an index: group_key -> set of source addresses
-    let mut source_addresses: HashMap<GroupKey, Vec<Vec<u32>>> = HashMap::new();
+    let mut source_addresses: HashMap<GroupKey, HashSet<Vec<u32>>> = HashMap::new();
 
     for batch in source_batches {
         let key_indices = resolve_indices(batch.schema_ref(), group_key_columns)?;
@@ -127,7 +127,7 @@ pub fn find_children(
                 continue;
             };
             let addr = extract_address(addr_array, row);
-            source_addresses.entry(gk).or_default().push(addr);
+            source_addresses.entry(gk).or_default().insert(addr);
         }
     }
 
@@ -213,7 +213,7 @@ pub fn find_parents(
     }
 
     // Build index: group_key -> set of source addresses
-    let mut source_addresses: HashMap<GroupKey, Vec<Vec<u32>>> = HashMap::new();
+    let mut source_addresses: HashMap<GroupKey, HashSet<Vec<u32>>> = HashMap::new();
 
     for batch in source_batches {
         let key_indices = resolve_indices(batch.schema_ref(), group_key_columns)?;
@@ -235,7 +235,7 @@ pub fn find_parents(
                 continue;
             };
             let addr = extract_address(addr_array, row);
-            source_addresses.entry(gk).or_default().push(addr);
+            source_addresses.entry(gk).or_default().insert(addr);
         }
     }
 

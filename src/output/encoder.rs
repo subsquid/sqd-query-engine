@@ -288,7 +288,10 @@ pub fn encode_bignum(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
             write_i64(buf, a.value(row) as i64);
         }
         DataType::Decimal128(_, scale) => {
-            let a = array.as_any().downcast_ref::<Decimal128Array>().unwrap();
+            let a = array
+                .as_any()
+                .downcast_ref::<Decimal128Array>()
+                .unwrap();
             let v = a.value(row);
             if *scale == 0 {
                 write_i128(buf, v);
@@ -712,9 +715,7 @@ mod tests {
 
     #[test]
     fn test_decimal128_scale_zero() {
-        let arr = Decimal128Array::from(vec![12345i128])
-            .with_precision_and_scale(38, 0)
-            .unwrap();
+        let arr = Decimal128Array::from(vec![12345i128]).with_precision_and_scale(38, 0).unwrap();
         let mut buf = Vec::new();
         encode_bignum(&arr, 0, &mut buf);
         assert_eq!(String::from_utf8(buf).unwrap(), "\"12345\"");
@@ -722,9 +723,7 @@ mod tests {
 
     #[test]
     fn test_decimal128_scale_nonzero() {
-        let arr = Decimal128Array::from(vec![12345i128])
-            .with_precision_and_scale(38, 2)
-            .unwrap();
+        let arr = Decimal128Array::from(vec![12345i128]).with_precision_and_scale(38, 2).unwrap();
         let mut buf = Vec::new();
         encode_bignum(&arr, 0, &mut buf);
         assert_eq!(String::from_utf8(buf).unwrap(), "\"123.45\"");
@@ -732,9 +731,7 @@ mod tests {
 
     #[test]
     fn test_decimal128_scale_negative_value() {
-        let arr = Decimal128Array::from(vec![-12345i128])
-            .with_precision_and_scale(38, 3)
-            .unwrap();
+        let arr = Decimal128Array::from(vec![-12345i128]).with_precision_and_scale(38, 3).unwrap();
         let mut buf = Vec::new();
         encode_bignum(&arr, 0, &mut buf);
         assert_eq!(String::from_utf8(buf).unwrap(), "\"-12.345\"");
@@ -743,9 +740,7 @@ mod tests {
     #[test]
     fn test_decimal128_scale_small_value() {
         // 5 with scale 3 → "0.005"
-        let arr = Decimal128Array::from(vec![5i128])
-            .with_precision_and_scale(38, 3)
-            .unwrap();
+        let arr = Decimal128Array::from(vec![5i128]).with_precision_and_scale(38, 3).unwrap();
         let mut buf = Vec::new();
         encode_bignum(&arr, 0, &mut buf);
         assert_eq!(String::from_utf8(buf).unwrap(), "\"0.005\"");
@@ -754,9 +749,7 @@ mod tests {
     #[test]
     fn test_decimal128_negative_small_value() {
         // -5 with scale 3 → "-0.005"
-        let arr = Decimal128Array::from(vec![-5i128])
-            .with_precision_and_scale(38, 3)
-            .unwrap();
+        let arr = Decimal128Array::from(vec![-5i128]).with_precision_and_scale(38, 3).unwrap();
         let mut buf = Vec::new();
         encode_bignum(&arr, 0, &mut buf);
         assert_eq!(String::from_utf8(buf).unwrap(), "\"-0.005\"");
