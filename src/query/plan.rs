@@ -28,7 +28,9 @@ fn numeric_scalar(n: u64, col_type: &ColumnType) -> Result<ScalarValue> {
         ColumnType::Int16 => Ok(ScalarValue::Int16(
             i16::try_from(n).map_err(|_| anyhow!("value {} out of range for Int16", n))?,
         )),
-        ColumnType::Int64 => Ok(ScalarValue::Int64(n as i64)),
+        ColumnType::Int64 => Ok(ScalarValue::Int64(
+            i64::try_from(n).map_err(|_| anyhow!("value {} out of range for Int64", n))?,
+        )),
         _ => Ok(ScalarValue::UInt64(n)),
     }
 }
@@ -198,7 +200,18 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
         // since the union of all items' predicates IS the primary scan predicate).
         for rel in &mut all_relations {
             for (rel_name, preds) in &rel_source_preds {
-                if let Some(rel_def) = table_desc.relations.get(rel_name) {
+                // Use the same alias-aware lookup as the relation creation above
+                let rel_def = table_desc
+                    .relations
+                    .get(rel_name)
+                    .or_else(|| {
+                        metadata
+                            .query_aliases
+                            .values()
+                            .find(|a| a.table == *table_name)
+                            .and_then(|a| a.relations.get(rel_name))
+                    });
+                if let Some(rel_def) = rel_def {
                     if rel_def.table == rel.target_table {
                         let kind = match rel_def.kind {
                             MetaRelationKind::Join => RelationKind::Join,
@@ -392,17 +405,25 @@ fn compile_in_list(
             ))
         }
         ColumnType::UInt8 => {
-            let vals: Vec<u8> = strings
+            let mut vals: Vec<u8> = strings
                 .iter()
                 .filter_map(|s| parse_hex(s).filter(|b| b.len() == 1).map(|b| b[0]))
                 .collect();
+            // Also accept JSON numbers
+            for v in values {
+                if let Some(n) = v.as_u64() {
+                    if let Ok(n8) = u8::try_from(n) {
+                        vals.push(n8);
+                    }
+                }
+            }
             Ok(col_in_list(
                 column,
                 Arc::new(UInt8Array::from(vals)) as Arc<dyn Array>,
             ))
         }
         ColumnType::UInt16 => {
-            let vals: Vec<u16> = strings
+            let mut vals: Vec<u16> = strings
                 .iter()
                 .filter_map(|s| {
                     parse_hex(s)
@@ -410,13 +431,20 @@ fn compile_in_list(
                         .map(|b| u16::from_be_bytes([b[0], b[1]]))
                 })
                 .collect();
+            for v in values {
+                if let Some(n) = v.as_u64() {
+                    if let Ok(n16) = u16::try_from(n) {
+                        vals.push(n16);
+                    }
+                }
+            }
             Ok(col_in_list(
                 column,
                 Arc::new(UInt16Array::from(vals)) as Arc<dyn Array>,
             ))
         }
         ColumnType::UInt32 => {
-            let vals: Vec<u32> = strings
+            let mut vals: Vec<u32> = strings
                 .iter()
                 .filter_map(|s| {
                     parse_hex(s)
@@ -424,13 +452,20 @@ fn compile_in_list(
                         .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
                 })
                 .collect();
+            for v in values {
+                if let Some(n) = v.as_u64() {
+                    if let Ok(n32) = u32::try_from(n) {
+                        vals.push(n32);
+                    }
+                }
+            }
             Ok(col_in_list(
                 column,
                 Arc::new(UInt32Array::from(vals)) as Arc<dyn Array>,
             ))
         }
         ColumnType::UInt64 => {
-            let vals: Vec<u64> = strings
+            let mut vals: Vec<u64> = strings
                 .iter()
                 .filter_map(|s| {
                     parse_hex(s).filter(|b| b.len() == 8).map(|b| {
@@ -438,6 +473,11 @@ fn compile_in_list(
                     })
                 })
                 .collect();
+            for v in values {
+                if let Some(n) = v.as_u64() {
+                    vals.push(n);
+                }
+            }
             Ok(col_in_list(
                 column,
                 Arc::new(UInt64Array::from(vals)) as Arc<dyn Array>,
@@ -856,6 +896,17 @@ mod tests {
         assert!(numeric_scalar(u64::MAX, &ColumnType::UInt32).is_err());
     }
 
+    /// Int64 scalar must reject values > i64::MAX instead of wrapping.
+    #[test]
+    fn test_numeric_scalar_int64_overflow() {
+        // u64::MAX > i64::MAX, should error
+        assert!(numeric_scalar(u64::MAX, &ColumnType::Int64).is_err());
+        // i64::MAX as u64 should work
+        assert!(numeric_scalar(i64::MAX as u64, &ColumnType::Int64).is_ok());
+        // i64::MAX + 1 should fail
+        assert!(numeric_scalar(i64::MAX as u64 + 1, &ColumnType::Int64).is_err());
+    }
+
     /// Regression: numeric scalar filters were always compiled as UInt64,
     /// causing type mismatch on UInt32 columns → zero results.
     #[test]
@@ -903,6 +954,54 @@ mod tests {
         assert!(
             total_rows > 0,
             "numeric filter on UInt32 column must match rows (was broken when always UInt64)"
+        );
+    }
+
+    /// Regression: JSON numeric arrays like [0, 1] were silently compiled to
+    /// empty IN-lists because compile_in_list only parsed string values.
+    #[test]
+    fn test_numeric_in_list_filter() {
+        let meta = solana_metadata();
+        let json = br#"{
+            "type": "solana",
+            "fromBlock": 0,
+            "fields": {
+                "instruction": { "programId": true, "transactionIndex": true }
+            },
+            "instructions": [{
+                "transactionIndex": [0, 1, 2]
+            }]
+        }"#;
+
+        let query = parse_query(json, &meta).unwrap();
+        let plan = compile(&query, &meta).unwrap();
+
+        let chunk_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/chunk");
+        let table_path = chunk_path.join("instructions.parquet");
+        let parquet_table = crate::scan::ParquetTable::open(&table_path).unwrap();
+
+        let instr_plan = &plan.table_plans[0];
+        let table_desc = meta.table("instructions").unwrap();
+
+        let output_cols: Vec<&str> = instr_plan
+            .output_columns
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
+        let pred_refs: Vec<&crate::scan::predicate::RowPredicate> =
+            instr_plan.predicates.iter().collect();
+
+        let mut request = crate::scan::ScanRequest::new(output_cols);
+        request.predicates = pred_refs;
+        request.from_block = Some(plan.from_block);
+        request.block_number_column = Some(table_desc.block_number_column.as_str());
+
+        let batches = crate::scan::scan(&parquet_table, &request).unwrap();
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+
+        assert!(
+            total_rows > 0,
+            "numeric IN-list [0, 1, 2] on UInt32 column must match rows"
         );
     }
 
@@ -964,5 +1063,72 @@ mod tests {
                 assert_eq!(col.value(i), "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc");
             }
         }
+    }
+
+    /// Alias-relation must propagate source_predicates when not all items request it.
+    #[test]
+    fn test_alias_relation_source_predicates() {
+        use crate::metadata::parse_dataset_description;
+
+        let yaml = r#"
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    sort_key: [number]
+    columns:
+      number: { type: uint64, stats: true }
+  items:
+    columns:
+      block_number: { type: uint64 }
+      transaction_index: { type: uint32 }
+      kind: { type: string }
+    item_order_keys: [transaction_index]
+  related:
+    columns:
+      block_number: { type: uint64 }
+      transaction_index: { type: uint32 }
+      data: { type: string }
+    item_order_keys: [transaction_index]
+query_aliases:
+  filteredItems:
+    table: items
+    implicit_predicates:
+      kind: ["special"]
+    relations:
+      related:
+        table: related
+        kind: join
+        key: [block_number, transaction_index]
+"#;
+        let meta = parse_dataset_description(yaml).unwrap();
+
+        // Two items: one with filter + relation, one without relation
+        let json = br#"{
+            "type": "test",
+            "fromBlock": 0,
+            "filteredItems": [
+                { "kind": ["special"], "related": true },
+                { "kind": ["other"] }
+            ]
+        }"#;
+
+        let query = parse_query(json, &meta).unwrap();
+        let plan = compile(&query, &meta).unwrap();
+
+        let items_plan = &plan.table_plans[0];
+        assert_eq!(items_plan.table, "items");
+
+        let rel = items_plan
+            .relations
+            .iter()
+            .find(|r| r.target_table == "related")
+            .expect("should have 'related' relation");
+
+        // source_predicates should be Some because only 1 of 2 items requests it
+        assert!(
+            rel.source_predicates.is_some(),
+            "alias relation must have source_predicates when not all items request it"
+        );
     }
 }

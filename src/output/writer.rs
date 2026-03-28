@@ -7,6 +7,9 @@ const FLUSH_THRESHOLD: usize = 16 * 1024; // 16 KB
 
 /// A buffered JSON array writer that streams blocks to an underlying writer.
 /// Output format: `[block1,block2,...]`
+///
+/// Intermediate flushes only happen at item boundaries (after a complete block).
+/// Complete valid JSON is only available after `finish()` is called.
 pub struct JsonArrayWriter<W: Write> {
     write: W,
     buf: Vec<u8>,
@@ -25,7 +28,9 @@ impl<W: Write> JsonArrayWriter<W> {
     }
 
     /// Begin a new item (block). Call this before writing block JSON bytes.
+    /// Flushes the previous item to the writer if the buffer exceeds the threshold.
     pub fn begin_item(&mut self) -> io::Result<()> {
+        // Flush at item boundary — buffer contains complete blocks only
         if self.buf.len() > self.flush_threshold {
             self.flush_buf()?;
         }

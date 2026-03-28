@@ -5,6 +5,24 @@ use arrow::datatypes::*;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+/// Extract a u64 from a statistics array (single-element).
+/// Parquet stores UInt64 as physical INT64, so stats arrive as Int64Array.
+fn stat_as_u64(arr: &dyn Array) -> Option<u64> {
+    if let Some(a) = arr.as_any().downcast_ref::<UInt64Array>() {
+        if a.len() > 0 { return Some(a.value(0)); }
+    }
+    if let Some(a) = arr.as_any().downcast_ref::<Int64Array>() {
+        if a.len() > 0 { return Some(a.value(0) as u64); }
+    }
+    if let Some(a) = arr.as_any().downcast_ref::<UInt32Array>() {
+        if a.len() > 0 { return Some(a.value(0) as u64); }
+    }
+    if let Some(a) = arr.as_any().downcast_ref::<Int32Array>() {
+        if a.len() > 0 { return Some((a.value(0) as u32) as u64); }
+    }
+    None
+}
+
 /// A predicate that evaluates against an Arrow array, producing a boolean mask.
 pub trait ArrayPredicate: Send + Sync {
     /// Evaluate this predicate against the given array, returning a boolean mask.
@@ -207,18 +225,19 @@ impl ArrayPredicate for EqPredicate {
 
     fn can_skip(&self, min: &dyn Array, max: &dyn Array) -> bool {
         // If value < min or value > max, then no rows can match
-        match &self.value {
-            ScalarValue::UInt64(v) => {
-                if let (Some(min_arr), Some(max_arr)) = (
-                    min.as_any().downcast_ref::<UInt64Array>(),
-                    max.as_any().downcast_ref::<UInt64Array>(),
-                ) {
-                    if min_arr.len() > 0 && max_arr.len() > 0 {
-                        return *v < min_arr.value(0) || *v > max_arr.value(0);
-                    }
-                }
-                false
+        let numeric_val = match &self.value {
+            ScalarValue::UInt64(v) => Some(*v),
+            ScalarValue::UInt32(v) => Some(*v as u64),
+            ScalarValue::UInt16(v) => Some(*v as u64),
+            ScalarValue::UInt8(v) => Some(*v as u64),
+            _ => None,
+        };
+        if let Some(val) = numeric_val {
+            if let (Some(rg_min), Some(rg_max)) = (stat_as_u64(min), stat_as_u64(max)) {
+                return val < rg_min || val > rg_max;
             }
+        }
+        match &self.value {
             ScalarValue::Utf8(v) => {
                 if let (Some(min_arr), Some(max_arr)) = (
                     min.as_any().downcast_ref::<StringArray>(),
@@ -349,72 +368,74 @@ impl ArrayPredicate for InListPredicate {
             return self.evaluate_dictionary(array, value_type.as_ref());
         }
 
-        match array.data_type() {
-            DataType::Utf8 => {
-                let Some(arr) = array.as_any().downcast_ref::<StringArray>() else {
-                    return BooleanArray::from(vec![false; array.len()]);
-                };
-                let Some(set) = self.string_set.as_ref() else {
-                    return BooleanArray::from(vec![false; array.len()]);
-                };
-                in_list_string_fast(arr, set)
+        // Try exact type match first, then fallback to compatible parquet types.
+        if let Some(arr) = array.as_any().downcast_ref::<StringArray>() {
+            if let Some(set) = self.string_set.as_ref() {
+                return in_list_string_fast(arr, set);
             }
-            DataType::UInt8 => {
-                let Some(arr) = array.as_any().downcast_ref::<UInt8Array>() else {
-                    return BooleanArray::from(vec![false; array.len()]);
-                };
-                let Some(set) = self.u8_set.as_ref() else {
-                    return BooleanArray::from(vec![false; array.len()]);
-                };
-                in_list_primitive_fast(arr, set)
-            }
-            DataType::UInt16 => {
-                let Some(arr) = array.as_any().downcast_ref::<UInt16Array>() else {
-                    return BooleanArray::from(vec![false; array.len()]);
-                };
-                let Some(set) = self.u16_set.as_ref() else {
-                    return BooleanArray::from(vec![false; array.len()]);
-                };
-                in_list_primitive_fast(arr, set)
-            }
-            DataType::UInt32 => {
-                let Some(arr) = array.as_any().downcast_ref::<UInt32Array>() else {
-                    return BooleanArray::from(vec![false; array.len()]);
-                };
-                let Some(set) = self.u32_set.as_ref() else {
-                    return BooleanArray::from(vec![false; array.len()]);
-                };
-                in_list_primitive_fast(arr, set)
-            }
-            DataType::UInt64 => {
-                let Some(arr) = array.as_any().downcast_ref::<UInt64Array>() else {
-                    return BooleanArray::from(vec![false; array.len()]);
-                };
-                let Some(set) = self.u64_set.as_ref() else {
-                    return BooleanArray::from(vec![false; array.len()]);
-                };
-                in_list_primitive_fast(arr, set)
-            }
-            DataType::Int64 => {
-                let Some(arr) = array.as_any().downcast_ref::<Int64Array>() else {
-                    return BooleanArray::from(vec![false; array.len()]);
-                };
-                let Some(set) = self.i64_set.as_ref() else {
-                    return BooleanArray::from(vec![false; array.len()]);
-                };
-                in_list_primitive_fast(arr, set)
-            }
-            DataType::FixedSizeBinary(_) => {
-                let Some(arr) = array.as_any().downcast_ref::<FixedSizeBinaryArray>() else {
-                    return BooleanArray::from(vec![false; array.len()]);
-                };
-                let Some(set) = self.fixed_binary_set.as_ref() else {
-                    return BooleanArray::from(vec![false; array.len()]);
-                };
-                in_list_fixed_binary(arr, set)
-            }
-            _ => BooleanArray::from(vec![false; array.len()]),
         }
+        if let Some(arr) = array.as_any().downcast_ref::<UInt64Array>() {
+            if let Some(set) = self.u64_set.as_ref() {
+                return in_list_primitive_fast(arr, set);
+            }
+        }
+        if let Some(arr) = array.as_any().downcast_ref::<UInt32Array>() {
+            if let Some(set) = self.u32_set.as_ref() {
+                return in_list_primitive_fast(arr, set);
+            }
+            // Fallback: u64 set → narrow to u32
+            if let Some(set) = self.u64_set.as_ref() {
+                let narrow: HashSet<u32> = set.iter().filter_map(|&v| u32::try_from(v).ok()).collect();
+                return in_list_primitive_fast(arr, &narrow);
+            }
+        }
+        if let Some(arr) = array.as_any().downcast_ref::<UInt16Array>() {
+            if let Some(set) = self.u16_set.as_ref() {
+                return in_list_primitive_fast(arr, set);
+            }
+            // Fallback: u32 set → narrow to u16
+            if let Some(set) = self.u32_set.as_ref() {
+                let narrow: HashSet<u16> = set.iter().filter_map(|&v| u16::try_from(v).ok()).collect();
+                return in_list_primitive_fast(arr, &narrow);
+            }
+            // Fallback: u64 set → narrow to u16
+            if let Some(set) = self.u64_set.as_ref() {
+                let narrow: HashSet<u16> = set.iter().filter_map(|&v| u16::try_from(v).ok()).collect();
+                return in_list_primitive_fast(arr, &narrow);
+            }
+        }
+        if let Some(arr) = array.as_any().downcast_ref::<UInt8Array>() {
+            if let Some(set) = self.u8_set.as_ref() {
+                return in_list_primitive_fast(arr, set);
+            }
+        }
+        if let Some(arr) = array.as_any().downcast_ref::<Int64Array>() {
+            if let Some(set) = self.i64_set.as_ref() {
+                return in_list_primitive_fast(arr, set);
+            }
+            // Fallback: u64 set on Int64 array (parquet physical type for UInt64)
+            if let Some(set) = self.u64_set.as_ref() {
+                let as_i64: HashSet<i64> = set.iter().map(|&v| v as i64).collect();
+                return in_list_primitive_fast(arr, &as_i64);
+            }
+        }
+        // Int32 parquet physical type for UInt32 metadata
+        if let Some(arr) = array.as_any().downcast_ref::<Int32Array>() {
+            if let Some(set) = self.u32_set.as_ref() {
+                let signed: HashSet<i32> = set.iter().map(|&v| v as i32).collect();
+                return in_list_primitive_fast(arr, &signed);
+            }
+            if let Some(set) = self.u64_set.as_ref() {
+                let signed: HashSet<i32> = set.iter().filter_map(|&v| u32::try_from(v).ok()).map(|v| v as i32).collect();
+                return in_list_primitive_fast(arr, &signed);
+            }
+        }
+        if let Some(arr) = array.as_any().downcast_ref::<FixedSizeBinaryArray>() {
+            if let Some(set) = self.fixed_binary_set.as_ref() {
+                return in_list_fixed_binary(arr, set);
+            }
+        }
+        BooleanArray::from(vec![false; array.len()])
     }
 
     fn can_skip(&self, min: &dyn Array, max: &dyn Array) -> bool {
@@ -434,20 +455,19 @@ impl ArrayPredicate for InListPredicate {
                 }
             }
         }
-        // For UInt64 IN-list
-        if let (Some(min_arr), Some(max_arr)) = (
-            min.as_any().downcast_ref::<UInt64Array>(),
-            max.as_any().downcast_ref::<UInt64Array>(),
-        ) {
-            if min_arr.len() > 0 && max_arr.len() > 0 {
-                let rg_min = min_arr.value(0);
-                let rg_max = max_arr.value(0);
-                if let Some(list) = self.values.as_any().downcast_ref::<UInt64Array>() {
-                    return (0..list.len()).all(|i| {
-                        let v = list.value(i);
-                        v < rg_min || v > rg_max
-                    });
-                }
+        // For numeric IN-lists: skip if all values fall outside [rg_min, rg_max]
+        if let (Some(rg_min), Some(rg_max)) = (stat_as_u64(min), stat_as_u64(max)) {
+            if let Some(set) = self.u64_set.as_ref() {
+                return set.iter().all(|&v| v < rg_min || v > rg_max);
+            }
+            if let Some(set) = self.u32_set.as_ref() {
+                return set.iter().all(|&v| (v as u64) < rg_min || (v as u64) > rg_max);
+            }
+            if let Some(set) = self.u16_set.as_ref() {
+                return set.iter().all(|&v| (v as u64) < rg_min || (v as u64) > rg_max);
+            }
+            if let Some(set) = self.u8_set.as_ref() {
+                return set.iter().all(|&v| (v as u64) < rg_min || (v as u64) > rg_max);
             }
         }
         false
@@ -654,10 +674,8 @@ impl ArrayPredicate for RangeGtePredicate {
         // Skip if max < value (all values in group are below threshold)
         match &self.value {
             ScalarValue::UInt64(v) => {
-                if let Some(max_arr) = max.as_any().downcast_ref::<UInt64Array>() {
-                    if max_arr.len() > 0 {
-                        return max_arr.value(0) < *v;
-                    }
+                if let Some(rg_max) = stat_as_u64(max) {
+                    return rg_max < *v;
                 }
                 false
             }
@@ -688,10 +706,8 @@ impl ArrayPredicate for RangeLtePredicate {
         // Skip if min > value (all values in group are above threshold)
         match &self.value {
             ScalarValue::UInt64(v) => {
-                if let Some(min_arr) = min.as_any().downcast_ref::<UInt64Array>() {
-                    if min_arr.len() > 0 {
-                        return min_arr.value(0) > *v;
-                    }
+                if let Some(rg_min) = stat_as_u64(min) {
+                    return rg_min > *v;
                 }
                 false
             }
@@ -776,13 +792,14 @@ impl RowPredicate {
 
     /// Evaluate the predicate on a RecordBatch, returning a boolean mask.
     /// All column predicates are ANDed together.
+    /// Missing columns are treated as all-true (no filtering).
     pub fn evaluate(&self, batch: &RecordBatch) -> BooleanArray {
         let mut result: Option<BooleanArray> = None;
 
         for col_pred in &self.columns {
-            let col = batch
-                .column_by_name(&col_pred.column)
-                .unwrap_or_else(|| panic!("column '{}' not found in batch", col_pred.column));
+            let Some(col) = batch.column_by_name(&col_pred.column) else {
+                continue; // missing column → all-true (no filtering)
+            };
             let mask = col_pred.predicate.evaluate(col.as_ref());
             result = Some(match result {
                 None => mask,
@@ -1014,6 +1031,134 @@ mod tests {
             &StringArray::from(vec!["bzzz"]) as &dyn Array,
         );
         assert!(!can_skip);
+    }
+
+    /// Row group pruning must work when parquet stores UInt64 as physical Int64.
+    #[test]
+    fn test_can_skip_uint64_with_int64_stats() {
+        let eq = EqPredicate { value: ScalarValue::UInt64(100) };
+        // Stats arrive as Int64Array (parquet physical type for UInt64)
+        let min = Int64Array::from(vec![200i64]);
+        let max = Int64Array::from(vec![300i64]);
+        assert!(eq.can_skip(&min as &dyn Array, &max as &dyn Array),
+            "value=100 outside [200,300] — should skip");
+
+        let min2 = Int64Array::from(vec![50i64]);
+        let max2 = Int64Array::from(vec![150i64]);
+        assert!(!eq.can_skip(&min2 as &dyn Array, &max2 as &dyn Array),
+            "value=100 inside [50,150] — should NOT skip");
+    }
+
+    /// InList row group pruning with Int64 stats (parquet physical for UInt64).
+    #[test]
+    fn test_in_list_can_skip_uint64_with_int64_stats() {
+        let pred = InListPredicate::from_u64s(&[10, 20]);
+        // Stats as Int64 — all values in [100, 200], our set {10, 20} is below
+        let min = Int64Array::from(vec![100i64]);
+        let max = Int64Array::from(vec![200i64]);
+        assert!(pred.can_skip(&min as &dyn Array, &max as &dyn Array));
+
+        // Stats [5, 25] — 10 and 20 are in range
+        let min2 = Int64Array::from(vec![5i64]);
+        let max2 = Int64Array::from(vec![25i64]);
+        assert!(!pred.can_skip(&min2 as &dyn Array, &max2 as &dyn Array));
+    }
+
+    /// RangeGte pruning with Int64 stats.
+    #[test]
+    fn test_range_gte_can_skip_with_int64_stats() {
+        let pred = RangeGtePredicate::new(ScalarValue::UInt64(100));
+        // max=50 as Int64 — all values below 100, should skip
+        let max = Int64Array::from(vec![50i64]);
+        assert!(pred.can_skip(&Int64Array::from(vec![0i64]) as &dyn Array, &max as &dyn Array));
+
+        // max=150 — some values >= 100, should NOT skip
+        let max2 = Int64Array::from(vec![150i64]);
+        assert!(!pred.can_skip(&Int64Array::from(vec![0i64]) as &dyn Array, &max2 as &dyn Array));
+    }
+
+    /// RangeLte pruning with Int64 stats.
+    #[test]
+    fn test_range_lte_can_skip_with_int64_stats() {
+        let pred = RangeLtePredicate::new(ScalarValue::UInt64(100));
+        // min=200 as Int64 — all values above 100, should skip
+        let min = Int64Array::from(vec![200i64]);
+        assert!(pred.can_skip(&min as &dyn Array, &Int64Array::from(vec![300i64]) as &dyn Array));
+
+        // min=50 — some values <= 100, should NOT skip
+        let min2 = Int64Array::from(vec![50i64]);
+        assert!(!pred.can_skip(&min2 as &dyn Array, &Int64Array::from(vec![300i64]) as &dyn Array));
+    }
+
+    /// InList with u64 values must evaluate correctly against Int64Array (parquet physical type).
+    #[test]
+    fn test_in_list_u64_on_int64_array() {
+        let pred = InListPredicate::from_u64s(&[10, 20, 30]);
+        // Array is Int64 (parquet physical type for UInt64)
+        let arr = Int64Array::from(vec![10i64, 15, 20, 25, 30]);
+        let mask = pred.evaluate(&arr as &dyn Array);
+        let matches: Vec<bool> = (0..mask.len()).map(|i| mask.value(i)).collect();
+        assert_eq!(matches, vec![true, false, true, false, true]);
+    }
+
+    /// RowPredicate::evaluate must treat missing columns as all-true, not panic.
+    #[test]
+    fn test_row_predicate_missing_column_no_panic() {
+        use arrow::datatypes::{Field, Schema};
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::UInt32, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(UInt32Array::from(vec![1, 2, 3]))],
+        )
+        .unwrap();
+
+        // Predicate on column "b" which doesn't exist in the batch
+        let pred = RowPredicate::new(vec![ColumnPredicate {
+            column: "b".to_string(),
+            predicate: Arc::new(InListPredicate::from_u64s(&[1])),
+        }]);
+
+        // Should NOT panic — missing columns treated as all-true
+        let mask = pred.evaluate(&batch);
+        assert_eq!(mask.len(), 3);
+        // All true because the only predicate column is missing
+        assert_eq!(mask.true_count(), 3);
+    }
+
+    /// Missing column in multi-predicate OR path must not panic either.
+    #[test]
+    fn test_or_row_predicates_missing_column() {
+        use arrow::datatypes::{Field, Schema};
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(StringArray::from(vec!["x", "y", "z"]))],
+        )
+        .unwrap();
+
+        // pred1: column "a" == "x" (exists)
+        let pred1 = RowPredicate::new(vec![ColumnPredicate {
+            column: "a".to_string(),
+            predicate: Arc::new(EqPredicate { value: ScalarValue::Utf8("x".to_string()) }),
+        }]);
+        // pred2: column "missing" (doesn't exist)
+        let pred2 = RowPredicate::new(vec![ColumnPredicate {
+            column: "missing".to_string(),
+            predicate: Arc::new(InListPredicate::from_strings(&["whatever"])),
+        }]);
+
+        let preds: Vec<&RowPredicate> = vec![&pred1, &pred2];
+        let mask = or_row_predicates(&preds, &batch);
+
+        // pred2 evaluates to all-true (missing column), OR'd with pred1
+        // → all rows match
+        assert_eq!(mask.true_count(), 3);
     }
 
     /// Regression test: or_row_predicates must use or_kleene (not or) so that

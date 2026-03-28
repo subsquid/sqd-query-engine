@@ -830,6 +830,12 @@ fn scan_row_groups(
         }
 
         if let Some(hf) = request.hierarchical_filter {
+            // Hierarchical filter and predicates are structurally mutually exclusive:
+            // predicates apply to primary scans, hierarchical filters to relation scans.
+            assert!(
+                request.predicates.is_empty(),
+                "hierarchical_filter and predicates must not be set simultaneously"
+            );
             // Two-pass approach for hierarchical filters:
             // Pass 1: Read only key columns (cheap integers), find matching row indices
             // Pass 2: Read address + data columns only for matching rows via RowSelection
@@ -1383,6 +1389,38 @@ mod tests {
             assert_eq!(batch.num_columns(), 2);
             assert!(batch.schema().field_with_name("program_id").is_err());
         }
+    }
+
+    /// hierarchical_filter and predicates must not be set simultaneously.
+    #[test]
+    #[should_panic(expected = "hierarchical_filter and predicates must not be set simultaneously")]
+    fn test_hierarchical_filter_with_predicates_panics() {
+        let table =
+            ParquetTable::open(&solana_chunk_path().join("instructions.parquet")).unwrap();
+
+        let pred = RowPredicate::new(vec![crate::scan::predicate::ColumnPredicate {
+            column: "program_id".to_string(),
+            predicate: Arc::new(InListPredicate::from_strings(&[
+                "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
+            ])),
+        }]);
+
+        // Build a minimal HierarchicalFilter from empty source batches
+        let hf = HierarchicalFilter::build(
+            &[],
+            &["block_number", "transaction_index"],
+            "instruction_address",
+            "instruction_address",
+            HierarchicalMode::Children,
+            true,
+        );
+
+        let mut request = ScanRequest::new(vec!["block_number"]);
+        request.predicates = vec![&pred];
+        request.hierarchical_filter = Some(&hf);
+
+        // This should panic due to debug_assert
+        let _ = scan(&table, &request);
     }
 
     #[test]
