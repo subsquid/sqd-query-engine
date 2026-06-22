@@ -19,7 +19,8 @@ use crate::scan::{
 use anyhow::{anyhow, Result};
 use arrow::record_batch::RecordBatch;
 use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
+use rustc_hash::FxHashSet as HashSet;
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 
@@ -402,7 +403,7 @@ pub fn execute_chunk<W: Write>(
 
         // Always read block_number column + requested output columns
         let bn_col = block_desc.block_number_column.as_str();
-        let mut block_cols: HashSet<&str> = HashSet::new();
+        let mut block_cols: HashSet<&str> = HashSet::default();
         block_cols.insert(bn_col);
         for col in &plan.block_output_columns {
             block_cols.insert(col);
@@ -420,7 +421,7 @@ pub fn execute_chunk<W: Write>(
     };
 
     // 3. Collect all block numbers that have data
-    let mut block_numbers: HashSet<u64> = HashSet::new();
+    let mut block_numbers: HashSet<u64> = HashSet::default();
 
     // From table outputs
     for (table_name, output) in &table_outputs {
