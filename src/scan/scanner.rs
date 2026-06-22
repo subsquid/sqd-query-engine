@@ -50,14 +50,42 @@ impl<'a> ScanRequest<'a> {
     }
 }
 
+/// Composite-key set with an inline fast path. The common join key is two
+/// integer columns (block_number + transaction_index = 16 bytes); packing it
+/// into a `u128` avoids a per-key heap allocation on build and a slice hash on
+/// probe. Wider or string/list keys fall back to serialized `Vec<u8>`.
+enum CompositeKeySet {
+    /// Two integer key columns, packed `(c0 << 64) | c1`.
+    Fixed16(HashSet<u128>),
+    /// Arbitrary key: serialized bytes (see `TypedKeyColumn::append_to`).
+    Wide(HashSet<Vec<u8>>),
+}
+
+impl CompositeKeySet {
+    #[inline]
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Fixed16(s) => s.is_empty(),
+            Self::Wide(s) => s.is_empty(),
+        }
+    }
+}
+
+/// Pack two normalized u64 key components into a single u128 (bijective; build
+/// and probe must agree — they both call this).
+#[inline(always)]
+fn pack16(a: u64, b: u64) -> u128 {
+    ((a as u128) << 64) | (b as u128)
+}
+
 /// A set-based filter for join key pushdown during relation scans.
 /// Filters rows to only those matching specific composite keys from a primary scan.
 /// Uses Arc-wrapped sets for cheap cloning into RowFilter closures.
 pub struct KeyFilter {
     /// Column names forming the composite key (in the target/relation table).
     pub columns: Vec<String>,
-    /// Pre-built set of serialized composite keys (Arc for cheap clone into closures).
-    key_set: Arc<HashSet<Vec<u8>>>,
+    /// Pre-built set of composite keys (Arc for cheap clone into closures).
+    key_set: Arc<CompositeKeySet>,
     /// Sorted unique block numbers for efficient row group pruning.
     sorted_blocks: Vec<u64>,
     /// Block number column name in the target table.
@@ -82,41 +110,77 @@ impl KeyFilter {
         assert_eq!(left_keys.len(), right_keys.len());
 
         let mut block_numbers = HashSet::default();
-        let mut key_set = HashSet::default();
 
-        for batch in primary_batches {
-            if batch.num_rows() == 0 {
-                continue;
-            }
-
-            // Extract block numbers for coarse filtering
-            if let Some(col) = batch.column_by_name(primary_bn_col) {
-                extract_block_numbers(col.as_ref(), &mut block_numbers);
-            }
-
-            // Extract composite keys using left_key column names
-            let typed_cols: Vec<Option<TypedKeyColumn>> = left_keys
+        // Fast path when the key is exactly two integer columns (block_number +
+        // transaction_index): pack into a u128, avoiding a per-key heap alloc.
+        let use_fixed16 = left_keys.len() == 2
+            && primary_batches
                 .iter()
-                .map(|name| {
-                    batch
-                        .column_by_name(name)
-                        .and_then(|c| TypedKeyColumn::resolve(c.as_ref()))
+                .find(|b| b.num_rows() > 0)
+                .map(|b| {
+                    left_keys.iter().all(|name| {
+                        b.column_by_name(name)
+                            .and_then(|c| TypedKeyColumn::resolve(c.as_ref()))
+                            .map(|tc| tc.is_integer())
+                            .unwrap_or(false)
+                    })
                 })
-                .collect();
+                .unwrap_or(false);
 
-            let mut key_buf = Vec::with_capacity(left_keys.len() * 8);
-            for row in 0..batch.num_rows() {
-                key_buf.clear();
-                for tc in &typed_cols {
-                    if let Some(tc) = tc {
-                        tc.append_to(&mut key_buf, row);
-                    } else {
-                        key_buf.extend_from_slice(&0u64.to_le_bytes());
+        let key_set = if use_fixed16 {
+            let mut set: HashSet<u128> = HashSet::default();
+            for batch in primary_batches {
+                if batch.num_rows() == 0 {
+                    continue;
+                }
+                if let Some(col) = batch.column_by_name(primary_bn_col) {
+                    extract_block_numbers(col.as_ref(), &mut block_numbers);
+                }
+                let c0 = batch
+                    .column_by_name(left_keys[0])
+                    .and_then(|c| TypedKeyColumn::resolve(c.as_ref()));
+                let c1 = batch
+                    .column_by_name(left_keys[1])
+                    .and_then(|c| TypedKeyColumn::resolve(c.as_ref()));
+                if let (Some(c0), Some(c1)) = (c0, c1) {
+                    for row in 0..batch.num_rows() {
+                        set.insert(pack16(c0.get_u64(row), c1.get_u64(row)));
                     }
                 }
-                key_set.insert(key_buf.clone());
             }
-        }
+            CompositeKeySet::Fixed16(set)
+        } else {
+            let mut set: HashSet<Vec<u8>> = HashSet::default();
+            for batch in primary_batches {
+                if batch.num_rows() == 0 {
+                    continue;
+                }
+                if let Some(col) = batch.column_by_name(primary_bn_col) {
+                    extract_block_numbers(col.as_ref(), &mut block_numbers);
+                }
+                let typed_cols: Vec<Option<TypedKeyColumn>> = left_keys
+                    .iter()
+                    .map(|name| {
+                        batch
+                            .column_by_name(name)
+                            .and_then(|c| TypedKeyColumn::resolve(c.as_ref()))
+                    })
+                    .collect();
+                let mut key_buf = Vec::with_capacity(left_keys.len() * 8);
+                for row in 0..batch.num_rows() {
+                    key_buf.clear();
+                    for tc in &typed_cols {
+                        if let Some(tc) = tc {
+                            tc.append_to(&mut key_buf, row);
+                        } else {
+                            key_buf.extend_from_slice(&0u64.to_le_bytes());
+                        }
+                    }
+                    set.insert(key_buf.clone());
+                }
+            }
+            CompositeKeySet::Wide(set)
+        };
 
         let mut sorted_blocks: Vec<u64> = block_numbers.iter().copied().collect();
         sorted_blocks.sort_unstable();
@@ -565,6 +629,21 @@ impl<'a> TypedKeyColumn<'a> {
         }
     }
 
+    /// True for integer key columns (eligible for the packed-u128 fast path).
+    #[inline(always)]
+    fn is_integer(&self) -> bool {
+        matches!(
+            self,
+            Self::U64(_)
+                | Self::U32(_)
+                | Self::U16(_)
+                | Self::U8(_)
+                | Self::I64(_)
+                | Self::I32(_)
+                | Self::I16(_)
+        )
+    }
+
     /// Write normalized u64 value directly into a fixed-size buffer slice.
     /// Only for integer types (used in optimized paths).
     #[inline(always)]
@@ -578,7 +657,7 @@ impl<'a> TypedKeyColumn<'a> {
 fn composite_key_in_set_mask(
     batch: &RecordBatch,
     key_columns: &[String],
-    key_set: &HashSet<Vec<u8>>,
+    key_set: &CompositeKeySet,
 ) -> BooleanArray {
     let len = batch.num_rows();
     let mut builder = BooleanBufferBuilder::new(len);
@@ -593,32 +672,34 @@ fn composite_key_in_set_mask(
         })
         .collect();
 
-    // Fast path for 2-column composite key (most common: block_number + transaction_index)
-    // Uses a fixed-size stack buffer instead of heap-allocated Vec.
-    if typed_cols.len() == 2 {
-        if let (Some(ref c0), Some(ref c1)) = (&typed_cols[0], &typed_cols[1]) {
-            let mut key_buf = [0u8; 16];
-            for row in 0..len {
-                c0.write_to_buf(&mut key_buf[..8], row);
-                c1.write_to_buf(&mut key_buf[8..16], row);
-                builder.append(key_set.contains(&key_buf[..16]));
-            }
-            return BooleanArray::new(builder.finish(), None);
-        }
-    }
-
-    // General path for arbitrary number of key columns
-    let mut key_buf = Vec::with_capacity(key_columns.len() * 8);
-    for row in 0..len {
-        key_buf.clear();
-        for typed_col in &typed_cols {
-            if let Some(tc) = typed_col {
-                tc.append_to(&mut key_buf, row);
+    match key_set {
+        // Fast path: exactly two integer columns packed as u128 (matches
+        // `KeyFilter::build`'s `pack16`). No per-row allocation, no slice hash.
+        CompositeKeySet::Fixed16(set) => {
+            if let [Some(c0), Some(c1)] = typed_cols.as_slice() {
+                for row in 0..len {
+                    builder.append(set.contains(&pack16(c0.get_u64(row), c1.get_u64(row))));
+                }
             } else {
-                key_buf.extend_from_slice(&0u64.to_le_bytes());
+                builder.append_n(len, false);
             }
         }
-        builder.append(key_set.contains(key_buf.as_slice()));
+        // General path: serialize each key column with `append_to` (matches
+        // build), reusing one scratch buffer. Correct for string/list keys.
+        CompositeKeySet::Wide(set) => {
+            let mut key_buf = Vec::with_capacity(key_columns.len() * 8);
+            for row in 0..len {
+                key_buf.clear();
+                for typed_col in &typed_cols {
+                    if let Some(tc) = typed_col {
+                        tc.append_to(&mut key_buf, row);
+                    } else {
+                        key_buf.extend_from_slice(&0u64.to_le_bytes());
+                    }
+                }
+                builder.append(set.contains(key_buf.as_slice()));
+            }
+        }
     }
 
     BooleanArray::new(builder.finish(), None)
