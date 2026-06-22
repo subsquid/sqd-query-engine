@@ -2,7 +2,7 @@ use arrow::array::*;
 use arrow::compute::kernels::boolean::{and, or_kleene};
 use arrow::compute::kernels::cmp::eq;
 use arrow::datatypes::*;
-use std::collections::HashSet;
+use rustc_hash::FxHashSet as HashSet;
 use std::sync::Arc;
 
 /// Extract a u64 from a statistics array (single-element).

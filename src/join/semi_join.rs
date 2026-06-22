@@ -3,7 +3,7 @@ use arrow::array::*;
 use arrow::compute;
 use arrow::datatypes::SchemaRef;
 use std::borrow::Borrow;
-use std::collections::HashSet;
+use rustc_hash::FxHashSet as HashSet;
 
 /// A composite key for joining on multiple columns.
 #[derive(Clone, Eq, PartialEq, Hash)]
@@ -164,7 +164,7 @@ fn write_key(buf: &mut Vec<u8>, batch: &RecordBatch, row: usize, extractors: &[T
 
 /// Build a hash set of composite keys from batches. Rows with any null key are skipped.
 fn build_key_set(batches: &[RecordBatch], key_columns: &[&str]) -> Result<HashSet<CompositeKey>> {
-    let mut set = HashSet::new();
+    let mut set = HashSet::default();
     let mut buf = Vec::with_capacity(key_columns.len() * 8);
     for batch in batches {
         let indices = resolve_key_indices(batch.schema_ref(), key_columns)?;
