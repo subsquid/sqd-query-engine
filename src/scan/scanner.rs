@@ -11,7 +11,8 @@ use parquet::arrow::arrow_reader::{
 };
 use parquet::arrow::ProjectionMask;
 use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
+use rustc_hash::FxHashSet as HashSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// A scan request: which columns to read, what predicates to apply.
@@ -80,8 +81,8 @@ impl KeyFilter {
     ) -> Self {
         assert_eq!(left_keys.len(), right_keys.len());
 
-        let mut block_numbers = HashSet::new();
-        let mut key_set = HashSet::new();
+        let mut block_numbers = HashSet::default();
+        let mut key_set = HashSet::default();
 
         for batch in primary_batches {
             if batch.num_rows() == 0 {
@@ -627,7 +628,7 @@ fn composite_key_in_set_mask(
 /// Returns filtered RecordBatches with only the output columns.
 pub fn scan(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<RecordBatch>> {
     // 1. Determine all columns we need to read (output + predicate + block range)
-    let mut all_columns: HashSet<&str> = HashSet::new();
+    let mut all_columns: HashSet<&str> = HashSet::default();
     for col in &request.output_columns {
         all_columns.insert(col);
     }
@@ -988,7 +989,7 @@ fn scan_hierarchical_two_pass(
     let parquet_schema = table.metadata().file_metadata().schema_descr();
 
     // Collect all columns needed: output + key + address + block range
-    let mut all_columns: HashSet<&str> = HashSet::new();
+    let mut all_columns: HashSet<&str> = HashSet::default();
     for col in &request.output_columns {
         all_columns.insert(col);
     }

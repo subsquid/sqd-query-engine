@@ -1,7 +1,7 @@
 use arrow::array::*;
 use arrow::record_batch::RecordBatch;
 use rustc_hash::FxHashMap;
-use std::collections::HashSet;
+use rustc_hash::FxHashSet as HashSet;
 
 /// Typed block number reader — downcasts once per column, reads per row without branching.
 /// Parquet stores UInt32/UInt64 as Int32/Int64 physical types, so Int32 is reinterpreted
