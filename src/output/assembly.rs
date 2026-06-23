@@ -9,7 +9,9 @@ use crate::output::row_writer::{
     resolve_grouped_writers, resolve_sort_columns, resolve_writers, write_header,
     write_merged_table_items, IndexedBatches,
 };
-use crate::output::weight::{apply_weight_limit, TableOutput};
+use crate::output::weight::{
+    apply_weight_limit, weight_cutoff_block, weight_scan_columns, TableOutput,
+};
 use crate::output::writer::JsonArrayWriter;
 use crate::query::{Plan, RelationKind};
 use crate::scan::predicate::{evaluate_predicates_on_batch, RowPredicate};
@@ -94,10 +96,52 @@ pub fn execute_chunk<W: Write>(
         let output_col_refs: Vec<&str> = output_cols.iter().map(|s| s.as_str()).collect();
         let pred_refs: Vec<&RowPredicate> = table_plan.predicates.iter().collect();
 
+        // Two-phase scan for large single-table full scans: a cheap narrow scan
+        // (block number + weight columns) finds the response-budget block cutoff,
+        // so the real scan below decodes wide data columns only for rows that will
+        // actually be emitted. Restricted to the single-source, unfiltered,
+        // non-include-all-blocks case where the cutoff depends solely on this
+        // table; the exact, header-aware `apply_weight_limit` still runs later and
+        // performs the precise trim, so the output is byte-for-byte unchanged.
+        let mut effective_to_block = plan.to_block;
+        // Engage the two-phase scan only for a genuine single-table full scan:
+        // one table, no relations, not include-all-blocks, and no *real* row
+        // filter (an empty selector `{}` compiles to a trivial predicate with no
+        // columns). Selective queries are left on the original path — their
+        // result rarely hits the budget, so a phase-1 pre-scan would be pure
+        // overhead.
+        let single_full_scan = plan.table_plans.len() == 1
+            && table_plan.relations.is_empty()
+            && !plan.include_all_blocks
+            && table_plan.predicates.iter().all(|p| p.columns.is_empty());
+        if single_full_scan {
+            // Narrow projection = block number + data-dependent weight columns
+            // (the `*_size` companions) — never the wide data columns.
+            let wcols = weight_scan_columns(&table_plan.output_columns, table_desc);
+            let wcol_refs: Vec<&str> = wcols.iter().map(|s| s.as_str()).collect();
+            let mut narrow_req = ScanRequest::new(wcol_refs);
+            narrow_req.predicates = pred_refs.clone();
+            narrow_req.from_block = Some(plan.from_block);
+            narrow_req.to_block = plan.to_block;
+            narrow_req.block_number_column = Some(table_desc.block_number_column.as_str());
+
+            let t_phase1 = timer!();
+            let narrow_batches = chunk.scan(&table_plan.table, &narrow_req)?;
+            if let Some(cutoff) =
+                weight_cutoff_block(&narrow_batches, &table_plan.output_columns, table_desc)
+            {
+                effective_to_block = Some(match plan.to_block {
+                    Some(tb) => tb.min(cutoff),
+                    None => cutoff,
+                });
+            }
+            elapsed!(t_phase1, "weight pre-scan", "cutoff -> {:?}", effective_to_block);
+        }
+
         let mut request = ScanRequest::new(output_col_refs);
         request.predicates = pred_refs;
         request.from_block = Some(plan.from_block);
-        request.to_block = plan.to_block;
+        request.to_block = effective_to_block;
         request.block_number_column = Some(table_desc.block_number_column.as_str());
 
         let t_primary = timer!();
@@ -615,7 +659,11 @@ pub fn execute_chunk<W: Write>(
 
     // 6. Write each block as JSON (sequential, directly into output buffer)
     // See decisions/002: sequential wins at production concurrency (CPU=8+).
+    // Reusable per-block row-ref scratch buffers (sort + multi-source merge),
+    // allocated once and cleared per block to avoid per-block allocations.
     let t_json = timer!();
+    let mut sort_scratch: Vec<(usize, usize)> = Vec::new();
+    let mut merge_scratch: Vec<(usize, usize, usize)> = Vec::new();
     for &block_num in &selected_blocks {
         json_writer.begin_item()?;
         let buf = json_writer.buf_mut();
@@ -646,6 +694,8 @@ pub fn execute_chunk<W: Write>(
                 &all_resolved,
                 &all_grouped_resolved,
                 json_prefix,
+                &mut sort_scratch,
+                &mut merge_scratch,
             );
         }
 
