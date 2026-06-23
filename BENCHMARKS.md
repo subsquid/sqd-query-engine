@@ -1,9 +1,85 @@
 # Benchmarks
 
-Data: R2 production chunks (EVM: 224 blocks, ~70 MB; Solana: 48 blocks, ~27 MB).
-Jemalloc allocator, pre-cached ParquetTable.
+Data: R2 production chunks. The EVM suite runs a **chunk matrix**:
 
-## x86_64: Intel Xeon E-2136 (6C/12T @ 3.3GHz), 64GB DDR4, Linux
+- **small** — `data/evm/chunk`, 224 blocks (24550597–24550820), ~70 MB
+- **big** — `data/evm/big`, 1592 blocks (22562400–22563991), ~287 MB (dense,
+  USDC-active; downloaded, gitignored — the matrix auto-skips it if absent)
+
+Solana: 48 blocks, ~27 MB. Jemalloc allocator, pre-cached ParquetTable. Chunk
+paths override via `$EVM_CHUNK` (small), `$EVM_CHUNK_BIG` (big), `$SOL_CHUNK`.
+
+The legacy engine (`sqd-query`) runs the **identical** query JSON on the
+**identical** chunk via `--features legacy-query`; the RPC outputs are verified
+byte-identical between engines (`cargo bench --bench profile --features
+legacy-query -- rpc/getLogs --compare`).
+
+## Query catalog
+
+All RPC queries reproduce the real Ethereum JSON-RPC method semantics and run
+on `data/evm/chunk` (block 24550620 for the single-block calls; getLogs windows
+anchored there).
+
+| Name | RPC / indexer equivalent | Shape |
+|------|--------------------------|-------|
+| `evm/usdc_transfers`            | indexer log scan                  | USDC `Transfer` logs, whole chunk |
+| `evm/contract_calls+logs`       | indexer tx + join                 | USDT txs + their logs |
+| `evm/usdc_traces+diffs`         | indexer multi-table               | USDC traces + state diffs + tx |
+| `evm/sparse`                    | empty-result floor                | all logs of a non-existent contract (0 rows) |
+| `evm/all_blocks`                | full scan                         | every block header (`includeAllBlocks`) |
+| `evm/all_txs`                   | full scan                         | every transaction (`transactions:[{}]`) |
+| `evm/all_logs`                  | full scan                         | every log (`logs:[{}]`) |
+| `evm/all_traces`                | full scan                         | every trace (`traces:[{}]`) |
+| `evm/all_statediffs`            | full scan                         | every state diff (`stateDiffs:[{}]`) |
+| `rpc/getBlockByNumber`          | `eth_getBlockByNumber(N, true)`   | one block, header + full tx objects (~17 cols) |
+| `rpc/getBlockByNumber:txHashes` | `eth_getBlockByNumber(N, false)`  | one block, header + tx **hashes** only |
+| `rpc/getBlockReceipts`          | `eth_getBlockReceipts(N)`         | one block, all tx receipts + their logs |
+| `rpc/trace_block`               | `trace_block(N)`                  | one block, **all** traces (call/create/suicide/reward), full action+result fields |
+| `rpc/getLogs:1blk`              | `eth_getLogs` (1-block range)     | USDC `Transfer` logs, 1 block (63 logs) |
+| `rpc/getLogs:10blk`             | `eth_getLogs` (10-block range)    | USDC `Transfer` logs, 10 blocks (729 logs) |
+| `rpc/getLogs:100blk`            | `eth_getLogs` (100-block range)   | USDC `Transfer` logs, 100 blocks (7784 logs) |
+| `sol/whirlpool_swap`            | indexer                           | Whirlpool swaps + inner ix + tx |
+| `sol/hard`                      | indexer                           | Meteora DLMM, all relations |
+| `sol/instr+logs`                | indexer                           | Jupiter ix + logs |
+| `sol/instr+balances`            | indexer                           | Whirlpool ix + balance changes |
+
+### What the RPC numbers reveal
+
+EVM tables are sorted by **filter columns** (logs: `topic0 → address →
+block_number`; txs: `sighash → to → block_number`), *not* by `block_number`.
+Two consequences fall straight out of the measurements:
+
+- **`getLogs` is filter-aligned and scales with range.** Row-group statistics on
+  `topic0`/`address` prune almost everything, so a 1-block fetch is ~0.5 ms and
+  the cost grows with the window (1 → 10 → 100 blocks).
+- **Single-block calls can't prune by block.** `getBlockByNumber` /
+  `getBlockReceipts` select one block with no filter-column predicate, so within
+  every row group `block_number` spans the whole chunk and *no* row group is
+  pruned — every row group is scanned to gather one block's rows.
+- **The single-block cost is dominated by column decode, not the scan itself.**
+  `getBlockByNumber:txHashes` (header + hashes, 2 tx columns) is **~4× faster**
+  than the full variant (~17 tx columns) on the *same* scan — column projection
+  is what pays off. So full `getBlockByNumber`/`getBlockReceipts` are the
+  expensive RPC calls because they decode every column of every tx in the block —
+  and `trace_block` is the heaviest of all (14.9 ms), because the traces table is
+  the widest in the chunk and it decodes the full call/create/result field set.
+
+Both engines pay the layout cost; the new engine pays it 1.4×–4.6× more
+efficiently across every RPC call. Note a `block_number` *index can't* fix this:
+because `block_number` is the 3rd sort key (not a prefix) it's smeared uniformly
+across every row group and page, so row-group stats, the page index, and even a
+row-position posting list all fail to prune (a block's rows are physically
+scattered, and parquet decodes at page granularity). The only real lever is a
+separate **block-clustered storage tier** at ingestion (writer-side, ~2× storage,
+conflicts with the filter-optimized layout) — justified only if single-block RPC
+becomes a first-class workload. Otherwise the win is making the unavoidable scan
+cheap (column projection + RowFilter deferral, already done; P1 JSON; LZ4 codec).
+
+## Prior run — x86_64: Intel Xeon E-2136 (6C/12T @ 3.3GHz), 64GB DDR4, Linux
+
+> Historical numbers from an **earlier query set** (includes the since-removed
+> `all_blocks` full-scan bench, no RPC queries). See the Apple M2 Pro section
+> below for the current RPC-inclusive comparison.
 
 ### Latency (single-threaded, median)
 
@@ -69,80 +145,237 @@ Jemalloc allocator, pre-cached ParquetTable.
 
 ---
 
-## Apple M2 Pro (12-core), 32GB, macOS
+## Apple M2 Pro (12-core), 32GB, macOS — current
 
-### Latency (single-threaded, median, divan 20x100)
+Current working-tree build, RPC-inclusive query set. New = `sqd-query-engine`,
+Legacy = `sqd-query`; identical query JSON and chunk for both. "New vs legacy"
+is `legacy / new` (>1 means the new engine is faster).
 
-| Benchmark                  | New          | Legacy   | Diff             |
-|----------------------------|--------------|----------|------------------|
-| evm/usdc_transfers         | **7.48 ms**  | 8.04 ms  | **1.07x faster** |
-| evm/contract_calls+logs    | **13.23 ms** | 13.28 ms | **~same**        |
-| evm/usdc_traces+statediffs | 52.11 ms     | 42.11 ms | 1.24x slower     |
-| evm/all_blocks             | **0.14 ms**  | 0.42 ms  | **3.00x faster** |
-| sol/whirlpool_swap         | 5.39 ms      | 2.28 ms  | 2.36x slower     |
-| sol/hard (Meteora DLMM)    | **9.35 ms**  | 9.38 ms  | **~same**        |
-| sol/instr+balances         | **1.91 ms**  | 2.90 ms  | **1.52x faster** |
-| sol/all_blocks             | **0.05 ms**  | 0.27 ms  | **5.40x faster** |
+### Latency (single-threaded, median of 20 samples × 5 iters)
+
+| Benchmark                         | New          | Legacy    | New vs legacy    |
+|-----------------------------------|--------------|-----------|------------------|
+| evm/usdc_transfers                | **6.64 ms**  | 7.90 ms   | **1.19× faster** |
+| evm/contract_calls+logs           | **11.13 ms** | 12.95 ms  | **1.16× faster** |
+| evm/usdc_traces+diffs             | 44.01 ms     | 40.68 ms  | 1.08× slower     |
+| **rpc/getBlockByNumber**          | **5.67 ms**  | 11.13 ms  | **1.96× faster** |
+| **rpc/getBlockByNumber:txHashes** | **1.28 ms**  | 5.94 ms   | **4.63× faster** |
+| **rpc/getBlockReceipts**          | **6.19 ms**  | 17.10 ms  | **2.76× faster** |
+| **rpc/trace_block**               | **14.88 ms** | 47.53 ms  | **3.19× faster** |
+| **rpc/getLogs:1blk**              | **0.51 ms**  | 2.36 ms   | **4.65× faster** |
+| **rpc/getLogs:10blk**             | **0.81 ms**  | 2.66 ms   | **3.26× faster** |
+| **rpc/getLogs:100blk**            | **4.07 ms**  | 5.67 ms   | **1.39× faster** |
+| sol/whirlpool_swap                | **4.87 ms**  | 7.00 ms   | **1.44× faster** |
+| sol/hard (Meteora DLMM)           | **8.36 ms**  | 10.91 ms  | **1.30× faster** |
+| sol/instr+logs                    | **15.69 ms** | 17.30 ms  | **1.10× faster** |
+| sol/instr+balances                | **1.62 ms**  | 3.52 ms   | **2.17× faster** |
+
+The new engine is faster on every RPC call (1.4×–4.6×). Two things stand out:
+`getBlockByNumber` with tx hashes (1.28 ms) is **4.4× cheaper** than with full
+tx objects (5.67 ms) — column projection, not block lookup, dominates the cost;
+and `getLogs` scales cleanly with range (0.51 → 0.81 → 4.07 ms for 1/10/100
+blocks). The only regression is the heavy multi-table `usdc_traces+diffs`
+(1.08× slower).
 
 ### Throughput (requests/sec, 5s per concurrency level)
 
-| Benchmark                  | CPU | New       | Legacy  | Diff            |
-|----------------------------|-----|-----------|---------|-----------------|
-| evm/usdc_transfers         | 1   | **147**   | 124     | **18% faster**  |
-|                            | 4   | **487**   | 357     | **36% faster**  |
-|                            | 8   | **735**   | 503     | **46% faster**  |
-|                            | 12  | **775**   | 551     | **41% faster**  |
-| evm/contract_calls+logs    | 1   | **80**    | 75      | **7% faster**   |
-|                            | 4   | **231**   | 159     | **45% faster**  |
-|                            | 8   | **292**   | 184     | **59% faster**  |
-|                            | 12  | **290**   | 189     | **53% faster**  |
-| evm/usdc_traces+statediffs | 1   | 20        | **24**  | 17% slower      |
-|                            | 4   | **40**    | 31      | **27% faster**  |
-|                            | 8   | **47**    | 30      | **57% faster**  |
-|                            | 12  | **48**    | 33      | **45% faster**  |
-| evm/all_blocks             | 1   | **7515**  | 2381    | **216% faster** |
-|                            | 4   | **26312** | 9035    | **191% faster** |
-|                            | 8   | **31128** | 14075   | **121% faster** |
-|                            | 12  | **34676** | 17904   | **94% faster**  |
-| sol/whirlpool_swap         | 1   | 180       | **439** | 59% slower      |
-|                            | 4   | **356**   | 250     | **42% faster**  |
-|                            | 8   | **389**   | 272     | **43% faster**  |
-|                            | 12  | **409**   | 284     | **44% faster**  |
-| sol/hard (Meteora DLMM)    | 1   | **114**   | 107     | **7% faster**   |
-|                            | 4   | **200**   | 143     | **40% faster**  |
-|                            | 8   | **221**   | 146     | **51% faster**  |
-|                            | 12  | **228**   | 150     | **52% faster**  |
-| sol/instr+logs             | 1   | **60**    | 56      | **6% faster**   |
-|                            | 4   | **179**   | 145     | **23% faster**  |
-|                            | 8   | **228**   | 145     | **57% faster**  |
-|                            | 12  | **242**   | 146     | **66% faster**  |
-| sol/instr+balances         | 1   | **517**   | 345     | **50% faster**  |
-|                            | 4   | **1090**  | 719     | **52% faster**  |
-|                            | 8   | **1226**  | 719     | **71% faster**  |
-|                            | 12  | **1210**  | 738     | **64% faster**  |
-| sol/all_blocks             | 1   | **20710** | 3704    | **459% faster** |
-|                            | 4   | **49927** | 26872   | **86% faster**  |
-|                            | 8   | **47267** | 26872   | **76% faster**  |
-|                            | 12  | **42507** | 31831   | **34% faster**  |
+| Benchmark                       | CPU | New      | Legacy | New/Leg   |
+|---------------------------------|-----|----------|--------|-----------|
+| evm/usdc_transfers              | 1   | **156**  | 135    | **1.15×** |
+|                                 | 4   | **479**  | 425    | **1.13×** |
+|                                 | 8   | **726**  | 625    | **1.16×** |
+|                                 | 12  | **866**  | 722    | **1.20×** |
+| evm/contract_calls+logs         | 1   | **89**   | 76     | **1.17×** |
+|                                 | 4   | **263**  | 215    | **1.22×** |
+|                                 | 8   | **366**  | 269    | **1.36×** |
+|                                 | 12  | **386**  | 296    | **1.31×** |
+| evm/usdc_traces+diffs           | 1   | 22       | 24     | 0.94×     |
+|                                 | 4   | **47**   | 43     | **1.10×** |
+|                                 | 8   | **56**   | 44     | **1.26×** |
+|                                 | 12  | **59**   | 44     | **1.34×** |
+| **rpc/getBlockByNumber**        | 1   | **177**  | 96     | **1.84×** |
+|                                 | 4   | **247**  | 193    | **1.28×** |
+|                                 | 8   | **263**  | 224    | **1.17×** |
+|                                 | 12  | **265**  | 234    | **1.13×** |
+| **rpc/getBlockByNumber:txHashes** | 1 | **770**  | 163    | **4.72×** |
+|                                 | 4   | **1245** | 533    | **2.34×** |
+|                                 | 8   | **1324** | 707    | **1.87×** |
+|                                 | 12  | **1355** | 773    | **1.75×** |
+| **rpc/getBlockReceipts**        | 1   | **160**  | 59     | **2.73×** |
+|                                 | 4   | **207**  | 119    | **1.74×** |
+|                                 | 8   | **205**  | 126    | **1.63×** |
+|                                 | 12  | **197**  | 111    | **1.78×** |
+| **rpc/trace_block**             | 1   | **66**   | 21     | **3.18×** |
+|                                 | 4   | **78**   | 47     | **1.64×** |
+|                                 | 8   | **80**   | 56     | **1.43×** |
+|                                 | 12  | **81**   | 57     | **1.41×** |
+| **rpc/getLogs:1blk**            | 1   | **2014** | 445    | **4.53×** |
+|                                 | 4   | **5756** | 1381   | **4.17×** |
+|                                 | 8   | **6427** | 1880   | **3.42×** |
+|                                 | 12  | **6923** | 2101   | **3.30×** |
+| **rpc/getLogs:10blk**           | 1   | **1182** | 396    | **2.99×** |
+|                                 | 4   | **3985** | 1215   | **3.28×** |
+|                                 | 8   | **4633** | 1777   | **2.61×** |
+|                                 | 12  | **5118** | 2005   | **2.55×** |
+| **rpc/getLogs:100blk**          | 1   | **248**  | 184    | **1.35×** |
+|                                 | 4   | **877**  | 631    | **1.39×** |
+|                                 | 8   | **1348** | 868    | **1.55×** |
+|                                 | 12  | **1323** | 933    | **1.42×** |
+| sol/whirlpool_swap              | 1   | **207**  | 151    | **1.37×** |
+|                                 | 4   | **429**  | 268    | **1.60×** |
+|                                 | 8   | **481**  | 306    | **1.57×** |
+|                                 | 12  | **456**  | 313    | **1.45×** |
+| sol/hard (Meteora DLMM)         | 1   | **121**  | 95     | **1.28×** |
+|                                 | 4   | **228**  | 144    | **1.59×** |
+|                                 | 8   | **260**  | 148    | **1.75×** |
+|                                 | 12  | **263**  | 152    | **1.73×** |
+| sol/instr+logs                  | 1   | **64**   | 59     | **1.09×** |
+|                                 | 4   | **194**  | 153    | **1.27×** |
+|                                 | 8   | **260**  | 186    | **1.40×** |
+|                                 | 12  | **257**  | 171    | **1.51×** |
+| sol/instr+balances              | 1   | **614**  | 289    | **2.13×** |
+|                                 | 4   | **1274** | 717    | **1.78×** |
+|                                 | 8   | **1505** | 863    | **1.74×** |
+|                                 | 12  | **1317** | 879    | **1.50×** |
 
 ### Summary
 
-| Median           | CPU=1           | CPU=4           | CPU=8           | CPU=12          |
-|------------------|-----------------|-----------------|-----------------|-----------------|
-| General queries  | **7% faster**   | **40% faster**  | **53% faster**  | **49% faster**  |
-| Only full blocks | **337% faster** | **139% faster** | **99% faster**  | **64% faster**  |
+The new engine wins **every** RPC benchmark at every concurrency level. The
+cheapest RPC calls — single-block `getLogs` (up to 6.9k rps) and
+`getBlockByNumber:txHashes` (up to 1.4k rps) — are also where it leads by the
+widest margin (3–5×), because legacy's per-query fixed overhead dominates there.
+Full-block `getBlockByNumber`/`getBlockReceipts` saturate early (each request
+already fans out across cores internally), so their rps is flat across
+concurrency but still 1.1–2.7× ahead of legacy.
+
+---
+
+## Memory (heap usage)
+
+Measured with a counting allocator wrapping jemalloc (`cargo bench --bench
+memory`). Two metrics per query: **alloc/query** = bytes allocated per request
+(allocator churn / pressure), and **peak heap @ CPU=8** = peak simultaneously-live
+heap while serving 8 concurrent requests (working set). Requested bytes, mmap'd
+parquet excluded; the chunk is loaded during warmup so the peak is per-query
+working memory.
+
+| Benchmark                       | new a/q | leg a/q | new peak@8 | leg peak@8 |
+|---------------------------------|---------|---------|------------|------------|
+| evm/usdc_transfers              | 50 MB   | 55 MB   | 157 MB     | 159 MB     |
+| evm/contract_calls+logs         | 87 MB   | 107 MB  | 160 MB ⚠️  | 110 MB     |
+| evm/usdc_traces+diffs           | 642 MB  | 678 MB  | 343 MB ⚠️  | 209 MB     |
+| rpc/getBlockByNumber            | 160 MB  | 163 MB  | 19.9 MB    | 19.5 MB    |
+| rpc/getBlockByNumber:txHashes   | 34 MB   | 36 MB   | **6.4 MB** | 10.8 MB    |
+| rpc/getBlockReceipts            | 196 MB  | 196 MB  | **13 MB**  | 22 MB      |
+| rpc/trace_block                 | 580 MB  | 614 MB  | **30 MB**  | 57 MB      |
+| rpc/getLogs:1blk                | 6.3 MB  | 14 MB   | **4.6 MB** | 18 MB      |
+| rpc/getLogs:10blk               | 8.0 MB  | 16 MB   | **8.1 MB** | 18 MB      |
+| rpc/getLogs:100blk              | 30 MB   | 36 MB   | 70 MB ⚠️   | 58 MB      |
+| sol/whirlpool_swap              | 65 MB   | 74 MB   | **15 MB**  | 59 MB      |
+| sol/hard (Meteora DLMM)         | 143 MB  | 164 MB  | **19 MB**  | 59 MB      |
+| sol/instr+logs                  | 116 MB  | 120 MB  | 172 MB ⚠️  | 104 MB     |
+| sol/instr+balances              | 23 MB   | 30 MB   | **7.9 MB** | 22 MB      |
+
+Two findings:
+
+- **Allocator churn (alloc/query): the new engine allocates less on every
+  query.** Note the huge read-amplification on single-block calls — 160 MB
+  allocated to produce a 0.3 MB `getBlockByNumber` (decode every row group to
+  find one block). Column projection cuts it ~5×: `:txHashes` is 34 MB vs 160 MB.
+- **Peak working set (peak@8): a speed/memory trade-off.** On RPC and light
+  queries the new engine holds **2–4× less** simultaneous heap (e.g. trace_block
+  30 vs 57 MB, getLogs:1blk 4.6 vs 18 MB, sol/hard 19 vs 59 MB). But on the heavy
+  multi-table indexer queries (⚠️ `usdc_traces+diffs`, `contract_calls+logs`,
+  `instr+logs`, `getLogs:100blk`) it holds **1.4–1.65× more** — because it fans
+  each query across cores, so many row-group decode buffers are live at once.
+  That intra-query parallelism is exactly what buys the throughput; the cost is a
+  larger transient working set on the heaviest queries.
+
+---
+
+## Chunk matrix + full-scan family (Apple M2 Pro, 2026-06-23)
+
+The EVM latency/throughput/memory suites now run every query across the chunk
+matrix (small + big), and add a **full-scan family** (`all_blocks/all_txs/
+all_logs/all_traces/all_statediffs`) — one unfiltered `[{}]` scan per wide
+table. These exercise the **response-budget two-phase scan**: a single-table
+full scan with no real filter first does a cheap *narrow* pre-scan (block number
++ the `*_size` weight columns) to find the 20 MB block cutoff, then scans the
+wide data columns only up to that cutoff. Output is byte-identical to legacy
+(all 5 × 2 chunks verified `--compare`).
+
+### Latency (median of 20×5), new vs legacy
+
+| Benchmark | small new | small leg | big new | big leg | big ratio |
+|-----------|-----------|-----------|---------|---------|-----------|
+| evm/usdc_transfers      | 7.0 ms  | 8.2 ms  | 18.3 ms  | 19.4 ms  | **1.06×** |
+| evm/contract_calls+logs | 10.6 ms | 13.9 ms | 21.4 ms  | 27.5 ms  | **1.29×** |
+| evm/usdc_traces+diffs   | 45.6 ms | 43.8 ms | 111.9 ms | 91.0 ms  | 0.81× ⚠️  |
+| evm/sparse              | 0.48 ms | 1.38 ms | 0.95 ms  | 1.94 ms  | **2.04×** |
+| evm/all_blocks          | 0.15 ms | 0.76 ms | 0.68 ms  | 1.38 ms  | **2.0×**  |
+| evm/all_txs             | 30.0 ms | 33.7 ms | 41.7 ms  | 52.8 ms  | **1.27×** |
+| evm/all_logs            | 36.6 ms | 38.3 ms | 56.1 ms  | 85.3 ms  | **1.52×** |
+| evm/all_traces          | 59.6 ms | 67.6 ms | 114.3 ms | 209.2 ms | **1.83×** |
+| evm/all_statediffs      | 38.5 ms | 58.1 ms | 77.3 ms  | 166.5 ms | **2.15×** |
+
+The new engine wins the entire full-scan class on both chunks. The lone
+regression remains the heavy multi-table `usdc_traces+diffs`.
+
+### Memory on the big chunk (alloc/query, peak heap @ CPU=8)
+
+| Benchmark | new a/q | leg a/q | new peak | leg peak |
+|-----------|---------|---------|----------|----------|
+| evm/all_blocks        | 4 MB     | 5 MB     | 11 MB   | 8 MB   |
+| evm/all_txs           | 667 MB   | 661 MB   | 486 MB  | 355 MB |
+| evm/all_logs          | 721 MB   | 717 MB   | 522 MB  | 396 MB |
+| evm/all_traces        | 1988 MB  | 1909 MB  | 435 MB  | 501 MB |
+| evm/all_statediffs    | **465 MB** | 587 MB | **518 MB** | 622 MB |
+| evm/usdc_traces+diffs | 2488 MB ⚠️ | 1782 MB | 672 MB ⚠️ | 214 MB |
+
+**State-diff two-phase win.** Before the optimization `all_statediffs` on the
+big chunk allocated **2438 MB** / peaked at **5405 MB** (8.5× worse than legacy)
+— it scanned, decoded and indexed all 2.06 M rows, then `apply_weight_limit`
+discarded ~97 %. The two-phase scan cut that to 465 MB / 518 MB (**5.2× / 10.4×**
+less), and latency from 129 ms to 77 ms — now beating legacy on every metric.
+
+**Remaining weak spot.** `usdc_traces+diffs` is multi-table (traces + state diffs
++ joins) and so falls outside the single-table two-phase gate; it still holds
+the largest working set. Extending the budget pre-scan to multi-table plans is
+the next step.
 
 ---
 
 ## How to run
 
+All commands take an optional `--features legacy-query` to additionally run the
+legacy `sqd-query` engine on the same chunk for a side-by-side comparison
+(requires the sibling `../data` repo to be present). The EVM suites run the
+chunk matrix automatically: `data/evm/chunk` (small) plus `data/evm/big` (big)
+if present. To point the big slot elsewhere, set `EVM_CHUNK_BIG=/path`.
+
 ```bash
-# Latency benchmarks (divan, 20x100)
+# Latency (divan). EVM benches nest one sub-bench per chunk ("small"/"big").
+# With the feature, prints parallel `*_legacy` groups.
 cargo bench --bench latency
+cargo bench --bench latency --features legacy-query
+# Scope to one group/query, e.g. the full-scan family on both chunks:
+cargo bench --bench latency --features legacy-query -- evm_fullscan
 
-# Throughput benchmarks (default CPU=8, --all for full sweep)
+# Throughput (default CPU=8, --all for full sweep). With the feature, prints
+# New / Legacy / ratio columns.
 cargo bench --bench throughput -- --all
+cargo bench --bench throughput --features legacy-query -- --all
 
-# Single query profiling with timing breakdown
-cargo bench --bench profile -- "evm/usdc_transfers" 1 --profile
+# Single-query profiling with stage timing breakdown
+cargo bench --bench profile -- "rpc/getLogs" 1 --profile
+
+# Profile the same query through the legacy engine
+cargo bench --bench profile --features legacy-query -- "rpc/getBlockReceipts" 1000 --legacy
+
+# Verify the new engine matches legacy byte-for-byte on a query
+cargo bench --bench profile --features legacy-query -- "rpc/getBlockByNumber" --compare
+
+# Memory: alloc/query + peak heap under concurrency (add --features legacy-query
+# for the legacy columns; --cpu N sets the concurrency, --filter <substr> scopes)
+cargo bench --bench memory --features legacy-query -- --cpu 8
 ```

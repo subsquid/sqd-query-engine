@@ -1,5 +1,6 @@
 // Shared query definitions for benchmarks.
-// Included via `#[path]` from bench binaries.
+// Included via `#[path]` from bench binaries; each bench uses a subset.
+#![allow(dead_code)]
 
 // EVM queries
 
@@ -14,6 +15,86 @@ pub static EVM_USDC_TRANSFERS: &[u8] = br#"{
     "logs": [{
         "address": ["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"],
         "topic0": ["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"]
+    }]
+}"#;
+
+// ---------------------------------------------------------------------------
+// Full-scan family: one unfiltered `[{}]` scan per wide table. These exercise
+// the response-budget two-phase scan path (narrow weight pre-scan → wide scan
+// capped at the 20 MB cutoff). On a small chunk they fit under the budget and
+// emit everything; on a large chunk they cap, so the matrix shows the optimizer
+// engaging.
+// ---------------------------------------------------------------------------
+
+/// Every block header in the range (no item tables).
+pub static EVM_ALL_BLOCKS: &[u8] = br#"{
+    "type": "evm",
+    "fromBlock": 0,
+    "includeAllBlocks": true,
+    "fields": {
+        "block": { "number": true, "hash": true, "parentHash": true, "timestamp": true, "miner": true, "gasUsed": true, "gasLimit": true }
+    }
+}"#;
+
+/// Every transaction in the chunk.
+pub static EVM_ALL_TXS: &[u8] = br#"{
+    "type": "evm",
+    "fromBlock": 0,
+    "fields": {
+        "block": { "number": true },
+        "transaction": { "hash": true, "from": true, "to": true, "value": true, "input": true, "nonce": true, "gas": true, "gasPrice": true, "transactionIndex": true }
+    },
+    "transactions": [{}]
+}"#;
+
+/// Every log in the chunk.
+pub static EVM_ALL_LOGS: &[u8] = br#"{
+    "type": "evm",
+    "fromBlock": 0,
+    "fields": {
+        "block": { "number": true },
+        "log": { "address": true, "topics": true, "data": true, "logIndex": true, "transactionIndex": true }
+    },
+    "logs": [{}]
+}"#;
+
+/// Every trace in the chunk.
+pub static EVM_ALL_TRACES: &[u8] = br#"{
+    "type": "evm",
+    "fromBlock": 0,
+    "fields": {
+        "block": { "number": true },
+        "trace": { "type": true, "transactionIndex": true, "traceAddress": true, "callFrom": true, "callTo": true, "callInput": true, "callValue": true }
+    },
+    "traces": [{}]
+}"#;
+
+/// Isolated state-diff path: every state diff in the chunk (no relations, no
+/// traces). Used to profile the state-diff output assembly — the allocation /
+/// latency hot spot in `usdc_traces+diffs`.
+pub static EVM_ALL_STATEDIFFS: &[u8] = br#"{
+    "type": "evm",
+    "fromBlock": 0,
+    "fields": {
+        "block": { "number": true },
+        "stateDiff": { "kind": true, "next": true, "prev": true, "transactionIndex": true, "address": true, "key": true }
+    },
+    "stateDiffs": [{}]
+}"#;
+
+/// Empty-result floor: all logs of a contract with zero activity in the chunk.
+/// Address-only filter (no topic0) means the leading sort key is unconstrained,
+/// so row-group pruning by address can't trivially skip everything — this
+/// measures how cheaply the engine rejects and returns an empty result.
+pub static EVM_SPARSE_LOGS: &[u8] = br#"{
+    "type": "evm",
+    "fromBlock": 0,
+    "fields": {
+        "block": { "number": true, "hash": true, "timestamp": true },
+        "log": { "address": true, "topics": true, "data": true, "logIndex": true, "transactionIndex": true }
+    },
+    "logs": [{
+        "address": ["0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"]
     }]
 }"#;
 
@@ -53,14 +134,165 @@ pub static EVM_USDC_TRACES_AND_STATEDIFFS: &[u8] = br#"{
     }]
 }"#;
 
-/// Full scan: all blocks with header fields
-pub static EVM_ALL_BLOCKS: &[u8] = br#"{
+// ---------------------------------------------------------------------------
+// RPC-compatible EVM queries
+//
+// These reproduce the three workhorse Ethereum JSON-RPC methods as portal
+// queries, to measure how the engine serves traffic shaped like a node's RPC
+// endpoint rather than an indexer's bulk export.
+//
+// Note on data layout: EVM tables are sorted by filter columns
+// (logs: topic0 → address → block_number; txs: sighash → to → block_number),
+// NOT by block_number. So `getLogs` (filter-aligned) prunes row groups well,
+// while the single-block `getBlockByNumber` / `getBlockReceipts` must scan
+// every row group to collect one block's rows.
+//
+// Block 24550620 is a representative mid-chunk block (median tx count: 307
+// txs / 695 logs) from the EVM bench chunk (range 24550597-24550820).
+// ---------------------------------------------------------------------------
+
+/// `eth_getBlockByNumber(0x176fa7c, true)` — full block header + all
+/// transaction objects for a single block.
+pub static EVM_GET_BLOCK_BY_NUMBER: &[u8] = br#"{
     "type": "evm",
-    "fromBlock": 0,
+    "fromBlock": 24550620,
+    "toBlock": 24550620,
     "includeAllBlocks": true,
     "fields": {
-        "block": { "number": true, "hash": true, "timestamp": true, "gasUsed": true, "gasLimit": true, "parentHash": true }
-    }
+        "block": {
+            "number": true, "hash": true, "parentHash": true, "timestamp": true,
+            "gasUsed": true, "gasLimit": true, "baseFeePerGas": true, "miner": true,
+            "size": true, "stateRoot": true, "transactionsRoot": true, "receiptsRoot": true,
+            "logsBloom": true, "difficulty": true, "totalDifficulty": true, "extraData": true,
+            "mixHash": true, "nonce": true, "sha3Uncles": true
+        },
+        "transaction": {
+            "transactionIndex": true, "hash": true, "nonce": true, "from": true, "to": true,
+            "value": true, "gas": true, "gasPrice": true, "maxFeePerGas": true,
+            "maxPriorityFeePerGas": true, "input": true, "type": true,
+            "v": true, "r": true, "s": true, "yParity": true, "chainId": true
+        }
+    },
+    "transactions": [{}]
+}"#;
+
+/// `eth_getBlockByNumber(0x176fa7c, false)` — same block, header + transaction
+/// **hashes** only (the `fullTransactions=false` mode). Still scans the whole
+/// tx table to gather the block's rows, but emits only the hash per tx, so it
+/// isolates the decode/serialize cost vs the full-object variant above.
+pub static EVM_GET_BLOCK_BY_NUMBER_TX_HASHES: &[u8] = br#"{
+    "type": "evm",
+    "fromBlock": 24550620,
+    "toBlock": 24550620,
+    "includeAllBlocks": true,
+    "fields": {
+        "block": {
+            "number": true, "hash": true, "parentHash": true, "timestamp": true,
+            "gasUsed": true, "gasLimit": true, "baseFeePerGas": true, "miner": true,
+            "size": true, "stateRoot": true, "transactionsRoot": true, "receiptsRoot": true,
+            "logsBloom": true, "difficulty": true, "totalDifficulty": true, "extraData": true,
+            "mixHash": true, "nonce": true, "sha3Uncles": true
+        },
+        "transaction": { "transactionIndex": true, "hash": true }
+    },
+    "transactions": [{}]
+}"#;
+
+// `eth_getLogs({address, topics, fromBlock, toBlock})` over fixed block windows
+// of 1 / 10 / 100 blocks — the canonical USDC Transfer filter. Windows are
+// anchored at block 24550620 (same as the getBlockByNumber/Receipts queries);
+// they yield 63 / 729 / 7784 matching transfers, a clean range-scaling curve.
+
+/// getLogs over a single block.
+pub static EVM_GET_LOGS_1BLK: &[u8] = br#"{
+    "type": "evm",
+    "fromBlock": 24550620,
+    "toBlock": 24550620,
+    "fields": {
+        "block": { "number": true, "hash": true },
+        "log": { "address": true, "topics": true, "data": true, "logIndex": true, "transactionIndex": true, "transactionHash": true }
+    },
+    "logs": [{
+        "address": ["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"],
+        "topic0": ["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"]
+    }]
+}"#;
+
+/// getLogs over a 10-block window.
+pub static EVM_GET_LOGS_10BLK: &[u8] = br#"{
+    "type": "evm",
+    "fromBlock": 24550620,
+    "toBlock": 24550629,
+    "fields": {
+        "block": { "number": true, "hash": true },
+        "log": { "address": true, "topics": true, "data": true, "logIndex": true, "transactionIndex": true, "transactionHash": true }
+    },
+    "logs": [{
+        "address": ["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"],
+        "topic0": ["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"]
+    }]
+}"#;
+
+/// getLogs over a 100-block window.
+pub static EVM_GET_LOGS_100BLK: &[u8] = br#"{
+    "type": "evm",
+    "fromBlock": 24550620,
+    "toBlock": 24550719,
+    "fields": {
+        "block": { "number": true, "hash": true },
+        "log": { "address": true, "topics": true, "data": true, "logIndex": true, "transactionIndex": true, "transactionHash": true }
+    },
+    "logs": [{
+        "address": ["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"],
+        "topic0": ["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"]
+    }]
+}"#;
+
+/// `eth_getBlockReceipts(0x176fa7c)` — every transaction receipt in a single
+/// block: receipt fields (status/gas/effectiveGasPrice/...) + the logs each
+/// transaction emitted.
+pub static EVM_GET_BLOCK_RECEIPTS: &[u8] = br#"{
+    "type": "evm",
+    "fromBlock": 24550620,
+    "toBlock": 24550620,
+    "fields": {
+        "block": { "number": true, "hash": true },
+        "transaction": {
+            "transactionIndex": true, "hash": true, "from": true, "to": true, "type": true,
+            "status": true, "gasUsed": true, "cumulativeGasUsed": true,
+            "effectiveGasPrice": true, "contractAddress": true
+        },
+        "log": {
+            "address": true, "topics": true, "data": true,
+            "logIndex": true, "transactionIndex": true, "transactionHash": true
+        }
+    },
+    "transactions": [{ "logs": true }]
+}"#;
+
+/// `trace_block(0x176fa7c)` — every trace (call/create/suicide/reward) for all
+/// transactions in a single block, with the full action + result field set. The
+/// traces table is the widest in the chunk, so this is the heaviest single-block
+/// RPC call (scan all row groups for one block × decode every trace column).
+pub static EVM_TRACE_BLOCK: &[u8] = br#"{
+    "type": "evm",
+    "fromBlock": 24550620,
+    "toBlock": 24550620,
+    "fields": {
+        "block": { "number": true, "hash": true },
+        "trace": {
+            "type": true, "error": true, "revertReason": true,
+            "transactionIndex": true, "traceAddress": true, "subtraces": true,
+            "callFrom": true, "callTo": true, "callValue": true, "callGas": true,
+            "callInput": true, "callSighash": true, "callType": true,
+            "callResultGasUsed": true, "callResultOutput": true,
+            "createFrom": true, "createValue": true, "createGas": true, "createInit": true,
+            "createResultGasUsed": true, "createResultCode": true, "createResultAddress": true,
+            "suicideAddress": true, "suicideRefundAddress": true, "suicideBalance": true,
+            "rewardAuthor": true, "rewardValue": true, "rewardType": true
+        }
+    },
+    "traces": [{}]
 }"#;
 
 // Solana queries
@@ -145,22 +377,33 @@ pub static SOL_HARD: &[u8] = br#"{
     }]
 }"#;
 
-/// Full scan: all blocks with header fields
-pub static SOL_ALL_BLOCKS: &[u8] = br#"{
-    "type": "solana",
-    "fromBlock": 0,
-    "includeAllBlocks": true,
-    "fields": {
-        "block": { "number": true, "hash": true, "timestamp": true, "height": true, "parentHash": true, "parentNumber": true }
-    }
-}"#;
-
-/// All benchmark queries grouped by chain
+/// Indexer-style EVM queries (selective bulk-export patterns).
 pub static EVM_QUERIES: &[(&str, &[u8])] = &[
     ("evm/usdc_transfers", EVM_USDC_TRANSFERS),
     ("evm/contract_calls+logs", EVM_CONTRACT_CALLS_WITH_LOGS),
     ("evm/usdc_traces+diffs", EVM_USDC_TRACES_AND_STATEDIFFS),
+    ("evm/sparse", EVM_SPARSE_LOGS),
+];
+
+/// Full-scan family: unfiltered per-table scans that exercise the two-phase
+/// response-budget path. Run across the chunk matrix (small + big).
+pub static EVM_FULLSCAN_QUERIES: &[(&str, &[u8])] = &[
     ("evm/all_blocks", EVM_ALL_BLOCKS),
+    ("evm/all_txs", EVM_ALL_TXS),
+    ("evm/all_logs", EVM_ALL_LOGS),
+    ("evm/all_traces", EVM_ALL_TRACES),
+    ("evm/all_statediffs", EVM_ALL_STATEDIFFS),
+];
+
+/// RPC-compatible EVM queries (node endpoint patterns), all on `data/evm/chunk`.
+pub static EVM_RPC_QUERIES: &[(&str, &[u8])] = &[
+    ("rpc/getBlockByNumber", EVM_GET_BLOCK_BY_NUMBER),
+    ("rpc/getBlockByNumber:txHashes", EVM_GET_BLOCK_BY_NUMBER_TX_HASHES),
+    ("rpc/getBlockReceipts", EVM_GET_BLOCK_RECEIPTS),
+    ("rpc/trace_block", EVM_TRACE_BLOCK),
+    ("rpc/getLogs:1blk", EVM_GET_LOGS_1BLK),
+    ("rpc/getLogs:10blk", EVM_GET_LOGS_10BLK),
+    ("rpc/getLogs:100blk", EVM_GET_LOGS_100BLK),
 ];
 
 pub static SOL_QUERIES: &[(&str, &[u8])] = &[
@@ -168,5 +411,40 @@ pub static SOL_QUERIES: &[(&str, &[u8])] = &[
     ("sol/hard", SOL_HARD),
     ("sol/instr+logs", SOL_INSTRUCTION_WITH_LOGS),
     ("sol/instr+balances", SOL_BALANCES_FROM_INSTRUCTION),
-    ("sol/all_blocks", SOL_ALL_BLOCKS),
 ];
+
+// ---------------------------------------------------------------------------
+// Chunk matrix — benches run the EVM query sets across every available chunk.
+// ---------------------------------------------------------------------------
+
+/// EVM chunks for the benchmark matrix as `(label, path)`. The big chunk is
+/// optional: entries whose directory is absent are skipped, so the suite still
+/// runs on a machine that only has the small chunk. Paths are overridable via
+/// `$EVM_CHUNK` (small) and `$EVM_CHUNK_BIG` (big).
+pub fn evm_chunk_matrix() -> Vec<(&'static str, String)> {
+    let small = std::env::var("EVM_CHUNK").unwrap_or_else(|_| "data/evm/chunk".into());
+    let big = std::env::var("EVM_CHUNK_BIG").unwrap_or_else(|_| "data/evm/big".into());
+    [("small", small), ("big", big)]
+        .into_iter()
+        .filter(|(_, p)| std::path::Path::new(p).exists())
+        .collect()
+}
+
+/// Labels of the available EVM chunks (for divan `args`).
+pub fn evm_chunk_labels() -> Vec<&'static str> {
+    evm_chunk_matrix().into_iter().map(|(l, _)| l).collect()
+}
+
+/// Resolve an EVM chunk label to its path (re-reads env; called once per bench).
+pub fn evm_chunk_path(label: &str) -> String {
+    evm_chunk_matrix()
+        .into_iter()
+        .find(|(l, _)| *l == label)
+        .map(|(_, p)| p)
+        .unwrap_or_else(|| "data/evm/chunk".into())
+}
+
+/// The Solana chunk path (single chunk, no matrix). Overridable via `$SOL_CHUNK`.
+pub fn sol_chunk_path() -> String {
+    std::env::var("SOL_CHUNK").unwrap_or_else(|_| "data/solana/chunk".into())
+}

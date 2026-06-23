@@ -176,6 +176,70 @@ pub(crate) fn apply_weight_limit(
     selected
 }
 
+/// Columns needed to compute the response-budget weight *cheaply*, without
+/// decoding wide data columns: the block-number column plus any data-dependent
+/// weight columns (the narrow `*_size` companions). Used for the phase-1 narrow
+/// scan of large single-table full scans.
+pub(crate) fn weight_scan_columns(
+    output_columns: &[String],
+    table_desc: &TableDescription,
+) -> Vec<String> {
+    let (_fixed, weight_cols) = compute_weight_params(output_columns, Some(table_desc));
+    let mut cols = Vec::with_capacity(weight_cols.len() + 1);
+    cols.push(table_desc.block_number_column.clone());
+    for c in weight_cols {
+        if !cols.contains(&c) {
+            cols.push(c);
+        }
+    }
+    cols
+}
+
+/// Given a narrow scan (block number + weight columns) of a single table with no
+/// relations, return the highest block number that still fits within the
+/// response budget, or `None` if every block fits (no trimming needed).
+///
+/// This intentionally ignores block-header weight, so the cutoff is a safe upper
+/// bound: the exact, header-aware [`apply_weight_limit`] runs later on the
+/// (smaller) phase-2 scan and performs the precise trim. Over-including a few
+/// blocks only costs a little extra decode — it never changes the output.
+pub(crate) fn weight_cutoff_block(
+    narrow_batches: &[RecordBatch],
+    output_columns: &[String],
+    table_desc: &TableDescription,
+) -> Option<u64> {
+    let (fixed_weight, weight_cols) = compute_weight_params(output_columns, Some(table_desc));
+    let bn_col = table_desc.block_number_column.as_str();
+
+    let mut block_weights: FxHashMap<u64, u64> = FxHashMap::default();
+    accumulate_block_weights(
+        narrow_batches,
+        bn_col,
+        fixed_weight,
+        &weight_cols,
+        &mut block_weights,
+    );
+
+    let mut sorted_blocks: Vec<u64> = block_weights.keys().copied().collect();
+    sorted_blocks.sort_unstable();
+
+    // Mirror the selection loop in `apply_weight_limit`: always keep the first
+    // block, then keep blocks while cumulative weight stays within budget.
+    let mut cumulative: u64 = 0;
+    let mut cutoff: Option<u64> = None;
+    for (i, &bn) in sorted_blocks.iter().enumerate() {
+        cumulative += block_weights.get(&bn).copied().unwrap_or(0);
+        if i == 0 || cumulative <= MAX_RESPONSE_BYTES {
+            cutoff = Some(bn);
+        } else {
+            // Budget exceeded — blocks beyond `cutoff` won't be emitted.
+            return cutoff;
+        }
+    }
+    // Everything fit within budget: no trimming, scan the full range as before.
+    None
+}
+
 /// Compute fixed weight per row and list of weight columns for weight limiting.
 fn compute_weight_params(
     output_columns: &[String],

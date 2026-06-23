@@ -2,6 +2,9 @@
 name = "sqd-query-engine"
 version = "0.1.0"
 edition = "2021"
+# benches/{queries,legacy}.rs are shared modules included via #[path], not
+# standalone bench targets. Disable autodiscovery and list benches explicitly.
+autobenches = false
 
 [dependencies]
 arrow = { version = "54", features = ["ffi"] }
@@ -51,4 +54,8 @@ harness = false
 
 [[bench]]
 name = "profile"
+harness = false
+
+[[bench]]
+name = "memory"
 harness = false
