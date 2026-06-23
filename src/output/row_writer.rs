@@ -476,17 +476,21 @@ fn write_table_items_indexed(
     json_array_prefix: &[u8],
     resolved_by_batch: &[Vec<ResolvedFieldWriter>],
     grouped_resolved: Option<&[ResolvedGroupedWriters]>,
+    scratch: &mut Vec<(usize, usize)>,
 ) {
     let row_refs = match block_index.get(&block_num) {
         Some(refs) if !refs.is_empty() => refs,
         _ => return,
     };
 
-    // Build sortable rows (with batch_idx for resolved writer lookup)
-    let mut rows: Vec<(usize, usize)> = row_refs.to_vec();
+    // Build sortable rows (with batch_idx for resolved writer lookup). Reuse the
+    // caller-owned scratch buffer to avoid a fresh per-block allocation.
+    let rows = scratch;
+    rows.clear();
+    rows.extend_from_slice(row_refs);
 
     // Sort by pre-resolved typed sort columns (item_order_keys + address)
-    sort_rows_by_order_keys_indexed(&mut rows, sort_col_resolved);
+    sort_rows_by_order_keys_indexed(rows, sort_col_resolved);
 
     // Write array
     buf.extend_from_slice(json_array_prefix);
@@ -518,6 +522,8 @@ pub(crate) fn write_merged_table_items(
     all_resolved: &[Vec<Vec<ResolvedFieldWriter>>],
     all_grouped_resolved: &[Option<Vec<ResolvedGroupedWriters>>],
     json_array_prefix: &[u8],
+    sort_scratch: &mut Vec<(usize, usize)>,
+    merge_scratch: &mut Vec<(usize, usize, usize)>,
 ) {
     // If single source, use optimized path
     if source_indices.len() == 1 {
@@ -532,12 +538,15 @@ pub(crate) fn write_merged_table_items(
             json_array_prefix,
             &all_resolved[si],
             all_grouped_resolved[si].as_deref(),
+            sort_scratch,
         );
         return;
     }
 
-    // Collect rows from all sources: (source_idx, batch_idx, row_idx)
-    let mut rows: Vec<(usize, usize, usize)> = Vec::new();
+    // Collect rows from all sources: (source_idx, batch_idx, row_idx). Reuse the
+    // caller-owned scratch buffer to avoid a fresh per-block allocation.
+    let rows = merge_scratch;
+    rows.clear();
     for &si in source_indices {
         let idx = &all_indexes[si];
         if let Some(refs) = idx.index.get(&block_num) {

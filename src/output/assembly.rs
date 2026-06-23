@@ -10,7 +10,9 @@ use crate::output::row_writer::{
     write_merged_table_items, IndexedBatches,
 };
 use crate::output::weight::{
-    apply_weight_limit, weight_cutoff_block, weight_scan_columns, TableOutput,
+    accumulate_block_weights, apply_weight_limit, get_block_number, get_weight_value,
+    primary_weight_params, weight_cutoff_block, weight_scan_columns, TableOutput,
+    MAX_RESPONSE_BYTES,
 };
 use crate::output::writer::JsonArrayWriter;
 use crate::query::{Plan, RelationKind};
@@ -21,10 +23,65 @@ use crate::scan::{
 use anyhow::{anyhow, Result};
 use arrow::record_batch::RecordBatch;
 use rayon::prelude::*;
-use rustc_hash::FxHashSet as HashSet;
+use rustc_hash::{FxHashMap, FxHashSet as HashSet};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
+
+/// A table is block-sorted when its physical sort key leads with the block
+/// number column. Only then does a `to_block` cap prune whole row groups, which
+/// is what makes the budget early-stop scan worthwhile (see `scan_budget`).
+fn is_block_sorted(table_desc: &crate::metadata::TableDescription) -> bool {
+    table_desc
+        .sort_key
+        .first()
+        .map(|s| s == &table_desc.block_number_column)
+        .unwrap_or(false)
+}
+
+/// Fold one parallel wave's batches into the running budget weight: each row adds
+/// this table's own per-row weight, and the first time a block is seen it also
+/// adds that block's `external` weight (other tables already scanned) plus the
+/// block-header weight. Returns the updated cumulative. Counting the full wave
+/// (rather than stopping mid-wave) only over-estimates, which is safe — the exact
+/// `apply_weight_limit` trims afterwards.
+#[allow(clippy::too_many_arguments)]
+fn accumulate_wave_weight(
+    batches: &[RecordBatch],
+    bn_col: &str,
+    fixed: u64,
+    weight_cols: &[String],
+    external: &FxHashMap<u64, u64>,
+    header_fixed: u64,
+    seen: &mut HashSet<u64>,
+    cumulative: &mut u64,
+) -> u64 {
+    for batch in batches {
+        let bn = match batch.column_by_name(bn_col) {
+            Some(c) => c,
+            None => continue,
+        };
+        let wc_arrays: Vec<Option<&dyn arrow::array::Array>> = weight_cols
+            .iter()
+            .map(|name| batch.column_by_name(name).map(|c| c.as_ref()))
+            .collect();
+        for i in 0..batch.num_rows() {
+            if let Some(block) = get_block_number(bn.as_ref(), i) {
+                let mut row_weight = fixed;
+                for wc in &wc_arrays {
+                    if let Some(arr) = wc {
+                        row_weight += get_weight_value(*arr, i);
+                    }
+                }
+                *cumulative += row_weight;
+                if seen.insert(block) {
+                    *cumulative += external.get(&block).copied().unwrap_or(0) + header_fixed;
+                }
+            }
+        }
+    }
+    *cumulative
+}
 
 /// Execute a plan against a chunk directory and write JSON output.
 pub fn execute_plan<W: Write>(
@@ -82,7 +139,41 @@ pub fn execute_chunk<W: Write>(
     // 1. Scan all tables specified in the plan
     let mut table_outputs: HashMap<String, TableOutput> = HashMap::new();
 
-    for table_plan in &plan.table_plans {
+    // Process block-sorted tables LAST so the budget early-stop scan can weigh
+    // them against the (already known) per-block weight of the other tables.
+    // sort is stable, so non-block-sorted tables keep their original order.
+    let mut proc_order: Vec<usize> = (0..plan.table_plans.len()).collect();
+    proc_order.sort_by_key(|&i| {
+        metadata
+            .table(&plan.table_plans[i].table)
+            .map(is_block_sorted)
+            .unwrap_or(false)
+    });
+
+    // Per-block weight contributed by already-scanned non-block-sorted tables,
+    // seeding the early-stop budget walk. Deliberately under-counts (primary rows
+    // only, no relations) so the cutoff can only over-include → byte-identical.
+    // Only worth seeding when a block-sorted table coexists with another table;
+    // otherwise the early-stop walk has no external weight to add, so skip the
+    // extra accumulation pass entirely (keeps single-table / logs-only queries
+    // on their original cost).
+    let mut external_block_weight: FxHashMap<u64, u64> = FxHashMap::default();
+    let seed_external = plan.table_plans.len() > 1
+        && !plan.include_all_blocks
+        && proc_order.iter().any(|&i| {
+            metadata
+                .table(&plan.table_plans[i].table)
+                .map(is_block_sorted)
+                .unwrap_or(false)
+        });
+    let header_fixed = crate::output::weight::header_weight_params(
+        &plan.block_output_columns,
+        metadata.table(&plan.block_table),
+    )
+    .0;
+
+    for &tp_idx in &proc_order {
+        let table_plan = &plan.table_plans[tp_idx];
         let table_desc = metadata
             .table(&table_plan.table)
             .ok_or_else(|| anyhow!("table '{}' not found", table_plan.table))?;
@@ -138,6 +229,14 @@ pub fn execute_chunk<W: Write>(
             elapsed!(t_phase1, "weight pre-scan", "cutoff -> {:?}", effective_to_block);
         }
 
+        // Budget early-stop applies to block-sorted, non-include-all-blocks tables
+        // that aren't already on the cheap single-table narrow pre-scan path. For
+        // these a `to_block` cap prunes whole row groups, so reading row groups in
+        // block order and stopping at the budget avoids decoding wide columns for
+        // blocks that can't be emitted.
+        let wave_eligible =
+            is_block_sorted(table_desc) && !plan.include_all_blocks && !single_full_scan;
+
         let mut request = ScanRequest::new(output_col_refs);
         request.predicates = pred_refs;
         request.from_block = Some(plan.from_block);
@@ -145,9 +244,58 @@ pub fn execute_chunk<W: Write>(
         request.block_number_column = Some(table_desc.block_number_column.as_str());
 
         let t_primary = timer!();
-        let batches = chunk.scan(&table_plan.table, &request)?;
+        let batches = if wave_eligible {
+            // Stop once cumulative weight (this table + already-scanned tables +
+            // header) crosses the budget. Over-reads ≤ one wave; the exact
+            // `apply_weight_limit` trims afterwards, so output is byte-identical.
+            let (fixed, weight_cols) =
+                primary_weight_params(&table_plan.output_columns, Some(table_desc));
+            let bn_col = table_desc.block_number_column.to_string();
+            let ext = &external_block_weight;
+            let mut seen: HashSet<u64> = HashSet::default();
+            let mut cumulative: u64 = 0;
+            // Wave width = the rayon pool size: each wave saturates all cores in
+            // one parallel shot, and the budget is re-checked at every wave
+            // boundary (over-read ≤ one wave).
+            let wave_size = rayon::current_num_threads().max(1);
+            let mut weight_of = |wave: &[RecordBatch]| {
+                accumulate_wave_weight(
+                    wave,
+                    &bn_col,
+                    fixed,
+                    &weight_cols,
+                    ext,
+                    header_fixed,
+                    &mut seen,
+                    &mut cumulative,
+                )
+            };
+            chunk.scan_budget(
+                &table_plan.table,
+                &request,
+                wave_size,
+                MAX_RESPONSE_BYTES,
+                &mut weight_of,
+            )?
+        } else {
+            chunk.scan(&table_plan.table, &request)?
+        };
         let primary_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         elapsed!(t_primary, "primary scan", "{} rows", primary_rows);
+
+        // Seed external weight for any block-sorted table processed later (only
+        // non-block-sorted tables contribute; their full primary scan is done).
+        if seed_external && !wave_eligible {
+            let (fixed, weight_cols) =
+                primary_weight_params(&table_plan.output_columns, Some(table_desc));
+            accumulate_block_weights(
+                &batches,
+                table_desc.block_number_column.as_str(),
+                fixed,
+                &weight_cols,
+                &mut external_block_weight,
+            );
+        }
 
         // Compute actual block range from primary scan for cross-table pruning
         let bn_col_name = table_desc.block_number_column.as_str();

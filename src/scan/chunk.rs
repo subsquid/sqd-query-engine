@@ -130,6 +130,21 @@ impl ChunkReader for ParquetChunkReader {
         scanner::scan(parquet_table, request)
     }
 
+    fn scan_budget(
+        &self,
+        table: &str,
+        request: &ScanRequest,
+        wave_size: usize,
+        budget: u64,
+        weight_of: &mut dyn FnMut(&[RecordBatch]) -> u64,
+    ) -> Result<Vec<RecordBatch>> {
+        let parquet_table = match self.cache.get(table) {
+            Some(t) => t,
+            None => return Ok(Vec::new()),
+        };
+        scanner::scan_waves_until_budget(parquet_table, request, wave_size, budget, weight_of)
+    }
+
     fn has_table(&self, table: &str) -> bool {
         self.cache.contains_key(table)
             || self.chunk_dir.join(format!("{}.parquet", table)).exists()
