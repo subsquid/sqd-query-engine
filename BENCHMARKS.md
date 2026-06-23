@@ -20,28 +20,32 @@ All RPC queries reproduce the real Ethereum JSON-RPC method semantics and run
 on `data/evm/chunk` (block 24550620 for the single-block calls; getLogs windows
 anchored there).
 
-| Name | RPC / indexer equivalent | Shape |
-|------|--------------------------|-------|
-| `evm/usdc_transfers`            | indexer log scan                  | USDC `Transfer` logs, whole chunk |
-| `evm/contract_calls+logs`       | indexer tx + join                 | USDT txs + their logs |
-| `evm/usdc_traces+diffs`         | indexer multi-table               | USDC traces + state diffs + tx |
-| `evm/sparse`                    | empty-result floor                | all logs of a non-existent contract (0 rows) |
-| `evm/all_blocks`                | full scan                         | every block header (`includeAllBlocks`) |
-| `evm/all_txs`                   | full scan                         | every transaction (`transactions:[{}]`) |
-| `evm/all_logs`                  | full scan                         | every log (`logs:[{}]`) |
-| `evm/all_traces`                | full scan                         | every trace (`traces:[{}]`) |
-| `evm/all_statediffs`            | full scan                         | every state diff (`stateDiffs:[{}]`) |
-| `rpc/getBlockByNumber`          | `eth_getBlockByNumber(N, true)`   | one block, header + full tx objects (~17 cols) |
-| `rpc/getBlockByNumber:txHashes` | `eth_getBlockByNumber(N, false)`  | one block, header + tx **hashes** only |
-| `rpc/getBlockReceipts`          | `eth_getBlockReceipts(N)`         | one block, all tx receipts + their logs |
-| `rpc/trace_block`               | `trace_block(N)`                  | one block, **all** traces (call/create/suicide/reward), full action+result fields |
-| `rpc/getLogs:1blk`              | `eth_getLogs` (1-block range)     | USDC `Transfer` logs, 1 block (63 logs) |
-| `rpc/getLogs:10blk`             | `eth_getLogs` (10-block range)    | USDC `Transfer` logs, 10 blocks (729 logs) |
-| `rpc/getLogs:100blk`            | `eth_getLogs` (100-block range)   | USDC `Transfer` logs, 100 blocks (7784 logs) |
-| `sol/whirlpool_swap`            | indexer                           | Whirlpool swaps + inner ix + tx |
-| `sol/hard`                      | indexer                           | Meteora DLMM, all relations |
-| `sol/instr+logs`                | indexer                           | Jupiter ix + logs |
-| `sol/instr+balances`            | indexer                           | Whirlpool ix + balance changes |
+Response sizes are the emitted JSON (capped at the 20 MB / 20 MiB response
+budget). EVM-matrix rows show **small / big** chunk; RPC and Solana rows have a
+single chunk.
+
+| Name | RPC / indexer equivalent | Shape | Response |
+|------|--------------------------|-------|----------|
+| `evm/usdc_transfers`            | indexer log scan                  | USDC `Transfer` logs, whole chunk | 6.3 / 16.8 MB |
+| `evm/contract_calls+logs`       | indexer tx + join                 | USDT txs + their logs | 6.6 / 13.2 MB |
+| `evm/usdc_traces+diffs`         | indexer multi-table               | USDC traces + state diffs + tx | 14.7 / 20.4 MB |
+| `evm/sparse`                    | empty-result floor                | all logs of a non-existent contract (0 rows) | 0 (empty) |
+| `evm/all_blocks`                | full scan                         | every block header (`includeAllBlocks`) | 0.07 / 0.47 MB |
+| `evm/all_txs`                   | full scan                         | every transaction (`transactions:[{}]`) | 19.6 / 19.9 MB |
+| `evm/all_logs`                  | full scan                         | every log (`logs:[{}]`) | 22.3 / 21.7 MB |
+| `evm/all_traces`                | full scan                         | every trace (`traces:[{}]`) | 19.1 / 19.0 MB |
+| `evm/all_statediffs`            | full scan                         | every state diff (`stateDiffs:[{}]`) | 18.8 / 19.2 MB |
+| `rpc/getBlockByNumber`          | `eth_getBlockByNumber(N, true)`   | one block, header + full tx objects (~17 cols) | 320 KB |
+| `rpc/getBlockByNumber:txHashes` | `eth_getBlockByNumber(N, false)`  | one block, header + tx **hashes** only | 32 KB |
+| `rpc/getBlockReceipts`          | `eth_getBlockReceipts(N)`         | one block, all tx receipts + their logs | 451 KB |
+| `rpc/trace_block`               | `trace_block(N)`                  | one block, **all** traces (call/create/suicide/reward), full action+result fields | 1.10 MB |
+| `rpc/getLogs:1blk`              | `eth_getLogs` (1-block range)     | USDC `Transfer` logs, 1 block (63 logs) | 29 KB |
+| `rpc/getLogs:10blk`             | `eth_getLogs` (10-block range)    | USDC `Transfer` logs, 10 blocks (729 logs) | 340 KB |
+| `rpc/getLogs:100blk`            | `eth_getLogs` (100-block range)   | USDC `Transfer` logs, 100 blocks (7784 logs) | 3.5 MB |
+| `sol/whirlpool_swap`            | indexer                           | Whirlpool swaps + inner ix + tx | 80 KB |
+| `sol/hard`                      | indexer                           | Meteora DLMM, all relations | 0.38 MB |
+| `sol/instr+logs`                | indexer                           | Jupiter ix + logs | 7.5 MB |
+| `sol/instr+balances`            | indexer                           | Whirlpool ix + balance changes | 62 KB |
 
 ### What the RPC numbers reveal
 
