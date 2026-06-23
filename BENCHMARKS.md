@@ -298,39 +298,50 @@ Two findings:
 The EVM latency/throughput/memory suites now run every query across the chunk
 matrix (small + big), and add a **full-scan family** (`all_blocks/all_txs/
 all_logs/all_traces/all_statediffs`) — one unfiltered `[{}]` scan per wide
-table. These exercise the **response-budget two-phase scan**: a single-table
-full scan with no real filter first does a cheap *narrow* pre-scan (block number
-+ the `*_size` weight columns) to find the 20 MB block cutoff, then scans the
-wide data columns only up to that cutoff. Output is byte-identical to legacy
-(all 5 × 2 chunks verified `--compare`).
+table. These exercise two response-budget optimizations, both byte-identical to
+legacy (the exact `apply_weight_limit` always does the final trim):
 
-### Latency (median of 20×5), new vs legacy
+- **Single-table two-phase scan** (full-scan family): a single-table full scan
+  with no real filter first does a cheap *narrow* pre-scan (block number + the
+  `*_size` weight columns) to find the 20 MB block cutoff, then scans the wide
+  data columns only up to that cutoff.
+- **Multi-table budget early-stop** (`usdc_traces+diffs`): for a *block-sorted*
+  table (one whose `sort_key` leads with `block_number`, e.g. `statediffs`),
+  the scanner reads matching row groups in block order in parallel waves and
+  stops once the cumulative response weight — this table plus the already-scanned
+  tables plus headers — crosses 20 MB. Because the table is block-sorted, the
+  cutoff prunes whole row groups, so wide columns decode only for blocks that
+  can actually be emitted. (A purely sequential early-stop was measured 3–4×
+  slower, so the waves preserve intra-wave parallelism.)
+
+### Latency (new vs legacy; profile harness, mean over 60–120 iters)
 
 | Benchmark | small new | small leg | big new | big leg | big ratio |
 |-----------|-----------|-----------|---------|---------|-----------|
-| evm/usdc_transfers      | 7.0 ms  | 8.2 ms  | 18.3 ms  | 19.4 ms  | **1.06×** |
-| evm/contract_calls+logs | 10.6 ms | 13.9 ms | 21.4 ms  | 27.5 ms  | **1.29×** |
-| evm/usdc_traces+diffs   | 45.6 ms | 43.8 ms | 111.9 ms | 91.0 ms  | 0.81× ⚠️  |
-| evm/sparse              | 0.48 ms | 1.38 ms | 0.95 ms  | 1.94 ms  | **2.04×** |
-| evm/all_blocks          | 0.15 ms | 0.76 ms | 0.68 ms  | 1.38 ms  | **2.0×**  |
-| evm/all_txs             | 30.0 ms | 33.7 ms | 41.7 ms  | 52.8 ms  | **1.27×** |
-| evm/all_logs            | 36.6 ms | 38.3 ms | 56.1 ms  | 85.3 ms  | **1.52×** |
-| evm/all_traces          | 59.6 ms | 67.6 ms | 114.3 ms | 209.2 ms | **1.83×** |
-| evm/all_statediffs      | 38.5 ms | 58.1 ms | 77.3 ms  | 166.5 ms | **2.15×** |
+| evm/usdc_transfers      | 6.1 ms  | 8.3 ms  | 14.1 ms  | 16.8 ms  | **1.19×** |
+| evm/contract_calls+logs | 10.4 ms | 13.3 ms | 19.7 ms  | 25.3 ms  | **1.29×** |
+| evm/usdc_traces+diffs   | 45.1 ms | 41.3 ms | 87.4 ms  | 86.4 ms  | **0.99×** |
+| evm/sparse              | 0.48 ms | 1.36 ms | 0.93 ms  | 1.97 ms  | **2.12×** |
+| evm/all_blocks          | 0.14 ms | 0.79 ms | 0.69 ms  | 1.41 ms  | **2.04×** |
+| evm/all_txs             | 27.4 ms | 32.2 ms | 38.7 ms  | 52.5 ms  | **1.36×** |
+| evm/all_logs            | 29.9 ms | 35.8 ms | 50.5 ms  | 86.7 ms  | **1.72×** |
+| evm/all_traces          | 57.4 ms | 66.9 ms | 109.7 ms | 206.6 ms | **1.88×** |
+| evm/all_statediffs      | 35.2 ms | 56.9 ms | 72.0 ms  | 160.1 ms | **2.22×** |
 
-The new engine wins the entire full-scan class on both chunks. The lone
-regression remains the heavy multi-table `usdc_traces+diffs`.
+The new engine wins the entire full-scan class on both chunks. The former weak
+spot `usdc_traces+diffs` on the big chunk improved from **0.81× to 0.99×** (at
+parity with legacy) thanks to the multi-table budget early-stop.
 
 ### Memory on the big chunk (alloc/query, peak heap @ CPU=8)
 
 | Benchmark | new a/q | leg a/q | new peak | leg peak |
 |-----------|---------|---------|----------|----------|
-| evm/all_blocks        | 4 MB     | 5 MB     | 11 MB   | 8 MB   |
-| evm/all_txs           | 667 MB   | 661 MB   | 486 MB  | 355 MB |
-| evm/all_logs          | 721 MB   | 717 MB   | 522 MB  | 396 MB |
-| evm/all_traces        | 1988 MB  | 1909 MB  | 435 MB  | 501 MB |
-| evm/all_statediffs    | **465 MB** | 587 MB | **518 MB** | 622 MB |
-| evm/usdc_traces+diffs | 2488 MB ⚠️ | 1782 MB | 672 MB ⚠️ | 214 MB |
+| evm/all_blocks        | 4 MB       | 5 MB     | 10 MB      | 9 MB   |
+| evm/all_txs           | 667 MB     | 661 MB   | 486 MB     | 376 MB |
+| evm/all_logs          | 721 MB     | 717 MB   | 455 MB     | 303 MB |
+| evm/all_traces        | 1988 MB    | 1909 MB  | 435 MB     | 441 MB |
+| evm/all_statediffs    | **465 MB** | 587 MB   | **518 MB** | 626 MB |
+| evm/usdc_traces+diffs | **1534 MB** | 1782 MB | 504 MB    | 215 MB |
 
 **State-diff two-phase win.** Before the optimization `all_statediffs` on the
 big chunk allocated **2438 MB** / peaked at **5405 MB** (8.5× worse than legacy)
@@ -338,10 +349,14 @@ big chunk allocated **2438 MB** / peaked at **5405 MB** (8.5× worse than legacy
 discarded ~97 %. The two-phase scan cut that to 465 MB / 518 MB (**5.2× / 10.4×**
 less), and latency from 129 ms to 77 ms — now beating legacy on every metric.
 
-**Remaining weak spot.** `usdc_traces+diffs` is multi-table (traces + state diffs
-+ joins) and so falls outside the single-table two-phase gate; it still holds
-the largest working set. Extending the budget pre-scan to multi-table plans is
-the next step.
+**Former weak spot, now fixed.** `usdc_traces+diffs` is multi-table (traces +
+state diffs + joins) and falls outside the single-table two-phase gate. The
+multi-table budget early-stop brought its big-chunk allocation from **2488 MB to
+1534 MB** (−38 %, now below legacy's 1782 MB) and peak heap from **672 MB to
+504 MB** (−25 %), with latency at parity (above). Root cause: `statediffs` is
+physically **block-sorted**, not address-sorted (the metadata `sort_key` was
+corrected to match), so an `address` filter can't prune row groups — but a
+`block_number` cap can, which is exactly what the early-stop exploits.
 
 ---
 

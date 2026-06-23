@@ -16,6 +16,23 @@ pub trait ChunkReader: Sync {
     /// Scan a table: apply projection, predicates, block range, and key/hierarchical filters.
     fn scan(&self, table: &str, request: &ScanRequest) -> Result<Vec<RecordBatch>>;
 
+    /// Scan a block-sorted table in ascending block order, stopping once the
+    /// cumulative response weight (reported by `weight_of` after each parallel
+    /// wave of `wave_size` row groups) exceeds `budget`. See
+    /// [`scan_waves_until_budget`] for the contract. Default impl falls back to a
+    /// full `scan` (ignoring the budget) for readers that can't stream by block.
+    fn scan_budget(
+        &self,
+        table: &str,
+        request: &ScanRequest,
+        wave_size: usize,
+        budget: u64,
+        weight_of: &mut dyn FnMut(&[RecordBatch]) -> u64,
+    ) -> Result<Vec<RecordBatch>> {
+        let _ = (wave_size, budget, weight_of);
+        self.scan(table, request)
+    }
+
     /// Check if a table exists in this chunk.
     fn has_table(&self, table: &str) -> bool;
 

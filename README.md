@@ -96,23 +96,34 @@ Queries are JSON objects specifying block ranges, table filters, relations, and 
 Throughput improvement vs legacy engine (median across query types). See [BENCHMARKS.md](BENCHMARKS.md) for full
 results.
 
-### x86_64: Intel Xeon E-2136 (6C/12T @ 3.3GHz), 64GB DDR4, Linux
+### x86_64: Intel Xeon E-2136 (6C/12T @ 3.3GHz), 64GB DDR4, Linux — prior run (pre-RPC query set)
 
 | Median           | CPU=1           | CPU=4           | CPU=8           | CPU=12          |
 |------------------|-----------------|-----------------|-----------------|-----------------|
 | General queries  | **17% faster**  | **56% faster**  | **67% faster**  | **73% faster**  |
 | Only full blocks | **485% faster** | **599% faster** | **522% faster** | **455% faster** |
 
-### Apple M2 Pro (12-core), 32GB, macOS
+### Apple M2 Pro (12-core), 32GB, macOS — current (RPC-inclusive query set)
 
-| Median           | CPU=1           | CPU=4           | CPU=8          | CPU=12         |
-|------------------|-----------------|-----------------|----------------|----------------|
-| General queries  | **7% faster**   | **40% faster**  | **53% faster** | **49% faster** |
-| Only full blocks | **337% faster** | **139% faster** | **99% faster** | **64% faster** |
+Median throughput speedup vs legacy. RPC queries reproduce `eth_getBlockByNumber`
+(full + tx-hashes), `eth_getBlockReceipts`, and `eth_getLogs` (1/10/100-block).
+
+| Median          | CPU=1            | CPU=4            | CPU=8           | CPU=12          |
+|-----------------|------------------|------------------|-----------------|-----------------|
+| General queries | **17% faster**   | **27% faster**   | **40% faster**  | **45% faster**  |
+| RPC queries     | **~2.9× faster** | **~2.0× faster** | **75% faster**  | **77% faster**  |
+
+New engine is faster on **every** RPC call at every concurrency level
+(1.1×–4.7×); single-thread RPC latency is 1.4×–4.6× faster.
 
 ```bash
 cargo bench --bench latency               # latency (divan)
 cargo bench --bench throughput -- --all    # throughput (all CPU levels)
+
+# A/B vs the legacy engine on the same chunk (requires sibling ../data repo):
+cargo bench --bench latency    --features legacy-query
+cargo bench --bench throughput --features legacy-query -- --all
+cargo bench --bench profile    --features legacy-query -- rpc/getLogs --compare
 ```
 
 ## Supported Datasets
