@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 /// Maximum response size in bytes (20 MB).
-const MAX_RESPONSE_BYTES: u64 = 20 * 1024 * 1024;
+pub(crate) const MAX_RESPONSE_BYTES: u64 = 20 * 1024 * 1024;
 
 /// Default weight per row when no weight column is specified.
 const DEFAULT_ROW_WEIGHT: u64 = 32;
@@ -292,8 +292,31 @@ fn compute_weight_params(
     (fixed_weight, weight_cols)
 }
 
+/// Per-block response weight contributed by a primary table's own rows, matching
+/// the primary-table computation in [`apply_weight_limit`] (weight projection =
+/// primary key + user output columns; no relations, no dedup). Used to seed the
+/// "external" weight that the budget early-stop scan adds on top of the
+/// block-sorted table it is capping.
+pub(crate) fn primary_weight_params(
+    output_columns: &[String],
+    table_desc: Option<&TableDescription>,
+) -> (u64, Vec<String>) {
+    let cols = weight_projection(output_columns, table_desc);
+    compute_weight_params(&cols, table_desc)
+}
+
+/// Per-block-header weight params, matching the header computation in
+/// [`apply_weight_limit`] (no weight projection — the requested block columns
+/// are used directly). The fixed component seeds the budget early-stop walk.
+pub(crate) fn header_weight_params(
+    block_output_columns: &[String],
+    block_desc: Option<&TableDescription>,
+) -> (u64, Vec<String>) {
+    compute_weight_params(block_output_columns, block_desc)
+}
+
 /// Get block number from an array at row index.
-fn get_block_number(col: &dyn arrow::array::Array, i: usize) -> Option<u64> {
+pub(crate) fn get_block_number(col: &dyn arrow::array::Array, i: usize) -> Option<u64> {
     if let Some(a) = col.as_any().downcast_ref::<UInt64Array>() {
         Some(a.value(i))
     } else if let Some(a) = col.as_any().downcast_ref::<UInt32Array>() {
@@ -308,7 +331,7 @@ fn get_block_number(col: &dyn arrow::array::Array, i: usize) -> Option<u64> {
 }
 
 /// Get uint64 value from a weight column at row index.
-fn get_weight_value(col: &dyn arrow::array::Array, i: usize) -> u64 {
+pub(crate) fn get_weight_value(col: &dyn arrow::array::Array, i: usize) -> u64 {
     if let Some(a) = col.as_any().downcast_ref::<UInt64Array>() {
         a.value(i)
     } else if let Some(a) = col.as_any().downcast_ref::<UInt32Array>() {
@@ -323,7 +346,7 @@ fn get_weight_value(col: &dyn arrow::array::Array, i: usize) -> u64 {
 }
 
 /// Accumulate per-block weights in a single pass (no dedup, fast path).
-fn accumulate_block_weights(
+pub(crate) fn accumulate_block_weights(
     batches: &[RecordBatch],
     bn_column: &str,
     fixed_weight_per_row: u64,

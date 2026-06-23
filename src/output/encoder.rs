@@ -453,9 +453,19 @@ fn encode_hex_bytes(bytes: &[u8], buf: &mut Vec<u8>) {
     buf.push(b'"');
     buf.extend_from_slice(b"0x");
     let hex_len = bytes.len() * 2;
+    buf.reserve(hex_len);
     let start = buf.len();
-    buf.resize(start + hex_len, 0);
-    faster_hex::hex_encode(bytes, &mut buf[start..]).unwrap();
+    // Encode directly into the reserved spare capacity, skipping the redundant
+    // zero-fill that `resize(.., 0)` would do before `hex_encode` overwrites every
+    // byte. SAFETY: `reserve(hex_len)` guarantees `[start, start+hex_len)` is
+    // allocated; `faster_hex::hex_encode` writes exactly `bytes.len()*2 == hex_len`
+    // bytes (it errors otherwise, before `set_len` runs), initializing the whole
+    // range before it is exposed via `set_len`.
+    unsafe {
+        let dst = std::slice::from_raw_parts_mut(buf.as_mut_ptr().add(start), hex_len);
+        faster_hex::hex_encode(bytes, dst).unwrap();
+        buf.set_len(start + hex_len);
+    }
     buf.push(b'"');
 }
 

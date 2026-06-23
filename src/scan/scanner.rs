@@ -705,10 +705,16 @@ fn composite_key_in_set_mask(
     BooleanArray::new(builder.finish(), None)
 }
 
-/// Execute a scan against a parquet table: read, filter, project.
-/// Returns filtered RecordBatches with only the output columns.
-pub fn scan(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<RecordBatch>> {
-    // 1. Determine all columns we need to read (output + predicate + block range)
+/// Determine all columns a scan must read: requested output + predicate columns
+/// + block-number column + any key/hierarchical filter columns, restricted to
+/// those that actually exist in the table.
+fn collect_read_columns<'a, 'b>(
+    table: &ParquetTable,
+    request: &'b ScanRequest<'a>,
+) -> Vec<&'b str>
+where
+    'a: 'b,
+{
     let mut all_columns: HashSet<&str> = HashSet::default();
     for col in &request.output_columns {
         all_columns.insert(col);
@@ -736,11 +742,17 @@ pub fn scan(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<RecordBat
         all_columns.insert(&hf.address_column);
     }
 
-    // Filter to columns that actually exist in the table
-    let all_columns: Vec<&str> = all_columns
+    all_columns
         .into_iter()
         .filter(|c| table.column_index(c).is_some())
-        .collect();
+        .collect()
+}
+
+/// Execute a scan against a parquet table: read, filter, project.
+/// Returns filtered RecordBatches with only the output columns.
+pub fn scan(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<RecordBatch>> {
+    // 1. Determine all columns we need to read (output + predicate + block range)
+    let all_columns = collect_read_columns(table, request);
 
     // 2. Determine which row groups to scan (skip via statistics)
     let row_groups_to_scan = select_row_groups(table, request)?;
@@ -770,6 +782,75 @@ pub fn scan(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<RecordBat
             .collect();
         for result in results {
             all_batches.extend(result?);
+        }
+    }
+
+    Ok(all_batches)
+}
+
+/// Scan a block-sorted table's matching row groups in ascending block order, in
+/// parallel waves of `wave_size`. After each wave the freshly read batches are
+/// passed to `weight_of`, which returns the *cumulative* response weight seen so
+/// far; once that exceeds `budget` scanning stops — the wave that tripped the
+/// budget is kept, so the result over-reads by at most one wave (a safe
+/// over-estimate: the exact `apply_weight_limit` trims precisely afterwards).
+///
+/// For a block-sorted table the budget cutoff prunes every later row group, so
+/// wide data columns decode only for blocks that can actually be emitted, while
+/// intra-wave parallelism preserves throughput (a fully sequential scan was
+/// measured 3–4x slower).
+pub fn scan_waves_until_budget<F>(
+    table: &ParquetTable,
+    request: &ScanRequest,
+    wave_size: usize,
+    budget: u64,
+    mut weight_of: F,
+) -> Result<Vec<RecordBatch>>
+where
+    F: FnMut(&[RecordBatch]) -> u64,
+{
+    let mut row_groups = select_row_groups(table, request)?;
+    if row_groups.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Visit row groups in ascending block-number order. For a block-sorted table
+    // the row-group index already follows block order; sort by min block_number
+    // defensively so the budget walk is monotonic regardless of file layout.
+    if let Some(bn_col) = request.block_number_column {
+        row_groups.sort_by_key(|&rg| {
+            table
+                .column_stats(rg, bn_col)
+                .and_then(|s| s.min)
+                .and_then(|m| stat_value_to_u64(&m))
+                .unwrap_or(u64::MAX)
+        });
+    }
+
+    let all_columns = collect_read_columns(table, request);
+    let output_schema = build_output_schema(table.schema(), &request.output_columns);
+
+    let wave_size = wave_size.max(1);
+    let mut all_batches = Vec::new();
+    for wave in row_groups.chunks(wave_size) {
+        let wave_batches: Vec<RecordBatch> = if wave.len() == 1 {
+            scan_row_groups(table, wave, &all_columns, request, &output_schema)?
+        } else {
+            let results: Vec<Result<Vec<RecordBatch>>> = wave
+                .par_iter()
+                .map(|&rg| scan_row_groups(table, &[rg], &all_columns, request, &output_schema))
+                .collect();
+            let mut v = Vec::new();
+            for r in results {
+                v.extend(r?);
+            }
+            v
+        };
+
+        let cumulative = weight_of(&wave_batches);
+        all_batches.extend(wave_batches);
+        if cumulative > budget {
+            break;
         }
     }
 

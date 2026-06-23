@@ -438,7 +438,10 @@ tables:
     query_name: stateDiffs
     field_name: stateDiff
     item_order_keys: [ transaction_index, address, key ]
-    sort_key: [ address, block_number, transaction_index ]
+    # Physical layout is block-sorted (verified on R2 chunks): row groups carry
+    # tight block_number stats but span the full address range, so block-range
+    # pruning works while an `address` filter cannot skip row groups.
+    sort_key: [ block_number, transaction_index, address, key ]
     relations:
       transaction:
         table: transactions
