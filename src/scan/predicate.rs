@@ -661,12 +661,36 @@ impl RangeGtePredicate {
 impl ArrayPredicate for RangeGtePredicate {
     fn evaluate(&self, array: &dyn Array) -> BooleanArray {
         use arrow::compute::kernels::cmp::gt_eq;
+        let len = array.len();
         match &self.value {
+            // Threshold is always built as UInt64, but the physical column may be
+            // Int64 (metadata uint64 → parquet INT64, e.g. `nonce`), UInt32 or Int32.
+            // Never `.unwrap()` a downcast on an attacker-influenced physical type.
             ScalarValue::UInt64(v) => {
-                let arr = array.as_any().downcast_ref::<UInt64Array>().unwrap();
-                gt_eq(&arr, &UInt64Array::new_scalar(*v)).unwrap()
+                if let Some(arr) = array.as_any().downcast_ref::<UInt64Array>() {
+                    gt_eq(&arr, &UInt64Array::new_scalar(*v)).unwrap()
+                } else if let Some(arr) = array.as_any().downcast_ref::<Int64Array>() {
+                    match i64::try_from(*v) {
+                        Ok(v64) => gt_eq(&arr, &Int64Array::new_scalar(v64)).unwrap(),
+                        // No Int64 value can be >= a threshold above i64::MAX.
+                        Err(_) => BooleanArray::from(vec![false; len]),
+                    }
+                } else if let Some(arr) = array.as_any().downcast_ref::<UInt32Array>() {
+                    match u32::try_from(*v) {
+                        Ok(v32) => gt_eq(&arr, &UInt32Array::new_scalar(v32)).unwrap(),
+                        Err(_) => BooleanArray::from(vec![false; len]),
+                    }
+                } else if let Some(arr) = array.as_any().downcast_ref::<Int32Array>() {
+                    match i32::try_from(*v) {
+                        Ok(v32) => gt_eq(&arr, &Int32Array::new_scalar(v32)).unwrap(),
+                        Err(_) => BooleanArray::from(vec![false; len]),
+                    }
+                } else {
+                    // Unknown physical type: don't silently exclude — leave rows in.
+                    BooleanArray::from(vec![true; len])
+                }
             }
-            _ => BooleanArray::from(vec![true; array.len()]),
+            _ => BooleanArray::from(vec![true; len]),
         }
     }
 
@@ -693,12 +717,34 @@ impl RangeLtePredicate {
 impl ArrayPredicate for RangeLtePredicate {
     fn evaluate(&self, array: &dyn Array) -> BooleanArray {
         use arrow::compute::kernels::cmp::lt_eq;
+        let len = array.len();
         match &self.value {
+            // Threshold is always built as UInt64, but the physical column may be
+            // Int64 (metadata uint64 → parquet INT64, e.g. `nonce`), UInt32 or Int32.
             ScalarValue::UInt64(v) => {
-                let arr = array.as_any().downcast_ref::<UInt64Array>().unwrap();
-                lt_eq(&arr, &UInt64Array::new_scalar(*v)).unwrap()
+                if let Some(arr) = array.as_any().downcast_ref::<UInt64Array>() {
+                    lt_eq(&arr, &UInt64Array::new_scalar(*v)).unwrap()
+                } else if let Some(arr) = array.as_any().downcast_ref::<Int64Array>() {
+                    match i64::try_from(*v) {
+                        Ok(v64) => lt_eq(&arr, &Int64Array::new_scalar(v64)).unwrap(),
+                        // Every Int64 value is <= a threshold above i64::MAX.
+                        Err(_) => BooleanArray::from(vec![true; len]),
+                    }
+                } else if let Some(arr) = array.as_any().downcast_ref::<UInt32Array>() {
+                    match u32::try_from(*v) {
+                        Ok(v32) => lt_eq(&arr, &UInt32Array::new_scalar(v32)).unwrap(),
+                        Err(_) => BooleanArray::from(vec![true; len]),
+                    }
+                } else if let Some(arr) = array.as_any().downcast_ref::<Int32Array>() {
+                    match i32::try_from(*v) {
+                        Ok(v32) => lt_eq(&arr, &Int32Array::new_scalar(v32)).unwrap(),
+                        Err(_) => BooleanArray::from(vec![true; len]),
+                    }
+                } else {
+                    BooleanArray::from(vec![true; len])
+                }
             }
-            _ => BooleanArray::from(vec![true; array.len()]),
+            _ => BooleanArray::from(vec![true; len]),
         }
     }
 
@@ -734,15 +780,12 @@ impl ListContainsAnyPredicate {
             string_set: Some(values.into_iter().collect()),
         }
     }
-}
 
-impl ArrayPredicate for ListContainsAnyPredicate {
-    fn evaluate(&self, array: &dyn Array) -> BooleanArray {
-        let list_array = array
-            .as_any()
-            .downcast_ref::<GenericListArray<i32>>()
-            .expect("ListContainsAny requires a List column");
-
+    /// Evaluate against a list array of either offset width.
+    fn evaluate_list<O: OffsetSizeTrait>(
+        &self,
+        list_array: &GenericListArray<O>,
+    ) -> BooleanArray {
         let mut results = Vec::with_capacity(list_array.len());
         for i in 0..list_array.len() {
             if list_array.is_null(i) {
@@ -751,13 +794,27 @@ impl ArrayPredicate for ListContainsAnyPredicate {
             }
             let item = list_array.value(i);
             let matches = if let Some(u32_set) = &self.u32_set {
+                // `instruction_address` is metadata list_uint32 but physically
+                // List<UInt16>; also accept Int32/Int16/UInt8 inner widths.
                 if let Some(vals) = item.as_any().downcast_ref::<UInt32Array>() {
                     (0..vals.len()).any(|j| u32_set.contains(&vals.value(j)))
+                } else if let Some(vals) = item.as_any().downcast_ref::<UInt16Array>() {
+                    (0..vals.len()).any(|j| u32_set.contains(&(vals.value(j) as u32)))
+                } else if let Some(vals) = item.as_any().downcast_ref::<Int32Array>() {
+                    (0..vals.len())
+                        .any(|j| u32::try_from(vals.value(j)).is_ok_and(|v| u32_set.contains(&v)))
+                } else if let Some(vals) = item.as_any().downcast_ref::<Int16Array>() {
+                    (0..vals.len())
+                        .any(|j| u32::try_from(vals.value(j)).is_ok_and(|v| u32_set.contains(&v)))
+                } else if let Some(vals) = item.as_any().downcast_ref::<UInt8Array>() {
+                    (0..vals.len()).any(|j| u32_set.contains(&(vals.value(j) as u32)))
                 } else {
                     false
                 }
             } else if let Some(string_set) = &self.string_set {
                 if let Some(vals) = item.as_any().downcast_ref::<StringArray>() {
+                    (0..vals.len()).any(|j| string_set.contains(vals.value(j)))
+                } else if let Some(vals) = item.as_any().downcast_ref::<LargeStringArray>() {
                     (0..vals.len()).any(|j| string_set.contains(vals.value(j)))
                 } else {
                     false
@@ -768,6 +825,20 @@ impl ArrayPredicate for ListContainsAnyPredicate {
             results.push(matches);
         }
         BooleanArray::from(results)
+    }
+}
+
+impl ArrayPredicate for ListContainsAnyPredicate {
+    fn evaluate(&self, array: &dyn Array) -> BooleanArray {
+        // Support both List (i32 offsets) and LargeList (i64 offsets) without panicking.
+        if let Some(list) = array.as_any().downcast_ref::<GenericListArray<i32>>() {
+            self.evaluate_list(list)
+        } else if let Some(list) = array.as_any().downcast_ref::<GenericListArray<i64>>() {
+            self.evaluate_list(list)
+        } else {
+            // Unknown physical type: don't silently match — exclude all rows.
+            BooleanArray::from(vec![false; array.len()])
+        }
     }
 
     fn can_skip(&self, _min: &dyn Array, _max: &dyn Array) -> bool {
@@ -1244,5 +1315,108 @@ mod tests {
         // Verify via filter_record_batch that rows are correctly selected
         let filtered = arrow::compute::filter_record_batch(&batch, &mask).unwrap();
         assert_eq!(filtered.num_rows(), 2);
+    }
+
+    // --- A1: Range filter must not panic on physical-type divergence ---
+
+    #[test]
+    fn test_range_gte_uint64_threshold_on_int64_array() {
+        // `nonce` is metadata uint64 but physically Int64. Previously `.unwrap()`
+        // on a UInt64 downcast panicked the worker; now it must compare correctly.
+        let pred = RangeGtePredicate::new(ScalarValue::UInt64(42));
+        let array = Int64Array::from(vec![10, 42, 100]);
+        let result = pred.evaluate(&array);
+        assert_eq!(result, BooleanArray::from(vec![false, true, true]));
+    }
+
+    #[test]
+    fn test_range_lte_uint64_threshold_on_int64_array() {
+        let pred = RangeLtePredicate::new(ScalarValue::UInt64(42));
+        let array = Int64Array::from(vec![10, 42, 100]);
+        let result = pred.evaluate(&array);
+        assert_eq!(result, BooleanArray::from(vec![true, true, false]));
+    }
+
+    #[test]
+    fn test_range_gte_threshold_above_i64_max_on_int64_array() {
+        // No Int64 value can be >= a threshold above i64::MAX.
+        let pred = RangeGtePredicate::new(ScalarValue::UInt64(u64::MAX));
+        let array = Int64Array::from(vec![0, i64::MAX]);
+        let result = pred.evaluate(&array);
+        assert_eq!(result, BooleanArray::from(vec![false, false]));
+    }
+
+    #[test]
+    fn test_range_lte_threshold_above_i64_max_on_int64_array() {
+        // Every Int64 value is <= a threshold above i64::MAX.
+        let pred = RangeLtePredicate::new(ScalarValue::UInt64(u64::MAX));
+        let array = Int64Array::from(vec![0, i64::MAX]);
+        let result = pred.evaluate(&array);
+        assert_eq!(result, BooleanArray::from(vec![true, true]));
+    }
+
+    #[test]
+    fn test_range_gte_on_native_uint64_array() {
+        let pred = RangeGtePredicate::new(ScalarValue::UInt64(42));
+        let array = UInt64Array::from(vec![10, 42, 100]);
+        assert_eq!(
+            pred.evaluate(&array),
+            BooleanArray::from(vec![false, true, true])
+        );
+    }
+
+    // --- A2: ListContainsAny must handle List<UInt16> and LargeList ---
+
+    fn list_u16(rows: &[&[u16]]) -> GenericListArray<i32> {
+        let mut b = arrow::array::builder::ListBuilder::new(
+            arrow::array::builder::UInt16Builder::new(),
+        );
+        for row in rows {
+            for v in *row {
+                b.values().append_value(*v);
+            }
+            b.append(true);
+        }
+        b.finish()
+    }
+
+    #[test]
+    fn test_list_contains_any_on_list_uint16() {
+        // `instruction_address` is metadata list_uint32 but physically List<UInt16>.
+        // Previously every row resolved false → silent 0 results.
+        let pred = ListContainsAnyPredicate::new_u32(vec![3, 7]);
+        let array = list_u16(&[&[1, 2], &[3, 4], &[5, 7], &[]]);
+        let result = pred.evaluate(&array);
+        assert_eq!(
+            result,
+            BooleanArray::from(vec![false, true, true, false])
+        );
+    }
+
+    #[test]
+    fn test_list_contains_any_large_list_does_not_panic() {
+        // LargeList (i64 offsets) previously hit `.expect()` and panicked.
+        let mut b = arrow::array::builder::LargeListBuilder::new(
+            arrow::array::builder::UInt32Builder::new(),
+        );
+        for v in [&[10u32, 20][..], &[30][..]] {
+            for x in v {
+                b.values().append_value(*x);
+            }
+            b.append(true);
+        }
+        let array = b.finish();
+        let pred = ListContainsAnyPredicate::new_u32(vec![30]);
+        let result = pred.evaluate(&array);
+        assert_eq!(result, BooleanArray::from(vec![false, true]));
+    }
+
+    #[test]
+    fn test_list_contains_any_unknown_type_excludes_all() {
+        // A non-list array must not panic and must not silently match.
+        let pred = ListContainsAnyPredicate::new_u32(vec![1]);
+        let array = UInt32Array::from(vec![1, 2, 3]);
+        let result = pred.evaluate(&array);
+        assert_eq!(result, BooleanArray::from(vec![false, false, false]));
     }
 }
