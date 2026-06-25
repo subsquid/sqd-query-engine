@@ -1322,8 +1322,65 @@ fn block_range_mask(
             }
         }
         mask
+    } else if let Some(arr) = column.as_any().downcast_ref::<Int64Array>() {
+        // A bare INT64 block_number column decodes as Int64Array. Block numbers are
+        // non-negative; reinterpret-safe because the values fit in i64 in practice.
+        let mut mask = BooleanArray::from(vec![true; arr.len()]);
+        if let Some(from) = from_block {
+            if from > i64::MAX as u64 {
+                return BooleanArray::from(vec![false; arr.len()]);
+            }
+            let ge = gt_eq(&arr, &Int64Array::new_scalar(from as i64)).unwrap();
+            mask = and(&mask, &ge).unwrap();
+        }
+        if let Some(to) = to_block {
+            if to <= i64::MAX as u64 {
+                let le = lt_eq(&arr, &Int64Array::new_scalar(to as i64)).unwrap();
+                mask = and(&mask, &le).unwrap();
+            }
+        }
+        mask
+    } else if let Some(arr) = column.as_any().downcast_ref::<UInt16Array>() {
+        let mut mask = BooleanArray::from(vec![true; arr.len()]);
+        if let Some(from) = from_block {
+            if from > u16::MAX as u64 {
+                return BooleanArray::from(vec![false; arr.len()]);
+            }
+            let ge = gt_eq(&arr, &UInt16Array::new_scalar(from as u16)).unwrap();
+            mask = and(&mask, &ge).unwrap();
+        }
+        if let Some(to) = to_block {
+            if to <= u16::MAX as u64 {
+                let le = lt_eq(&arr, &UInt16Array::new_scalar(to as u16)).unwrap();
+                mask = and(&mask, &le).unwrap();
+            }
+        }
+        mask
+    } else if let Some(arr) = column.as_any().downcast_ref::<Int16Array>() {
+        let mut mask = BooleanArray::from(vec![true; arr.len()]);
+        if let Some(from) = from_block {
+            if from > i16::MAX as u64 {
+                return BooleanArray::from(vec![false; arr.len()]);
+            }
+            let ge = gt_eq(&arr, &Int16Array::new_scalar(from as i16)).unwrap();
+            mask = and(&mask, &ge).unwrap();
+        }
+        if let Some(to) = to_block {
+            if to <= i16::MAX as u64 {
+                let le = lt_eq(&arr, &Int16Array::new_scalar(to as i16)).unwrap();
+                mask = and(&mask, &le).unwrap();
+            }
+        }
+        mask
     } else {
-        // Unknown type, don't filter
+        // Unrecognized physical type for a block_number column: we cannot apply the
+        // range filter here. Surface it loudly — returning all-true would silently
+        // leak out-of-range rows from boundary/interior row groups.
+        eprintln!(
+            "WARN block_range_mask: unsupported block_number physical type {:?}; \
+             block-range filtering skipped for this batch",
+            column.data_type()
+        );
         BooleanArray::from(vec![true; column.len()])
     }
 }
@@ -1401,6 +1458,37 @@ mod tests {
 
     fn evm_chunk_path() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("data/evm/chunk")
+    }
+
+    // --- A3: block_range_mask must filter Int64/UInt16/Int16 columns ---
+
+    #[test]
+    fn test_block_range_mask_int64() {
+        // A bare INT64 block_number column must be filtered, not pass-through.
+        let col: Arc<dyn Array> = Arc::new(Int64Array::from(vec![100, 150, 200, 250]));
+        let mask = block_range_mask(&col, Some(150), Some(200));
+        assert_eq!(mask, BooleanArray::from(vec![false, true, true, false]));
+    }
+
+    #[test]
+    fn test_block_range_mask_uint16() {
+        let col: Arc<dyn Array> = Arc::new(UInt16Array::from(vec![10u16, 20, 30, 40]));
+        let mask = block_range_mask(&col, Some(20), Some(30));
+        assert_eq!(mask, BooleanArray::from(vec![false, true, true, false]));
+    }
+
+    #[test]
+    fn test_block_range_mask_int16() {
+        let col: Arc<dyn Array> = Arc::new(Int16Array::from(vec![10i16, 20, 30, 40]));
+        let mask = block_range_mask(&col, Some(20), None);
+        assert_eq!(mask, BooleanArray::from(vec![false, true, true, true]));
+    }
+
+    #[test]
+    fn test_block_range_mask_int64_from_above_i64_max() {
+        let col: Arc<dyn Array> = Arc::new(Int64Array::from(vec![0, i64::MAX]));
+        let mask = block_range_mask(&col, Some(u64::MAX), None);
+        assert_eq!(mask, BooleanArray::from(vec![false, false]));
     }
 
     #[test]
