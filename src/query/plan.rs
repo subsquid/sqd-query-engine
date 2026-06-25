@@ -31,7 +31,13 @@ fn numeric_scalar(n: u64, col_type: &ColumnType) -> Result<ScalarValue> {
         ColumnType::Int64 => Ok(ScalarValue::Int64(
             i64::try_from(n).map_err(|_| anyhow!("value {} out of range for Int64", n))?,
         )),
-        _ => Ok(ScalarValue::UInt64(n)),
+        // Do NOT silently coerce to UInt64: an integer filter on a
+        // Float64/Timestamp/Decimal128/String/List/Struct column would build a
+        // UInt64 scalar whose downcast always fails → silent empty (HTTP 200, 0 rows).
+        other => bail!(
+            "numeric filter is not supported on column type {:?}",
+            other
+        ),
     }
 }
 
@@ -687,6 +693,48 @@ mod tests {
 
     fn evm_metadata() -> DatasetDescription {
         load_dataset_description(Path::new("metadata/evm.yaml")).unwrap()
+    }
+
+    // --- A4: numeric_scalar must error (not silently coerce to UInt64) on
+    //         non-integer column types, otherwise the filter returns 0 rows. ---
+
+    #[test]
+    fn test_numeric_scalar_integer_types_ok() {
+        assert!(matches!(
+            numeric_scalar(5, &ColumnType::UInt8).unwrap(),
+            ScalarValue::UInt8(5)
+        ));
+        assert!(matches!(
+            numeric_scalar(5, &ColumnType::Int64).unwrap(),
+            ScalarValue::Int64(5)
+        ));
+        assert!(matches!(
+            numeric_scalar(5, &ColumnType::UInt64).unwrap(),
+            ScalarValue::UInt64(5)
+        ));
+    }
+
+    #[test]
+    fn test_numeric_scalar_rejects_non_integer_types() {
+        for ty in [
+            ColumnType::Float64,
+            ColumnType::TimestampMillisecond,
+            ColumnType::Decimal128,
+            ColumnType::String,
+            ColumnType::ListUInt32,
+        ] {
+            assert!(
+                numeric_scalar(5, &ty).is_err(),
+                "expected error for column type {:?}",
+                ty
+            );
+        }
+    }
+
+    #[test]
+    fn test_numeric_scalar_out_of_range_errors() {
+        assert!(numeric_scalar(u64::MAX, &ColumnType::UInt8).is_err());
+        assert!(numeric_scalar(u64::MAX, &ColumnType::Int64).is_err());
     }
 
     #[test]
