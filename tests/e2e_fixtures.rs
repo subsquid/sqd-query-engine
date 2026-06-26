@@ -13,12 +13,16 @@ fn fixture_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
-fn run_fixture_query(meta_path: &str, chunk_dir: &Path, query_json: &[u8]) -> serde_json::Value {
-    let meta = load_dataset_description(Path::new(meta_path)).unwrap();
-    let parsed = parse_query(query_json, &meta).unwrap();
-    let plan = compile(&parsed, &meta).unwrap();
-    let result = execute_plan(&plan, &meta, chunk_dir, Vec::new()).unwrap();
-    serde_json::from_slice(&result).unwrap()
+fn run_fixture_query(
+    meta_path: &str,
+    chunk_dir: &Path,
+    query_json: &[u8],
+) -> anyhow::Result<serde_json::Value> {
+    let meta = load_dataset_description(Path::new(meta_path))?;
+    let parsed = parse_query(query_json, &meta)?;
+    let plan = compile(&parsed, &meta)?;
+    let result = execute_plan(&plan, &meta, chunk_dir, Vec::new())?;
+    Ok(serde_json::from_slice(&result)?)
 }
 
 fn test_fixture(dataset: &str, meta_path: &str, query_name: &str) {
@@ -35,7 +39,12 @@ fn test_fixture(dataset: &str, meta_path: &str, query_name: &str) {
     let query_json = std::fs::read(&query_file).unwrap();
     let actual =
         match std::panic::catch_unwind(|| run_fixture_query(meta_path, &chunk, &query_json)) {
-            Ok(v) => v,
+            // A query error is a legitimate result: legacy serializes it as a bare
+            // JSON string, and some fixtures expect exactly that (e.g. requesting a
+            // schema column that's absent from the parquet). Use the root cause so
+            // the message matches legacy's `err.to_string()` without anyhow context.
+            Ok(Ok(v)) => v,
+            Ok(Err(err)) => serde_json::Value::String(err.root_cause().to_string()),
             Err(e) => {
                 let msg = if let Some(s) = e.downcast_ref::<String>() {
                     s.clone()
@@ -188,6 +197,20 @@ evm_fixture!(example_uniswapv3_abridged_squid_preloaded_pools);
 evm_fixture!(example_evm_ipfs_example);
 evm_fixture!(example_modified_dia_prices_squid);
 
+// NET-536 planner-bug regression: relation request with no predicate on the
+// child table (logs/traces/state_diffs with `transaction: true` and friends).
+evm_fixture!(logs_no_predicate_with_transaction);
+evm_fixture!(logs_no_predicate_with_transaction_logs);
+evm_fixture!(logs_no_predicate_with_transaction_state_diffs);
+evm_fixture!(logs_no_predicate_with_transaction_traces);
+evm_fixture!(traces_no_predicate_with_transaction);
+evm_fixture!(traces_no_predicate_with_transaction_logs);
+evm_fixture!(state_diffs_no_predicate_with_transaction);
+
+// Extended EVM trace API (#73): callCallType + *NonZero trace filters.
+evm_fixture!(trace_call_type);
+evm_fixture!(trace_value_non_zero);
+
 // Production query patterns (from ClickHouse worker_query_logs)
 evm_fixture!(
     evm_prod_01_multi_log_with_tx,
@@ -277,6 +300,9 @@ macro_rules! fuel_fixture {
 fuel_fixture!(asset_transfers);
 fuel_fixture!(created_contracts);
 fuel_fixture!(log_data_from_contract);
+// NET-92: requesting a schema column absent from the parquet is a hard error.
+fuel_fixture!(missing_block_fields);
+fuel_fixture!(missing_field_with_join);
 
 // ---------------------------------------------------------------------------
 // Optimism fixtures (uses EVM metadata)
@@ -314,6 +340,27 @@ binance_fixture!(example_showcase00_analyzing_a_large_number_of_wallets);
 binance_fixture!(example_showcase05_dex_pair_creation_and_swaps);
 binance_fixture!(example_thena_squid_no_preloaded_pools);
 binance_fixture!(example_thena_squid_preloaded_pools);
+
+// ---------------------------------------------------------------------------
+// Tempo fixtures. Tempo is served as `kind: evm` (its extra block/tx fields live
+// in the shared EVM schema as nullable columns, matching the legacy data model),
+// so these use metadata/evm.yaml — there is no separate Tempo dataset kind.
+// ---------------------------------------------------------------------------
+
+macro_rules! tempo_fixture {
+    ($name:ident) => {
+        paste::paste! {
+            #[test]
+            fn [<tempo_ $name>]() {
+                test_fixture("tempo", "metadata/evm.yaml", stringify!($name));
+            }
+        }
+    };
+}
+
+tempo_fixture!(tempo_block_fields);
+tempo_fixture!(tempo_transaction_fields);
+tempo_fixture!(tempo_all_fields);
 
 // ---------------------------------------------------------------------------
 // Kusama fixtures (uses Substrate metadata)

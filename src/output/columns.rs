@@ -38,6 +38,14 @@ pub(crate) fn resolve_output_columns(
             }
         } else if table_desc.columns.contains_key(col.as_str()) {
             cols.insert(col.clone());
+        } else if let Some(phys) = table_desc
+            .field_groups
+            .as_ref()
+            .and_then(|fg| fg.physical_column_for_request(col.as_str()))
+        {
+            // Request key that maps to a differently-named physical column
+            // (e.g. trace `call_call_type` → `call_type`).
+            cols.insert(phys.to_string());
         }
     }
 
@@ -101,6 +109,13 @@ pub(crate) fn resolve_relation_output_columns(
                         }
                     }
                 }
+            } else if let Some(phys) = desc
+                .field_groups
+                .as_ref()
+                .filter(|_| !desc.columns.contains_key(col.as_str()))
+                .and_then(|fg| fg.physical_column_for_request(col.as_str()))
+            {
+                cols.insert(phys.to_string());
             } else {
                 cols.insert(col.clone());
             }
@@ -121,6 +136,37 @@ pub(crate) fn resolve_relation_output_columns(
     }
 
     cols.into_iter().collect()
+}
+
+/// Physical columns that the user explicitly requested as output fields and
+/// which must exist in the parquet (a missing one is a hard error, matching
+/// legacy). Engine-internal columns (block number, sort keys, weights) are
+/// excluded, as are `system` columns and virtual-field sources (the latter are
+/// tolerated when absent).
+pub(crate) fn required_output_columns(
+    output_columns: &[String],
+    table_desc: &TableDescription,
+) -> Vec<String> {
+    let mut cols = Vec::new();
+    for col in output_columns {
+        // Virtual fields roll several optional sources — don't hard-require them.
+        if table_desc.virtual_fields.contains_key(col.as_str()) {
+            continue;
+        }
+        // Resolve field-group request keys (e.g. `call_call_type` → `call_type`).
+        let phys = table_desc
+            .field_groups
+            .as_ref()
+            .filter(|_| !table_desc.columns.contains_key(col.as_str()))
+            .and_then(|fg| fg.physical_column_for_request(col.as_str()))
+            .unwrap_or(col.as_str());
+        if let Some(desc) = table_desc.columns.get(phys) {
+            if !desc.system {
+                cols.push(phys.to_string());
+            }
+        }
+    }
+    cols
 }
 
 /// Get the hierarchical address column from table metadata.

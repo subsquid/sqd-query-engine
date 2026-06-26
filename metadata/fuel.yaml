@@ -29,6 +29,10 @@ tables:
       time:
         type: uint64
         json_encoding: string
+      consensus_parameters_version:
+        type: uint32
+      state_transition_bytecode_version:
+        type: uint32
 
   transactions:
     query_name: transactions
@@ -117,6 +121,9 @@ tables:
       output_contract:
         type: struct
       status:
+        type: string
+        json_encoding: json
+      upgrade_purpose:
         type: string
         json_encoding: json
       # system

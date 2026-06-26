@@ -221,17 +221,20 @@ pub(crate) fn build_grouped_writers(
 ) -> GroupedWriters {
     let base_set: HashSet<&str> = grouping.base_fields.iter().map(|s| s.as_str()).collect();
 
-    // Build a reverse map: physical_column -> (variant, group, field_name)
-    let mut col_to_group: HashMap<&str, (&str, &str, &str)> = HashMap::new();
+    // Build a reverse map: request_key -> (variant, group, field_name, physical_column).
+    // The request key usually equals the physical column, but a column may back
+    // several output fields (e.g. trace `call_type` → `type` and `callType`).
+    let mut col_to_group: HashMap<&str, (&str, &str, &str, &str)> = HashMap::new();
     for (variant_name, groups) in &grouping.variants {
         for (group_name, mappings) in groups {
             for mapping in mappings {
                 col_to_group.insert(
-                    mapping.column.as_str(),
+                    mapping.request_key(),
                     (
                         variant_name.as_str(),
                         group_name.as_str(),
                         mapping.field.as_str(),
+                        mapping.column.as_str(),
                     ),
                 );
             }
@@ -272,14 +275,17 @@ pub(crate) fn build_grouped_writers(
                 column_name: col_name.clone(),
                 encoding,
             });
-        } else if let Some(&(variant, group, field_name)) = col_to_group.get(col_name.as_str()) {
-            // Grouped field
+        } else if let Some(&(variant, group, field_name, phys_col)) =
+            col_to_group.get(col_name.as_str())
+        {
+            // Grouped field. `phys_col` is the parquet column to read, which may
+            // differ from the request key `col_name` (one column, many fields).
             let mut prefix = Vec::with_capacity(field_name.len() + 4);
             encode_json_string(field_name, &mut prefix);
             prefix.push(b':');
             let encoding = table_desc
                 .columns
-                .get(col_name)
+                .get(phys_col)
                 .and_then(|c| c.json_encoding.clone());
             variant_groups
                 .entry(variant.to_string())
@@ -288,7 +294,7 @@ pub(crate) fn build_grouped_writers(
                 .or_default()
                 .push(FieldWriter::Regular {
                     json_key_prefix: prefix,
-                    column_name: col_name.clone(),
+                    column_name: phys_col.to_string(),
                     encoding,
                 });
         }

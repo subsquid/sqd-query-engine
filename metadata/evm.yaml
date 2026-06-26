@@ -71,6 +71,16 @@ tables:
         json_encoding: hex
       l1_block_number:
         type: uint64
+      # Tempo-specific block header fields (nullable; only present in Tempo chunks).
+      main_block_general_gas_limit:
+        type: string
+        json_encoding: hex
+      shared_gas_limit:
+        type: string
+        json_encoding: hex
+      timestamp_millis_part:
+        type: string
+        json_encoding: hex
       # system
       extra_data_size:
         type: uint64
@@ -197,6 +207,37 @@ tables:
       l1_gas_used:
         type: string
         json_encoding: hex
+      # Tempo-specific transaction fields (account abstraction / fee payer;
+      # nullable, only present in Tempo chunks). Struct / list-struct columns are
+      # serialized generically (camelCased keys, nested hex values pass through).
+      calls:
+        type: list_struct
+      nonce_key:
+        type: string
+        json_encoding: hex
+      signature:
+        type: struct
+      fee_token:
+        type: string
+        json_encoding: hex
+      fee_payer_v:
+        type: uint8
+      fee_payer_r:
+        type: string
+        json_encoding: hex
+      fee_payer_s:
+        type: string
+        json_encoding: hex
+      valid_before:
+        type: string
+        json_encoding: hex
+      valid_after:
+        type: string
+        json_encoding: hex
+      aa_authorization_list:
+        type: list_struct
+      key_authorization:
+        type: struct
       # system
       input_size:
         type: uint64
@@ -286,6 +327,28 @@ tables:
         table: traces
         kind: parents
         key: [ block_number, transaction_index, trace_address ]
+    special_filters:
+      # callCallType filters on the shared `call_type` column.
+      call_call_type:
+        type: column_alias
+        column: call_type
+      # *NonZero flags: minimal-form hex means "non-zero" == ">= 0x1".
+      call_value_non_zero:
+        type: gte_const
+        column: call_value
+        value: "0x1"
+      create_value_non_zero:
+        type: gte_const
+        column: create_value
+        value: "0x1"
+      suicide_balance_non_zero:
+        type: gte_const
+        column: suicide_balance
+        value: "0x1"
+      reward_value_non_zero:
+        type: gte_const
+        column: reward_value
+        value: "0x1"
     columns:
       block_number:
         type: uint64
@@ -420,6 +483,8 @@ tables:
             - { column: call_input, field: input }
             - { column: call_sighash, field: sighash }
             - { column: call_type, field: type }
+            # `callCallType` field outputs `action.callType` from the same column.
+            - { column: call_type, field: callType, request: call_call_type }
           result:
             - { column: call_result_gas_used, field: gasUsed }
             - { column: call_result_output, field: output }
