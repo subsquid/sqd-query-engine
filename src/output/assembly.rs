@@ -2,7 +2,7 @@ use crate::metadata::DatasetDescription;
 use crate::output::block_index::{
     build_block_index, collect_block_numbers, collect_boundary_blocks, compute_block_range,
 };
-use crate::output::columns::{find_address_column, group_keys_for_relation, resolve_output_columns, resolve_relation_output_columns};
+use crate::output::columns::{find_address_column, group_keys_for_relation, required_output_columns, resolve_output_columns, resolve_relation_output_columns};
 use crate::output::encoder::{encode_json_string, snake_to_camel};
 use crate::output::row_writer::{
     build_field_writers, build_full_sort_columns, build_grouped_writers, json_close,
@@ -185,6 +185,8 @@ pub fn execute_chunk<W: Write>(
         // Determine all columns needed for output (including virtual field sources)
         let output_cols = resolve_output_columns(table_plan, table_desc);
         let output_col_refs: Vec<&str> = output_cols.iter().map(|s| s.as_str()).collect();
+        let req_cols = required_output_columns(&table_plan.output_columns, table_desc);
+        let req_col_refs: Vec<&str> = req_cols.iter().map(|s| s.as_str()).collect();
         let pred_refs: Vec<&RowPredicate> = table_plan.predicates.iter().collect();
 
         // Two-phase scan for large single-table full scans: a cheap narrow scan
@@ -242,6 +244,7 @@ pub fn execute_chunk<W: Write>(
         request.from_block = Some(plan.from_block);
         request.to_block = effective_to_block;
         request.block_number_column = Some(table_desc.block_number_column.as_str());
+        request.required_columns = req_col_refs;
 
         let t_primary = timer!();
         let batches = if wave_eligible {
@@ -443,10 +446,16 @@ pub fn execute_chunk<W: Write>(
                         resolve_relation_output_columns(&rel.output_columns, rel_table_desc);
                     let rel_col_refs: Vec<&str> =
                         rel_output_cols.iter().map(|s| s.as_str()).collect();
+                    let rel_req_cols = rel_table_desc
+                        .map(|d| required_output_columns(&rel.output_columns, d))
+                        .unwrap_or_default();
+                    let rel_req_refs: Vec<&str> =
+                        rel_req_cols.iter().map(|s| s.as_str()).collect();
 
                     let mut rel_request = ScanRequest::new(rel_col_refs);
                     rel_request.from_block = actual_min_block;
                     rel_request.to_block = actual_max_block;
+                    rel_request.required_columns = rel_req_refs;
                     if let Some(desc) = rel_table_desc {
                         rel_request.block_number_column =
                             Some(desc.block_number_column.as_str());
@@ -601,11 +610,14 @@ pub fn execute_chunk<W: Write>(
             block_cols.insert(col);
         }
         let block_col_vec: Vec<&str> = block_cols.into_iter().collect();
+        let block_req_cols = required_output_columns(&plan.block_output_columns, block_desc);
+        let block_req_refs: Vec<&str> = block_req_cols.iter().map(|s| s.as_str()).collect();
 
         let mut request = ScanRequest::new(block_col_vec);
         request.from_block = Some(plan.from_block);
         request.to_block = plan.to_block;
         request.block_number_column = Some(bn_col);
+        request.required_columns = block_req_refs;
 
         chunk.scan(&plan.block_table, &request)?
     } else {

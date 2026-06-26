@@ -349,6 +349,22 @@ fn compile_item_predicates(
                         col_predicates.push(col_eq(column, numeric_scalar(n, &col_desc.data_type)?));
                     }
                 }
+                SpecialFilter::GteConst { column, value: konst } => {
+                    // Only active when the flag is true (e.g. `callValueNonZero: true`).
+                    if value.as_bool() == Some(true) {
+                        table.column(column).ok_or_else(|| {
+                            anyhow!("gte_const column '{}' not found", column)
+                        })?;
+                        col_predicates.push(ColumnPredicate {
+                            column: column.to_string(),
+                            predicate: Arc::new(
+                                crate::scan::predicate::RangeGtePredicate::new(
+                                    ScalarValue::Utf8(konst.clone()),
+                                ),
+                            ),
+                        });
+                    }
+                }
             }
             continue;
         }

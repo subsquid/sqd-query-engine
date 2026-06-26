@@ -33,6 +33,11 @@ pub struct ScanRequest<'a> {
     pub key_filter: Option<&'a KeyFilter>,
     /// Optional hierarchical filter for Children/Parents relations.
     pub hierarchical_filter: Option<&'a HierarchicalFilter>,
+    /// Columns that the user explicitly requested and which MUST exist in the
+    /// parquet file. A missing one is a hard error (matches legacy
+    /// `ColumnDoesNotExist`), as opposed to engine-internal columns that are
+    /// tolerated when absent.
+    pub required_columns: Vec<&'a str>,
 }
 
 impl<'a> ScanRequest<'a> {
@@ -46,6 +51,7 @@ impl<'a> ScanRequest<'a> {
             batch_size: usize::MAX,
             key_filter: None,
             hierarchical_filter: None,
+            required_columns: Vec::new(),
         }
     }
 }
@@ -751,6 +757,14 @@ where
 /// Execute a scan against a parquet table: read, filter, project.
 /// Returns filtered RecordBatches with only the output columns.
 pub fn scan(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<RecordBatch>> {
+    // 0. A user-requested column declared in metadata but absent from this
+    //    parquet file is a hard error (matches legacy `ColumnDoesNotExist`).
+    for &col in &request.required_columns {
+        if table.column_index(col).is_none() {
+            anyhow::bail!("column '{}' is not found in '{}'", col, table.name());
+        }
+    }
+
     // 1. Determine all columns we need to read (output + predicate + block range)
     let all_columns = collect_read_columns(table, request);
 

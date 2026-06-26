@@ -690,6 +690,17 @@ impl ArrayPredicate for RangeGtePredicate {
                     BooleanArray::from(vec![true; len])
                 }
             }
+            // Lexicographic comparison on a string column (e.g. minimal-form hex
+            // values: `call_value >= "0x1"` keeps every non-zero value, drops "0x"
+            // and nulls). Matches the legacy `col_gt_eq` semantics for `*NonZero`
+            // trace filters.
+            ScalarValue::Utf8(v) => {
+                if let Some(arr) = array.as_any().downcast_ref::<StringArray>() {
+                    gt_eq(&arr, &StringArray::new_scalar(v)).unwrap()
+                } else {
+                    BooleanArray::from(vec![true; len])
+                }
+            }
             _ => BooleanArray::from(vec![true; len]),
         }
     }

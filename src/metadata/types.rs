@@ -318,6 +318,12 @@ pub enum SpecialFilter {
     /// Alias: query key maps to a different physical column name.
     #[serde(rename = "column_alias")]
     ColumnAlias { column: String },
+    /// Boolean flag filter: when `true`, emits `column >= value` against a fixed
+    /// metadata-defined constant. Used for EVM trace `*NonZero` filters, e.g.
+    /// `callValueNonZero: true` → `call_value >= "0x1"` (minimal-form hex, so this
+    /// keeps every non-zero value and drops the zero representation "0x").
+    #[serde(rename = "gte_const")]
+    GteConst { column: String, value: String },
 }
 
 /// Polymorphic field grouping for tables whose output structure depends on a tag column.
@@ -342,6 +348,24 @@ pub struct FieldGrouping {
     pub variants: BTreeMap<String, BTreeMap<String, Vec<FieldMapping>>>,
 }
 
+impl FieldGrouping {
+    /// Resolve a requested output field key to the physical parquet column it
+    /// reads, if any mapping declares it. Handles request keys that differ from
+    /// the column name (e.g. `call_call_type` → `call_type`).
+    pub fn physical_column_for_request(&self, request_key: &str) -> Option<&str> {
+        for groups in self.variants.values() {
+            for mappings in groups.values() {
+                for m in mappings {
+                    if m.request_key() == request_key {
+                        return Some(m.column.as_str());
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
 /// Maps a physical column to a JSON field name within a group.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FieldMapping {
@@ -349,6 +373,19 @@ pub struct FieldMapping {
     pub column: String,
     /// JSON field name in output (camelCase).
     pub field: String,
+    /// Optional request key (snake_case) that selects this mapping, when it
+    /// differs from `column`. Lets one physical column back several output
+    /// fields — e.g. EVM `call_type` powers both `action.type` (request `type`)
+    /// and `action.callType` (request `call_call_type`).
+    #[serde(default)]
+    pub request: Option<String>,
+}
+
+impl FieldMapping {
+    /// The query-field key that selects this mapping (defaults to `column`).
+    pub fn request_key(&self) -> &str {
+        self.request.as_deref().unwrap_or(&self.column)
+    }
 }
 
 /// A virtual field that combines multiple physical columns into one output value.

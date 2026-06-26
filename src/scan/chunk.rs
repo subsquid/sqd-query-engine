@@ -185,6 +185,14 @@ impl ParquetTable {
         &self.path
     }
 
+    /// Logical table name (parquet file stem, e.g. `blocks`).
+    pub fn name(&self) -> &str {
+        self.path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+    }
+
     /// Arrow schema for this table.
     pub fn schema(&self) -> &SchemaRef {
         &self.schema
