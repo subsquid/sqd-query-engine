@@ -1267,26 +1267,6 @@ fn scan_hierarchical_two_pass(
     Ok(output_batches)
 }
 
-/// Create a boolean mask for block range filtering.
-/// Fast block_number IN set check using pre-resolved typed column.
-fn block_number_in_set_mask(
-    batch: &RecordBatch,
-    bn_col_name: &str,
-    set: &rustc_hash::FxHashSet<u64>,
-) -> BooleanArray {
-    let len = batch.num_rows();
-    if let Some(col) = batch.column_by_name(bn_col_name) {
-        if let Some(tc) = TypedKeyColumn::resolve(col.as_ref()) {
-            let mut builder = BooleanBufferBuilder::new(len);
-            for row in 0..len {
-                builder.append(set.contains(&tc.get_u64(row)));
-            }
-            return BooleanArray::new(builder.finish(), None);
-        }
-    }
-    BooleanArray::from(vec![true; len])
-}
-
 fn block_range_mask(
     column: &Arc<dyn Array>,
     from_block: Option<u64>,

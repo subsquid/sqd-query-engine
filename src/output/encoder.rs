@@ -14,11 +14,6 @@ pub fn resolve_encoder(data_type: &DataType, encoding: Option<&JsonEncoding>) ->
         Some(JsonEncoding::Json) => encode_json_passthrough,
         Some(JsonEncoding::SolanaTxVersion) => encode_solana_tx_version,
         Some(JsonEncoding::TimestampMillisecond) => encode_timestamp_millisecond_raw,
-        // Disabled: ~11% faster but not 100% safe — malformed data could produce invalid JSON
-        // Some(JsonEncoding::Hex) | Some(JsonEncoding::Base58) => match data_type {
-        //     DataType::Utf8 => encode_utf8_safe,
-        //     _ => resolve_value_encoder(data_type),
-        // },
         Some(JsonEncoding::Hex) | Some(JsonEncoding::Base58) | None => {
             resolve_value_encoder(data_type)
         }
@@ -161,21 +156,6 @@ fn encode_utf8_value(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
     }
     let a = array.as_any().downcast_ref::<StringArray>().unwrap();
     encode_json_string(a.value(row), buf);
-}
-
-/// Encode a Utf8 string without JSON escaping.
-/// SAFETY: assumes hex/base58 values contain only safe ASCII chars.
-/// This is not 100% safe — malformed data could produce invalid JSON.
-fn encode_utf8_safe(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
-    if array.is_null(row) {
-        buf.extend_from_slice(b"null");
-        return;
-    }
-    let a = array.as_any().downcast_ref::<StringArray>().unwrap();
-    let s = a.value(row);
-    buf.push(b'"');
-    buf.extend_from_slice(s.as_bytes());
-    buf.push(b'"');
 }
 
 fn encode_binary_value(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
@@ -552,8 +532,6 @@ pub fn snake_to_camel(s: &str) -> String {
     }
     result
 }
-
-const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
 
 #[cfg(test)]
 mod tests {

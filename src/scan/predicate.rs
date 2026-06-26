@@ -93,16 +93,6 @@ pub struct BloomFilterPredicate {
     num_hashes: usize,
 }
 
-/// AND combinator: all sub-predicates must match.
-pub struct AndPredicate {
-    predicates: Vec<Arc<dyn ArrayPredicate>>,
-}
-
-/// OR combinator: at least one sub-predicate must match.
-pub struct OrPredicate {
-    predicates: Vec<Arc<dyn ArrayPredicate>>,
-}
-
 /// Range >= predicate: value >= threshold.
 pub struct RangeGtePredicate {
     value: ScalarValue,
@@ -591,60 +581,6 @@ impl ArrayPredicate for BloomFilterPredicate {
     fn can_skip(&self, _min: &dyn Array, _max: &dyn Array) -> bool {
         // Cannot use row group stats to skip bloom filter columns
         false
-    }
-}
-
-// ---------------------------------------------------------------------------
-// And / Or combinators
-// ---------------------------------------------------------------------------
-
-impl AndPredicate {
-    pub fn new(predicates: Vec<Arc<dyn ArrayPredicate>>) -> Self {
-        Self { predicates }
-    }
-}
-
-impl ArrayPredicate for AndPredicate {
-    fn evaluate(&self, array: &dyn Array) -> BooleanArray {
-        let mut result: Option<BooleanArray> = None;
-        for pred in &self.predicates {
-            let mask = pred.evaluate(array);
-            result = Some(match result {
-                None => mask,
-                Some(prev) => and(&prev, &mask).unwrap(),
-            });
-        }
-        result.unwrap_or_else(|| BooleanArray::from(vec![true; array.len()]))
-    }
-
-    fn can_skip(&self, min: &dyn Array, max: &dyn Array) -> bool {
-        // If ANY sub-predicate says skip, we can skip (AND short-circuits)
-        self.predicates.iter().any(|p| p.can_skip(min, max))
-    }
-}
-
-impl OrPredicate {
-    pub fn new(predicates: Vec<Arc<dyn ArrayPredicate>>) -> Self {
-        Self { predicates }
-    }
-}
-
-impl ArrayPredicate for OrPredicate {
-    fn evaluate(&self, array: &dyn Array) -> BooleanArray {
-        let mut result: Option<BooleanArray> = None;
-        for pred in &self.predicates {
-            let mask = pred.evaluate(array);
-            result = Some(match result {
-                None => mask,
-                Some(prev) => or_kleene(&prev, &mask).unwrap(),
-            });
-        }
-        result.unwrap_or_else(|| BooleanArray::from(vec![false; array.len()]))
-    }
-
-    fn can_skip(&self, min: &dyn Array, max: &dyn Array) -> bool {
-        // Only skip if ALL sub-predicates say skip (OR requires all to fail)
-        self.predicates.iter().all(|p| p.can_skip(min, max))
     }
 }
 
