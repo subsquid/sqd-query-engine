@@ -17,8 +17,8 @@ use crate::output::weight::{
 use crate::output::arrow_out::{
     dedup_first, filter_to_blocks, hexify_group, project_columns, write_arrow_frames, OutputFormat,
 };
-use crate::output::writer::JsonArrayWriter;
-use crate::query::{Plan, RelationKind};
+use crate::output::writer::JsonLinesWriter;
+use crate::query::{compile, parse_query, Plan, RelationKind};
 use crate::scan::predicate::{evaluate_predicates_on_batch, RowPredicate};
 use crate::scan::{
     ChunkReader, HierarchicalFilter, HierarchicalMode, KeyFilter, ParquetChunkReader, ScanRequest,
@@ -123,7 +123,7 @@ pub fn execute_plan_arrow<W: Write>(
     execute_chunk_arrow(plan, metadata, &chunk, writer, compress, binary)
 }
 
-/// Execute a plan against any ChunkReader implementation, writing nested JSON.
+/// Execute a plan against any ChunkReader implementation, writing NDJSON.
 pub fn execute_chunk<W: Write>(
     plan: &Plan,
     metadata: &DatasetDescription,
@@ -131,7 +131,7 @@ pub fn execute_chunk<W: Write>(
     writer: W,
     profile: bool,
 ) -> Result<W> {
-    execute_chunk_fmt(plan, metadata, chunk, writer, profile, OutputFormat::Json)
+    Ok(execute_chunk_ext(plan, metadata, chunk, writer, OutputFormat::Json, profile)?.0)
 }
 
 /// Execute a plan against any ChunkReader implementation, writing flat per-table
@@ -144,27 +144,49 @@ pub fn execute_chunk_arrow<W: Write>(
     compress: bool,
     binary: bool,
 ) -> Result<W> {
-    execute_chunk_fmt(
+    Ok(execute_chunk_ext(
         plan,
         metadata,
         chunk,
         writer,
-        false,
         OutputFormat::Arrow { compress, binary },
-    )
+        false,
+    )?
+    .0)
 }
 
-/// Core execution: scan → block selection → output assembly. The `format`
-/// selects the back half: nested JSON or flat Arrow IPC streams. The expensive
-/// front half (scan, joins, weight limit) is shared.
-fn execute_chunk_fmt<W: Write>(
+/// One-call convenience entry point. Parses a JSON query against `meta`, scopes
+/// it to the chunk's `[from, to]` range (overriding the query's own range),
+/// executes, and returns newline-delimited JSON together with the last block
+/// actually emitted. The block is `None` when the result is empty, so the caller
+/// falls back to its `to` bound (matching the legacy engine's empty-chunk
+/// behavior).
+pub fn run_query_ndjson(
+    query_json: &[u8],
+    meta: &DatasetDescription,
+    chunk: &dyn ChunkReader,
+    from: u64,
+    to: Option<u64>,
+) -> Result<(Vec<u8>, Option<u64>)> {
+    let mut query = parse_query(query_json, meta)?;
+    query.from_block = from;
+    query.to_block = to;
+    let plan = compile(&query, meta)?;
+    execute_chunk_ext(&plan, meta, chunk, Vec::new(), OutputFormat::Json, false)
+}
+
+/// Core execution: scan → block selection → output assembly. Returns the
+/// finished `writer` plus the last block actually emitted (`None` for an empty
+/// result). `format` selects the back half — NDJSON or flat Arrow IPC streams;
+/// the expensive front half (scan, joins, weight limit) is shared.
+pub fn execute_chunk_ext<W: Write>(
     plan: &Plan,
     metadata: &DatasetDescription,
     chunk: &dyn ChunkReader,
     writer: W,
-    profile: bool,
     format: OutputFormat,
-) -> Result<W> {
+    profile: bool,
+) -> Result<(W, Option<u64>)> {
     use std::time::Instant;
 
     macro_rules! timer {
@@ -186,7 +208,7 @@ fn execute_chunk_fmt<W: Write>(
     }
 
     let t_total = timer!();
-    // `writer` stays owned here; the JSON path wraps it in a JsonArrayWriter
+    // `writer` stays owned here; the JSON path wraps it in a JsonLinesWriter
     // only after block selection, so the Arrow branch can consume it directly.
 
     // 1. Scan all tables specified in the plan
@@ -715,6 +737,12 @@ fn execute_chunk_fmt<W: Write>(
         plan,
     );
 
+    // Last block actually emitted (post weight-trim). `None` when nothing is
+    // emitted → the caller falls back to its `to` bound. This is the block the
+    // caller reports as processed, so under a response-size truncation it must
+    // be the last *selected* block, not the last candidate block.
+    let last_block = selected_blocks.last().copied();
+
     // Arrow branch: emit flat per-table IPC streams straight from the post-scan
     // batches and return, skipping the entire JSON assembly below. Columns are
     // projected to the requested output fields (+ block_number key), rows are
@@ -864,7 +892,7 @@ fn execute_chunk_fmt<W: Write>(
 
         let out = write_arrow_frames(writer, &groups, compress)?;
         elapsed!(t_total, "TOTAL (arrow)");
-        return Ok(out);
+        return Ok((out, last_block));
     }
 
     // 5. Pre-build block→rows indexes for each batch set
@@ -1027,7 +1055,7 @@ fn execute_chunk_fmt<W: Write>(
     // Reusable per-block row-ref scratch buffers (sort + multi-source merge),
     // allocated once and cleared per block to avoid per-block allocations.
     let t_json = timer!();
-    let mut json_writer = JsonArrayWriter::new(writer);
+    let mut json_writer = JsonLinesWriter::new(writer);
     let mut sort_scratch: Vec<(usize, usize)> = Vec::new();
     let mut merge_scratch: Vec<(usize, usize, usize)> = Vec::new();
     for &block_num in &selected_blocks {
@@ -1071,7 +1099,7 @@ fn execute_chunk_fmt<W: Write>(
     elapsed!(t_json, "json output");
     elapsed!(t_total, "TOTAL");
 
-    Ok(json_writer.finish()?)
+    Ok((json_writer.finish()?, last_block))
 }
 
 #[cfg(test)]
@@ -1123,11 +1151,21 @@ mod tests {
         out
     }
 
-    /// Sum of array lengths per output table across all blocks in the JSON.
+    /// Parse the engine's NDJSON output (one block per line, trailing newline)
+    /// into a vector of block objects.
+    fn ndjson_blocks(bytes: &[u8]) -> Vec<serde_json::Value> {
+        std::str::from_utf8(bytes)
+            .unwrap()
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    /// Sum of array lengths per output table across all blocks in the NDJSON.
     fn json_item_counts(json: &[u8]) -> HashMap<String, usize> {
-        let v: serde_json::Value = serde_json::from_slice(json).unwrap();
         let mut map: HashMap<String, usize> = HashMap::new();
-        for b in v.as_array().unwrap() {
+        for b in ndjson_blocks(json) {
             for (k, val) in b.as_object().unwrap() {
                 if k == "header" {
                     continue;
@@ -1335,17 +1373,16 @@ mod tests {
         let output = Vec::new();
         let result = execute_plan(&plan, &meta, &chunk_dir, output).unwrap();
 
-        let json_str = String::from_utf8(result).unwrap();
-        assert!(json_str.starts_with('['));
-        assert!(json_str.ends_with(']'));
+        // NDJSON framing: non-empty output ends with a trailing newline, no
+        // array brackets.
+        assert!(result.ends_with(b"\n"));
+        assert_ne!(result.first(), Some(&b'['));
 
-        // Parse to validate JSON
-        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
-        let blocks = parsed.as_array().unwrap();
+        let blocks = ndjson_blocks(&result);
         assert!(!blocks.is_empty(), "should have at least one block");
 
         // Each block should have a header
-        for block in blocks {
+        for block in &blocks {
             assert!(block.get("header").is_some(), "block should have header");
         }
 
@@ -1354,7 +1391,7 @@ mod tests {
         assert!(has_instructions, "should have instructions in output");
 
         // Verify instruction fields are camelCase
-        for block in blocks {
+        for block in &blocks {
             if let Some(instrs) = block.get("instructions") {
                 for instr in instrs.as_array().unwrap() {
                     assert!(instr.get("programId").is_some());
@@ -1387,13 +1424,11 @@ mod tests {
         let output = Vec::new();
         let result = execute_plan(&plan, &meta, &chunk_dir, output).unwrap();
 
-        let json_str = String::from_utf8(result).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
-        let blocks = parsed.as_array().unwrap();
+        let blocks = ndjson_blocks(&result);
         assert!(!blocks.is_empty());
 
         // Check topics is an array (virtual field via roll)
-        for block in blocks {
+        for block in &blocks {
             if let Some(logs) = block.get("logs") {
                 for log in logs.as_array().unwrap() {
                     if let Some(topics) = log.get("topics") {
@@ -1432,9 +1467,7 @@ mod tests {
         let output = Vec::new();
         let result = execute_plan(&plan, &meta, &chunk_dir, output).unwrap();
 
-        let json_str = String::from_utf8(result).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
-        let blocks = parsed.as_array().unwrap();
+        let blocks = ndjson_blocks(&result);
 
         // Should have both instructions and transactions
         let has_txs = blocks.iter().any(|b| b.get("transactions").is_some());
@@ -1460,7 +1493,104 @@ mod tests {
         let output = Vec::new();
         let result = execute_plan(&plan, &meta, &chunk_dir, output).unwrap();
 
-        assert_eq!(String::from_utf8(result).unwrap(), "[]");
+        // Empty result → empty NDJSON output (not "[]").
+        assert_eq!(String::from_utf8(result).unwrap(), "");
+    }
+
+    #[test]
+    fn test_run_query_ndjson_framing_and_last_block() {
+        let meta = evm_metadata();
+        let q = br#"{
+            "type": "evm", "fromBlock": 0,
+            "fields": {
+                "block": { "number": true },
+                "log": { "address": true, "topics": true, "logIndex": true }
+            },
+            "logs": [{ "topic0": ["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"] }]
+        }"#;
+        let chunk = evm_chunk();
+        let (bytes, last) = run_query_ndjson(q, &meta, &chunk, 0, None).unwrap();
+
+        // NDJSON framing: trailing newline, no array bracket, every line is a
+        // valid block object.
+        assert!(bytes.ends_with(b"\n"));
+        assert_ne!(bytes.first(), Some(&b'['));
+        let blocks = ndjson_blocks(&bytes);
+        assert!(!blocks.is_empty(), "transfer logs should match in this chunk");
+
+        // last_block is the highest emitted header number (blocks are ascending).
+        let max_num = blocks
+            .iter()
+            .map(|b| b["header"]["number"].as_u64().unwrap())
+            .max()
+            .unwrap();
+        assert_eq!(last, Some(max_num));
+    }
+
+    #[test]
+    fn test_run_query_ndjson_empty_has_none_last_block() {
+        let meta = solana_metadata();
+        let q = br#"{
+            "type": "solana", "fromBlock": 999999999, "toBlock": 999999999,
+            "instructions": [{ "programId": ["nonexistent_program"] }]
+        }"#;
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/chunk");
+        let chunk = ParquetChunkReader::open(&dir).unwrap();
+        let (bytes, last) = run_query_ndjson(q, &meta, &chunk, 999999999, Some(999999999)).unwrap();
+        // Empty result → empty output, and no last block (caller falls back to `to`).
+        assert!(bytes.is_empty());
+        assert_eq!(last, None);
+    }
+
+    #[test]
+    fn test_ndjson_resume_no_duplicate_or_gap() {
+        // Simulate paging a chunk: page 1 covers [from, last_block]; page 2
+        // resumes at last_block + 1. The last emitted block
+        // must NOT reappear on the next page (no duplication), and no block may
+        // be skipped (no gap). This is the invariant that makes `last_block`
+        // safe as an inclusive resume cursor.
+        let meta = evm_metadata();
+        let q = br#"{
+            "type": "evm", "fromBlock": 0,
+            "fields": {
+                "block": { "number": true },
+                "log": { "address": true, "logIndex": true }
+            },
+            "logs": [{ "topic0": ["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"] }]
+        }"#;
+        let chunk = evm_chunk();
+
+        let block_nums = |bytes: &[u8]| -> Vec<u64> {
+            ndjson_blocks(bytes)
+                .iter()
+                .map(|b| b["header"]["number"].as_u64().unwrap())
+                .collect()
+        };
+
+        // Full run → pick a midpoint block to split on.
+        let (full_bytes, _) = run_query_ndjson(q, &meta, &chunk, 0, None).unwrap();
+        let full = block_nums(&full_bytes);
+        assert!(full.len() >= 4, "need several blocks to split meaningfully");
+        let mid = full[full.len() / 2];
+
+        // Page 1: [0, mid]. last_block is the inclusive upper boundary `mid`.
+        let (p1_bytes, last1) = run_query_ndjson(q, &meta, &chunk, 0, Some(mid)).unwrap();
+        assert_eq!(last1, Some(mid), "page-1 last_block must be the inclusive boundary");
+        let s1: HashSet<u64> = block_nums(&p1_bytes).into_iter().collect();
+
+        // Page 2 resumes strictly after last_block.
+        let (p2_bytes, _last2) = run_query_ndjson(q, &meta, &chunk, mid + 1, None).unwrap();
+        let s2: HashSet<u64> = block_nums(&p2_bytes).into_iter().collect();
+
+        // No duplication: the boundary block is on exactly one page.
+        let overlap: Vec<u64> = s1.intersection(&s2).copied().collect();
+        assert!(overlap.is_empty(), "blocks duplicated across resume boundary: {overlap:?}");
+        assert!(!s2.contains(&mid), "last emitted block {mid} must not reappear on page 2");
+
+        // No gap: every block from the full run is covered by one of the pages.
+        for b in &full {
+            assert!(s1.contains(b) || s2.contains(b), "block {b} fell into a resume gap");
+        }
     }
 
     #[test]

@@ -22,7 +22,15 @@ fn run_fixture_query(
     let parsed = parse_query(query_json, &meta)?;
     let plan = compile(&parsed, &meta)?;
     let result = execute_plan(&plan, &meta, chunk_dir, Vec::new())?;
-    Ok(serde_json::from_slice(&result)?)
+    // The engine emits NDJSON (one block per line, trailing newline); the
+    // fixtures store the same blocks as a JSON array. Normalize NDJSON → array
+    // so the comparison stays value-level (framing-agnostic).
+    let blocks: Vec<serde_json::Value> = std::str::from_utf8(&result)?
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(serde_json::from_str)
+        .collect::<Result<_, _>>()?;
+    Ok(serde_json::Value::Array(blocks))
 }
 
 fn test_fixture(dataset: &str, meta_path: &str, query_name: &str) {

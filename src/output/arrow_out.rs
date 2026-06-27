@@ -50,9 +50,12 @@ use std::io::Write;
 use std::sync::Arc;
 
 /// Output format selector threaded into the execution core.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub enum OutputFormat {
-    /// Nested JSON (the production format): `[{header, logs:[...], ...}, ...]`.
+    /// Newline-delimited JSON (NDJSON), the engine's default output format:
+    /// `{header, logs:[…], …}\n` per block, trailing newline, empty result →
+    /// empty output. See [`crate::output::JsonLinesWriter`].
+    #[default]
     Json,
     /// Flat per-table Arrow IPC streams. `compress` toggles Arrow's built-in
     /// Zstd; `binary` decodes hex `Utf8` columns to raw bytes.
