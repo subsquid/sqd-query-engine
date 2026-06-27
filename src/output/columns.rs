@@ -2,6 +2,40 @@ use crate::metadata::{TableDescription, VirtualField, WeightSource};
 use crate::query::TablePlan;
 use std::collections::HashSet;
 
+/// Map a table's *requested output fields* (logical names, possibly virtual or
+/// field-group requests) to the physical parquet columns that back them, in
+/// request order. Unlike [`resolve_output_columns`], this does NOT add scan
+/// helpers (join keys, weight columns, sort keys, tag column) — it is exactly
+/// the columns a user asked to see, expanded to physical form. Used to project
+/// flat Arrow output.
+pub(crate) fn physical_output_columns(
+    out_cols: &[String],
+    table_desc: &TableDescription,
+) -> Vec<String> {
+    let mut cols: Vec<String> = Vec::new();
+    let push = |c: String, cols: &mut Vec<String>| {
+        if !cols.contains(&c) {
+            cols.push(c);
+        }
+    };
+    for col in out_cols {
+        if let Some(VirtualField::Roll { columns }) = table_desc.virtual_fields.get(col.as_str()) {
+            for c in columns {
+                push(c.clone(), &mut cols);
+            }
+        } else if table_desc.columns.contains_key(col.as_str()) {
+            push(col.clone(), &mut cols);
+        } else if let Some(phys) = table_desc
+            .field_groups
+            .as_ref()
+            .and_then(|fg| fg.physical_column_for_request(col.as_str()))
+        {
+            push(phys.to_string(), &mut cols);
+        }
+    }
+    cols
+}
+
 /// Resolve all physical columns needed for a table's output (including virtual field sources).
 pub(crate) fn resolve_output_columns(
     table_plan: &TablePlan,
