@@ -7,7 +7,7 @@ edition = "2021"
 autobenches = false
 
 [dependencies]
-arrow = { version = "54", features = ["ffi"] }
+arrow = { version = "54", features = ["ffi", "ipc_compression"] }
 parquet = { version = "54", features = ["arrow"] }
 rayon = "1"
 serde = { version = "1", features = ["derive"] }
@@ -43,6 +43,7 @@ required-features = ["legacy-query"]
 divan = "0.1"
 paste = "1.0.15"
 tempfile = "3"
+zstd = "0.13"
 
 [[bench]]
 name = "latency"

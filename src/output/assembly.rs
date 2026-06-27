@@ -2,7 +2,7 @@ use crate::metadata::DatasetDescription;
 use crate::output::block_index::{
     build_block_index, collect_block_numbers, collect_boundary_blocks, compute_block_range,
 };
-use crate::output::columns::{find_address_column, group_keys_for_relation, required_output_columns, resolve_output_columns, resolve_relation_output_columns};
+use crate::output::columns::{find_address_column, group_keys_for_relation, physical_output_columns, required_output_columns, resolve_output_columns, resolve_relation_output_columns};
 use crate::output::encoder::{encode_json_string, snake_to_camel};
 use crate::output::row_writer::{
     build_field_writers, build_full_sort_columns, build_grouped_writers, json_close,
@@ -13,6 +13,9 @@ use crate::output::weight::{
     accumulate_block_weights, apply_weight_limit, get_block_number, get_weight_value,
     primary_weight_params, weight_cutoff_block, weight_scan_columns, TableOutput,
     MAX_RESPONSE_BYTES,
+};
+use crate::output::arrow_out::{
+    dedup_first, filter_to_blocks, hexify_group, project_columns, write_arrow_frames, OutputFormat,
 };
 use crate::output::writer::JsonArrayWriter;
 use crate::query::{Plan, RelationKind};
@@ -105,13 +108,62 @@ pub fn execute_plan_profiled<W: Write>(
     execute_chunk(plan, metadata, &chunk, writer, true)
 }
 
-/// Execute a plan against any ChunkReader implementation.
+/// Execute a plan against a chunk directory and write flat per-table Arrow IPC
+/// streams instead of nested JSON (prototype). `compress` toggles Arrow's
+/// built-in Zstd. See [`crate::output::arrow_out`].
+pub fn execute_plan_arrow<W: Write>(
+    plan: &Plan,
+    metadata: &DatasetDescription,
+    chunk_dir: &Path,
+    writer: W,
+    compress: bool,
+    binary: bool,
+) -> Result<W> {
+    let chunk = ParquetChunkReader::open(chunk_dir)?;
+    execute_chunk_arrow(plan, metadata, &chunk, writer, compress, binary)
+}
+
+/// Execute a plan against any ChunkReader implementation, writing nested JSON.
 pub fn execute_chunk<W: Write>(
     plan: &Plan,
     metadata: &DatasetDescription,
     chunk: &dyn ChunkReader,
     writer: W,
     profile: bool,
+) -> Result<W> {
+    execute_chunk_fmt(plan, metadata, chunk, writer, profile, OutputFormat::Json)
+}
+
+/// Execute a plan against any ChunkReader implementation, writing flat per-table
+/// Arrow IPC streams (prototype). See [`crate::output::arrow_out`].
+pub fn execute_chunk_arrow<W: Write>(
+    plan: &Plan,
+    metadata: &DatasetDescription,
+    chunk: &dyn ChunkReader,
+    writer: W,
+    compress: bool,
+    binary: bool,
+) -> Result<W> {
+    execute_chunk_fmt(
+        plan,
+        metadata,
+        chunk,
+        writer,
+        false,
+        OutputFormat::Arrow { compress, binary },
+    )
+}
+
+/// Core execution: scan → block selection → output assembly. The `format`
+/// selects the back half: nested JSON or flat Arrow IPC streams. The expensive
+/// front half (scan, joins, weight limit) is shared.
+fn execute_chunk_fmt<W: Write>(
+    plan: &Plan,
+    metadata: &DatasetDescription,
+    chunk: &dyn ChunkReader,
+    writer: W,
+    profile: bool,
+    format: OutputFormat,
 ) -> Result<W> {
     use std::time::Instant;
 
@@ -134,7 +186,8 @@ pub fn execute_chunk<W: Write>(
     }
 
     let t_total = timer!();
-    let mut json_writer = JsonArrayWriter::new(writer);
+    // `writer` stays owned here; the JSON path wraps it in a JsonArrayWriter
+    // only after block selection, so the Arrow branch can consume it directly.
 
     // 1. Scan all tables specified in the plan
     let mut table_outputs: HashMap<String, TableOutput> = HashMap::new();
@@ -662,6 +715,158 @@ pub fn execute_chunk<W: Write>(
         plan,
     );
 
+    // Arrow branch: emit flat per-table IPC streams straight from the post-scan
+    // batches and return, skipping the entire JSON assembly below. Columns are
+    // projected to the requested output fields (+ block_number key), rows are
+    // trimmed to the weight-limited `selected_blocks`, and tables fed by several
+    // sources are merged + deduped to match JSON. See `crate::output::arrow_out`.
+    if let OutputFormat::Arrow { compress, binary } = format {
+        let selected: HashSet<u64> = selected_blocks.iter().copied().collect();
+        let keep = |b: u64| selected.contains(&b);
+
+        // Collect every output source (primary scans + relation pulls).
+        struct Src<'a> {
+            qn: String,
+            td: &'a crate::metadata::TableDescription,
+            out_cols: &'a [String],
+            batches: &'a [RecordBatch],
+        }
+        let mut srcs: Vec<Src> = Vec::new();
+        for table_plan in &plan.table_plans {
+            if let Some(output) = table_outputs.get(&table_plan.table) {
+                let td = metadata.table(&table_plan.table).unwrap();
+                srcs.push(Src {
+                    qn: td.query_name.clone().unwrap_or_else(|| table_plan.table.clone()),
+                    td,
+                    out_cols: &table_plan.output_columns,
+                    batches: &output.batches,
+                });
+                for rel in &table_plan.relations {
+                    if let Some(rb) = output.relation_batches.get(&rel.target_table) {
+                        if let Some(rd) = metadata.table(&rel.target_table) {
+                            srcs.push(Src {
+                                qn: rd.query_name.clone().unwrap_or_else(|| rel.target_table.clone()),
+                                td: rd,
+                                out_cols: &rel.output_columns,
+                                batches: rb,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Group sources by output table name, ordered by metadata table order.
+        let qn_pos: HashMap<&str, usize> = metadata
+            .tables
+            .iter()
+            .enumerate()
+            .map(|(i, (name, desc))| (desc.query_name.as_deref().unwrap_or(name.as_str()), i))
+            .collect();
+        let mut order: Vec<String> = Vec::new();
+        let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, s) in srcs.iter().enumerate() {
+            by_name
+                .entry(s.qn.clone())
+                .or_insert_with(|| {
+                    order.push(s.qn.clone());
+                    Vec::new()
+                })
+                .push(i);
+        }
+        order.sort_by_key(|qn| qn_pos.get(qn.as_str()).copied().unwrap_or(usize::MAX));
+
+        let mut groups: Vec<(String, Vec<RecordBatch>)> = Vec::new();
+
+        // Block header stream: project + weight-trim.
+        {
+            let bn = block_table_desc
+                .map(|d| d.block_number_column.clone())
+                .unwrap_or_else(|| "number".to_string());
+            let mut wanted = vec![bn.clone()];
+            let block_phys = match block_table_desc {
+                Some(bd) => physical_output_columns(&plan.block_output_columns, bd),
+                None => plan.block_output_columns.clone(),
+            };
+            for c in block_phys {
+                if !wanted.contains(&c) {
+                    wanted.push(c);
+                }
+            }
+            let name = block_table_desc
+                .and_then(|d| d.query_name.clone())
+                .unwrap_or_else(|| "blocks".to_string());
+            let batches: Vec<RecordBatch> = block_batches
+                .iter()
+                .map(|b| filter_to_blocks(&project_columns(b, &wanted), &bn, keep))
+                .filter(|b| b.num_rows() > 0)
+                .collect();
+            let batches = match (binary, block_table_desc) {
+                (true, Some(bd)) => hexify_group(batches, bd),
+                _ => batches,
+            };
+            groups.push((name, batches));
+        }
+
+        // Item tables.
+        for qn in &order {
+            let idxs = &by_name[qn];
+            let td = srcs[idxs[0]].td;
+            let bn = td.block_number_column.clone();
+            let mut emit_cols = vec![bn.clone()];
+            for c in physical_output_columns(srcs[idxs[0]].out_cols, td) {
+                if !emit_cols.contains(&c) {
+                    emit_cols.push(c);
+                }
+            }
+            let multi = idxs.len() > 1;
+            // For a multi-source table, carry the dedup key columns through the
+            // projection so they exist at dedup time, then drop them on emit.
+            let sort_cols = build_full_sort_columns(td);
+            let mut proc_cols = emit_cols.clone();
+            if multi {
+                for c in &sort_cols {
+                    if !proc_cols.contains(c) {
+                        proc_cols.push(c.clone());
+                    }
+                }
+            }
+
+            let mut projected: Vec<RecordBatch> = Vec::new();
+            for &si in idxs {
+                for b in srcs[si].batches {
+                    let f = filter_to_blocks(&project_columns(b, &proc_cols), &bn, keep);
+                    if f.num_rows() > 0 {
+                        projected.push(f);
+                    }
+                }
+            }
+            if projected.is_empty() {
+                continue;
+            }
+
+            let batches: Vec<RecordBatch> = if multi {
+                let schema = projected[0].schema();
+                let merged = arrow::compute::concat_batches(&schema, &projected)?;
+                let mut key = vec![bn.clone()];
+                for c in &sort_cols {
+                    if !key.contains(c) {
+                        key.push(c.clone());
+                    }
+                }
+                vec![project_columns(&dedup_first(&merged, &key), &emit_cols)]
+            } else {
+                projected
+            };
+
+            groups.push((qn.clone(), if binary { hexify_group(batches, td) } else { batches }));
+        }
+
+        let out = write_arrow_frames(writer, &groups, compress)?;
+        elapsed!(t_total, "TOTAL (arrow)");
+        return Ok(out);
+    }
+
     // 5. Pre-build block→rows indexes for each batch set
     let block_index = build_block_index(
         &block_batches,
@@ -822,6 +1027,7 @@ pub fn execute_chunk<W: Write>(
     // Reusable per-block row-ref scratch buffers (sort + multi-source merge),
     // allocated once and cleared per block to avoid per-block allocations.
     let t_json = timer!();
+    let mut json_writer = JsonArrayWriter::new(writer);
     let mut sort_scratch: Vec<(usize, usize)> = Vec::new();
     let mut merge_scratch: Vec<(usize, usize, usize)> = Vec::new();
     for &block_num in &selected_blocks {
@@ -881,6 +1087,230 @@ mod tests {
 
     fn evm_metadata() -> DatasetDescription {
         load_dataset_description(Path::new("metadata/evm.yaml")).unwrap()
+    }
+
+    fn evm_chunk() -> ParquetChunkReader {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/evm/chunk");
+        ParquetChunkReader::open(&dir).unwrap()
+    }
+
+    /// Parse framed Arrow streams → map of table name → (column names, row count).
+    fn read_arrow_frames(framed: &[u8]) -> HashMap<String, (Vec<String>, usize)> {
+        use arrow::ipc::reader::StreamReader;
+        use std::io::Cursor;
+        let mut out: HashMap<String, (Vec<String>, usize)> = HashMap::new();
+        let mut pos = 0usize;
+        while pos + 4 <= framed.len() {
+            let nl = u32::from_le_bytes(framed[pos..pos + 4].try_into().unwrap()) as usize;
+            pos += 4;
+            let name = String::from_utf8(framed[pos..pos + nl].to_vec()).unwrap();
+            pos += nl;
+            let pl = u32::from_le_bytes(framed[pos..pos + 4].try_into().unwrap()) as usize;
+            pos += 4;
+            let payload = &framed[pos..pos + pl];
+            pos += pl;
+            let reader = StreamReader::try_new(Cursor::new(payload), None).unwrap();
+            let cols: Vec<String> = reader
+                .schema()
+                .fields()
+                .iter()
+                .map(|f| f.name().to_string())
+                .collect();
+            let rows: usize = reader.map(|b| b.unwrap().num_rows()).sum();
+            let e = out.entry(name).or_insert_with(|| (cols.clone(), 0));
+            e.1 += rows;
+        }
+        out
+    }
+
+    /// Sum of array lengths per output table across all blocks in the JSON.
+    fn json_item_counts(json: &[u8]) -> HashMap<String, usize> {
+        let v: serde_json::Value = serde_json::from_slice(json).unwrap();
+        let mut map: HashMap<String, usize> = HashMap::new();
+        for b in v.as_array().unwrap() {
+            for (k, val) in b.as_object().unwrap() {
+                if k == "header" {
+                    continue;
+                }
+                if let Some(arr) = val.as_array() {
+                    *map.entry(k.clone()).or_default() += arr.len();
+                }
+            }
+        }
+        map
+    }
+
+    #[test]
+    fn test_arrow_parity_and_projection() {
+        let meta = evm_metadata();
+        let q = br#"{
+            "type": "evm", "fromBlock": 0,
+            "fields": {
+                "block": { "number": true, "hash": true },
+                "log": { "address": true, "topics": true, "data": true, "logIndex": true }
+            },
+            "logs": [{ "topic0": ["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"] }]
+        }"#;
+        let plan = compile(&parse_query(q, &meta).unwrap(), &meta).unwrap();
+        let chunk = evm_chunk();
+
+        let json = execute_chunk(&plan, &meta, &chunk, Vec::new(), false).unwrap();
+        let arrow = execute_chunk_arrow(&plan, &meta, &chunk, Vec::new(), false, false).unwrap();
+
+        let jcounts = json_item_counts(&json);
+        let frames = read_arrow_frames(&arrow);
+
+        // Row-count parity on the item table (weight-trim correctness).
+        assert_eq!(
+            frames["logs"].1, jcounts["logs"],
+            "arrow log rows must equal json log items"
+        );
+        assert!(frames["logs"].1 > 0, "should have logs");
+
+        // `topics` (virtual Roll) is expanded to physical topic0..3, not dropped.
+        let cols = &frames["logs"].0;
+        assert!(cols.contains(&"topic0".to_string()), "topic0 present: {cols:?}");
+        assert!(cols.contains(&"topic1".to_string()), "topic1 present");
+        assert!(cols.contains(&"address".to_string()));
+        assert!(cols.contains(&"block_number".to_string()), "join key present");
+        // Internal scan/weight columns must NOT leak into output.
+        assert!(!cols.contains(&"data_size".to_string()), "no internal data_size: {cols:?}");
+    }
+
+    #[test]
+    fn test_arrow_weight_trim_parity() {
+        // Full-scan logs exceed the response budget on this chunk, so the JSON
+        // path trims to weight-limited blocks. Flat Arrow must trim identically.
+        let meta = evm_metadata();
+        let q = br#"{
+            "type": "evm", "fromBlock": 0,
+            "fields": {
+                "block": { "number": true },
+                "log": { "address": true, "topics": true, "data": true, "logIndex": true, "transactionIndex": true }
+            },
+            "logs": [{}]
+        }"#;
+        let plan = compile(&parse_query(q, &meta).unwrap(), &meta).unwrap();
+        let chunk = evm_chunk();
+
+        let json = execute_chunk(&plan, &meta, &chunk, Vec::new(), false).unwrap();
+        let arrow = execute_chunk_arrow(&plan, &meta, &chunk, Vec::new(), false, false).unwrap();
+
+        let jcounts = json_item_counts(&json);
+        let frames = read_arrow_frames(&arrow);
+        assert_eq!(
+            frames["logs"].1, jcounts["logs"],
+            "arrow must apply the same weight-limit row trim as json"
+        );
+    }
+
+    #[test]
+    fn test_arrow_multisource_dedup() {
+        // `transactions` is pulled by BOTH the traces and stateDiffs relations.
+        // JSON merges+dedups into one array; flat Arrow must do the same.
+        let meta = evm_metadata();
+        let q = br#"{
+            "type": "evm", "fromBlock": 0,
+            "fields": {
+                "block": { "number": true },
+                "transaction": { "from": true, "to": true, "hash": true, "transactionIndex": true },
+                "trace": { "type": true, "transactionIndex": true },
+                "stateDiff": { "kind": true, "transactionIndex": true, "address": true }
+            },
+            "traces": [{ "type": ["call"], "callTo": ["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"], "transaction": true }],
+            "stateDiffs": [{ "address": ["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"], "transaction": true }]
+        }"#;
+        let plan = compile(&parse_query(q, &meta).unwrap(), &meta).unwrap();
+        let chunk = evm_chunk();
+
+        let json = execute_chunk(&plan, &meta, &chunk, Vec::new(), false).unwrap();
+        let arrow = execute_chunk_arrow(&plan, &meta, &chunk, Vec::new(), false, false).unwrap();
+
+        let jcounts = json_item_counts(&json);
+        let frames = read_arrow_frames(&arrow);
+
+        assert_eq!(
+            frames["transactions"].1, jcounts["transactions"],
+            "multi-source transactions must be deduped to match json"
+        );
+    }
+
+    #[test]
+    fn test_arrow_solana_base58_and_list() {
+        // Solana: base58 columns (not 0x-hex) must stay Utf8 under `binary`, and
+        // List<UInt16> instructionAddress must round-trip. Parity with JSON.
+        let meta = solana_metadata();
+        let q = br#"{
+            "type": "solana", "fromBlock": 0,
+            "fields": {
+                "instruction": { "programId": true, "transactionIndex": true, "instructionAddress": true }
+            },
+            "instructions": [{ "programId": ["whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc"] }]
+        }"#;
+        let plan = compile(&parse_query(q, &meta).unwrap(), &meta).unwrap();
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/chunk");
+        let chunk = ParquetChunkReader::open(&dir).unwrap();
+
+        let json = execute_chunk(&plan, &meta, &chunk, Vec::new(), false).unwrap();
+        // binary=true must not corrupt base58 (non-0x) columns.
+        let arrow = execute_chunk_arrow(&plan, &meta, &chunk, Vec::new(), false, true).unwrap();
+
+        let jcounts = json_item_counts(&json);
+        let frames = read_arrow_frames(&arrow);
+        assert_eq!(frames["instructions"].1, jcounts["instructions"]);
+        assert!(frames["instructions"].0.contains(&"instruction_address".to_string()));
+    }
+
+    #[test]
+    fn test_arrow_binary_columns() {
+        use arrow::datatypes::DataType;
+        let meta = evm_metadata();
+        let q = br#"{
+            "type": "evm", "fromBlock": 0,
+            "fields": {
+                "block": { "number": true },
+                "log": { "address": true, "topics": true, "data": true, "logIndex": true }
+            },
+            "logs": [{ "topic0": ["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"] }]
+        }"#;
+        let plan = compile(&parse_query(q, &meta).unwrap(), &meta).unwrap();
+        let chunk = evm_chunk();
+
+        let arrow = execute_chunk_arrow(&plan, &meta, &chunk, Vec::new(), false, true).unwrap();
+
+        // Inspect the logs stream schema: hex columns (json_encoding: hex) decode
+        // to variable Binary, driven by metadata so the type is stable across
+        // responses — including all-null columns like topic3 on 3-topic logs.
+        use arrow::ipc::reader::StreamReader;
+        use std::io::Cursor;
+        let mut pos = 0usize;
+        let mut checked = false;
+        while pos + 4 <= arrow.len() {
+            let nl = u32::from_le_bytes(arrow[pos..pos + 4].try_into().unwrap()) as usize;
+            pos += 4;
+            let name = String::from_utf8(arrow[pos..pos + nl].to_vec()).unwrap();
+            pos += nl;
+            let pl = u32::from_le_bytes(arrow[pos..pos + 4].try_into().unwrap()) as usize;
+            pos += 4;
+            let payload = &arrow[pos..pos + pl];
+            pos += pl;
+            if name == "logs" {
+                let reader = StreamReader::try_new(Cursor::new(payload), None).unwrap();
+                let schema = reader.schema();
+                let addr = schema.field_with_name("address").unwrap().data_type().clone();
+                let topic0 = schema.field_with_name("topic0").unwrap().data_type().clone();
+                let topic3 = schema.field_with_name("topic3").unwrap().data_type().clone();
+                let data = schema.field_with_name("data").unwrap().data_type().clone();
+                assert_eq!(addr, DataType::Binary, "address hex → Binary");
+                assert_eq!(topic0, DataType::Binary, "topic0 hex → Binary");
+                // topic3 is all-null for 3-topic Transfer logs but is still Binary:
+                // the type comes from metadata, not from the values present.
+                assert_eq!(topic3, DataType::Binary, "all-null topic3 → Binary (stable)");
+                assert_eq!(data, DataType::Binary, "data hex → Binary");
+                checked = true;
+            }
+        }
+        assert!(checked, "logs stream must be present");
     }
 
     #[test]
