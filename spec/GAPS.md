@@ -35,11 +35,11 @@ Compared against the reference implementation at
 | 6 | Scalar string filters are not case-folded; `inList` filters are | [INV-P8](07-invariants.md#inv-p8) | **S1** |
 | 7 | `inList` silently drops values it cannot parse | [INV-Q12](07-invariants.md#inv-q12) | **S1** |
 | 8 | 26 `prod_pattern_*` e2e tests have no fixtures on disk and report green | §8.1 | **S1** |
+| 13 | Solana `d1/d2/d4/d8` emit raw JSON numbers, not `hexNumber` — `d8` loses precision above 2⁵³ | [INV-O9](07-invariants.md#inv-o9) | **S1** |
 | 9 | `tron` dataset is entirely absent | [03-catalog.md §3.4](03-catalog.md) | **S2** |
 | 10 | Five of six Substrate aliases are missing | [03-catalog.md §3.3](03-catalog.md) | **S2** |
 | 11 | EVM `blocks` is missing 5 selectable fields | [03-catalog.md §3.1](03-catalog.md) | **S2** |
 | 12 | EVM `transactions` is missing 4 selectable fields | [03-catalog.md §3.1](03-catalog.md) | **S2** |
-| 13 | Solana `d1/d2/d4/d8` are not selectable; no `hexNumber` encoding | [INV-O9](07-invariants.md#inv-o9) | **S2** |
 | 14 | Negative values cannot filter signed columns | [INV-P14](07-invariants.md#inv-p14) | **S2** |
 | 15 | `discriminator: []` errors instead of matching nothing | [INV-P3](07-invariants.md#inv-p3) | **S3** |
 | 16 | Bloom ≤ 10 and discriminator-exclusivity validations are absent | [INV-Q10](07-invariants.md#inv-q10), [INV-Q11](07-invariants.md#inv-q11) | **S3** |
@@ -159,6 +159,50 @@ real production traffic — have never run.
 Fix: assert an expected fixture count per dataset, and fail on a shortfall. §8.8
 rule 2.
 
+### 13. Solana discriminator columns emit raw numbers, and `d8` loses precision
+
+`metadata/solana.yaml` marks `d1`…`d16` as `system: true`. That flag is honoured
+in `src/output/weight.rs:276` and in `required_output_columns`
+(`src/output/columns.rs:198`) — but **not at emission time**. `output_columns`
+comes from the user's `fields` selection, and the row writer emits whatever is in
+it.
+
+So the columns *are* selectable, and they render by physical type. Measured
+against `data/solana/chunk`, selecting `{"instruction":{"d1":true,"d8":true}}`:
+
+| | `d1` | `d8` |
+|---|---|---|
+| this engine | `248` | `17926189716184860616` |
+| reference | `"0xf8"` | `"0xf8c69e91e17587c8"` |
+
+The reference encodes them as `hexNumber` — quoted, zero-padded to the column's
+width ([INV-O9](07-invariants.md#inv-o9)). There is no `hexNumber` encoding in
+this engine at all.
+
+`d8` is a `uint64`. Emitted as a JSON number, `17926189716184860616` exceeds 2⁵³
+and every JavaScript client silently reads it back as `17926189716184860000`. The
+discriminator a client receives is not the discriminator that was stored. This is
+why the gap is S1 and not, as first recorded here, "not selectable".
+
+Two further consequences of the misplaced `system` flag:
+
+- The columns contribute **zero weight**, so blocks selecting them are
+  under-weighed and truncation lands later than it should
+  ([INV-B10](07-invariants.md#inv-b10)).
+- `required_output_columns` skips them, so selecting a `d1` that is absent from
+  the chunk yields `null` rather than `ColumnNotFound`
+  ([INV-E3](07-invariants.md#inv-e3)).
+
+A column being *read by a filter* does not make it a `system` column. The catalog
+conflates "internal, never emitted" with "used by a special filter", and `d1`…`d8`
+are the columns where the two come apart.
+
+**Why no test caught it.** `d8` appears in exactly two fixture queries
+(`solana/whirpool_usdc_sol_swaps`, `solana/is_committed`) and in both it is a
+*filter*, never a selected field. No `query.json` selects `d1/d2/d4/d8`; no
+`result.json` contains such a key. The fixture suite cannot observe this gap —
+see §8.1.
+
 ---
 
 ## S2 — Missing capability
@@ -202,19 +246,6 @@ weights and hence where truncation lands.
 A query selecting any of these fields today gets a `200` with the field silently
 absent, by gap 3. After gap 3 is fixed it will get `UnknownField` — which is at
 least loud, but still wrong.
-
-### 13. Solana discriminator columns are not selectable
-
-`metadata/solana.yaml` marks `d1`…`d16` as `system: true`, so they are excluded
-from output and from weight.
-
-The reference implementation exposes `d1`, `d2`, `d4`, `d8` as selectable fields
-of `instructions`, encoded as `hexNumber`: zero-padded to the column's width, so a
-`uint16` `d2` of 1600 renders `"0x0640"`.
-
-There is no `hexNumber` encoding in the engine at all. A column being read by a
-filter does not make it a `system` column — the two concerns are independent, and
-the catalog conflates them.
 
 ### 14. Negative values cannot filter signed columns
 
@@ -361,13 +392,14 @@ Permitted; must not change the meaning of anything above.
 
 1. **Gap 1** (absent filtered column → match everything). One check, and it is the
    only entry that can hand a client the wrong answer with no way to notice.
-2. **Gaps 3, 4, 7** (silent drops and coercions). Cheap, and each converts a
-   silent wrong answer into an error.
+2. **Gaps 3, 4, 7, 13** (silent drops, coercions, and a `uint64` emitted as a JSON
+   number). Cheap, and each converts a silent wrong answer into an error or a
+   correct value.
 3. **Gap 8** (skipped tests). Until this is fixed the suite cannot tell you
    whether anything else is fixed.
 4. **Gap 5** (closed filter surface) + **gap 19** (catalog validation). These are
    one change: introduce `filters:` in the catalog, and validate the whole catalog
    properly. Everything in [03-catalog.md](03-catalog.md) becomes checkable.
 5. **Gap 2** (fork detection). Needed before any client pages across a reorg.
-6. **Gaps 9–13** (missing surface). Mechanical catalog work, gated on 4.
+6. **Gaps 9–12** (missing surface). Mechanical catalog work, gated on 4.
 7. The rest.
