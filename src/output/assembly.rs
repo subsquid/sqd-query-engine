@@ -5,9 +5,8 @@ use crate::output::block_index::{
 use crate::output::columns::{find_address_column, group_keys_for_relation, physical_output_columns, required_output_columns, resolve_output_columns, resolve_relation_output_columns};
 use crate::output::encoder::{encode_json_string, snake_to_camel};
 use crate::output::row_writer::{
-    build_field_writers, build_full_sort_columns, build_grouped_writers, json_close,
-    resolve_grouped_writers, resolve_sort_columns, resolve_writers, write_header,
-    write_merged_table_items, IndexedBatches,
+    build_field_writers, build_full_sort_columns, build_grouped_writers, resolve_grouped_writers,
+    resolve_sort_columns, resolve_writers, IndexedBatches,
 };
 use crate::output::weight::{
     accumulate_block_weights, apply_weight_limit, get_block_number, get_weight_value,
@@ -15,9 +14,10 @@ use crate::output::weight::{
     MAX_RESPONSE_BYTES,
 };
 use crate::output::arrow_out::{
-    dedup_first, filter_to_blocks, hexify_group, project_columns, write_arrow_frames, OutputFormat,
+    dedup_first, filter_to_blocks, hexify_group, project_columns, write_arrow_frames, ArrowOutput,
+    OutputFormat,
 };
-use crate::output::writer::JsonArrayWriter;
+use crate::output::writer::QueryOutput;
 use crate::query::{Plan, RelationKind};
 use crate::scan::predicate::{evaluate_predicates_on_batch, RowPredicate};
 use crate::scan::{
@@ -28,7 +28,6 @@ use arrow::record_batch::RecordBatch;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet as HashSet};
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::Path;
 
 /// A table is block-sorted when its physical sort key leads with the block
@@ -86,85 +85,93 @@ fn accumulate_wave_weight(
     *cumulative
 }
 
-/// Execute a plan against a chunk directory and write JSON output.
-pub fn execute_plan<W: Write>(
+/// Execute a plan against a chunk directory. Returns `None` if the output
+/// contains no blocks, which only happens when the queried block range doesn't
+/// intersect the chunk's data — a query whose filters match nothing still
+/// yields the boundary blocks of the range as header-only entries. See
+/// [`QueryOutput`] for the block range metadata and lazy block encoding.
+pub fn execute_plan(
     plan: &Plan,
     metadata: &DatasetDescription,
     chunk_dir: &Path,
-    writer: W,
-) -> Result<W> {
+) -> Result<Option<QueryOutput>> {
     let chunk = ParquetChunkReader::open(chunk_dir)?;
-    execute_chunk(plan, metadata, &chunk, writer, false)
+    execute_chunk(plan, metadata, &chunk, false)
 }
 
 /// Execute a plan with timing instrumentation printed to stderr.
-pub fn execute_plan_profiled<W: Write>(
+pub fn execute_plan_profiled(
     plan: &Plan,
     metadata: &DatasetDescription,
     chunk_dir: &Path,
-    writer: W,
-) -> Result<W> {
+) -> Result<Option<QueryOutput>> {
     let chunk = ParquetChunkReader::open(chunk_dir)?;
-    execute_chunk(plan, metadata, &chunk, writer, true)
+    execute_chunk(plan, metadata, &chunk, true)
 }
 
-/// Execute a plan against a chunk directory and write flat per-table Arrow IPC
+/// Execute a plan against a chunk directory, producing flat per-table Arrow IPC
 /// streams instead of nested JSON (prototype). `compress` toggles Arrow's
 /// built-in Zstd. See [`crate::output::arrow_out`].
-pub fn execute_plan_arrow<W: Write>(
+pub fn execute_plan_arrow(
     plan: &Plan,
     metadata: &DatasetDescription,
     chunk_dir: &Path,
-    writer: W,
     compress: bool,
     binary: bool,
-) -> Result<W> {
+) -> Result<Option<ArrowOutput>> {
     let chunk = ParquetChunkReader::open(chunk_dir)?;
-    execute_chunk_arrow(plan, metadata, &chunk, writer, compress, binary)
+    execute_chunk_arrow(plan, metadata, &chunk, compress, binary)
 }
 
-/// Execute a plan against any ChunkReader implementation, writing nested JSON.
-pub fn execute_chunk<W: Write>(
+/// Execute a plan against any ChunkReader implementation.
+pub fn execute_chunk(
     plan: &Plan,
     metadata: &DatasetDescription,
     chunk: &dyn ChunkReader,
-    writer: W,
     profile: bool,
-) -> Result<W> {
-    execute_chunk_fmt(plan, metadata, chunk, writer, profile, OutputFormat::Json)
+) -> Result<Option<QueryOutput>> {
+    match execute_chunk_fmt(plan, metadata, chunk, profile, OutputFormat::Json)? {
+        FmtOutput::Json(blocks) => Ok(blocks.map(|b| *b)),
+        FmtOutput::Arrow(_) => unreachable!(),
+    }
 }
 
-/// Execute a plan against any ChunkReader implementation, writing flat per-table
-/// Arrow IPC streams (prototype). See [`crate::output::arrow_out`].
-pub fn execute_chunk_arrow<W: Write>(
+/// Execute a plan against any ChunkReader implementation, producing flat
+/// per-table Arrow IPC streams (prototype). See [`crate::output::arrow_out`].
+pub fn execute_chunk_arrow(
     plan: &Plan,
     metadata: &DatasetDescription,
     chunk: &dyn ChunkReader,
-    writer: W,
     compress: bool,
     binary: bool,
-) -> Result<W> {
-    execute_chunk_fmt(
+) -> Result<Option<ArrowOutput>> {
+    match execute_chunk_fmt(
         plan,
         metadata,
         chunk,
-        writer,
         false,
         OutputFormat::Arrow { compress, binary },
-    )
+    )? {
+        FmtOutput::Arrow(output) => Ok(output),
+        FmtOutput::Json(_) => unreachable!(),
+    }
+}
+
+enum FmtOutput {
+    Json(Option<Box<QueryOutput>>),
+    Arrow(Option<ArrowOutput>),
 }
 
 /// Core execution: scan → block selection → output assembly. The `format`
-/// selects the back half: nested JSON or flat Arrow IPC streams. The expensive
-/// front half (scan, joins, weight limit) is shared.
-fn execute_chunk_fmt<W: Write>(
+/// selects the back half: nested JSON block encoding or flat Arrow IPC streams.
+/// The expensive front half (scan, joins, weight limit) is shared.
+fn execute_chunk_fmt(
     plan: &Plan,
     metadata: &DatasetDescription,
     chunk: &dyn ChunkReader,
-    writer: W,
     profile: bool,
     format: OutputFormat,
-) -> Result<W> {
+) -> Result<FmtOutput> {
     use std::time::Instant;
 
     macro_rules! timer {
@@ -186,8 +193,6 @@ fn execute_chunk_fmt<W: Write>(
     }
 
     let t_total = timer!();
-    // `writer` stays owned here; the JSON path wraps it in a JsonArrayWriter
-    // only after block selection, so the Arrow branch can consume it directly.
 
     // 1. Scan all tables specified in the plan
     let mut table_outputs: HashMap<String, TableOutput> = HashMap::new();
@@ -224,6 +229,12 @@ fn execute_chunk_fmt<W: Write>(
         metadata.table(&plan.block_table),
     )
     .0;
+
+    // The block header scan must be capped to the phase-1 cutoff (when engaged):
+    // otherwise the range-end boundary block enters block selection with only its
+    // header weight (its item rows were never scanned) and wrongly survives the
+    // budget trim, unlike in the exact path.
+    let mut header_to_block = plan.to_block;
 
     for &tp_idx in &proc_order {
         let table_plan = &plan.table_plans[tp_idx];
@@ -280,6 +291,7 @@ fn execute_chunk_fmt<W: Write>(
                     Some(tb) => tb.min(cutoff),
                     None => cutoff,
                 });
+                header_to_block = effective_to_block;
             }
             elapsed!(t_phase1, "weight pre-scan", "cutoff -> {:?}", effective_to_block);
         }
@@ -668,7 +680,7 @@ fn execute_chunk_fmt<W: Write>(
 
         let mut request = ScanRequest::new(block_col_vec);
         request.from_block = Some(plan.from_block);
-        request.to_block = plan.to_block;
+        request.to_block = header_to_block;
         request.block_number_column = Some(bn_col);
         request.required_columns = block_req_refs;
 
@@ -714,6 +726,13 @@ fn execute_chunk_fmt<W: Write>(
         metadata,
         plan,
     );
+
+    if selected_blocks.is_empty() {
+        return Ok(match format {
+            OutputFormat::Json => FmtOutput::Json(None),
+            OutputFormat::Arrow { .. } => FmtOutput::Arrow(None),
+        });
+    }
 
     // Arrow branch: emit flat per-table IPC streams straight from the post-scan
     // batches and return, skipping the entire JSON assembly below. Columns are
@@ -862,9 +881,12 @@ fn execute_chunk_fmt<W: Write>(
             groups.push((qn.clone(), if binary { hexify_group(batches, td) } else { batches }));
         }
 
-        let out = write_arrow_frames(writer, &groups, compress)?;
+        let data = write_arrow_frames(Vec::new(), &groups, compress)?;
         elapsed!(t_total, "TOTAL (arrow)");
-        return Ok(out);
+        return Ok(FmtOutput::Arrow(Some(ArrowOutput::new(
+            data,
+            &selected_blocks,
+        ))));
     }
 
     // 5. Pre-build block→rows indexes for each batch set
@@ -880,7 +902,11 @@ fn execute_chunk_fmt<W: Write>(
     let mut all_indexes: Vec<IndexedBatches> = Vec::new();
 
     for table_plan in &plan.table_plans {
-        if let Some(output) = table_outputs.get(&table_plan.table) {
+        if let Some(output) = table_outputs.remove(&table_plan.table) {
+            let TableOutput {
+                batches,
+                mut relation_batches,
+            } = output;
             let table_desc = metadata.table(&table_plan.table).unwrap();
             let bn_col = table_desc.block_number_column.as_str();
             let query_name = table_desc
@@ -893,11 +919,10 @@ fn execute_chunk_fmt<W: Write>(
                 .as_ref()
                 .map(|fg| build_grouped_writers(&table_plan.output_columns, table_desc, fg));
             let sort_columns = build_full_sort_columns(table_desc);
-            let sort_col_resolved = resolve_sort_columns(&output.batches, &sort_columns);
+            let sort_col_resolved = resolve_sort_columns(&batches, &sort_columns);
             all_indexes.push(IndexedBatches {
-                batches: &output.batches,
-                index: build_block_index(&output.batches, bn_col),
-                table_desc,
+                index: build_block_index(&batches, bn_col),
+                batches,
                 writers: build_field_writers(&table_plan.output_columns, Some(table_desc)),
                 grouped,
                 table_name: query_name.to_string(),
@@ -906,7 +931,7 @@ fn execute_chunk_fmt<W: Write>(
             });
 
             for rel in &table_plan.relations {
-                if let Some(rel_batches) = output.relation_batches.get(&rel.target_table) {
+                if let Some(rel_batches) = relation_batches.remove(&rel.target_table) {
                     if let Some(rd) = metadata.table(&rel.target_table) {
                         let rel_bn = rd.block_number_column.as_str();
                         let rel_qn = rd.query_name.as_deref().unwrap_or(&rel.target_table);
@@ -917,11 +942,10 @@ fn execute_chunk_fmt<W: Write>(
                             .map(|fg| build_grouped_writers(&rel.output_columns, rd, fg));
                         let rel_sort_columns = build_full_sort_columns(rd);
                         let rel_sort_resolved =
-                            resolve_sort_columns(rel_batches, &rel_sort_columns);
+                            resolve_sort_columns(&rel_batches, &rel_sort_columns);
                         all_indexes.push(IndexedBatches {
+                            index: build_block_index(&rel_batches, rel_bn),
                             batches: rel_batches,
-                            index: build_block_index(rel_batches, rel_bn),
-                            table_desc: rd,
                             writers: build_field_writers(&rel.output_columns, Some(rd)),
                             grouped: rel_grouped,
                             table_name: rel_qn.to_string(),
@@ -1022,64 +1046,48 @@ fn execute_chunk_fmt<W: Write>(
         selected_blocks.len()
     );
 
-    // 6. Write each block as JSON (sequential, directly into output buffer)
-    // See decisions/002: sequential wins at production concurrency (CPU=8+).
-    // Reusable per-block row-ref scratch buffers (sort + multi-source merge),
-    // allocated once and cleared per block to avoid per-block allocations.
-    let t_json = timer!();
-    let mut json_writer = JsonArrayWriter::new(writer);
-    let mut sort_scratch: Vec<(usize, usize)> = Vec::new();
-    let mut merge_scratch: Vec<(usize, usize, usize)> = Vec::new();
-    for &block_num in &selected_blocks {
-        json_writer.begin_item()?;
-        let buf = json_writer.buf_mut();
-        buf.push(b'{');
+    elapsed!(t_total, "TOTAL (front half; blocks encode lazily)");
 
-        // Write header
-        write_header(
-            buf,
-            block_num,
-            &block_batches,
-            &block_index,
-            block_table_desc,
-            &header_writers,
-            &bn_key_prefix,
-            &header_resolved,
-        );
-
-        // Write table items, merging multiple sources for the same output table
-        for table_name in &table_group_order {
-            let source_indices = &table_groups[table_name];
-            let json_prefix = &table_json_prefixes[table_name];
-
-            write_merged_table_items(
-                buf,
-                block_num,
-                &all_indexes,
-                source_indices,
-                &all_resolved,
-                &all_grouped_resolved,
-                json_prefix,
-                &mut sort_scratch,
-                &mut merge_scratch,
-            );
-        }
-
-        json_close(b'}', buf);
-    }
-
-    elapsed!(t_json, "json output");
-    elapsed!(t_total, "TOTAL");
-
-    Ok(json_writer.finish()?)
+    // Blocks are encoded lazily, one per QueryOutput::write_next_block call.
+    // See decisions/002: sequential encoding wins at production concurrency.
+    Ok(FmtOutput::Json(Some(Box::new(QueryOutput {
+        selected_blocks,
+        next: 0,
+        block_batches,
+        block_index,
+        header_resolved,
+        bn_key_prefix,
+        all_indexes,
+        all_resolved,
+        all_grouped_resolved,
+        table_group_order,
+        table_groups,
+        table_json_prefixes,
+        sort_scratch: Vec::new(),
+        merge_scratch: Vec::new(),
+    }))))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::metadata::load_dataset_description;
+    use crate::output::row_writer::json_close;
     use crate::query::compile;
     use crate::query::parse_query;
+
+    fn to_blocks(blocks: Option<QueryOutput>) -> Vec<serde_json::Value> {
+        let mut result = Vec::new();
+        if let Some(mut blocks) = blocks {
+            let mut buf = Vec::new();
+            while blocks.has_next_block() {
+                buf.clear();
+                blocks.write_next_block(&mut buf);
+                result.push(serde_json::from_slice(&buf).unwrap());
+            }
+        }
+        result
+    }
 
     fn solana_metadata() -> DatasetDescription {
         load_dataset_description(Path::new("metadata/solana.yaml")).unwrap()
@@ -1124,10 +1132,9 @@ mod tests {
     }
 
     /// Sum of array lengths per output table across all blocks in the JSON.
-    fn json_item_counts(json: &[u8]) -> HashMap<String, usize> {
-        let v: serde_json::Value = serde_json::from_slice(json).unwrap();
+    fn json_item_counts(blocks: &[serde_json::Value]) -> HashMap<String, usize> {
         let mut map: HashMap<String, usize> = HashMap::new();
-        for b in v.as_array().unwrap() {
+        for b in blocks {
             for (k, val) in b.as_object().unwrap() {
                 if k == "header" {
                     continue;
@@ -1154,8 +1161,11 @@ mod tests {
         let plan = compile(&parse_query(q, &meta).unwrap(), &meta).unwrap();
         let chunk = evm_chunk();
 
-        let json = execute_chunk(&plan, &meta, &chunk, Vec::new(), false).unwrap();
-        let arrow = execute_chunk_arrow(&plan, &meta, &chunk, Vec::new(), false, false).unwrap();
+        let json = to_blocks(execute_chunk(&plan, &meta, &chunk, false).unwrap());
+        let arrow = execute_chunk_arrow(&plan, &meta, &chunk, false, false)
+            .unwrap()
+            .unwrap()
+            .into_data();
 
         let jcounts = json_item_counts(&json);
         let frames = read_arrow_frames(&arrow);
@@ -1193,8 +1203,11 @@ mod tests {
         let plan = compile(&parse_query(q, &meta).unwrap(), &meta).unwrap();
         let chunk = evm_chunk();
 
-        let json = execute_chunk(&plan, &meta, &chunk, Vec::new(), false).unwrap();
-        let arrow = execute_chunk_arrow(&plan, &meta, &chunk, Vec::new(), false, false).unwrap();
+        let json = to_blocks(execute_chunk(&plan, &meta, &chunk, false).unwrap());
+        let arrow = execute_chunk_arrow(&plan, &meta, &chunk, false, false)
+            .unwrap()
+            .unwrap()
+            .into_data();
 
         let jcounts = json_item_counts(&json);
         let frames = read_arrow_frames(&arrow);
@@ -1223,8 +1236,11 @@ mod tests {
         let plan = compile(&parse_query(q, &meta).unwrap(), &meta).unwrap();
         let chunk = evm_chunk();
 
-        let json = execute_chunk(&plan, &meta, &chunk, Vec::new(), false).unwrap();
-        let arrow = execute_chunk_arrow(&plan, &meta, &chunk, Vec::new(), false, false).unwrap();
+        let json = to_blocks(execute_chunk(&plan, &meta, &chunk, false).unwrap());
+        let arrow = execute_chunk_arrow(&plan, &meta, &chunk, false, false)
+            .unwrap()
+            .unwrap()
+            .into_data();
 
         let jcounts = json_item_counts(&json);
         let frames = read_arrow_frames(&arrow);
@@ -1251,9 +1267,12 @@ mod tests {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/chunk");
         let chunk = ParquetChunkReader::open(&dir).unwrap();
 
-        let json = execute_chunk(&plan, &meta, &chunk, Vec::new(), false).unwrap();
+        let json = to_blocks(execute_chunk(&plan, &meta, &chunk, false).unwrap());
         // binary=true must not corrupt base58 (non-0x) columns.
-        let arrow = execute_chunk_arrow(&plan, &meta, &chunk, Vec::new(), false, true).unwrap();
+        let arrow = execute_chunk_arrow(&plan, &meta, &chunk, false, true)
+            .unwrap()
+            .unwrap()
+            .into_data();
 
         let jcounts = json_item_counts(&json);
         let frames = read_arrow_frames(&arrow);
@@ -1276,7 +1295,10 @@ mod tests {
         let plan = compile(&parse_query(q, &meta).unwrap(), &meta).unwrap();
         let chunk = evm_chunk();
 
-        let arrow = execute_chunk_arrow(&plan, &meta, &chunk, Vec::new(), false, true).unwrap();
+        let arrow = execute_chunk_arrow(&plan, &meta, &chunk, false, true)
+            .unwrap()
+            .unwrap()
+            .into_data();
 
         // Inspect the logs stream schema: hex columns (json_encoding: hex) decode
         // to variable Binary, driven by metadata so the type is stable across
@@ -1332,20 +1354,12 @@ mod tests {
         let plan = compile(&query, &meta).unwrap();
 
         let chunk_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/chunk");
-        let output = Vec::new();
-        let result = execute_plan(&plan, &meta, &chunk_dir, output).unwrap();
+        let blocks = to_blocks(execute_plan(&plan, &meta, &chunk_dir).unwrap());
 
-        let json_str = String::from_utf8(result).unwrap();
-        assert!(json_str.starts_with('['));
-        assert!(json_str.ends_with(']'));
-
-        // Parse to validate JSON
-        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
-        let blocks = parsed.as_array().unwrap();
         assert!(!blocks.is_empty(), "should have at least one block");
 
         // Each block should have a header
-        for block in blocks {
+        for block in &blocks {
             assert!(block.get("header").is_some(), "block should have header");
         }
 
@@ -1354,7 +1368,7 @@ mod tests {
         assert!(has_instructions, "should have instructions in output");
 
         // Verify instruction fields are camelCase
-        for block in blocks {
+        for block in &blocks {
             if let Some(instrs) = block.get("instructions") {
                 for instr in instrs.as_array().unwrap() {
                     assert!(instr.get("programId").is_some());
@@ -1384,16 +1398,12 @@ mod tests {
         let plan = compile(&query, &meta).unwrap();
 
         let chunk_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/evm/chunk");
-        let output = Vec::new();
-        let result = execute_plan(&plan, &meta, &chunk_dir, output).unwrap();
+        let blocks = to_blocks(execute_plan(&plan, &meta, &chunk_dir).unwrap());
 
-        let json_str = String::from_utf8(result).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
-        let blocks = parsed.as_array().unwrap();
         assert!(!blocks.is_empty());
 
         // Check topics is an array (virtual field via roll)
-        for block in blocks {
+        for block in &blocks {
             if let Some(logs) = block.get("logs") {
                 for log in logs.as_array().unwrap() {
                     if let Some(topics) = log.get("topics") {
@@ -1429,12 +1439,7 @@ mod tests {
         let plan = compile(&query, &meta).unwrap();
 
         let chunk_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/chunk");
-        let output = Vec::new();
-        let result = execute_plan(&plan, &meta, &chunk_dir, output).unwrap();
-
-        let json_str = String::from_utf8(result).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
-        let blocks = parsed.as_array().unwrap();
+        let blocks = to_blocks(execute_plan(&plan, &meta, &chunk_dir).unwrap());
 
         // Should have both instructions and transactions
         let has_txs = blocks.iter().any(|b| b.get("transactions").is_some());
@@ -1457,10 +1462,9 @@ mod tests {
         let plan = compile(&query, &meta).unwrap();
 
         let chunk_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/chunk");
-        let output = Vec::new();
-        let result = execute_plan(&plan, &meta, &chunk_dir, output).unwrap();
+        let blocks = to_blocks(execute_plan(&plan, &meta, &chunk_dir).unwrap());
 
-        assert_eq!(String::from_utf8(result).unwrap(), "[]");
+        assert!(blocks.is_empty());
     }
 
     #[test]

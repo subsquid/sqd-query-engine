@@ -92,7 +92,7 @@ execute_chunk()
     +---> 4. Collect block numbers (HashSet)
     +---> 5. Sort blocks, apply weight limit (20MB cap)
     +---> 6. Build block indexes (block_number -> batch positions)
-    +---> 7. Write JSON output (sequential iteration over selected blocks)
+    +---> 7. Return QueryOutput (blocks encode lazily, one per write_next_block)
 ```
 
 ### scan() Internals

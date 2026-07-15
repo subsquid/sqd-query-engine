@@ -33,7 +33,10 @@ const ITERS: usize = 20;
 fn run_json(query: &[u8], meta: &DatasetDescription, chunk: &ParquetChunkReader) -> Vec<u8> {
     let parsed = parse_query(query, meta).unwrap();
     let plan = compile(&parsed, meta).unwrap();
-    execute_chunk(&plan, meta, chunk, Vec::new(), false).unwrap()
+    execute_chunk(&plan, meta, chunk, false)
+        .unwrap()
+        .map(|blocks| blocks.into_json_lines())
+        .unwrap_or_default()
 }
 
 fn run_arrow(
@@ -45,7 +48,10 @@ fn run_arrow(
 ) -> Vec<u8> {
     let parsed = parse_query(query, meta).unwrap();
     let plan = compile(&parsed, meta).unwrap();
-    execute_chunk_arrow(&plan, meta, chunk, Vec::new(), compress, binary).unwrap()
+    execute_chunk_arrow(&plan, meta, chunk, compress, binary)
+        .unwrap()
+        .map(|output| output.into_data())
+        .unwrap_or_default()
 }
 
 /// Minimum wall-clock over ITERS runs, in milliseconds.
@@ -69,8 +75,13 @@ fn unzstd(data: &[u8]) -> Vec<u8> {
 }
 
 fn json_parse(json: &[u8]) -> usize {
-    let v: serde_json::Value = serde_json::from_slice(json).unwrap();
-    v.as_array().map(|a| a.len()).unwrap_or(0)
+    let blocks: Vec<serde_json::Value> = std::str::from_utf8(json)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    blocks.len()
 }
 
 /// Read every frame's batches back (no schema input) and total the rows.

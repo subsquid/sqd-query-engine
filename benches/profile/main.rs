@@ -33,12 +33,14 @@ fn run_query(
     query_json: &[u8],
     meta: &sqd_query_engine::metadata::DatasetDescription,
     chunk: &ParquetChunkReader,
-    buf: Vec<u8>,
     profile: bool,
 ) -> Vec<u8> {
     let parsed = parse_query(query_json, meta).unwrap();
     let plan = compile(&parsed, meta).unwrap();
-    execute_chunk(&plan, meta, chunk, buf, profile).unwrap()
+    execute_chunk(&plan, meta, chunk, profile)
+        .unwrap()
+        .map(|blocks| blocks.into_json_lines())
+        .unwrap_or_default()
 }
 
 fn main() {
@@ -105,27 +107,25 @@ fn main() {
     // Warmup
     eprintln!("Warming up {} ...", name);
     for _ in 0..10 {
-        let _ = run_query(query_json, meta, &chunk, Vec::new(), false);
+        let _ = run_query(query_json, meta, &chunk, false);
     }
 
     if size_mode {
-        let result = run_query(query_json, meta, &chunk, Vec::new(), false);
+        let result = run_query(query_json, meta, &chunk, false);
         eprintln!("Output size: {} bytes ({:.2} MB)", result.len(), result.len() as f64 / 1024.0 / 1024.0);
         return;
     }
 
     if profile_mode {
         eprintln!("\n=== Profiled run: {} ===", name);
-        let _ = run_query(query_json, meta, &chunk, Vec::new(), true);
+        let _ = run_query(query_json, meta, &chunk, true);
         return;
     }
 
     eprintln!("Profiling {} x {} iterations ...", name, iterations);
     let start = Instant::now();
-    let mut buf = Vec::new();
     for _ in 0..iterations {
-        buf = run_query(query_json, meta, &chunk, buf, false);
-        buf.clear();
+        std::hint::black_box(run_query(query_json, meta, &chunk, false));
     }
     report(name, iterations, start.elapsed());
 }
@@ -171,8 +171,14 @@ fn compare_engines(
     chunk_dir: &str,
 ) {
     let new_chunk = ParquetChunkReader::open(Path::new(chunk_dir)).unwrap();
-    let new_bytes = run_query(query_json, meta, &new_chunk, Vec::new(), false);
-    let new_val: serde_json::Value = serde_json::from_slice(&new_bytes).unwrap();
+    let new_bytes = run_query(query_json, meta, &new_chunk, false);
+    let new_blocks: Vec<serde_json::Value> = String::from_utf8(new_bytes)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let new_val = serde_json::Value::Array(new_blocks);
 
     let leg_chunk = legacy::open_chunk(Path::new(chunk_dir));
     let leg_bytes = legacy::run_query(query_json, &leg_chunk);

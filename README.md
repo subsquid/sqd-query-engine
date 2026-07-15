@@ -52,7 +52,8 @@ use sqd_query_engine::output::assembly::execute_plan;
 let meta = load_dataset_description(Path::new("metadata/evm.yaml"))?;
 let parsed = parse_query(query_json, &meta)?;
 let plan = compile(&parsed, &meta)?;
-let result = execute_plan(&plan, &meta, chunk_dir, Vec::new())?;
+let output = execute_plan(&plan, &meta, chunk_dir)?; // None = no blocks in range
+let json_lines = output.map(|blocks| blocks.into_json_lines()).unwrap_or_default();
 ```
 
 ## Query Format

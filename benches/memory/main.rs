@@ -97,6 +97,10 @@ static SOLANA_META: LazyLock<sqd_query_engine::metadata::DatasetDescription> =
 static EVM_META: LazyLock<sqd_query_engine::metadata::DatasetDescription> =
     LazyLock::new(|| load_dataset_description(Path::new("metadata/evm.yaml")).unwrap());
 
+fn to_json_lines(blocks: Option<sqd_query_engine::output::QueryOutput>) -> Vec<u8> {
+    blocks.map(|b| b.into_json_lines()).unwrap_or_default()
+}
+
 fn run_new(
     json: &[u8],
     meta: &sqd_query_engine::metadata::DatasetDescription,
@@ -104,7 +108,7 @@ fn run_new(
 ) -> Vec<u8> {
     let parsed = parse_query(json, meta).unwrap();
     let plan = compile(&parsed, meta).unwrap();
-    execute_chunk(&plan, meta, chunk, Vec::new(), false).unwrap()
+    to_json_lines(execute_chunk(&plan, meta, chunk, false).unwrap())
 }
 
 /// Bytes allocated per query (single-threaded). Allocation is deterministic per

@@ -1,122 +1,101 @@
-use std::io::{self, Write};
+use crate::output::row_writer::{
+    json_close, write_header, write_merged_table_items, IndexedBatches, ResolvedFieldWriter,
+    ResolvedGroupedWriters,
+};
+use arrow::record_batch::RecordBatch;
+use rustc_hash::FxHashMap;
+use std::collections::HashMap;
 
-/// Initial capacity for the internal buffer (tuned for typical block JSON sizes).
-const INITIAL_CAPACITY: usize = 256 * 1024; // 256 KB
-/// Flush the buffer to the underlying writer when it exceeds this size.
-const FLUSH_THRESHOLD: usize = 16 * 1024; // 16 KB
+/// Initial buffer capacity, tuned for typical response sizes.
+const INITIAL_CAPACITY: usize = 256 * 1024;
 
-/// A buffered JSON array writer that streams blocks to an underlying writer.
-/// Output format: `[block1,block2,...]`
+/// Result of a query execution: the selected blocks plus everything needed to
+/// encode them on demand.
 ///
-/// Intermediate flushes only happen at item boundaries (after a complete block).
-/// Complete valid JSON is only available after `finish()` is called.
-pub struct JsonArrayWriter<W: Write> {
-    write: W,
-    buf: Vec<u8>,
-    flush_threshold: usize,
-    has_items: bool,
+/// The block range metadata is available immediately — block selection happens
+/// before any encoding — and may end below the queried range end if the
+/// response was trimmed to the size budget. Blocks are encoded lazily, one per
+/// [`write_next_block`](Self::write_next_block) call, so a streaming consumer
+/// never holds more than one encoded block; buffering consumers use
+/// [`into_json_lines`](Self::into_json_lines).
+///
+pub struct QueryOutput {
+    pub(crate) selected_blocks: Vec<u64>,
+    pub(crate) next: usize,
+    pub(crate) block_batches: Vec<RecordBatch>,
+    pub(crate) block_index: FxHashMap<u64, Vec<(usize, usize)>>,
+    pub(crate) header_resolved: Vec<Vec<ResolvedFieldWriter>>,
+    pub(crate) bn_key_prefix: Vec<u8>,
+    pub(crate) all_indexes: Vec<IndexedBatches>,
+    pub(crate) all_resolved: Vec<Vec<Vec<ResolvedFieldWriter>>>,
+    pub(crate) all_grouped_resolved: Vec<Option<Vec<ResolvedGroupedWriters>>>,
+    pub(crate) table_group_order: Vec<String>,
+    pub(crate) table_groups: HashMap<String, Vec<usize>>,
+    pub(crate) table_json_prefixes: HashMap<String, Vec<u8>>,
+    // Reusable per-block row-ref scratch buffers (sort + multi-source merge).
+    pub(crate) sort_scratch: Vec<(usize, usize)>,
+    pub(crate) merge_scratch: Vec<(usize, usize, usize)>,
 }
 
-impl<W: Write> JsonArrayWriter<W> {
-    pub fn new(write: W) -> Self {
-        Self {
-            write,
-            buf: Vec::with_capacity(INITIAL_CAPACITY),
-            flush_threshold: FLUSH_THRESHOLD,
-            has_items: false,
-        }
+impl QueryOutput {
+    pub fn num_blocks(&self) -> usize {
+        self.selected_blocks.len()
     }
 
-    /// Begin a new item (block). Call this before writing block JSON bytes.
-    /// Flushes the previous item to the writer if the buffer exceeds the threshold.
-    pub fn begin_item(&mut self) -> io::Result<()> {
-        // Flush at item boundary — buffer contains complete blocks only
-        if self.buf.len() > self.flush_threshold {
-            self.flush_buf()?;
-        }
-        if self.has_items {
-            self.buf.push(b',');
-        } else {
-            self.has_items = true;
-            self.buf.push(b'[');
-        }
-        Ok(())
+    pub fn first_block(&self) -> u64 {
+        self.selected_blocks[0]
     }
 
-    /// Write raw bytes to the current item.
-    pub fn write_bytes(&mut self, bytes: &[u8]) {
-        self.buf.extend_from_slice(bytes);
+    pub fn last_block(&self) -> u64 {
+        *self.selected_blocks.last().expect("never empty")
     }
 
-    /// Write a single byte to the current item.
-    pub fn write_byte(&mut self, byte: u8) {
-        self.buf.push(byte);
+    pub fn has_next_block(&self) -> bool {
+        self.next < self.selected_blocks.len()
     }
 
-    /// Get a mutable reference to the internal buffer for direct writes.
-    pub fn buf_mut(&mut self) -> &mut Vec<u8> {
-        &mut self.buf
-    }
+    /// Encodes the next block as a JSON object appended to `out`.
+    /// Panics if there is no next block — check [`has_next_block`](Self::has_next_block) first.
+    pub fn write_next_block(&mut self, out: &mut Vec<u8>) {
+        let block_num = self.selected_blocks[self.next];
+        out.push(b'{');
 
-    /// Finish writing. Closes the JSON array and flushes.
-    pub fn finish(mut self) -> io::Result<W> {
-        if self.has_items {
-            self.buf.push(b']');
-        } else {
-            self.buf.extend_from_slice(b"[]");
-        }
-        self.flush_buf()?;
-        Ok(self.write)
-    }
-
-    /// Get the current buffer size (for testing/debugging).
-    pub fn buffer_len(&self) -> usize {
-        self.buf.len()
-    }
-
-    fn flush_buf(&mut self) -> io::Result<()> {
-        if !self.buf.is_empty() {
-            self.write.write_all(&self.buf)?;
-            self.buf.clear();
-        }
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_empty_output() {
-        let writer = JsonArrayWriter::new(Vec::new());
-        let result = writer.finish().unwrap();
-        assert_eq!(String::from_utf8(result).unwrap(), "[]");
-    }
-
-    #[test]
-    fn test_single_block() {
-        let mut writer = JsonArrayWriter::new(Vec::new());
-        writer.begin_item().unwrap();
-        writer.write_bytes(b"{\"header\":{\"number\":1}}");
-        let result = writer.finish().unwrap();
-        assert_eq!(
-            String::from_utf8(result).unwrap(),
-            "[{\"header\":{\"number\":1}}]"
+        write_header(
+            out,
+            block_num,
+            &self.block_batches,
+            &self.block_index,
+            &self.bn_key_prefix,
+            &self.header_resolved,
         );
+
+        // Table items, merging multiple sources for the same output table
+        for table_name in &self.table_group_order {
+            write_merged_table_items(
+                out,
+                block_num,
+                &self.all_indexes,
+                &self.table_groups[table_name],
+                &self.all_resolved,
+                &self.all_grouped_resolved,
+                &self.table_json_prefixes[table_name],
+                &mut self.sort_scratch,
+                &mut self.merge_scratch,
+            );
+        }
+
+        json_close(b'}', out);
+        self.next += 1;
     }
 
-    #[test]
-    fn test_multiple_blocks() {
-        let mut writer = JsonArrayWriter::new(Vec::new());
-        writer.begin_item().unwrap();
-        writer.write_bytes(b"{\"header\":{\"number\":1}}");
-        writer.begin_item().unwrap();
-        writer.write_bytes(b"{\"header\":{\"number\":2}}");
-        let result = writer.finish().unwrap();
-        assert_eq!(
-            String::from_utf8(result).unwrap(),
-            "[{\"header\":{\"number\":1}},{\"header\":{\"number\":2}}]"
-        );
+    /// Encodes all blocks (regardless of prior iteration) as JSON Lines.
+    pub fn into_json_lines(mut self) -> Vec<u8> {
+        self.next = 0;
+        let mut out = Vec::with_capacity(INITIAL_CAPACITY);
+        while self.has_next_block() {
+            self.write_next_block(&mut out);
+            out.push(b'\n');
+        }
+        out
     }
 }

@@ -16,14 +16,14 @@ fn profile_query(label: &str, json: &[u8], meta_path: &str, chunk_path: &str) {
     let chunk = ParquetChunkReader::open(Path::new(chunk_path)).unwrap();
 
     // Warmup
-    let _ = execute_chunk(&plan, &meta, &chunk, Vec::new(), false).unwrap();
+    let _ = execute_chunk(&plan, &meta, &chunk, false).unwrap();
 
     // Timed runs
     let n = 10;
     let mut times = Vec::with_capacity(n);
     for _ in 0..n {
         let t = Instant::now();
-        let _ = execute_chunk(&plan, &meta, &chunk, Vec::new(), false).unwrap();
+        let _ = execute_chunk(&plan, &meta, &chunk, false).unwrap();
         times.push(t.elapsed());
     }
     times.sort();
@@ -35,7 +35,7 @@ fn profile_query(label: &str, json: &[u8], meta_path: &str, chunk_path: &str) {
     );
 
     // Detailed breakdown
-    let _ = execute_plan_profiled(&plan, &meta, Path::new(chunk_path), Vec::new()).unwrap();
+    let _ = execute_plan_profiled(&plan, &meta, Path::new(chunk_path)).unwrap();
     eprintln!();
 }
 
