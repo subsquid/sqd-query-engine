@@ -26,6 +26,10 @@ static SOLANA_META: LazyLock<sqd_query_engine::metadata::DatasetDescription> =
 static EVM_META: LazyLock<sqd_query_engine::metadata::DatasetDescription> =
     LazyLock::new(|| load_dataset_description(Path::new("metadata/evm.yaml")).unwrap());
 
+fn to_json_lines(blocks: Option<sqd_query_engine::output::QueryOutput>) -> Vec<u8> {
+    blocks.map(|b| b.into_json_lines()).unwrap_or_default()
+}
+
 /// Full pipeline: parse → compile → execute (new engine).
 fn run_query(
     query_json: &[u8],
@@ -34,7 +38,7 @@ fn run_query(
 ) -> Vec<u8> {
     let parsed = parse_query(query_json, meta).unwrap();
     let plan = compile(&parsed, meta).unwrap();
-    execute_chunk(&plan, meta, chunk, Vec::new(), false).unwrap()
+    to_json_lines(execute_chunk(&plan, meta, chunk, false).unwrap())
 }
 
 // EVM benches run across the chunk matrix: divan nests one sub-bench per

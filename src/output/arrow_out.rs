@@ -49,6 +49,51 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::sync::Arc;
 
+/// Result of an Arrow query execution: flat per-table IPC streams plus the
+/// included block range (which may end below the queried range end if the
+/// response was trimmed to the size budget).
+pub struct ArrowOutput {
+    data: Vec<u8>,
+    first_block: u64,
+    last_block: u64,
+    num_blocks: usize,
+}
+
+impl ArrowOutput {
+    pub(crate) fn new(data: Vec<u8>, selected_blocks: &[u64]) -> Self {
+        Self {
+            data,
+            first_block: selected_blocks[0],
+            last_block: selected_blocks[selected_blocks.len() - 1],
+            num_blocks: selected_blocks.len(),
+        }
+    }
+
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+
+    pub fn into_data(self) -> Vec<u8> {
+        self.data
+    }
+
+    pub fn data_size(&self) -> usize {
+        self.data.len()
+    }
+
+    pub fn num_blocks(&self) -> usize {
+        self.num_blocks
+    }
+
+    pub fn first_block(&self) -> u64 {
+        self.first_block
+    }
+
+    pub fn last_block(&self) -> u64 {
+        self.last_block
+    }
+}
+
 /// Output format selector threaded into the execution core.
 #[derive(Clone, Copy, Debug)]
 pub enum OutputFormat {

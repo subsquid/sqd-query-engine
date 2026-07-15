@@ -21,8 +21,16 @@ fn run_fixture_query(
     let meta = load_dataset_description(Path::new(meta_path))?;
     let parsed = parse_query(query_json, &meta)?;
     let plan = compile(&parsed, &meta)?;
-    let result = execute_plan(&plan, &meta, chunk_dir, Vec::new())?;
-    Ok(serde_json::from_slice(&result)?)
+    let mut result = Vec::new();
+    if let Some(mut blocks) = execute_plan(&plan, &meta, chunk_dir)? {
+        let mut buf = Vec::new();
+        while blocks.has_next_block() {
+            buf.clear();
+            blocks.write_next_block(&mut buf);
+            result.push(serde_json::from_slice(&buf)?);
+        }
+    }
+    Ok(serde_json::Value::Array(result))
 }
 
 fn test_fixture(dataset: &str, meta_path: &str, query_name: &str) {

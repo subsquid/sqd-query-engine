@@ -10,10 +10,9 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 /// Pre-indexed batch data for a single table source (primary or relation).
-pub(crate) struct IndexedBatches<'a> {
-    pub(crate) batches: &'a [RecordBatch],
+pub(crate) struct IndexedBatches {
+    pub(crate) batches: Vec<RecordBatch>,
     pub(crate) index: FxHashMap<u64, Vec<(usize, usize)>>,
-    pub(crate) table_desc: &'a TableDescription,
     pub(crate) writers: Vec<FieldWriter>,
     pub(crate) grouped: Option<GroupedWriters>,
     /// Actual table name (for merging same-table sources)
@@ -21,46 +20,46 @@ pub(crate) struct IndexedBatches<'a> {
     /// Pre-computed sort columns (item_order_keys + address_column, excluding block_number).
     pub(crate) sort_columns: Vec<String>,
     /// Pre-resolved typed sort columns per batch (eliminates per-comparison downcast chain).
-    pub(crate) sort_col_resolved: Vec<Vec<Option<TypedSortColumn<'a>>>>,
+    pub(crate) sort_col_resolved: Vec<Vec<Option<TypedSortColumn>>>,
 }
 
-/// Pre-resolved typed array reference for sort comparisons.
+/// Pre-resolved typed array (Arc-backed, cheap to clone) for sort comparisons.
 /// Resolved once per column per batch; eliminates 8-way downcast chain per comparison.
-pub(crate) enum TypedSortColumn<'a> {
-    UInt64(&'a UInt64Array),
-    UInt32(&'a UInt32Array),
-    UInt16(&'a UInt16Array),
-    Int64(&'a Int64Array),
-    Int32(&'a Int32Array),
-    Int16(&'a Int16Array),
-    Utf8(&'a StringArray),
-    List(&'a GenericListArray<i32>),
+pub(crate) enum TypedSortColumn {
+    UInt64(UInt64Array),
+    UInt32(UInt32Array),
+    UInt16(UInt16Array),
+    Int64(Int64Array),
+    Int32(Int32Array),
+    Int16(Int16Array),
+    Utf8(StringArray),
+    List(GenericListArray<i32>),
 }
 
-impl<'a> TypedSortColumn<'a> {
-    fn resolve(col: &'a dyn Array) -> Option<Self> {
+impl TypedSortColumn {
+    fn resolve(col: &dyn Array) -> Option<Self> {
         if let Some(a) = col.as_any().downcast_ref::<UInt64Array>() {
-            Some(Self::UInt64(a))
+            Some(Self::UInt64(a.clone()))
         } else if let Some(a) = col.as_any().downcast_ref::<UInt32Array>() {
-            Some(Self::UInt32(a))
+            Some(Self::UInt32(a.clone()))
         } else if let Some(a) = col.as_any().downcast_ref::<UInt16Array>() {
-            Some(Self::UInt16(a))
+            Some(Self::UInt16(a.clone()))
         } else if let Some(a) = col.as_any().downcast_ref::<Int64Array>() {
-            Some(Self::Int64(a))
+            Some(Self::Int64(a.clone()))
         } else if let Some(a) = col.as_any().downcast_ref::<Int32Array>() {
-            Some(Self::Int32(a))
+            Some(Self::Int32(a.clone()))
         } else if let Some(a) = col.as_any().downcast_ref::<Int16Array>() {
-            Some(Self::Int16(a))
+            Some(Self::Int16(a.clone()))
         } else if let Some(a) = col.as_any().downcast_ref::<StringArray>() {
-            Some(Self::Utf8(a))
+            Some(Self::Utf8(a.clone()))
         } else if let Some(a) = col.as_any().downcast_ref::<GenericListArray<i32>>() {
-            Some(Self::List(a))
+            Some(Self::List(a.clone()))
         } else {
             None
         }
     }
 
-    fn cmp_rows(&self, row_a: usize, other: &TypedSortColumn<'a>, row_b: usize) -> std::cmp::Ordering {
+    fn cmp_rows(&self, row_a: usize, other: &TypedSortColumn, row_b: usize) -> std::cmp::Ordering {
         match (self, other) {
             (Self::UInt64(a), Self::UInt64(b)) => a.value(row_a).cmp(&b.value(row_b)),
             (Self::UInt32(a), Self::UInt32(b)) => a.value(row_a).cmp(&b.value(row_b)),
@@ -94,8 +93,8 @@ pub(crate) enum FieldWriter {
 }
 
 /// FieldWriter with column indices resolved for a specific batch schema.
-pub(crate) struct ResolvedFieldWriter<'a> {
-    writer: &'a FieldWriter,
+pub(crate) struct ResolvedFieldWriter {
+    json_key_prefix: Vec<u8>,
     /// Resolved column index for Regular, or resolved indices for Roll.
     indices: ResolvedIndices,
     /// Pre-resolved encoder function for Regular fields (eliminates per-row DataType dispatch).
@@ -122,23 +121,23 @@ pub(crate) struct GroupedWriters {
 }
 
 /// Resolved grouped writers for a specific batch schema.
-pub(crate) struct ResolvedGroupedWriters<'a> {
-    base_resolved: Vec<ResolvedFieldWriter<'a>>,
+pub(crate) struct ResolvedGroupedWriters {
+    base_resolved: Vec<ResolvedFieldWriter>,
     tag_col_idx: Option<usize>,
-    variant_resolved: HashMap<&'a str, Vec<(&'a [u8], Vec<ResolvedFieldWriter<'a>>)>>,
+    variant_resolved: HashMap<String, Vec<(Vec<u8>, Vec<ResolvedFieldWriter>)>>,
 }
 
 /// Resolve field writers against a specific batch schema (done once per batch).
-pub(crate) fn resolve_writers<'a>(
-    writers: &'a [FieldWriter],
+pub(crate) fn resolve_writers(
+    writers: &[FieldWriter],
     batch: &RecordBatch,
-) -> Vec<ResolvedFieldWriter<'a>> {
+) -> Vec<ResolvedFieldWriter> {
     writers
         .iter()
         .map(|w| match w {
             FieldWriter::Roll {
+                json_key_prefix,
                 source_column_names,
-                ..
             } => {
                 let idxs: Vec<usize> = source_column_names
                     .iter()
@@ -146,23 +145,23 @@ pub(crate) fn resolve_writers<'a>(
                     .collect();
                 let roll_encoder = ResolvedRollEncoder::resolve(batch, &idxs);
                 ResolvedFieldWriter {
-                    writer: w,
+                    json_key_prefix: json_key_prefix.clone(),
                     indices: ResolvedIndices::Multi(idxs),
                     encoder: None,
                     roll_encoder: Some(roll_encoder),
                 }
             }
             FieldWriter::Regular {
+                json_key_prefix,
                 column_name,
                 encoding,
-                ..
             } => {
                 let idx = batch.schema().index_of(column_name).ok();
                 let encoder = idx.map(|i| {
                     resolve_encoder(batch.column(i).data_type(), encoding.as_ref())
                 });
                 ResolvedFieldWriter {
-                    writer: w,
+                    json_key_prefix: json_key_prefix.clone(),
                     indices: ResolvedIndices::Single(idx),
                     encoder,
                     roll_encoder: None,
@@ -327,23 +326,23 @@ pub(crate) fn build_grouped_writers(
     }
 }
 
-pub(crate) fn resolve_grouped_writers<'a>(
-    gw: &'a GroupedWriters,
+pub(crate) fn resolve_grouped_writers(
+    gw: &GroupedWriters,
     batch: &RecordBatch,
-) -> ResolvedGroupedWriters<'a> {
+) -> ResolvedGroupedWriters {
     let base_resolved = resolve_writers(&gw.base_writers, batch);
     let tag_col_idx = batch.schema().index_of(&gw.tag_column).ok();
-    let mut variant_resolved: HashMap<&'a str, Vec<(&'a [u8], Vec<ResolvedFieldWriter<'a>>)>> =
+    let mut variant_resolved: HashMap<String, Vec<(Vec<u8>, Vec<ResolvedFieldWriter>)>> =
         HashMap::new();
     for (variant, groups) in &gw.variant_writers {
         let resolved_groups: Vec<_> = groups
             .iter()
             .map(|(key, writers)| {
                 let resolved = resolve_writers(writers, batch);
-                (key.as_slice(), resolved)
+                (key.clone(), resolved)
             })
             .collect();
-        variant_resolved.insert(variant.as_str(), resolved_groups);
+        variant_resolved.insert(variant.clone(), resolved_groups);
     }
     ResolvedGroupedWriters {
         base_resolved,
@@ -360,15 +359,10 @@ fn write_row_fields_resolved(
     resolved: &[ResolvedFieldWriter],
 ) {
     for rw in resolved {
-        match (&rw.writer, &rw.indices) {
-            (
-                FieldWriter::Roll {
-                    json_key_prefix, ..
-                },
-                ResolvedIndices::Multi(indices),
-            ) => {
+        match &rw.indices {
+            ResolvedIndices::Multi(indices) => {
                 if !indices.is_empty() {
-                    buf.extend_from_slice(json_key_prefix);
+                    buf.extend_from_slice(&rw.json_key_prefix);
                     if let Some(ref roll_enc) = rw.roll_encoder {
                         roll_enc.encode(batch, row, buf);
                     } else {
@@ -377,18 +371,13 @@ fn write_row_fields_resolved(
                     buf.push(b',');
                 }
             }
-            (
-                FieldWriter::Regular {
-                    json_key_prefix, ..
-                },
-                ResolvedIndices::Single(Some(idx)),
-            ) => {
+            ResolvedIndices::Single(Some(idx)) => {
                 let col = batch.column(*idx);
-                buf.extend_from_slice(json_key_prefix);
+                buf.extend_from_slice(&rw.json_key_prefix);
                 (rw.encoder.unwrap())(col.as_ref(), row, buf);
                 buf.push(b',');
             }
-            _ => {}
+            ResolvedIndices::Single(None) => {}
         }
     }
 }
@@ -442,8 +431,6 @@ pub(crate) fn write_header(
     block_num: u64,
     block_batches: &[RecordBatch],
     block_index: &FxHashMap<u64, Vec<(usize, usize)>>,
-    _block_desc: Option<&TableDescription>,
-    _writers: &[FieldWriter],
     bn_key_prefix: &[u8],
     resolved_by_batch: &[Vec<ResolvedFieldWriter>],
 ) {
@@ -538,7 +525,7 @@ pub(crate) fn write_merged_table_items(
         write_table_items_indexed(
             buf,
             block_num,
-            idx.batches,
+            &idx.batches,
             &idx.index,
             &idx.sort_col_resolved,
             json_array_prefix,
@@ -664,10 +651,10 @@ pub(crate) fn build_full_sort_columns(table_desc: &TableDescription) -> Vec<Stri
 }
 
 /// Pre-resolve typed sort columns for each batch (done once, reused per block).
-pub(crate) fn resolve_sort_columns<'a>(
-    batches: &'a [RecordBatch],
+pub(crate) fn resolve_sort_columns(
+    batches: &[RecordBatch],
     sort_columns: &[String],
-) -> Vec<Vec<Option<TypedSortColumn<'a>>>> {
+) -> Vec<Vec<Option<TypedSortColumn>>> {
     batches
         .iter()
         .map(|b| {
@@ -777,8 +764,8 @@ mod tests {
     fn test_typed_sort_column_same_type_comparison() {
         let a = UInt32Array::from(vec![10, 20, 30]);
         let b = UInt32Array::from(vec![15, 25, 5]);
-        let col_a = TypedSortColumn::UInt32(&a);
-        let col_b = TypedSortColumn::UInt32(&b);
+        let col_a = TypedSortColumn::UInt32(a);
+        let col_b = TypedSortColumn::UInt32(b);
         assert_eq!(col_a.cmp_rows(0, &col_b, 0), std::cmp::Ordering::Less); // 10 < 15
         assert_eq!(col_a.cmp_rows(1, &col_b, 2), std::cmp::Ordering::Greater); // 20 > 5
         assert_eq!(col_a.cmp_rows(0, &col_b, 2), std::cmp::Ordering::Greater); // 10 > 5
@@ -790,8 +777,8 @@ mod tests {
     fn test_typed_sort_column_type_mismatch_panics_in_debug() {
         let a = UInt32Array::from(vec![10]);
         let b = Int32Array::from(vec![10]);
-        let col_a = TypedSortColumn::UInt32(&a);
-        let col_b = TypedSortColumn::Int32(&b);
+        let col_a = TypedSortColumn::UInt32(a);
+        let col_b = TypedSortColumn::Int32(b);
         col_a.cmp_rows(0, &col_b, 0);
     }
 }
