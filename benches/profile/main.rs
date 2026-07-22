@@ -62,7 +62,7 @@ fn main() {
         ("evm/all_traces", EVM_ALL_TRACES, &EVM_META, EVM_CHUNK.as_str()),
         ("evm/all_statediffs", EVM_ALL_STATEDIFFS, &EVM_META, EVM_CHUNK.as_str()),
         ("rpc/getBlockByNumber", EVM_GET_BLOCK_BY_NUMBER, &EVM_META, EVM_CHUNK.as_str()),
-        ("rpc/getBlockByNumber:txHashes", EVM_GET_BLOCK_BY_NUMBER_TX_HASHES, &EVM_META, EVM_CHUNK.as_str()),
+        ("rpc/getBlockByNumber:txHashesOnly", EVM_GET_BLOCK_BY_NUMBER_TX_HASHES, &EVM_META, EVM_CHUNK.as_str()),
         ("rpc/getBlockReceipts", EVM_GET_BLOCK_RECEIPTS, &EVM_META, EVM_CHUNK.as_str()),
         ("rpc/trace_block", EVM_TRACE_BLOCK, &EVM_META, EVM_CHUNK.as_str()),
         ("rpc/getLogs:1blk", EVM_GET_LOGS_1BLK, &EVM_META, EVM_CHUNK.as_str()),
@@ -162,7 +162,7 @@ fn run_legacy(_name: &str, _query_json: &[u8], _chunk_dir: &str, _iterations: us
 
 /// Run the query through both engines on the same chunk and assert that the
 /// decoded JSON is semantically identical (the legacy engine is the reference).
-/// Mirrors `generate_fixtures`: legacy emits JSON-lines, new emits a JSON array.
+/// Both engines now emit NDJSON, so each side is parsed line-by-line.
 #[cfg(feature = "legacy-query")]
 fn compare_engines(
     name: &str,
@@ -170,19 +170,23 @@ fn compare_engines(
     meta: &sqd_query_engine::metadata::DatasetDescription,
     chunk_dir: &str,
 ) {
+    let ndjson_to_value = |bytes: Vec<u8>| -> serde_json::Value {
+        let blocks: Vec<serde_json::Value> = String::from_utf8(bytes)
+            .unwrap()
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        serde_json::Value::Array(blocks)
+    };
+
     let new_chunk = ParquetChunkReader::open(Path::new(chunk_dir)).unwrap();
     let new_bytes = run_query(query_json, meta, &new_chunk, Vec::new(), false);
-    let new_val: serde_json::Value = serde_json::from_slice(&new_bytes).unwrap();
+    let new_val = ndjson_to_value(new_bytes);
 
     let leg_chunk = legacy::open_chunk(Path::new(chunk_dir));
     let leg_bytes = legacy::run_query(query_json, &leg_chunk);
-    let leg_blocks: Vec<serde_json::Value> = String::from_utf8(leg_bytes)
-        .unwrap()
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|l| serde_json::from_str(l).unwrap())
-        .collect();
-    let leg_val = serde_json::Value::Array(leg_blocks);
+    let leg_val = ndjson_to_value(leg_bytes);
 
     let new_blocks = new_val.as_array().map(|a| a.len()).unwrap_or(0);
     let leg_n = leg_val.as_array().map(|a| a.len()).unwrap_or(0);
