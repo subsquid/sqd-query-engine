@@ -235,6 +235,10 @@ impl<'de> Deserialize<'de> for ColumnType {
 pub enum JsonEncoding {
     /// Hex-encoded string with "0x" prefix (e.g., addresses, hashes)
     Hex,
+    /// Hex-encoded string *without* the "0x" prefix — the form Tron stores and
+    /// emits. Same bytes as [`JsonEncoding::Hex`], different rendering, so it
+    /// case-folds filter values and decodes to Arrow `Binary` just like `Hex`.
+    HexUnprefixed,
     /// Base58-encoded string (Solana addresses)
     Base58,
     /// Number as quoted string (for large integers that exceed JS safe range)

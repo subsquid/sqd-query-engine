@@ -145,6 +145,7 @@ per column.
 | Encoding | Rendering | Notes |
 |---|---|---|
 | `hexBytes` | `"0x"` followed by lowercase hex | Filters on such columns compare case-insensitively ([INV-P8](07-invariants.md#inv-p8)). |
+| `hexUnprefixed` | lowercase hex, no `0x` | The same bytes as `hexBytes` and folded the same way; only the rendering differs. Tron stores and returns hex this way. |
 | `base58` | base58 string | Filters compare exactly. |
 | `utf8` | JSON string | Filters compare exactly. |
 | `decimalString` | quoted decimal, e.g. `"1000000000000000000"` | For values that exceed IEEE-754 exact integer range. |

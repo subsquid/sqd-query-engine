@@ -1,0 +1,376 @@
+name: tron
+
+# Tron hex values (addresses, hashes, topics, call data) are stored and emitted
+# *without* the `0x` prefix, exactly as the Tron HTTP API returns them — hence
+# `hex_unprefixed` rather than `hex` throughout. Both encodings mean "these are
+# hex bytes", so filters on them case-fold; they differ only in the prefix.
+# `_transfer_asset_contract_asset` is deliberately left plain: legacy compares
+# asset names byte-exactly, without folding.
+
+tables:
+  blocks:
+    block_number_column: number
+    field_name: block
+    sort_key: [ number ]
+    columns:
+      number:
+        type: uint64
+        stats: true
+      hash:
+        type: string
+        json_encoding: hex_unprefixed
+      parent_hash:
+        type: string
+        json_encoding: hex_unprefixed
+      tx_trie_root:
+        type: string
+        json_encoding: hex_unprefixed
+      version:
+        type: uint32
+      witness_address:
+        type: string
+        json_encoding: hex_unprefixed
+      witness_signature:
+        type: string
+        json_encoding: hex_unprefixed
+        weight: 130
+      timestamp:
+        type: timestamp_millisecond
+        json_encoding: timestamp_millisecond
+
+  transactions:
+    query_name: transactions
+    field_name: transaction
+    item_order_keys: [ transaction_index ]
+    # Filter columns first: `type` leads, then the per-contract-kind extracts
+    # that back the transferTransactions / transferAssetTransactions /
+    # triggerSmartContractTransactions aliases.
+    sort_key:
+      - type
+      - _trigger_smart_contract_sighash
+      - _trigger_smart_contract_contract
+      - _trigger_smart_contract_owner
+      - _transfer_contract_owner
+      - _transfer_contract_to
+      - _transfer_asset_contract_owner
+      - _transfer_asset_contract_to
+      - _transfer_asset_contract_asset
+      - block_number
+      - transaction_index
+    children: [ logs, internal_transactions ]
+    parent_key: [ block_number, transaction_index ]
+    relations:
+      logs:
+        table: logs
+        key: [ block_number, transaction_index ]
+      internal_transactions:
+        table: internal_transactions
+        key: [ block_number, transaction_index ]
+    columns:
+      block_number:
+        type: uint64
+        stats: true
+      transaction_index:
+        type: uint32
+        stats: true
+      hash:
+        type: string
+        json_encoding: hex_unprefixed
+      signature:
+        type: list_string
+        weight: 132
+      type:
+        type: string
+        stats: true
+        dictionary: true
+      permission_id:
+        type: uint32
+      ref_block_bytes:
+        type: string
+        json_encoding: hex_unprefixed
+      ref_block_hash:
+        type: string
+        json_encoding: hex_unprefixed
+      raw_data_hex:
+        type: string
+        json_encoding: hex_unprefixed
+        weight: raw_data_hex_size
+
+      # info
+      contract_result:
+        type: string
+        json_encoding: hex_unprefixed
+      contract_address:
+        type: string
+        json_encoding: hex_unprefixed
+      res_message:
+        type: string
+        json_encoding: hex_unprefixed
+
+      # receipt
+      result:
+        type: string
+
+      ret:
+        type: string
+        json_encoding: json
+        dictionary: true
+      parameter:
+        type: string
+        json_encoding: json
+        weight: 256
+      fee_limit:
+        type: int64
+        json_encoding: string
+      expiration:
+        type: timestamp_millisecond
+        json_encoding: timestamp_millisecond
+      timestamp:
+        type: timestamp_millisecond
+        json_encoding: timestamp_millisecond
+      fee:
+        type: int64
+        json_encoding: string
+      withdraw_amount:
+        type: int64
+        json_encoding: string
+      unfreeze_amount:
+        type: int64
+        json_encoding: string
+      withdraw_expire_amount:
+        type: int64
+        json_encoding: string
+      cancel_unfreeze_v2_amount:
+        type: string
+        json_encoding: json
+      energy_fee:
+        type: int64
+        json_encoding: string
+      energy_usage:
+        type: int64
+        json_encoding: string
+      energy_usage_total:
+        type: int64
+        json_encoding: string
+      net_usage:
+        type: int64
+        json_encoding: string
+      net_fee:
+        type: int64
+        json_encoding: string
+      origin_energy_usage:
+        type: int64
+        json_encoding: string
+      energy_penalty_total:
+        type: int64
+        json_encoding: string
+
+      # Per-contract-kind extracts from `parameter.value`, populated only when
+      # `type` matches. Filter-only: reached through the query aliases below.
+      _transfer_contract_owner:
+        type: string
+        json_encoding: hex_unprefixed
+        stats: true
+        system: true
+      _transfer_contract_to:
+        type: string
+        json_encoding: hex_unprefixed
+        stats: true
+        system: true
+      _transfer_asset_contract_owner:
+        type: string
+        json_encoding: hex_unprefixed
+        stats: true
+        system: true
+      _transfer_asset_contract_to:
+        type: string
+        json_encoding: hex_unprefixed
+        stats: true
+        system: true
+      _transfer_asset_contract_asset:
+        type: string
+        stats: true
+        system: true
+      _trigger_smart_contract_owner:
+        type: string
+        json_encoding: hex_unprefixed
+        stats: true
+        system: true
+      _trigger_smart_contract_contract:
+        type: string
+        json_encoding: hex_unprefixed
+        stats: true
+        system: true
+      _trigger_smart_contract_sighash:
+        type: string
+        json_encoding: hex_unprefixed
+        stats: true
+        system: true
+
+      # system
+      raw_data_hex_size:
+        type: uint64
+        system: true
+
+  logs:
+    query_name: logs
+    field_name: log
+    item_order_keys: [ transaction_index, log_index ]
+    sort_key: [ topic0, address, block_number, transaction_index, log_index ]
+    relations:
+      transaction:
+        table: transactions
+        key: [ block_number, transaction_index ]
+    columns:
+      block_number:
+        type: uint64
+        stats: true
+      # Legacy emits transactionIndex before logIndex for Tron logs (the
+      # reverse of EVM), and column order here drives output field order.
+      transaction_index:
+        type: uint32
+        stats: true
+      log_index:
+        type: uint32
+        stats: true
+      address:
+        type: string
+        json_encoding: hex_unprefixed
+        stats: true
+        dictionary: true
+      data:
+        type: string
+        json_encoding: hex_unprefixed
+        weight: data_size
+      topic0:
+        type: string
+        json_encoding: hex_unprefixed
+        stats: true
+        dictionary: true
+      topic1:
+        type: string
+        json_encoding: hex_unprefixed
+      topic2:
+        type: string
+        json_encoding: hex_unprefixed
+      topic3:
+        type: string
+        json_encoding: hex_unprefixed
+      # system
+      data_size:
+        type: uint64
+        system: true
+    virtual_fields:
+      topics:
+        type: roll
+        columns: [ topic0, topic1, topic2, topic3 ]
+
+  internal_transactions:
+    query_name: internalTransactions
+    field_name: internalTransaction
+    item_order_keys: [ transaction_index, internal_transaction_index ]
+    sort_key:
+      - transfer_to_address
+      - caller_address
+      - block_number
+      - transaction_index
+      - internal_transaction_index
+    relations:
+      transaction:
+        table: transactions
+        key: [ block_number, transaction_index ]
+    special_filters:
+      # Legacy names these two filters after the party, not the column.
+      caller:
+        type: column_alias
+        column: caller_address
+      transfer_to:
+        type: column_alias
+        column: transfer_to_address
+    columns:
+      block_number:
+        type: uint64
+        stats: true
+      transaction_index:
+        type: uint32
+        stats: true
+      internal_transaction_index:
+        type: uint32
+        stats: true
+      hash:
+        type: string
+        json_encoding: hex_unprefixed
+      caller_address:
+        type: string
+        json_encoding: hex_unprefixed
+        stats: true
+        dictionary: true
+      transfer_to_address:
+        type: string
+        json_encoding: hex_unprefixed
+        stats: true
+        dictionary: true
+      note:
+        type: string
+        json_encoding: hex_unprefixed
+      rejected:
+        type: boolean
+      extra:
+        type: string
+      call_value_info:
+        type: string
+        json_encoding: json
+        weight: 64
+
+# `transactions` is queried under four names. The plain one filters on `type`
+# directly; each alias below pins `type` and exposes the matching extracts as
+# short filter keys (owner/to/asset/contract/sighash), mirroring the legacy
+# TransferTransactionRequest / TransferAssetTransactionRequest /
+# TriggerSmartContractTransactionRequest.
+query_aliases:
+  transferTransactions:
+    table: transactions
+    implicit_predicates:
+      type: [ TransferContract ]
+    filter_aliases:
+      owner: _transfer_contract_owner
+      to: _transfer_contract_to
+    relations:
+      logs:
+        table: logs
+        key: [ block_number, transaction_index ]
+      internal_transactions:
+        table: internal_transactions
+        key: [ block_number, transaction_index ]
+
+  transferAssetTransactions:
+    table: transactions
+    implicit_predicates:
+      type: [ TransferAssetContract ]
+    filter_aliases:
+      owner: _transfer_asset_contract_owner
+      to: _transfer_asset_contract_to
+      asset: _transfer_asset_contract_asset
+    relations:
+      logs:
+        table: logs
+        key: [ block_number, transaction_index ]
+      internal_transactions:
+        table: internal_transactions
+        key: [ block_number, transaction_index ]
+
+  triggerSmartContractTransactions:
+    table: transactions
+    implicit_predicates:
+      type: [ TriggerSmartContract ]
+    filter_aliases:
+      owner: _trigger_smart_contract_owner
+      contract: _trigger_smart_contract_contract
+      sighash: _trigger_smart_contract_sighash
+    relations:
+      logs:
+        table: logs
+        key: [ block_number, transaction_index ]
+      internal_transactions:
+        table: internal_transactions
+        key: [ block_number, transaction_index ]

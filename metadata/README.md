@@ -145,11 +145,16 @@ The `json_encoding` field controls how a column's value is serialized to JSON ou
 | Encoding | Description | Example |
 |---|---|---|
 | `hex` | Bytes displayed as `0x`-prefixed hex string | `0xa0b1...` |
+| `hex_unprefixed` | Bytes displayed as a bare hex string, no `0x` (Tron) | `41a614f8...` |
 | `base58` | Bytes displayed as base58 string | `So11111111111111111111111111111112` |
 | `string` | Integer as quoted decimal string (avoids JS precision loss for >2^53) | `5000` → `"5000"` |
 | `json` | String containing JSON — parsed and embedded as raw JSON in output | `"{\"a\":1}"` → `{"a":1}` |
 | `solana_tx_version` | Solana transaction version: `-1` → `"legacy"`, otherwise the number | `-1` → `"legacy"`, `0` → `0` |
 | `timestamp_millisecond` | Millisecond timestamp, output as integer | `1710000000000` |
+
+Filter values for `hex`/`hex_unprefixed` columns are lowercased before comparison,
+so a checksummed or upper-cased address in a query still matches. Every other
+encoding compares byte-exactly.
 
 ### Weight
 

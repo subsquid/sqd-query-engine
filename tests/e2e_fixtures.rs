@@ -463,3 +463,96 @@ hyperliquid_replica_cmds_fixture!(action_type);
 hyperliquid_replica_cmds_fixture!(action_user);
 hyperliquid_replica_cmds_fixture!(include_all_blocks);
 hyperliquid_replica_cmds_fixture!(order_action);
+
+// ---------------------------------------------------------------------------
+// Tron fixtures
+// ---------------------------------------------------------------------------
+
+macro_rules! tron_fixture {
+    ($name:ident) => {
+        paste::paste! {
+            #[test]
+            fn [<tron_ $name>]() {
+                test_fixture("tron", "metadata/tron.yaml", stringify!($name));
+            }
+        }
+    };
+}
+
+tron_fixture!(all_fields);
+tron_fixture!(include_all_blocks);
+tron_fixture!(internal_transactions);
+tron_fixture!(logs_with_transaction);
+tron_fixture!(topics_filtering);
+tron_fixture!(transactions_by_type);
+tron_fixture!(transfer_asset_transactions);
+tron_fixture!(transfer_transactions);
+tron_fixture!(trigger_smart_contract);
+tron_fixture!(trigger_smart_contract_with_relations);
+
+// INV-P8: upper-casing hex filter values leaves the response byte-identical.
+// Tron hex is stored unprefixed (`hex_unprefixed`), which case-folds like `hex`.
+// `_transferAssetContractAsset` is excluded on purpose — legacy compares asset
+// names byte-exactly, so it is not folded.
+#[test]
+fn tron_hex_filters_are_case_folded() {
+    let base = fixture_dir().join("tron");
+    let chunk = base.join("chunk");
+    if !chunk.exists() {
+        eprintln!("SKIP tron_hex_filters_are_case_folded: fixtures not found");
+        return;
+    }
+
+    for query_name in [
+        "all_fields",
+        "logs_with_transaction",
+        "internal_transactions",
+        "transfer_transactions",
+    ] {
+        let query_file = base.join("queries").join(query_name).join("query.json");
+        let query_json = std::fs::read(&query_file).unwrap();
+        let lower = run_fixture_query("metadata/tron.yaml", &chunk, &query_json).unwrap();
+
+        // Upper-case every filter value in every item request (fields and block
+        // range are left alone; only filter lists carry hex).
+        let mut q: serde_json::Value = serde_json::from_slice(&query_json).unwrap();
+        for (key, value) in q.as_object_mut().unwrap() {
+            if key == "fields" {
+                continue;
+            }
+            let Some(items) = value.as_array_mut() else {
+                continue;
+            };
+            for item in items {
+                let Some(filters) = item.as_object_mut() else {
+                    continue;
+                };
+                for (name, v) in filters {
+                    if name == "asset" {
+                        continue;
+                    }
+                    if let Some(list) = v.as_array_mut() {
+                        for e in list {
+                            if let Some(s) = e.as_str() {
+                                *e = serde_json::Value::String(s.to_uppercase());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let upper =
+            run_fixture_query("metadata/tron.yaml", &chunk, q.to_string().as_bytes()).unwrap();
+
+        assert_eq!(
+            upper, lower,
+            "tron/{}: upper-cased hex filters changed the response",
+            query_name
+        );
+        assert!(
+            lower.as_array().is_some_and(|a| !a.is_empty()),
+            "tron/{}: fixture returned no blocks, the check proves nothing",
+            query_name
+        );
+    }
+}

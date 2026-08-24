@@ -371,13 +371,21 @@ Tables: `blocks`, `transactions`, `logs`, `internal_transactions`.
 
 `blocks.timestamp`, `transactions.expiration`, `transactions.timestamp`:
 `timestampMillisecond`. `transactions.ret`, `parameter`,
-`cancelUnfreezeV2Amount`, `internal_transactions.callValueInfo`, `extra`:
+`cancelUnfreezeV2Amount`, `internal_transactions.callValueInfo`:
 `jsonVerbatim`. `transactions.feeLimit`, `fee`, `withdrawAmount`,
 `unfreezeAmount`, `withdrawExpireAmount`, `energyFee`, `energyUsage`,
 `energyUsageTotal`, `netUsage`, `netFee`, `originEnergyUsage`,
 `energyPenaltyTotal`: `decimalString`.
 
-Tron sighashes are 8 hex digits with **no** `0x` prefix.
+`internal_transactions.extra` is `utf8`, not `jsonVerbatim`: it holds an opaque
+string, and splicing one verbatim would emit malformed JSON. The reference
+renders it as a quoted string.
+
+Every Tron hex column — addresses, hashes, topics, call data, sighashes — is
+`hexUnprefixed`: the same bytes as `hexBytes`, rendered with **no** `0x`, which
+is how Tron stores and returns them. Filters on it case-fold exactly as
+`hexBytes` does ([INV-P8](07-invariants.md#inv-p8)). The one exception is
+`_transferAssetContractAsset`, which is compared byte-exactly.
 
 ---
 

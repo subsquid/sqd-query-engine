@@ -14,9 +14,10 @@ pub fn resolve_encoder(data_type: &DataType, encoding: Option<&JsonEncoding>) ->
         Some(JsonEncoding::Json) => encode_json_passthrough,
         Some(JsonEncoding::SolanaTxVersion) => encode_solana_tx_version,
         Some(JsonEncoding::TimestampMillisecond) => encode_timestamp_millisecond_raw,
-        Some(JsonEncoding::Hex) | Some(JsonEncoding::Base58) | None => {
-            resolve_value_encoder(data_type)
-        }
+        Some(JsonEncoding::Hex)
+        | Some(JsonEncoding::HexUnprefixed)
+        | Some(JsonEncoding::Base58)
+        | None => resolve_value_encoder(data_type),
     }
 }
 

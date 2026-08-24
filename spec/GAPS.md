@@ -36,7 +36,6 @@ Compared against the reference implementation at
 | 7 | `inList` silently drops values it cannot parse | [INV-Q12](07-invariants.md#inv-q12) | **S1** |
 | 8 | 26 `prod_pattern_*` e2e tests have no fixtures on disk and report green | §8.1 | **S1** |
 | 13 | Solana `d1/d2/d4/d8` emit raw JSON numbers, not `hexNumber` — `d8` loses precision above 2⁵³ | [INV-O9](07-invariants.md#inv-o9) | **S1** |
-| 9 | `tron` dataset is entirely absent | [03-catalog.md §3.4](03-catalog.md) | **S2** |
 | 10 | Five of six Substrate aliases are missing | [03-catalog.md §3.3](03-catalog.md) | **S2** |
 | 11 | EVM `blocks` is missing 5 selectable fields | [03-catalog.md §3.1](03-catalog.md) | **S2** |
 | 12 | EVM `transactions` is missing 4 selectable fields | [03-catalog.md §3.1](03-catalog.md) | **S2** |
@@ -207,16 +206,6 @@ see §8.1.
 
 ## S2 — Missing capability
 
-### 9. `tron` is absent
-
-No metadata, no fixtures, no mention anywhere in `src/` or `metadata/`. The
-reference implementation serves it: 4 tables, 6 item request arrays including 3
-aliases (`transferTransactions`, `transferAssetTransactions`,
-`triggerSmartContractTransactions`), and the `internal_transactions` table whose
-`queryName` is `internalTransactions`.
-
-See [03-catalog.md §3.4](03-catalog.md).
-
 ### 10. Five of six Substrate aliases are missing
 
 `metadata/substrate.yaml` declares only `evmLogs`.
@@ -337,9 +326,9 @@ adds a column and forgets.
 
 [INV-O9](07-invariants.md#inv-o9): the *declared type* determines the unit.
 
-### 21. `base58` and `hex` encodings are no-ops
+### 21. `base58`, `hex` and `hexUnprefixed` encodings are no-ops
 
-Both fall through to the physical-type encoder. They work because every such
+All three fall through to the physical-type encoder. They work because every such
 column is physically `Utf8` holding the display string already. A base58 column
 stored as `Binary` would emit `0x…` hex. The encoding declarations do carry
 meaning elsewhere (case-folding on input, Arrow binary decoding), so they cannot

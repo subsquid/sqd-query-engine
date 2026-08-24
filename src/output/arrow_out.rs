@@ -181,7 +181,7 @@ pub fn hexify_group(batches: Vec<RecordBatch>, table_desc: &TableDescription) ->
                         .columns
                         .get(f.name())
                         .and_then(|c| c.json_encoding.as_ref()),
-                    Some(JsonEncoding::Hex)
+                    Some(JsonEncoding::Hex) | Some(JsonEncoding::HexUnprefixed)
                 )
         })
         .map(|(i, _)| i)

@@ -415,7 +415,11 @@ fn compile_in_list(
 
     match &col_desc.data_type {
         ColumnType::String => {
-            let vals: Vec<String> = if col_desc.json_encoding == Some(JsonEncoding::Hex) {
+            let case_folded = matches!(
+                col_desc.json_encoding,
+                Some(JsonEncoding::Hex) | Some(JsonEncoding::HexUnprefixed)
+            );
+            let vals: Vec<String> = if case_folded {
                 strings.iter().map(|s| s.to_ascii_lowercase()).collect()
             } else {
                 strings.iter().map(|s| s.to_string()).collect()
