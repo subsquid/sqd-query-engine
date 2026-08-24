@@ -463,3 +463,29 @@ hyperliquid_replica_cmds_fixture!(action_type);
 hyperliquid_replica_cmds_fixture!(action_user);
 hyperliquid_replica_cmds_fixture!(include_all_blocks);
 hyperliquid_replica_cmds_fixture!(order_action);
+
+// ---------------------------------------------------------------------------
+// Tron fixtures
+// ---------------------------------------------------------------------------
+
+macro_rules! tron_fixture {
+    ($name:ident) => {
+        paste::paste! {
+            #[test]
+            fn [<tron_ $name>]() {
+                test_fixture("tron", "metadata/tron.yaml", stringify!($name));
+            }
+        }
+    };
+}
+
+tron_fixture!(all_fields);
+tron_fixture!(include_all_blocks);
+tron_fixture!(internal_transactions);
+tron_fixture!(logs_with_transaction);
+tron_fixture!(topics_filtering);
+tron_fixture!(transactions_by_type);
+tron_fixture!(transfer_asset_transactions);
+tron_fixture!(transfer_transactions);
+tron_fixture!(trigger_smart_contract);
+tron_fixture!(trigger_smart_contract_with_relations);

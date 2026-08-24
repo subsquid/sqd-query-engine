@@ -36,11 +36,11 @@ Compared against the reference implementation at
 | 7 | `inList` silently drops values it cannot parse | [INV-Q12](07-invariants.md#inv-q12) | **S1** |
 | 8 | 26 `prod_pattern_*` e2e tests have no fixtures on disk and report green | §8.1 | **S1** |
 | 13 | Solana `d1/d2/d4/d8` emit raw JSON numbers, not `hexNumber` — `d8` loses precision above 2⁵³ | [INV-O9](07-invariants.md#inv-o9) | **S1** |
-| 9 | `tron` dataset is entirely absent | [03-catalog.md §3.4](03-catalog.md) | **S2** |
 | 10 | Five of six Substrate aliases are missing | [03-catalog.md §3.3](03-catalog.md) | **S2** |
 | 11 | EVM `blocks` is missing 5 selectable fields | [03-catalog.md §3.1](03-catalog.md) | **S2** |
 | 12 | EVM `transactions` is missing 4 selectable fields | [03-catalog.md §3.1](03-catalog.md) | **S2** |
 | 14 | Negative values cannot filter signed columns | [INV-P14](07-invariants.md#inv-p14) | **S2** |
+| 24 | Tron hex filters are not case-folded — no encoding means "hex bytes, rendered bare" | [INV-P8](07-invariants.md#inv-p8) | **S2** |
 | 15 | `discriminator: []` errors instead of matching nothing | [INV-P3](07-invariants.md#inv-p3) | **S3** |
 | 16 | Bloom ≤ 10 and discriminator-exclusivity validations are absent | [INV-Q10](07-invariants.md#inv-q10), [INV-Q11](07-invariants.md#inv-q11) | **S3** |
 | 17 | Relation block-number collection hardcodes the name `block_number` | [INV-X1](07-invariants.md#inv-x1) | **S3** |
@@ -207,15 +207,28 @@ see §8.1.
 
 ## S2 — Missing capability
 
-### 9. `tron` is absent
+### 24. Tron hex filters are not case-folded
 
-No metadata, no fixtures, no mention anywhere in `src/` or `metadata/`. The
-reference implementation serves it: 4 tables, 6 item request arrays including 3
-aliases (`transferTransactions`, `transferAssetTransactions`,
-`triggerSmartContractTransactions`), and the `internal_transactions` table whose
-`queryName` is `internalTransactions`.
+[03-catalog.md §3.4](03-catalog.md) specifies `logs.address`, `logs.topic0…3`,
+`internal_transactions.caller`/`transferTo` and the three transaction aliases'
+`owner`/`to`/`contract`/`sighash` filters as case-folded, matching the
+reference's `to_lowercase_list`. `metadata/tron.yaml` declares those columns as
+plain `string`, so they compare byte-exactly: an upper-cased address matches
+nothing instead of matching.
 
-See [03-catalog.md §3.4](03-catalog.md).
+The engine folds `inList` values only when a column declares
+`json_encoding: hex` (`src/query/plan.rs`), and Tron cannot use it — Tron stores
+hex *without* the `0x` prefix, so `hex` describes the wrong rendering. (It
+happens to be a no-op on output today, which is gap 21; relying on that would
+break Tron the moment 21 is fixed.)
+
+Closing this needs a `hexUnprefixed` encoding — same bytes as `hexBytes`,
+rendered bare, folded the same way — declared on the 14 filtered columns.
+`_transferAssetContractAsset` must stay unfolded: the reference deliberately
+omits `to_lowercase_list` for asset names.
+
+Note the reference is only partially conformant here too: gap 6 means scalar
+filters are unfolded on every dataset regardless of encoding.
 
 ### 10. Five of six Substrate aliases are missing
 
@@ -401,5 +414,5 @@ Permitted; must not change the meaning of anything above.
    one change: introduce `filters:` in the catalog, and validate the whole catalog
    properly. Everything in [03-catalog.md](03-catalog.md) becomes checkable.
 5. **Gap 2** (fork detection). Needed before any client pages across a reorg.
-6. **Gaps 9–12** (missing surface). Mechanical catalog work, gated on 4.
+6. **Gaps 10–12** (missing surface). Mechanical catalog work, gated on 4.
 7. The rest.

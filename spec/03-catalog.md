@@ -371,13 +371,18 @@ Tables: `blocks`, `transactions`, `logs`, `internal_transactions`.
 
 `blocks.timestamp`, `transactions.expiration`, `transactions.timestamp`:
 `timestampMillisecond`. `transactions.ret`, `parameter`,
-`cancelUnfreezeV2Amount`, `internal_transactions.callValueInfo`, `extra`:
+`cancelUnfreezeV2Amount`, `internal_transactions.callValueInfo`:
 `jsonVerbatim`. `transactions.feeLimit`, `fee`, `withdrawAmount`,
 `unfreezeAmount`, `withdrawExpireAmount`, `energyFee`, `energyUsage`,
 `energyUsageTotal`, `netUsage`, `netFee`, `originEnergyUsage`,
 `energyPenaltyTotal`: `decimalString`.
 
-Tron sighashes are 8 hex digits with **no** `0x` prefix.
+`internal_transactions.extra` is `utf8`, not `jsonVerbatim`: it holds an opaque
+string, and splicing one verbatim would emit malformed JSON. The reference
+renders it as a quoted string.
+
+Tron sighashes are 8 hex digits with **no** `0x` prefix — as is every other Tron
+hex column.
 
 ---
 
