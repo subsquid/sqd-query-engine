@@ -14,10 +14,22 @@ pub fn resolve_encoder(data_type: &DataType, encoding: Option<&JsonEncoding>) ->
         Some(JsonEncoding::Json) => encode_json_passthrough,
         Some(JsonEncoding::SolanaTxVersion) => encode_solana_tx_version,
         Some(JsonEncoding::TimestampMillisecond) => encode_timestamp_millisecond_raw,
-        Some(JsonEncoding::Hex)
-        | Some(JsonEncoding::HexUnprefixed)
-        | Some(JsonEncoding::Base58)
-        | None => resolve_value_encoder(data_type),
+        Some(JsonEncoding::HexUnprefixed) => resolve_unprefixed_hex_encoder(data_type),
+        Some(JsonEncoding::Hex) | Some(JsonEncoding::Base58) | None => {
+            resolve_value_encoder(data_type)
+        }
+    }
+}
+
+/// Encoder for [`JsonEncoding::HexUnprefixed`]. Identical to
+/// [`resolve_value_encoder`] except for the byte-backed types, where the default
+/// encoders would prepend `0x` — the one thing this encoding exists to avoid.
+/// A `Utf8` column already holds the display string, so it passes through.
+fn resolve_unprefixed_hex_encoder(data_type: &DataType) -> EncoderFn {
+    match data_type {
+        DataType::Binary => encode_binary_unprefixed,
+        DataType::FixedSizeBinary(_) => encode_fixed_binary_unprefixed,
+        _ => resolve_value_encoder(data_type),
     }
 }
 
@@ -178,6 +190,27 @@ fn encode_fixed_binary_value(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
         .downcast_ref::<FixedSizeBinaryArray>()
         .unwrap();
     encode_hex_bytes(a.value(row), buf);
+}
+
+fn encode_binary_unprefixed(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
+    if array.is_null(row) {
+        buf.extend_from_slice(b"null");
+        return;
+    }
+    let a = array.as_any().downcast_ref::<BinaryArray>().unwrap();
+    encode_hex_bytes_unprefixed(a.value(row), buf);
+}
+
+fn encode_fixed_binary_unprefixed(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
+    if array.is_null(row) {
+        buf.extend_from_slice(b"null");
+        return;
+    }
+    let a = array
+        .as_any()
+        .downcast_ref::<FixedSizeBinaryArray>()
+        .unwrap();
+    encode_hex_bytes_unprefixed(a.value(row), buf);
 }
 
 fn encode_timestamp_second(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
@@ -433,6 +466,21 @@ pub fn encode_json_string(s: &str, buf: &mut Vec<u8>) {
 fn encode_hex_bytes(bytes: &[u8], buf: &mut Vec<u8>) {
     buf.push(b'"');
     buf.extend_from_slice(b"0x");
+    push_hex(bytes, buf);
+    buf.push(b'"');
+}
+
+/// Same bytes as [`encode_hex_bytes`], without the `0x` prefix — the rendering
+/// [`JsonEncoding::HexUnprefixed`] declares.
+fn encode_hex_bytes_unprefixed(bytes: &[u8], buf: &mut Vec<u8>) {
+    buf.push(b'"');
+    push_hex(bytes, buf);
+    buf.push(b'"');
+}
+
+/// Append lowercase hex for `bytes` to `buf`. No quotes, no prefix.
+#[inline]
+fn push_hex(bytes: &[u8], buf: &mut Vec<u8>) {
     let hex_len = bytes.len() * 2;
     buf.reserve(hex_len);
     let start = buf.len();
@@ -447,7 +495,6 @@ fn encode_hex_bytes(bytes: &[u8], buf: &mut Vec<u8>) {
         faster_hex::hex_encode(bytes, dst).unwrap();
         buf.set_len(start + hex_len);
     }
-    buf.push(b'"');
 }
 
 fn encode_list(array: &GenericListArray<i32>, row: usize, buf: &mut Vec<u8>) {
@@ -742,5 +789,59 @@ mod tests {
         let mut buf = Vec::new();
         encode_bignum(&arr, 0, &mut buf);
         assert_eq!(String::from_utf8(buf).unwrap(), "\"-0.005\"");
+    }
+
+    // --- JsonEncoding::HexUnprefixed -----------------------------------------
+    // The encoding's contract is "same bytes as Hex, rendered without `0x`".
+    // For Utf8 the stored string is already the rendering, but for the
+    // byte-backed types the default encoder prepends `0x`, so HexUnprefixed
+    // needs its own encoder. These pin both halves of that contract.
+
+    fn encode_with(enc: JsonEncoding, arr: &dyn Array) -> String {
+        let f = resolve_encoder(arr.data_type(), Some(&enc));
+        let mut buf = Vec::new();
+        f(arr, 0, &mut buf);
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn hex_unprefixed_binary_omits_0x() {
+        let arr = BinaryArray::from(vec![Some(&[0xa0u8, 0x1b, 0xff][..])]);
+        assert_eq!(encode_with(JsonEncoding::HexUnprefixed, &arr), "\"a01bff\"");
+        // Hex on the same physical type keeps the prefix.
+        assert_eq!(encode_with(JsonEncoding::Hex, &arr), "\"0xa01bff\"");
+    }
+
+    #[test]
+    fn hex_unprefixed_fixed_binary_omits_0x() {
+        let arr = FixedSizeBinaryArray::try_from_iter(vec![vec![0xde, 0xad, 0xbe, 0xef]].into_iter())
+            .unwrap();
+        assert_eq!(encode_with(JsonEncoding::HexUnprefixed, &arr), "\"deadbeef\"");
+        assert_eq!(encode_with(JsonEncoding::Hex, &arr), "\"0xdeadbeef\"");
+    }
+
+    #[test]
+    fn hex_unprefixed_nulls_and_empty() {
+        let arr = BinaryArray::from(vec![None::<&[u8]>]);
+        assert_eq!(encode_with(JsonEncoding::HexUnprefixed, &arr), "null");
+        let empty = BinaryArray::from(vec![Some(&[][..])]);
+        assert_eq!(encode_with(JsonEncoding::HexUnprefixed, &empty), "\"\"");
+    }
+
+    #[test]
+    fn hex_unprefixed_utf8_passes_through() {
+        // Every Tron hex column is physically Utf8 and already holds the bare
+        // hex string: the encoding must not touch it.
+        let arr = StringArray::from(vec!["41a614f803b6fd780986a42c78ec9c7f77e6ded13c"]);
+        assert_eq!(
+            encode_with(JsonEncoding::HexUnprefixed, &arr),
+            "\"41a614f803b6fd780986a42c78ec9c7f77e6ded13c\""
+        );
+    }
+
+    #[test]
+    fn hex_unprefixed_leaves_non_byte_types_alone() {
+        let arr = UInt64Array::from(vec![42]);
+        assert_eq!(encode_with(JsonEncoding::HexUnprefixed, &arr), "42");
     }
 }

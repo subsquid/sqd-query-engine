@@ -236,8 +236,10 @@ pub enum JsonEncoding {
     /// Hex-encoded string with "0x" prefix (e.g., addresses, hashes)
     Hex,
     /// Hex-encoded string *without* the "0x" prefix — the form Tron stores and
-    /// emits. Same bytes as [`JsonEncoding::Hex`], different rendering, so it
-    /// case-folds filter values and decodes to Arrow `Binary` just like `Hex`.
+    /// emits. Same bytes as [`JsonEncoding::Hex`], rendered bare, and folded the
+    /// same way when compared against list filter values. Unlike `Hex` it is NOT
+    /// converted to Arrow `Binary` in flat-Arrow output: `Binary` carries no
+    /// prefix information, so converting both would make the type ambiguous.
     HexUnprefixed,
     /// Base58-encoded string (Solana addresses)
     Base58,

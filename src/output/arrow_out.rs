@@ -159,6 +159,13 @@ pub fn dedup_first(batch: &RecordBatch, key_cols: &[String]) -> RecordBatch {
 
 /// Decode the table's hex `Utf8` columns from `0x…` text to raw `Binary`.
 ///
+/// Only `json_encoding: hex` is converted, deliberately not `hex_unprefixed`.
+/// A `Binary` field carries no rendering information, so converting both would
+/// make `Binary` ambiguous — a consumer reconstructing JSON could not tell
+/// whether to write `0x…` (EVM) or bare hex (Tron). Keeping the rule total
+/// ("`Binary` came from a `0x`-prefixed column") costs `hex_unprefixed` columns
+/// the size win and keeps the stream self-describing.
+///
 /// Which columns are hex is taken from the metadata (`json_encoding: hex`), not
 /// sniffed from the values — so a column's emitted type is **stable across
 /// responses** regardless of which rows are present: an all-null hex column is
@@ -181,7 +188,7 @@ pub fn hexify_group(batches: Vec<RecordBatch>, table_desc: &TableDescription) ->
                         .columns
                         .get(f.name())
                         .and_then(|c| c.json_encoding.as_ref()),
-                    Some(JsonEncoding::Hex) | Some(JsonEncoding::HexUnprefixed)
+                    Some(JsonEncoding::Hex)
                 )
         })
         .map(|(i, _)| i)

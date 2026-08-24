@@ -77,7 +77,8 @@ every `L` including the empty list. There is no filter syntax that selects nulls
 
 ### 4.2.4 Case folding
 
-Values of columns declared `hexBytes` compare **case-insensitively**: the engine
+Values of columns declared `hexBytes` or `hexUnprefixed` compare
+**case-insensitively**: the engine
 folds both the filter values and the stored values to lowercase before comparing
 ([INV-P8](07-invariants.md#inv-p8)). Everything else compares byte-exactly.
 

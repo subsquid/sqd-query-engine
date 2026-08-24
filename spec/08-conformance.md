@@ -90,7 +90,7 @@ a few that do not. Then assert the laws, over randomly composed queries:
 | `Q([s₁]) ∪ Q([s₂])` = `Q([s₁, s₂])` | [INV-P5](07-invariants.md#inv-p5) |
 | `Q([s, s])` = `Q([s])` | idempotence |
 | `Q([s₁, s₂])` = `Q([s₂, s₁])` | request order irrelevant |
-| `Q(c: [upper(a)])` = `Q(c: [a])` iff `c` is `hexBytes` | [INV-P8](07-invariants.md#inv-p8) |
+| `Q(c: [upper(a)])` = `Q(c: [a])` iff `c` is `hexBytes` or `hexUnprefixed` | [INV-P8](07-invariants.md#inv-p8) |
 | `Q(c: [huge])` = ∅, no error | [INV-P14](07-invariants.md#inv-p14) |
 | `Q` with pruning disabled = `Q` | [INV-P16](07-invariants.md#inv-p16) |
 

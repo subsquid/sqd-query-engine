@@ -61,20 +61,21 @@ fn process_dataset(dataset: &str, chunk_dir: &Path, queries_dir: &Path) {
 
         match run_legacy_query(&query_json, &chunk) {
             Ok(result) => {
-                // Legacy outputs JSON lines. Convert to JSON array to match
-                // our engine's output format (which e2e tests expect).
+                // Legacy outputs JSON lines. Splice them into a JSON array
+                // verbatim — parsing through `serde_json::Value` would reorder
+                // object keys (`Map` is a `BTreeMap`), and the recorded key
+                // order is the ground truth the fixture suite asserts on.
                 let result_str = String::from_utf8(result).unwrap();
-                let blocks: Vec<serde_json::Value> = result_str
-                    .lines()
-                    .filter(|l| !l.is_empty())
-                    .map(|l| serde_json::from_str(l).unwrap())
-                    .collect();
-
-                let json_array = serde_json::to_string(&blocks).unwrap();
+                let lines: Vec<&str> = result_str.lines().filter(|l| !l.is_empty()).collect();
+                // Validate each line parses, without keeping the parsed form.
+                for l in &lines {
+                    serde_json::from_str::<serde::de::IgnoredAny>(l).unwrap();
+                }
+                let json_array = format!("[{}]", lines.join(","));
                 std::fs::write(&result_file, json_array.as_bytes()).unwrap();
                 eprintln!(
                     "  OK {}/{}: {} blocks, {} bytes",
-                    dataset, query_name, blocks.len(), json_array.len()
+                    dataset, query_name, lines.len(), json_array.len()
                 );
             }
             Err(e) => {

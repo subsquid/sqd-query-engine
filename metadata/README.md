@@ -152,9 +152,10 @@ The `json_encoding` field controls how a column's value is serialized to JSON ou
 | `solana_tx_version` | Solana transaction version: `-1` → `"legacy"`, otherwise the number | `-1` → `"legacy"`, `0` → `0` |
 | `timestamp_millisecond` | Millisecond timestamp, output as integer | `1710000000000` |
 
-Filter values for `hex`/`hex_unprefixed` columns are lowercased before comparison,
-so a checksummed or upper-cased address in a query still matches. Every other
-encoding compares byte-exactly.
+Filter values given as a **list** for `hex`/`hex_unprefixed` columns are lowercased
+before comparison, so a checksummed or upper-cased address still matches. Scalar
+(non-list) filter values are compared byte-exactly regardless of encoding — see
+`spec/GAPS.md` #6, which tracks that inconsistency.
 
 ### Weight
 

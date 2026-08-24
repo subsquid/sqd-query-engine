@@ -213,12 +213,12 @@ a row matched by two item requests appears once.
 including the empty one.
 
 ### INV-P8
-**Case folding follows the column, not the filter.** Values of `hexBytes`
-columns compare case-insensitively, for both `inList` and scalar `equals`
-filters. All other columns compare byte-exactly.
+**Case folding follows the column, not the filter.** Values of `hexBytes` and
+`hexUnprefixed` columns compare case-insensitively, for both `inList` and scalar
+`equals` filters. All other columns compare byte-exactly.
 
 *Why:* clients send checksummed addresses. Folding lists but not scalars makes `{"to": ["0xAB…"]}` and `{"to": "0xAB…"}` mean different things.
-*Test:* upper-casing every hex filter value in a query leaves the response byte-identical. Upper-casing a value of a non-hex column (`statediffs.key`, `traces.type`) changes it.
+*Test:* upper-casing every hex filter value in a query leaves the response unchanged. Upper-casing a value of a non-hex column (`statediffs.key`, `traces.type`, `tron.transactions._transferAssetContractAsset`) changes it.
 
 ### INV-P9
 **A bloom filter over-approximates.** No false negatives; false positives

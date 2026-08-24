@@ -330,9 +330,9 @@ adds a column and forgets.
 
 Both fall through to the physical-type encoder. They work because every such
 column is physically `Utf8` holding the display string already. A base58 column
-stored as `Binary` would emit `0x…` hex. (`hexUnprefixed` also falls through, but
-there that is the *correct* rendering for a `Utf8` column, not a latent bug — it
-would only need to drive encoding for a physically-`Binary` column.) The encoding declarations do carry
+stored as `Binary` would emit `0x…` hex. (`hexUnprefixed` is not affected: it
+dispatches `Binary`/`FixedSizeBinary` to encoders that omit the prefix, and falls
+through only for `Utf8`, where the stored string is already the rendering.) The encoding declarations do carry
 meaning elsewhere (case-folding on input, Arrow binary decoding), so they cannot
 simply be removed — they need to actually drive encoding.
 
@@ -364,6 +364,7 @@ the one that is wrong. Listed so nobody "fixes" them back.
 | Empty result | `[]` (array writer) or empty (lines writer) | Zero bytes ([INV-O1](07-invariants.md#inv-o1)) | NDJSON is the only format; zero bytes concatenates. |
 | Response field order | Declaration order in the query DSL | Catalog column order ([INV-O6](07-invariants.md#inv-o6)) | Both are stable; the catalog is the single source of truth. Values are equal, bytes are not — the parity suite must compare values, not bytes. |
 | String escaping | `\u`-escapes non-ASCII | Raw UTF-8 | Both valid JSON. Same reason as above. |
+| Block-header weight | Adds the table primary key to the projection, so an unselected `number` still costs 32/block ([plan.rs:545](../../data/crates/query/src/plan/plan.rs)) | Sum of the columns *actually emitted* ([INV-B10](07-invariants.md#inv-b10)) | The engine follows the spec. Consequence: near the 20 MiB cap a query that does not select `number` can keep one more block than the reference, so differential parity runs must select `number` to line the two up. |
 | Fuel `ContractOutput.stateRoot` | Reads the column `state_root`, not `contract_state_root` | *Unresolved* | Preserved as a catalog quirk pending a check against real Fuel chunks. Flagged so it is not silently "corrected" into a regression. |
 
 ## Extensions beyond the reference
@@ -392,5 +393,5 @@ Permitted; must not change the meaning of anything above.
    one change: introduce `filters:` in the catalog, and validate the whole catalog
    properly. Everything in [03-catalog.md](03-catalog.md) becomes checkable.
 5. **Gap 2** (fork detection). Needed before any client pages across a reorg.
-6. **Gaps 9–12** (missing surface). Mechanical catalog work, gated on 4.
+6. **Gaps 10–12** (missing surface). Mechanical catalog work, gated on 4.
 7. The rest.
