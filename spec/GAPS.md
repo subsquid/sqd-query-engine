@@ -326,11 +326,13 @@ adds a column and forgets.
 
 [INV-O9](07-invariants.md#inv-o9): the *declared type* determines the unit.
 
-### 21. `base58`, `hex` and `hexUnprefixed` encodings are no-ops
+### 21. `base58` and `hex` encodings are no-ops
 
-All three fall through to the physical-type encoder. They work because every such
+Both fall through to the physical-type encoder. They work because every such
 column is physically `Utf8` holding the display string already. A base58 column
-stored as `Binary` would emit `0x…` hex. The encoding declarations do carry
+stored as `Binary` would emit `0x…` hex. (`hexUnprefixed` also falls through, but
+there that is the *correct* rendering for a `Utf8` column, not a latent bug — it
+would only need to drive encoding for a physically-`Binary` column.) The encoding declarations do carry
 meaning elsewhere (case-folding on input, Arrow binary decoding), so they cannot
 simply be removed — they need to actually drive encoding.
 

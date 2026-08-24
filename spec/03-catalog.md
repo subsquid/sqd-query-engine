@@ -381,11 +381,15 @@ Tables: `blocks`, `transactions`, `logs`, `internal_transactions`.
 string, and splicing one verbatim would emit malformed JSON. The reference
 renders it as a quoted string.
 
-Every Tron hex column — addresses, hashes, topics, call data, sighashes — is
-`hexUnprefixed`: the same bytes as `hexBytes`, rendered with **no** `0x`, which
-is how Tron stores and returns them. Filters on it case-fold exactly as
-`hexBytes` does ([INV-P8](07-invariants.md#inv-p8)). The one exception is
-`_transferAssetContractAsset`, which is compared byte-exactly.
+Tron hex — addresses, hashes, topics, call data, sighashes — carries **no** `0x`
+prefix, the form Tron stores and returns. The columns that are filtered on
+(`logs.address`, `logs.topic0…3`, `internal_transactions.callerAddress` and
+`transferToAddress`, and the alias extraction columns) are `hexUnprefixed`: the
+same bytes as `hexBytes`, rendered bare, and case-folded on input exactly as
+`hexBytes` is ([INV-P8](07-invariants.md#inv-p8)). The remaining hex-valued
+columns are `utf8` — they render the same and are never filtered.
+`_transferAssetContractAsset` is `utf8` though filterable: asset names compare
+byte-exactly.
 
 ---
 

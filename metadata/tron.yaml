@@ -1,11 +1,13 @@
 name: tron
 
 # Tron hex values (addresses, hashes, topics, call data) are stored and emitted
-# *without* the `0x` prefix, exactly as the Tron HTTP API returns them — hence
-# `hex_unprefixed` rather than `hex` throughout. Both encodings mean "these are
-# hex bytes", so filters on them case-fold; they differ only in the prefix.
-# `_transfer_asset_contract_asset` is deliberately left plain: legacy compares
-# asset names byte-exactly, without folding.
+# *without* the `0x` prefix, exactly as the Tron HTTP API returns them. Plain
+# `string` renders them correctly, so `hex_unprefixed` is declared only where it
+# does work: on the columns legacy filters on, where it case-folds the filter
+# values (legacy's `to_lowercase_list`). The other hex-valued columns — hashes,
+# `raw_data_hex`, `note`, log `data` — render identically either way and are
+# never filtered, so they stay plain. `_transfer_asset_contract_asset` is plain
+# too even though it is filterable: legacy compares asset names byte-exactly.
 
 tables:
   blocks:
@@ -18,22 +20,16 @@ tables:
         stats: true
       hash:
         type: string
-        json_encoding: hex_unprefixed
       parent_hash:
         type: string
-        json_encoding: hex_unprefixed
       tx_trie_root:
         type: string
-        json_encoding: hex_unprefixed
       version:
         type: uint32
       witness_address:
         type: string
-        json_encoding: hex_unprefixed
       witness_signature:
         type: string
-        json_encoding: hex_unprefixed
-        weight: 130
       timestamp:
         type: timestamp_millisecond
         json_encoding: timestamp_millisecond
@@ -75,10 +71,8 @@ tables:
         stats: true
       hash:
         type: string
-        json_encoding: hex_unprefixed
       signature:
         type: list_string
-        weight: 132
       type:
         type: string
         stats: true
@@ -87,25 +81,19 @@ tables:
         type: uint32
       ref_block_bytes:
         type: string
-        json_encoding: hex_unprefixed
       ref_block_hash:
         type: string
-        json_encoding: hex_unprefixed
       raw_data_hex:
         type: string
-        json_encoding: hex_unprefixed
         weight: raw_data_hex_size
 
       # info
       contract_result:
         type: string
-        json_encoding: hex_unprefixed
       contract_address:
         type: string
-        json_encoding: hex_unprefixed
       res_message:
         type: string
-        json_encoding: hex_unprefixed
 
       # receipt
       result:
@@ -115,10 +103,14 @@ tables:
         type: string
         json_encoding: json
         dictionary: true
+      # No weight: legacy sets none either, so rows are costed at the default
+      # 32 bytes while real values run ~1 KB. Deliberately bug-compatible —
+      # costing it accurately would truncate responses earlier than legacy and
+      # break output parity. Spec §5.4 licenses this: weight is a model, and
+      # "its absolute accuracy does not matter, its determinism does".
       parameter:
         type: string
         json_encoding: json
-        weight: 256
       fee_limit:
         type: int64
         json_encoding: string
@@ -240,7 +232,6 @@ tables:
         dictionary: true
       data:
         type: string
-        json_encoding: hex_unprefixed
         weight: data_size
       topic0:
         type: string
@@ -299,20 +290,16 @@ tables:
         stats: true
       hash:
         type: string
-        json_encoding: hex_unprefixed
       caller_address:
         type: string
         json_encoding: hex_unprefixed
         stats: true
-        dictionary: true
       transfer_to_address:
         type: string
         json_encoding: hex_unprefixed
         stats: true
-        dictionary: true
       note:
         type: string
-        json_encoding: hex_unprefixed
       rejected:
         type: boolean
       extra:
@@ -320,13 +307,14 @@ tables:
       call_value_info:
         type: string
         json_encoding: json
-        weight: 64
 
 # `transactions` is queried under four names. The plain one filters on `type`
 # directly; each alias below pins `type` and exposes the matching extracts as
 # short filter keys (owner/to/asset/contract/sighash), mirroring the legacy
 # TransferTransactionRequest / TransferAssetTransactionRequest /
-# TriggerSmartContractTransactionRequest.
+# TriggerSmartContractTransactionRequest. They declare no `relations:` of their
+# own — `logs: true` / `internalTransactions: true` inside an alias resolve
+# against the `transactions` table's relations, which the planner consults first.
 query_aliases:
   transferTransactions:
     table: transactions
@@ -335,13 +323,6 @@ query_aliases:
     filter_aliases:
       owner: _transfer_contract_owner
       to: _transfer_contract_to
-    relations:
-      logs:
-        table: logs
-        key: [ block_number, transaction_index ]
-      internal_transactions:
-        table: internal_transactions
-        key: [ block_number, transaction_index ]
 
   transferAssetTransactions:
     table: transactions
@@ -351,13 +332,6 @@ query_aliases:
       owner: _transfer_asset_contract_owner
       to: _transfer_asset_contract_to
       asset: _transfer_asset_contract_asset
-    relations:
-      logs:
-        table: logs
-        key: [ block_number, transaction_index ]
-      internal_transactions:
-        table: internal_transactions
-        key: [ block_number, transaction_index ]
 
   triggerSmartContractTransactions:
     table: transactions
@@ -367,10 +341,3 @@ query_aliases:
       owner: _trigger_smart_contract_owner
       contract: _trigger_smart_contract_contract
       sighash: _trigger_smart_contract_sighash
-    relations:
-      logs:
-        table: logs
-        key: [ block_number, transaction_index ]
-      internal_transactions:
-        table: internal_transactions
-        key: [ block_number, transaction_index ]
