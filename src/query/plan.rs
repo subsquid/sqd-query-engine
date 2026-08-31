@@ -347,6 +347,14 @@ fn compile_item_predicates(
                         col_predicates.push(pred);
                     } else if let Some(n) = value.as_u64() {
                         col_predicates.push(col_eq(column, numeric_scalar(n, &col_desc.data_type)?));
+                    } else if let Some(str_val) = value.as_str() {
+                        col_predicates
+                            .push(col_eq(column, ScalarValue::Utf8(fold_for_column(str_val, col_desc))));
+                    } else {
+                        bail!(
+                            "invalid filter value for '{}': expected array, boolean, number, or string",
+                            key
+                        );
                     }
                 }
                 SpecialFilter::GteConst { column, value: konst } => {
@@ -382,7 +390,7 @@ fn compile_item_predicates(
         } else if let Some(n) = value.as_u64() {
             col_predicates.push(col_eq(key, numeric_scalar(n, &col_desc.data_type)?));
         } else if let Some(s) = value.as_str() {
-            col_predicates.push(col_eq(key, ScalarValue::Utf8(s.to_string())));
+            col_predicates.push(col_eq(key, ScalarValue::Utf8(fold_for_column(s, col_desc))));
         } else {
             bail!(
                 "invalid filter value for '{}': expected array, boolean, number, or string",
@@ -405,21 +413,74 @@ fn compile_item_predicates(
     }
 }
 
+/// Case folding follows the column, not the filter: a hex-encoded column
+/// compares case-insensitively whether the value arrives as a scalar or inside
+/// an IN-list (INV-P8). Clients send checksummed addresses.
+fn fold_for_column(s: &str, col_desc: &ColumnDescription) -> String {
+    if col_desc.json_encoding == Some(JsonEncoding::Hex) {
+        s.to_ascii_lowercase()
+    } else {
+        s.to_string()
+    }
+}
+
+/// Split an IN-list over a binary column into hex byte strings and plain
+/// integers.
+///
+/// A string element must be well-formed hex — `0x`/`0X` prefix, even digit
+/// count (INV-Q12); anything that is neither a string nor an unsigned integer
+/// is an error. Whether a parsed value *fits* the column is left to the caller:
+/// one that does not fit matches nothing (INV-P14), and a never-matching
+/// disjunct is a no-op inside an IN-list.
+fn split_binary_in_list(
+    column: &str,
+    values: &[serde_json::Value],
+) -> Result<(Vec<Vec<u8>>, Vec<u64>)> {
+    let mut hex = Vec::new();
+    let mut numbers = Vec::new();
+
+    for v in values {
+        if let Some(s) = v.as_str() {
+            let bytes = parse_hex(s).ok_or_else(|| {
+                anyhow!(
+                    "invalid hex value '{}' in filter on '{}': expected a 0x-prefixed, \
+                     even-length hex string",
+                    s,
+                    column
+                )
+            })?;
+            hex.push(bytes);
+        } else if let Some(n) = v.as_u64() {
+            numbers.push(n);
+        } else {
+            bail!(
+                "invalid value {} in filter on '{}': expected a hex string or an unsigned integer",
+                v,
+                column
+            );
+        }
+    }
+
+    Ok((hex, numbers))
+}
+
 /// Compile an IN-list filter for a column based on its type.
 fn compile_in_list(
     column: &str,
     values: &[serde_json::Value],
     col_desc: &ColumnDescription,
 ) -> Result<ColumnPredicate> {
-    let strings: Vec<&str> = values.iter().filter_map(|v| v.as_str()).collect();
-
     match &col_desc.data_type {
         ColumnType::String => {
-            let vals: Vec<String> = if col_desc.json_encoding == Some(JsonEncoding::Hex) {
-                strings.iter().map(|s| s.to_ascii_lowercase()).collect()
-            } else {
-                strings.iter().map(|s| s.to_string()).collect()
-            };
+            // Free-form strings (base58 keys, hex addresses, enum names) — not
+            // hex-parsed, so only the element *kind* is validated here.
+            let mut vals: Vec<String> = Vec::with_capacity(values.len());
+            for v in values {
+                let s = v.as_str().ok_or_else(|| {
+                    anyhow!("invalid value {} in filter on '{}': expected a string", v, column)
+                })?;
+                vals.push(fold_for_column(s, col_desc));
+            }
             let str_refs: Vec<&str> = vals.iter().map(|s| s.as_str()).collect();
             Ok(col_in_list(
                 column,
@@ -427,91 +488,65 @@ fn compile_in_list(
             ))
         }
         ColumnType::UInt8 => {
-            let mut vals: Vec<u8> = strings
-                .iter()
-                .filter_map(|s| parse_hex(s).filter(|b| b.len() == 1).map(|b| b[0]))
-                .collect();
-            // Also accept JSON numbers
-            for v in values {
-                if let Some(n) = v.as_u64() {
-                    if let Ok(n8) = u8::try_from(n) {
-                        vals.push(n8);
-                    }
-                }
-            }
+            let (hex, numbers) = split_binary_in_list(column, values)?;
+            let mut vals: Vec<u8> = hex.iter().filter(|b| b.len() == 1).map(|b| b[0]).collect();
+            vals.extend(numbers.iter().filter_map(|&n| u8::try_from(n).ok()));
             Ok(col_in_list(
                 column,
                 Arc::new(UInt8Array::from(vals)) as Arc<dyn Array>,
             ))
         }
         ColumnType::UInt16 => {
-            let mut vals: Vec<u16> = strings
+            let (hex, numbers) = split_binary_in_list(column, values)?;
+            let mut vals: Vec<u16> = hex
                 .iter()
-                .filter_map(|s| {
-                    parse_hex(s)
-                        .filter(|b| b.len() == 2)
-                        .map(|b| u16::from_be_bytes([b[0], b[1]]))
-                })
+                .filter(|b| b.len() == 2)
+                .map(|b| u16::from_be_bytes([b[0], b[1]]))
                 .collect();
-            for v in values {
-                if let Some(n) = v.as_u64() {
-                    if let Ok(n16) = u16::try_from(n) {
-                        vals.push(n16);
-                    }
-                }
-            }
+            vals.extend(numbers.iter().filter_map(|&n| u16::try_from(n).ok()));
             Ok(col_in_list(
                 column,
                 Arc::new(UInt16Array::from(vals)) as Arc<dyn Array>,
             ))
         }
         ColumnType::UInt32 => {
-            let mut vals: Vec<u32> = strings
+            let (hex, numbers) = split_binary_in_list(column, values)?;
+            let mut vals: Vec<u32> = hex
                 .iter()
-                .filter_map(|s| {
-                    parse_hex(s)
-                        .filter(|b| b.len() == 4)
-                        .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
-                })
+                .filter(|b| b.len() == 4)
+                .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
                 .collect();
-            for v in values {
-                if let Some(n) = v.as_u64() {
-                    if let Ok(n32) = u32::try_from(n) {
-                        vals.push(n32);
-                    }
-                }
-            }
+            vals.extend(numbers.iter().filter_map(|&n| u32::try_from(n).ok()));
             Ok(col_in_list(
                 column,
                 Arc::new(UInt32Array::from(vals)) as Arc<dyn Array>,
             ))
         }
         ColumnType::UInt64 => {
-            let mut vals: Vec<u64> = strings
+            let (hex, numbers) = split_binary_in_list(column, values)?;
+            let mut vals: Vec<u64> = hex
                 .iter()
-                .filter_map(|s| {
-                    parse_hex(s).filter(|b| b.len() == 8).map(|b| {
-                        u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
-                    })
-                })
+                .filter(|b| b.len() == 8)
+                .map(|b| u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
                 .collect();
-            for v in values {
-                if let Some(n) = v.as_u64() {
-                    vals.push(n);
-                }
-            }
+            vals.extend(numbers.iter().copied());
             Ok(col_in_list(
                 column,
                 Arc::new(UInt64Array::from(vals)) as Arc<dyn Array>,
             ))
         }
         ColumnType::FixedBinary(size) => {
-            let vals: Vec<Vec<u8>> = strings
-                .iter()
-                .filter_map(|s| parse_hex(s).filter(|b| b.len() == *size))
-                .collect();
+            let (hex, numbers) = split_binary_in_list(column, values)?;
+            ensure!(
+                numbers.is_empty(),
+                "invalid value in filter on '{}': a fixed_binary_{} column takes hex strings, \
+                 not numbers",
+                column,
+                size
+            );
+            let vals: Vec<&Vec<u8>> = hex.iter().filter(|b| b.len() == *size).collect();
             let mut builder = FixedSizeBinaryBuilder::with_capacity(vals.len(), *size as i32);
-            for v in &vals {
+            for v in vals {
                 builder.append_value(v)?;
             }
             Ok(col_in_list(
@@ -520,19 +555,31 @@ fn compile_in_list(
             ))
         }
         ColumnType::ListUInt32 => {
-            // List-contains-any: values are integers (possibly JSON numbers)
-            let vals: Vec<u32> = values
-                .iter()
-                .filter_map(|v| v.as_u64().map(|n| n as u32))
-                .collect();
+            // List-contains-any over integers. An out-of-range value matches
+            // nothing; it must never be truncated into a *different* id.
+            let mut vals: Vec<u32> = Vec::with_capacity(values.len());
+            for v in values {
+                let n = v.as_u64().ok_or_else(|| {
+                    anyhow!(
+                        "invalid value {} in filter on '{}': expected an unsigned integer",
+                        v,
+                        column
+                    )
+                })?;
+                if let Ok(n32) = u32::try_from(n) {
+                    vals.push(n32);
+                }
+            }
             Ok(col_list_contains_any_u32(column, vals))
         }
         ColumnType::ListString => {
-            // List-contains-any: values are strings
-            let vals: Vec<String> = values
-                .iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect();
+            let mut vals: Vec<String> = Vec::with_capacity(values.len());
+            for v in values {
+                let s = v.as_str().ok_or_else(|| {
+                    anyhow!("invalid value {} in filter on '{}': expected a string", v, column)
+                })?;
+                vals.push(fold_for_column(s, col_desc));
+            }
             Ok(col_list_contains_any_string(column, vals))
         }
         _ => bail!(
