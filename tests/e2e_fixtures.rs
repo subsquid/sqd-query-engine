@@ -1,8 +1,13 @@
 //! End-to-end fixture tests: run queries against parquet chunks and compare
 //! output with expected results from the legacy engine.
 //!
-//! Fixture data is expected at `tests/fixtures/` (symlink to legacy repo's
-//! `crates/query/fixtures/`). Tests are skipped if fixtures are not present.
+//! Fixture data lives at `tests/fixtures/` (a symlink to the legacy repo's
+//! `crates/query/fixtures/`) and is not in the repository, so a checkout without
+//! it runs no comparison at all — the whole suite says so once and stops.
+//!
+//! Once the tree *is* there, a declared fixture that is missing from it is a
+//! failure, not a skip: a test that quietly does nothing reads exactly like a
+//! test that passes.
 
 use sqd_query_engine::metadata::load_dataset_description;
 use sqd_query_engine::output::execute_plan;
@@ -33,7 +38,17 @@ fn run_fixture_query(
     Ok(serde_json::Value::Array(result))
 }
 
+/// Whether the fixture tree is checked out at all. Absent, there is nothing to
+/// compare against and every test in the file would fail for the same reason.
+fn fixture_tree_is_present() -> bool {
+    fixture_dir().join("ethereum").join("chunk").is_dir()
+}
+
 fn test_fixture(dataset: &str, meta_path: &str, query_name: &str) {
+    if !fixture_tree_is_present() {
+        return;
+    }
+
     let base = fixture_dir().join(dataset);
     let chunk = base.join("chunk");
     let query_file = base.join("queries").join(query_name).join("query.json");
@@ -423,7 +438,14 @@ hyperliquid_replica_cmds_fixture!(order_action);
 /// shrink.
 #[test]
 fn fixture_declarations_match_the_fixture_tree() {
-    const UNSUPPORTED_DATASETS: &[&str] = &["tron"];
+    // Datasets the engine does not serve: `tron` was never ported, `fuel` was
+    // dropped. Their fixtures stay in the shared tree for the reference
+    // implementation and are nothing this suite should account for.
+    const UNSUPPORTED_DATASETS: &[&str] = &["tron", "fuel"];
+
+    if !fixture_tree_is_present() {
+        return;
+    }
 
     let source = include_str!("e2e_fixtures.rs");
 
@@ -448,23 +470,33 @@ fn fixture_declarations_match_the_fixture_tree() {
 
     // Declared fixture directories, per dataset. Both macro forms are used:
     // `m!(name)` takes the directory from the name, `m!(name, "dir")` names it.
+    // Read from a whitespace-flattened copy of the source, because rustfmt wraps
+    // a long invocation across lines and a line-by-line reader would then report
+    // the fixture it declares as undeclared.
+    let flat = source.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut declared: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
         Default::default();
-    for line in source.lines() {
-        let line = line.trim();
-        for (macro_name, dataset) in &macro_dataset {
-            let Some(args) = line
-                .strip_prefix(&format!("{macro_name}!("))
-                .and_then(|r| r.strip_suffix(");"))
-            else {
+
+    for (macro_name, dataset) in &macro_dataset {
+        let call = format!("{macro_name}!(");
+        let mut rest = flat.as_str();
+
+        while let Some(at) = rest.find(&call) {
+            let after = &rest[at + call.len()..];
+            let Some(end) = after.find(')') else { break };
+            let args = &after[..end];
+            rest = &after[end..];
+
+            // A `$name` here is the macro's own definition, not a call site.
+            if args.contains('$') {
                 continue;
-            };
+            }
+
             let dir = match args.split_once(',') {
                 Some((_, explicit)) => explicit.trim().trim_matches('"').to_string(),
                 None => args.trim().to_string(),
             };
             declared.entry(dataset.clone()).or_default().insert(dir);
-            break;
         }
     }
 
