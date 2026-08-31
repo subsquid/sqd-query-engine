@@ -1,6 +1,6 @@
 use crate::metadata::{
-    ColumnDescription, ColumnType, DatasetDescription, RelationKind as MetaRelationKind,
-    JsonEncoding, SpecialFilter, TableDescription,
+    ColumnDescription, ColumnType, DatasetDescription, JsonEncoding,
+    RelationKind as MetaRelationKind, SpecialFilter, TableDescription,
 };
 use crate::query::parse::{parse_hex, Query, QueryItem};
 use crate::scan::predicate::{
@@ -11,35 +11,6 @@ use anyhow::{anyhow, bail, ensure, Result};
 use arrow::array::*;
 use std::collections::HashSet;
 use std::sync::Arc;
-
-/// Convert a JSON numeric value to the appropriate ScalarValue based on column type.
-fn numeric_scalar(n: u64, col_type: &ColumnType) -> Result<ScalarValue> {
-    match col_type {
-        ColumnType::UInt8 => Ok(ScalarValue::UInt8(
-            u8::try_from(n).map_err(|_| anyhow!("value {} out of range for UInt8", n))?,
-        )),
-        ColumnType::UInt16 => Ok(ScalarValue::UInt16(
-            u16::try_from(n).map_err(|_| anyhow!("value {} out of range for UInt16", n))?,
-        )),
-        ColumnType::UInt32 => Ok(ScalarValue::UInt32(
-            u32::try_from(n).map_err(|_| anyhow!("value {} out of range for UInt32", n))?,
-        )),
-        ColumnType::UInt64 => Ok(ScalarValue::UInt64(n)),
-        ColumnType::Int16 => Ok(ScalarValue::Int16(
-            i16::try_from(n).map_err(|_| anyhow!("value {} out of range for Int16", n))?,
-        )),
-        ColumnType::Int64 => Ok(ScalarValue::Int64(
-            i64::try_from(n).map_err(|_| anyhow!("value {} out of range for Int64", n))?,
-        )),
-        // Do NOT silently coerce to UInt64: an integer filter on a
-        // Float64/Timestamp/Decimal128/String/List/Struct column would build a
-        // UInt64 scalar whose downcast always fails → silent empty (HTTP 200, 0 rows).
-        other => bail!(
-            "numeric filter is not supported on column type {:?}",
-            other
-        ),
-    }
-}
 
 /// An execution plan compiled from a query.
 #[derive(Debug)]
@@ -209,16 +180,13 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
         for rel in &mut all_relations {
             for (rel_name, preds) in &rel_source_preds {
                 // Use the same alias-aware lookup as the relation creation above
-                let rel_def = table_desc
-                    .relations
-                    .get(rel_name)
-                    .or_else(|| {
-                        metadata
-                            .query_aliases
-                            .values()
-                            .find(|a| a.table == *table_name)
-                            .and_then(|a| a.relations.get(rel_name))
-                    });
+                let rel_def = table_desc.relations.get(rel_name).or_else(|| {
+                    metadata
+                        .query_aliases
+                        .values()
+                        .find(|a| a.table == *table_name)
+                        .and_then(|a| a.relations.get(rel_name))
+                });
                 if let Some(rel_def) = rel_def {
                     if rel_def.table == rel.target_table {
                         let kind = match rel_def.kind {
@@ -264,6 +232,7 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
 
 /// Order output columns according to metadata column definition order (YAML key order).
 /// Virtual fields are placed after the last column they reference, or at the end.
+
 fn order_columns_by_metadata(
     cols: &[String],
     table_desc: Option<&TableDescription>,
@@ -340,19 +309,21 @@ fn compile_item_predicates(
                     }
                 }
                 SpecialFilter::ColumnAlias { column } => {
-                    let col_desc = table.column(column).ok_or_else(|| {
-                        anyhow!("alias target column '{}' not found", column)
-                    })?;
-                    if let Some(bool_val) = value.as_bool() {
+                    let col_desc = table
+                        .column(column)
+                        .ok_or_else(|| anyhow!("alias target column '{}' not found", column))?;
+                    let boolean_filter = value
+                        .as_bool()
+                        .filter(|_| matches!(col_desc.data_type, ColumnType::Boolean));
+
+                    if let Some(bool_val) = boolean_filter {
                         col_predicates.push(col_eq(column, ScalarValue::Boolean(bool_val)));
-                    } else if let Some(arr) = value.as_array() {
-                        let pred = compile_in_list(column, arr, col_desc)?;
-                        col_predicates.push(pred);
-                    } else if let Some(n) = value.as_u64() {
-                        col_predicates.push(col_eq(column, numeric_scalar(n, &col_desc.data_type)?));
-                    } else if let Some(str_val) = value.as_str() {
-                        col_predicates
-                            .push(col_eq(column, ScalarValue::Utf8(fold_for_column(str_val, col_desc))));
+                    } else if value.is_string() || value.is_u64() || value.is_array() {
+                        let values = match value.as_array() {
+                            Some(arr) => arr,
+                            None => std::slice::from_ref(value),
+                        };
+                        col_predicates.push(compile_in_list(column, values, col_desc)?);
                     } else {
                         bail!(
                             "invalid filter value for '{}': expected array, boolean, number, or string",
@@ -360,19 +331,20 @@ fn compile_item_predicates(
                         );
                     }
                 }
-                SpecialFilter::GteConst { column, value: konst } => {
+                SpecialFilter::GteConst {
+                    column,
+                    value: konst,
+                } => {
                     // Only active when the flag is true (e.g. `callValueNonZero: true`).
                     if value.as_bool() == Some(true) {
-                        table.column(column).ok_or_else(|| {
-                            anyhow!("gte_const column '{}' not found", column)
-                        })?;
+                        table
+                            .column(column)
+                            .ok_or_else(|| anyhow!("gte_const column '{}' not found", column))?;
                         col_predicates.push(ColumnPredicate {
                             column: column.to_string(),
-                            predicate: Arc::new(
-                                crate::scan::predicate::RangeGtePredicate::new(
-                                    ScalarValue::Utf8(konst.clone()),
-                                ),
-                            ),
+                            predicate: Arc::new(crate::scan::predicate::RangeGtePredicate::new(
+                                ScalarValue::Utf8(konst.clone()),
+                            )),
                         });
                     }
                 }
@@ -385,15 +357,25 @@ fn compile_item_predicates(
             .column(key)
             .ok_or_else(|| anyhow!("column '{}' not found in table", key))?;
 
-        if let Some(bool_val) = value.as_bool() {
+        // A boolean only means anything on a boolean column. Anywhere else it
+        // compiles to a comparison that cannot match, and the query comes back
+        // empty with nothing to say why.
+        let boolean_filter = value
+            .as_bool()
+            .filter(|_| matches!(col_desc.data_type, ColumnType::Boolean));
+
+        if let Some(bool_val) = boolean_filter {
             col_predicates.push(col_eq(key, ScalarValue::Boolean(bool_val)));
-        } else if let Some(arr) = value.as_array() {
-            let pred = compile_in_list(key, arr, col_desc)?;
-            col_predicates.push(pred);
-        } else if let Some(n) = value.as_u64() {
-            col_predicates.push(col_eq(key, numeric_scalar(n, &col_desc.data_type)?));
-        } else if let Some(s) = value.as_str() {
-            col_predicates.push(col_eq(key, ScalarValue::Utf8(fold_for_column(s, col_desc))));
+        } else if value.is_string() || value.is_u64() || value.is_array() {
+            // A bare value is a one-element list and compiles as one, so the two
+            // forms cannot drift: the scalar branch used to compare a `Utf8`
+            // against whatever the column was, which worked on a string column
+            // and silently matched nothing on a binary one.
+            let values = match value.as_array() {
+                Some(arr) => arr,
+                None => std::slice::from_ref(value),
+            };
+            col_predicates.push(compile_in_list(key, values, col_desc)?);
         } else {
             bail!(
                 "invalid filter value for '{}': expected array, boolean, number, or string",
@@ -480,7 +462,11 @@ fn compile_in_list(
             let mut vals: Vec<String> = Vec::with_capacity(values.len());
             for v in values {
                 let s = v.as_str().ok_or_else(|| {
-                    anyhow!("invalid value {} in filter on '{}': expected a string", v, column)
+                    anyhow!(
+                        "invalid value {} in filter on '{}': expected a string",
+                        v,
+                        column
+                    )
                 })?;
                 vals.push(fold_for_column(s, col_desc));
             }
@@ -579,7 +565,11 @@ fn compile_in_list(
             let mut vals: Vec<String> = Vec::with_capacity(values.len());
             for v in values {
                 let s = v.as_str().ok_or_else(|| {
-                    anyhow!("invalid value {} in filter on '{}': expected a string", v, column)
+                    anyhow!(
+                        "invalid value {} in filter on '{}': expected a string",
+                        v,
+                        column
+                    )
                 })?;
                 vals.push(fold_for_column(s, col_desc));
             }
@@ -765,8 +755,8 @@ mod tests {
     /// tests assert against data rather than a guessed constant.
     fn first_d4_value() -> u32 {
         use arrow::array::UInt32Array;
-        let table_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("data/solana/chunk/instructions.parquet");
+        let table_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/chunk/instructions.parquet");
         let table = crate::scan::ParquetTable::open(&table_path).unwrap();
         let request = crate::scan::ScanRequest::new(vec!["d4"]);
         let batches = crate::scan::scan(&table, &request).unwrap();
@@ -784,45 +774,6 @@ mod tests {
 
     // --- A4: numeric_scalar must error (not silently coerce to UInt64) on
     //         non-integer column types, otherwise the filter returns 0 rows. ---
-
-    #[test]
-    fn test_numeric_scalar_integer_types_ok() {
-        assert!(matches!(
-            numeric_scalar(5, &ColumnType::UInt8).unwrap(),
-            ScalarValue::UInt8(5)
-        ));
-        assert!(matches!(
-            numeric_scalar(5, &ColumnType::Int64).unwrap(),
-            ScalarValue::Int64(5)
-        ));
-        assert!(matches!(
-            numeric_scalar(5, &ColumnType::UInt64).unwrap(),
-            ScalarValue::UInt64(5)
-        ));
-    }
-
-    #[test]
-    fn test_numeric_scalar_rejects_non_integer_types() {
-        for ty in [
-            ColumnType::Float64,
-            ColumnType::TimestampMillisecond,
-            ColumnType::Decimal128,
-            ColumnType::String,
-            ColumnType::ListUInt32,
-        ] {
-            assert!(
-                numeric_scalar(5, &ty).is_err(),
-                "expected error for column type {:?}",
-                ty
-            );
-        }
-    }
-
-    #[test]
-    fn test_numeric_scalar_out_of_range_errors() {
-        assert!(numeric_scalar(u64::MAX, &ColumnType::UInt8).is_err());
-        assert!(numeric_scalar(u64::MAX, &ColumnType::Int64).is_err());
-    }
 
     #[test]
     fn test_compile_evm_logs_query() {
@@ -1005,41 +956,6 @@ mod tests {
             assert!(batch.schema().field_with_name("address").is_ok());
             assert!(batch.schema().field_with_name("topic0").is_ok());
         }
-    }
-
-    #[test]
-    fn test_numeric_scalar_type_dispatch() {
-        assert!(matches!(
-            numeric_scalar(42, &ColumnType::UInt8).unwrap(),
-            ScalarValue::UInt8(42)
-        ));
-        assert!(matches!(
-            numeric_scalar(1000, &ColumnType::UInt16).unwrap(),
-            ScalarValue::UInt16(1000)
-        ));
-        assert!(matches!(
-            numeric_scalar(100000, &ColumnType::UInt32).unwrap(),
-            ScalarValue::UInt32(100000)
-        ));
-        assert!(matches!(
-            numeric_scalar(u64::MAX, &ColumnType::UInt64).unwrap(),
-            ScalarValue::UInt64(u64::MAX)
-        ));
-        // Out of range
-        assert!(numeric_scalar(256, &ColumnType::UInt8).is_err());
-        assert!(numeric_scalar(70000, &ColumnType::UInt16).is_err());
-        assert!(numeric_scalar(u64::MAX, &ColumnType::UInt32).is_err());
-    }
-
-    /// Int64 scalar must reject values > i64::MAX instead of wrapping.
-    #[test]
-    fn test_numeric_scalar_int64_overflow() {
-        // u64::MAX > i64::MAX, should error
-        assert!(numeric_scalar(u64::MAX, &ColumnType::Int64).is_err());
-        // i64::MAX as u64 should work
-        assert!(numeric_scalar(i64::MAX as u64, &ColumnType::Int64).is_ok());
-        // i64::MAX + 1 should fail
-        assert!(numeric_scalar(i64::MAX as u64 + 1, &ColumnType::Int64).is_err());
     }
 
     /// Regression: numeric scalar filters were always compiled as UInt64,

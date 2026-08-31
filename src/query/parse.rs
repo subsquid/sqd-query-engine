@@ -40,14 +40,21 @@ pub fn camel_to_snake(s: &str) -> String {
 }
 
 /// Parse a hex string like "0xaabb" to bytes.
+///
+/// Walks bytes rather than characters: a filter value arrives from the network
+/// and may hold any UTF-8, and slicing a multi-byte character down the middle
+/// panics. A pair that is not two ASCII hex digits is simply not hex.
 pub fn parse_hex(s: &str) -> Option<Vec<u8>> {
     let hex = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))?;
     if hex.len() % 2 != 0 {
         return None;
     }
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+    hex.as_bytes()
+        .chunks(2)
+        .map(|pair| {
+            let digits = std::str::from_utf8(pair).ok()?;
+            u8::from_str_radix(digits, 16).ok()
+        })
         .collect()
 }
 
@@ -103,10 +110,15 @@ pub fn parse_query(json_bytes: &[u8], metadata: &DatasetDescription) -> Result<Q
         ensure!(from_block <= to, "'toBlock' must be >= 'fromBlock'");
     }
 
-    let include_all_blocks = obj
-        .get("includeAllBlocks")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    // A wrong type here silently picks one of two very different answers — every
+    // block in range, or only the blocks with matches — so it is refused, like
+    // the block bounds next to it.
+    let include_all_blocks = match obj.get("includeAllBlocks") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(v) => v
+            .as_bool()
+            .ok_or_else(|| anyhow!("'includeAllBlocks' must be a boolean, got {}", v))?,
+    };
 
     let parent_block_hash = match obj.get("parentBlockHash") {
         None | Some(serde_json::Value::Null) => None,
@@ -149,9 +161,11 @@ pub fn parse_query(json_bytes: &[u8], metadata: &DatasetDescription) -> Result<Q
             (tn, alias_name)
         } else if metadata.tables.contains_key(&snake_key) {
             (snake_key.as_str(), alias_name)
-        } else if let Some(alias) = metadata.query_aliases.get(key.as_str()).or_else(|| {
-            metadata.query_aliases.get(&snake_key)
-        }) {
+        } else if let Some(alias) = metadata
+            .query_aliases
+            .get(key.as_str())
+            .or_else(|| metadata.query_aliases.get(&snake_key))
+        {
             // Query alias → resolve to the real table
             (alias.table.as_str(), Some(key.as_str()))
         } else {
@@ -242,7 +256,19 @@ fn parse_fields(
                 key
             );
 
-            if selected.as_bool() == Some(true) {
+            // A selector is a boolean. `{"logIndex": 1}` is as much a mistake as
+            // `{"logIndx": true}`, and treating it as "not selected" answers with
+            // a 200 that is missing a column the client asked for.
+            let selected = selected.as_bool().ok_or_else(|| {
+                anyhow!(
+                    "field '{}' in fields.{} must be a boolean, got {}",
+                    field_key,
+                    key,
+                    selected
+                )
+            })?;
+
+            if selected {
                 columns.push(column);
             }
         }
@@ -308,7 +334,7 @@ fn parse_query_item(
             Some(alias_def) => &alias_def.filters,
             None => &table.filters,
         };
-        if declared.iter().any(|f| *f == snake_key) {
+        if declared.contains(&snake_key) {
             ensure!(
                 table.columns.contains_key(&snake_key),
                 "filter '{}' of table '{}' names no column",
@@ -330,8 +356,10 @@ fn parse_query_item(
     // Add implicit predicates from alias (e.g., name: ["EVM.Log"])
     if let Some(alias_def) = alias {
         for (col_name, values) in &alias_def.implicit_predicates {
-            let json_values: Vec<serde_json::Value> =
-                values.iter().map(|v| serde_json::Value::String(v.clone())).collect();
+            let json_values: Vec<serde_json::Value> = values
+                .iter()
+                .map(|v| serde_json::Value::String(v.clone()))
+                .collect();
             filters.push((col_name.clone(), serde_json::Value::Array(json_values)));
         }
     }
@@ -566,11 +594,7 @@ mod tests {
         assert_eq!(q.from_block, 0);
         assert_eq!(q.to_block, None);
 
-        let q = parse_query(
-            br#"{"type":"evm","fromBlock":null,"toBlock":null}"#,
-            &meta,
-        )
-        .unwrap();
+        let q = parse_query(br#"{"type":"evm","fromBlock":null,"toBlock":null}"#, &meta).unwrap();
         assert_eq!(q.from_block, 0);
         assert_eq!(q.to_block, None);
     }
@@ -580,11 +604,7 @@ mod tests {
     #[test]
     fn test_out_of_chunk_range_block_bound_is_not_an_error() {
         let meta = evm_metadata();
-        let q = parse_query(
-            br#"{"type":"evm","fromBlock":1099511627776}"#,
-            &meta,
-        )
-        .unwrap();
+        let q = parse_query(br#"{"type":"evm","fromBlock":1099511627776}"#, &meta).unwrap();
         assert_eq!(q.from_block, 1_099_511_627_776);
     }
 }
