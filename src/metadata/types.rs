@@ -241,6 +241,11 @@ pub enum JsonEncoding {
     String,
     /// Raw JSON pass-through — string column containing JSON, embedded without quoting
     Json,
+    /// Unsigned integer as a quoted hex string, zero-padded to the column's
+    /// physical width (`uint16` 1600 → `"0x0640"`). The padding is load-bearing:
+    /// `"0x0640"` and `"0x640"` are different discriminators. A `uint64` above
+    /// 2^53 emitted as a JSON number would round in every JavaScript client.
+    HexNumber,
     /// Solana transaction version: -1 → "legacy", else number
     SolanaTxVersion,
     /// Timestamp as raw millisecond integer (no conversion to seconds)

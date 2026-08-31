@@ -163,3 +163,87 @@ fn unmatchable_values_are_not_errors() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// INV-O9 — hexNumber renders quoted and zero-padded to the column's width
+// ---------------------------------------------------------------------------
+
+/// Solana discriminator prefixes are selectable columns. Emitted as raw JSON
+/// numbers, a `uint64` `d8` above 2^53 is silently re-read as a different value
+/// by every JavaScript client — the discriminator a client receives is not the
+/// one that was stored. They render as quoted hex, zero-padded to the column's
+/// physical width, so that `"0x0640"` and `"0x640"` stay distinguishable.
+#[test]
+fn discriminator_columns_render_as_padded_hex() {
+    let solana = meta("solana");
+    let body = run(
+        "solana",
+        &solana,
+        br#"{"type":"solana","fromBlock":0,
+             "fields":{"instruction":{"d1":true,"d2":true,"d4":true,"d8":true}},
+             "instructions":[{"programId":["whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc"]}]}"#,
+    )
+    .unwrap();
+
+    let mut seen = 0;
+    for line in body.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
+        let block: serde_json::Value = serde_json::from_slice(line).unwrap();
+        let Some(items) = block.get("instructions").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for item in items {
+            for (key, width) in [("d1", 2), ("d2", 4), ("d4", 8), ("d8", 16)] {
+                let value = item.get(key).unwrap();
+                let s = value.as_str().unwrap_or_else(|| {
+                    panic!("{key} must be a quoted string, got {value} — a JSON number loses precision above 2^53")
+                });
+                assert!(s.starts_with("0x"), "{key} = {s} must be 0x-prefixed");
+                assert_eq!(
+                    s.len() - 2,
+                    width,
+                    "{key} = {s} must be zero-padded to {width} hex digits"
+                );
+                assert_eq!(s.to_ascii_lowercase(), s, "{key} = {s} must be lowercase");
+            }
+            seen += 1;
+        }
+    }
+    assert!(seen > 0, "fixture must contain whirlpool instructions");
+}
+
+/// The width is the column's, not the value's: a small `d8` still renders
+/// sixteen digits, and the prefix bytes agree across widths for the same
+/// instruction.
+#[test]
+fn discriminator_hex_is_a_prefix_chain() {
+    let solana = meta("solana");
+    let body = run(
+        "solana",
+        &solana,
+        br#"{"type":"solana","fromBlock":0,
+             "fields":{"instruction":{"d1":true,"d2":true,"d4":true,"d8":true}},
+             "instructions":[{"programId":["whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc"]}]}"#,
+    )
+    .unwrap();
+
+    let mut checked = 0;
+    for line in body.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
+        let block: serde_json::Value = serde_json::from_slice(line).unwrap();
+        for item in block
+            .get("instructions")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let d1 = item["d1"].as_str().unwrap();
+            let d2 = item["d2"].as_str().unwrap();
+            let d4 = item["d4"].as_str().unwrap();
+            let d8 = item["d8"].as_str().unwrap();
+            assert!(d2.starts_with(d1), "{d2} must extend {d1}");
+            assert!(d4.starts_with(d2), "{d4} must extend {d2}");
+            assert!(d8.starts_with(d4), "{d8} must extend {d4}");
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "fixture must contain whirlpool instructions");
+}

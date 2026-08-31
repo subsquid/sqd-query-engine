@@ -279,15 +279,16 @@ tables:
         type: boolean
       has_dropped_log_messages:
         type: boolean
-      # system
+      # d1/d2/d4/d8 are selectable; the remaining widths exist only to serve the
+      # `discriminator` filter.
       d1:
         type: uint8
         stats: true
-        system: true
+        json_encoding: hex_number
       d2:
         type: uint16
         stats: true
-        system: true
+        json_encoding: hex_number
       d3:
         type: fixed_binary_3
         stats: true
@@ -295,7 +296,7 @@ tables:
       d4:
         type: uint32
         stats: true
-        system: true
+        json_encoding: hex_number
       d5:
         type: fixed_binary_5
         stats: true
@@ -311,7 +312,7 @@ tables:
       d8:
         type: uint64
         stats: true
-        system: true
+        json_encoding: hex_number
       d9:
         type: fixed_binary_9
         stats: true
