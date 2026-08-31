@@ -810,7 +810,12 @@ impl RowPredicate {
 
     /// Evaluate the predicate on a RecordBatch, returning a boolean mask.
     /// All column predicates are ANDed together.
-    /// Missing columns are treated as all-true (no filtering).
+    ///
+    /// A column absent from the batch is skipped rather than fatal, so that this
+    /// kernel cannot panic on an unexpected batch. That tolerance is not the
+    /// engine's policy: `scan` rejects a filter on a column the chunk does not
+    /// have before any row is read, because skipping it silently widens the
+    /// query to everything (INV-X3).
     pub fn evaluate(&self, batch: &RecordBatch) -> BooleanArray {
         let mut result: Option<BooleanArray> = None;
 
@@ -1119,7 +1124,8 @@ mod tests {
         assert_eq!(matches, vec![true, false, true, false, true]);
     }
 
-    /// RowPredicate::evaluate must treat missing columns as all-true, not panic.
+    /// The kernel must not panic on a batch lacking a predicate column. Whether
+    /// such a scan is allowed at all is decided in `scan`, not here.
     #[test]
     fn test_row_predicate_missing_column_no_panic() {
         use arrow::datatypes::{Field, Schema};

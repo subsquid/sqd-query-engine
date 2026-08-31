@@ -348,3 +348,108 @@ fn reference_selectable_fields_are_all_accepted() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// INV-X3 — a filtered column absent from the chunk is an error
+// ---------------------------------------------------------------------------
+
+/// Copy a fixture chunk into a temp dir, dropping one column from one table —
+/// the shape of a chunk written before that column existed.
+fn chunk_without_column(dataset: &str, table: &str, drop_column: &str) -> tempfile::TempDir {
+    use arrow::record_batch::RecordBatch;
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use parquet::arrow::ArrowWriter;
+    use std::sync::Arc;
+
+    let src = fixture_chunk(dataset);
+    let dir = tempfile::TempDir::new().unwrap();
+
+    for entry in std::fs::read_dir(&src).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let dst = dir.path().join(&name);
+
+        if name != format!("{table}.parquet") {
+            std::fs::copy(&path, &dst).unwrap();
+            continue;
+        }
+
+        let reader = ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(&path).unwrap())
+            .unwrap()
+            .build()
+            .unwrap();
+        let batches: Vec<RecordBatch> = reader.map(|b| b.unwrap()).collect();
+        let full = batches[0].schema();
+        let keep: Vec<usize> = (0..full.fields().len())
+            .filter(|&i| full.field(i).name() != drop_column)
+            .collect();
+        assert_eq!(
+            keep.len() + 1,
+            full.fields().len(),
+            "'{drop_column}' must be present in the source table to drop it"
+        );
+
+        let trimmed = Arc::new(full.project(&keep).unwrap());
+        let mut writer =
+            ArrowWriter::try_new(std::fs::File::create(&dst).unwrap(), trimmed.clone(), None)
+                .unwrap();
+        for batch in &batches {
+            writer.write(&batch.project(&keep).unwrap()).unwrap();
+        }
+        writer.close().unwrap();
+    }
+
+    dir
+}
+
+/// The single most dangerous silent failure available: a filter the engine
+/// cannot evaluate stops narrowing the scan and starts matching everything, so
+/// a query asking for four rows is answered with the whole chunk — and the
+/// response gives the client no way to tell.
+#[test]
+fn filtering_an_absent_column_is_an_error() {
+    let evm = meta("evm");
+    let chunk = chunk_without_column("ethereum", "transactions", "sighash");
+    let query = br#"{"type":"evm","fromBlock":17881390,"toBlock":17881391,
+                     "fields":{"transaction":{"transactionIndex":true}},
+                     "transactions":[{"sighash":["0xa9059cbb"]}]}"#;
+
+    let parsed = parse_query(query, &evm).unwrap();
+    let plan = compile(&parsed, &evm).unwrap();
+    let result = execute_plan(&plan, &evm, chunk.path());
+
+    let err = match result {
+        Err(e) => e,
+        Ok(out) => {
+            let items = count_items(
+                &out.map(|o| o.into_json_lines()).unwrap_or_default(),
+                "transactions",
+            );
+            panic!("filtering on an absent column must error; got {items} transactions instead");
+        }
+    };
+    let message = err.root_cause().to_string();
+    assert!(
+        message.contains("sighash"),
+        "the error must name the missing column, got: {message}"
+    );
+}
+
+/// The check is about the chunk, not the catalog: with the column present the
+/// same query is answered normally.
+#[test]
+fn filtering_a_present_column_still_works() {
+    let evm = meta("evm");
+    let body = run(
+        "ethereum",
+        &evm,
+        br#"{"type":"evm","fromBlock":17881390,"toBlock":17881391,
+             "fields":{"transaction":{"transactionIndex":true}},
+             "transactions":[{"sighash":["0xa9059cbb"]}]}"#,
+    )
+    .unwrap();
+    assert!(
+        count_items(&body, "transactions") > 0,
+        "fixture must contain ERC-20 transfers"
+    );
+}
