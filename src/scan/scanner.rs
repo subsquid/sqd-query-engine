@@ -1621,7 +1621,13 @@ mod tests {
             }
         }
 
-        assert!(filtered_rows > 0 || true, "may or may not have matches");
+        // Without this the per-row checks above are vacuous: zero rows verifies
+        // nothing. The chunk and the filter are both fixed, so it either matches
+        // or the test is not testing anything.
+        assert!(
+            filtered_rows > 0,
+            "the whirlpool program must match rows in this block range"
+        );
     }
 
     #[test]

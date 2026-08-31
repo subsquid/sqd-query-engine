@@ -72,6 +72,66 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
                 child
             );
         }
+
+        // Validate the declared filter surface. A typo here does not fail a
+        // query — it removes a filter, and the query it was meant to narrow
+        // comes back wrong instead.
+        for filter in &table.filters {
+            anyhow::ensure!(
+                table.columns.contains_key(filter),
+                "table '{}': filter '{}' not found in columns",
+                table_name,
+                filter
+            );
+        }
+
+        // Fork detection is off when nothing is declared, so a typo here would
+        // turn it off silently.
+        for (label, column) in [
+            ("parent_hash_column", table.parent_hash_column.as_ref()),
+            ("parent_number_column", table.parent_number_column.as_ref()),
+        ] {
+            if let Some(column) = column {
+                anyhow::ensure!(
+                    table.columns.contains_key(column),
+                    "table '{}': {} '{}' not found in columns",
+                    table_name,
+                    label,
+                    column
+                );
+            }
+        }
+    }
+
+    for (alias_name, alias) in &desc.query_aliases {
+        let table = desc.tables.get(&alias.table).ok_or_else(|| {
+            anyhow::anyhow!(
+                "alias '{}': table '{}' not found in dataset",
+                alias_name,
+                alias.table
+            )
+        })?;
+
+        for filter in &alias.filters {
+            anyhow::ensure!(
+                table.columns.contains_key(filter),
+                "alias '{}': filter '{}' not found in columns of '{}'",
+                alias_name,
+                filter,
+                alias.table
+            );
+        }
+
+        for (key, column) in &alias.filter_aliases {
+            anyhow::ensure!(
+                table.columns.contains_key(column),
+                "alias '{}': filter '{}' targets column '{}', which '{}' does not have",
+                alias_name,
+                key,
+                column,
+                alias.table
+            );
+        }
     }
 
     Ok(())
@@ -242,5 +302,117 @@ tables:
             "unexpected error: {}",
             err
         );
+    }
+
+    /// A typo in the filter surface does not fail a query — it removes a filter,
+    /// and the query it was meant to narrow comes back wrong instead. It has to
+    /// fail at load.
+    #[test]
+    fn test_validate_rejects_unknown_filter_column() {
+        let yaml = r#"
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    columns:
+      number: { type: uint64 }
+  items:
+    filters: [ no_such_column ]
+    columns:
+      block_number: { type: uint64 }
+"#;
+        let err = parse_dataset_description(yaml).unwrap_err().to_string();
+        assert!(err.contains("no_such_column"), "got: {err}");
+    }
+
+    /// Fork detection is off when nothing is declared, so a typo would turn it
+    /// off silently rather than loudly.
+    #[test]
+    fn test_validate_rejects_unknown_parent_columns() {
+        for column in ["parent_hash_column", "parent_number_column"] {
+            let yaml = format!(
+                r#"
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    {column}: no_such_column
+    columns:
+      number: {{ type: uint64 }}
+"#
+            );
+            let err = parse_dataset_description(&yaml).unwrap_err().to_string();
+            assert!(err.contains("no_such_column"), "{column}: got: {err}");
+        }
+    }
+
+    #[test]
+    fn test_validate_rejects_broken_alias_references() {
+        let bad_table = r#"
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    columns:
+      number: { type: uint64 }
+query_aliases:
+  view:
+    table: no_such_table
+"#;
+        assert!(parse_dataset_description(bad_table).is_err());
+
+        let bad_filter = r#"
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    columns:
+      number: { type: uint64 }
+  items:
+    columns:
+      block_number: { type: uint64 }
+query_aliases:
+  view:
+    table: items
+    filters: [ no_such_column ]
+"#;
+        let err = parse_dataset_description(bad_filter).unwrap_err().to_string();
+        assert!(err.contains("no_such_column"), "got: {err}");
+
+        let bad_target = r#"
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    columns:
+      number: { type: uint64 }
+  items:
+    columns:
+      block_number: { type: uint64 }
+query_aliases:
+  view:
+    table: items
+    filter_aliases:
+      topic0: no_such_column
+"#;
+        let err = parse_dataset_description(bad_target).unwrap_err().to_string();
+        assert!(err.contains("no_such_column"), "got: {err}");
+    }
+
+    /// Every catalog shipped with the engine must load.
+    #[test]
+    fn test_bundled_catalogs_validate() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("metadata");
+        let mut loaded = 0;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
+                continue;
+            }
+            load_dataset_description(&path)
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            loaded += 1;
+        }
+        assert!(loaded >= 7, "expected the bundled catalogs, found {loaded}");
     }
 }
