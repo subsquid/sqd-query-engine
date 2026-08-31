@@ -2,6 +2,7 @@ name: substrate
 
 tables:
   blocks:
+    filters: []
     parent_hash_column: parent_hash
     block_number_column: number
     field_name: block
@@ -36,6 +37,7 @@ tables:
         type: string
 
   extrinsics:
+    filters: []
     query_name: extrinsics
     field_name: extrinsic
     item_order_keys: [ index ]
@@ -79,6 +81,7 @@ tables:
         system: true
 
   calls:
+    filters: [ name ]
     query_name: calls
     field_name: call
     address_column: address
@@ -142,6 +145,7 @@ tables:
         system: true
 
   events:
+    filters: [ name ]
     query_name: events
     field_name: event
     address_column: call_address
@@ -216,6 +220,7 @@ tables:
 
 query_aliases:
   evmLogs:
+    filters: []
     table: events
     implicit_predicates:
       name: [ "EVM.Log" ]

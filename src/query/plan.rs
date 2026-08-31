@@ -761,6 +761,27 @@ mod tests {
         load_dataset_description(Path::new("metadata/evm.yaml")).unwrap()
     }
 
+    /// A `d4` value that occurs in the local Solana chunk, so numeric-filter
+    /// tests assert against data rather than a guessed constant.
+    fn first_d4_value() -> u32 {
+        use arrow::array::UInt32Array;
+        let table_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("data/solana/chunk/instructions.parquet");
+        let table = crate::scan::ParquetTable::open(&table_path).unwrap();
+        let request = crate::scan::ScanRequest::new(vec!["d4"]);
+        let batches = crate::scan::scan(&table, &request).unwrap();
+        for batch in &batches {
+            let col = batch.column_by_name("d4").unwrap();
+            let values = col.as_any().downcast_ref::<UInt32Array>().unwrap();
+            for i in 0..values.len() {
+                if !values.is_null(i) {
+                    return values.value(i);
+                }
+            }
+        }
+        panic!("chunk has no non-null d4 value");
+    }
+
     // --- A4: numeric_scalar must error (not silently coerce to UInt64) on
     //         non-integer column types, otherwise the filter returns 0 rows. ---
 
@@ -1026,19 +1047,23 @@ mod tests {
     #[test]
     fn test_numeric_filter_on_uint32_column() {
         let meta = solana_metadata();
-        // transaction_index is UInt32 in Solana metadata
-        let json = br#"{
+        // d4 is a UInt32 column, and one the catalog declares filterable. The
+        // value comes from the chunk so the test does not turn on a guess.
+        let d4 = first_d4_value();
+        let json = format!(
+            r#"{{
             "type": "solana",
             "fromBlock": 0,
-            "fields": {
-                "instruction": { "programId": true, "transactionIndex": true }
-            },
-            "instructions": [{
-                "transactionIndex": 0
-            }]
-        }"#;
+            "fields": {{
+                "instruction": {{ "programId": true }}
+            }},
+            "instructions": [{{
+                "d4": {d4}
+            }}]
+        }}"#
+        );
 
-        let query = parse_query(json, &meta).unwrap();
+        let query = parse_query(json.as_bytes(), &meta).unwrap();
         let plan = compile(&query, &meta).unwrap();
 
         let chunk_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/chunk");
@@ -1064,7 +1089,7 @@ mod tests {
         let batches = crate::scan::scan(&parquet_table, &request).unwrap();
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
 
-        // Must match instructions with transaction_index=0 (not empty!)
+        // Must match the instructions carrying that d4 (not empty!)
         assert!(
             total_rows > 0,
             "numeric filter on UInt32 column must match rows (was broken when always UInt64)"
@@ -1076,18 +1101,21 @@ mod tests {
     #[test]
     fn test_numeric_in_list_filter() {
         let meta = solana_metadata();
-        let json = br#"{
+        let d4 = first_d4_value();
+        let json = format!(
+            r#"{{
             "type": "solana",
             "fromBlock": 0,
-            "fields": {
-                "instruction": { "programId": true, "transactionIndex": true }
-            },
-            "instructions": [{
-                "transactionIndex": [0, 1, 2]
-            }]
-        }"#;
+            "fields": {{
+                "instruction": {{ "programId": true }}
+            }},
+            "instructions": [{{
+                "d4": [{d4}]
+            }}]
+        }}"#
+        );
 
-        let query = parse_query(json, &meta).unwrap();
+        let query = parse_query(json.as_bytes(), &meta).unwrap();
         let plan = compile(&query, &meta).unwrap();
 
         let chunk_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/chunk");
@@ -1207,6 +1235,7 @@ tables:
 query_aliases:
   filteredItems:
     table: items
+    filters: [kind]
     implicit_predicates:
       kind: ["special"]
     relations:

@@ -126,19 +126,27 @@ fn malformed_hex_in_list_is_an_error() {
         r#"["0xf8c69e91e17587c8", "f8c69e91e17587c8"]"#, // missing 0x on the second
         r#"["0xabc"]"#,                                  // odd digit count
         r#"["0xzz"]"#,                                   // not hex
-        r#"[123]"#,                                      // number for a fixed_binary column
         r#"[true]"#,                                     // neither string nor integer
     ];
     for values in malformed {
-        let json = format!(
-            r#"{{"type":"solana","fromBlock":0,"instructions":[{{"d16":{values}}}]}}"#
-        );
+        let json =
+            format!(r#"{{"type":"solana","fromBlock":0,"instructions":[{{"d8":{values}}}]}}"#);
         let parsed = parse_query(json.as_bytes(), &solana).unwrap();
         assert!(
             compile(&parsed, &solana).is_err(),
-            "expected an error for d16 filter {values}"
+            "expected an error for d8 filter {values}"
         );
     }
+
+    // The same on a list column, reached through an alias.
+    let replica = meta("hyperliquid_replica_cmds");
+    let json = r#"{"type":"hyperliquidReplicaCmds","fromBlock":0,
+                   "orderActions":[{"containsAsset":["not-a-number"]}]}"#;
+    let parsed = parse_query(json.as_bytes(), &replica).unwrap();
+    assert!(
+        compile(&parsed, &replica).is_err(),
+        "a non-integer in a list_uint32 filter must be an error"
+    );
 }
 
 /// INV-P14: a well-formed value the column cannot hold matches nothing. It is
@@ -147,21 +155,22 @@ fn malformed_hex_in_list_is_an_error() {
 #[test]
 fn unmatchable_values_are_not_errors() {
     let solana = meta("solana");
-    let queries = [
-        // 8-byte value against the 1-byte d1 column: cannot match, not malformed.
-        r#"{"type":"solana","fromBlock":0,"instructions":[{"d1":["0xf8c69e91e17587c8"]}]}"#,
-        // Beyond u32::MAX for a list_uint32 column.
-        r#"{"type":"solana","fromBlock":0,"instructions":[{"instructionAddress":[4294967296]}]}"#,
-    ];
-    for json in queries {
-        let out = run("solana", &solana, json.as_bytes())
-            .unwrap_or_else(|e| panic!("expected a result, got an error: {e} for {json}"));
-        assert_eq!(
-            count_items(&out, "instructions"),
-            0,
-            "expected no matches for {json}"
-        );
-    }
+    // An 8-byte value against the 1-byte d1 column: cannot match, not malformed.
+    let json = r#"{"type":"solana","fromBlock":0,
+                   "instructions":[{"d1":["0xf8c69e91e17587c8"]}]}"#;
+    let out = run("solana", &solana, json.as_bytes())
+        .unwrap_or_else(|e| panic!("expected a result, got an error: {e}"));
+    assert_eq!(count_items(&out, "instructions"), 0, "expected no matches");
+
+    // Beyond u32::MAX for a list_uint32 column: it used to wrap to 0 and match
+    // whatever carried asset 0.
+    let replica = meta("hyperliquid_replica_cmds");
+    let json = r#"{"type":"hyperliquidReplicaCmds","fromBlock":0,
+                   "fields":{"action":{"user":true}},
+                   "orderActions":[{"containsAsset":[4294967296]}]}"#;
+    let out = run("hyperliquid_replica_cmds", &replica, json.as_bytes())
+        .unwrap_or_else(|e| panic!("expected a result, got an error: {e}"));
+    assert_eq!(count_items(&out, "actions"), 0, "expected no matches");
 }
 
 // ---------------------------------------------------------------------------
@@ -617,4 +626,138 @@ fn fork_detection_follows_a_chain_that_skips_numbers() {
         .as_bytes(),
     )
     .expect("a matching parent hash must be served");
+}
+
+// ---------------------------------------------------------------------------
+// INV-P15 — the filter surface is closed
+// ---------------------------------------------------------------------------
+
+/// Tables carry blooms, size counters and denormalised extractions. Resolving a
+/// filter key against "any column of the table" exposed all of them, and made
+/// the column list the public API: adding a column added a filter.
+#[test]
+fn undeclared_columns_are_not_filterable() {
+    let evm = meta("evm");
+    let rejected = [
+        // System columns backing the weight model.
+        (r#"{"type":"evm","fromBlock":0,"logs":[{"dataSize":[100]}]}"#, "data_size"),
+        // A real, emitted column that the reference does not let a client filter.
+        (r#"{"type":"evm","fromBlock":0,"logs":[{"logIndex":[3]}]}"#, "log_index"),
+        (r#"{"type":"evm","fromBlock":0,"transactions":[{"gasUsed":["0x1"]}]}"#, "gas_used"),
+    ];
+    for (json, column) in rejected {
+        let table = evm.table("logs").unwrap();
+        assert!(
+            table.columns.contains_key(column) || evm.table("transactions").unwrap().columns.contains_key(column),
+            "the test is only meaningful while '{column}' is a real column"
+        );
+        assert!(
+            parse_query(json.as_bytes(), &evm).is_err(),
+            "expected {json} to be rejected"
+        );
+    }
+}
+
+/// An alias is a narrower view of its table, and exposes its own filters rather
+/// than inheriting everything the table accepts.
+#[test]
+fn an_alias_has_its_own_filter_surface() {
+    let substrate = meta("substrate");
+
+    // `evmLogs` accepts the log filters it aliases...
+    parse_query(
+        br#"{"type":"substrate","fromBlock":0,"evmLogs":[{"address":["0xabcd"]}]}"#,
+        &substrate,
+    )
+    .expect("an alias must accept the filters it declares");
+
+    // ...but not `name`, which belongs to the underlying events table and is
+    // already pinned by the alias's implicit predicate.
+    assert!(
+        parse_query(
+            br#"{"type":"substrate","fromBlock":0,"evmLogs":[{"name":["Balances.Transfer"]}]}"#,
+            &substrate,
+        )
+        .is_err(),
+        "an alias must not inherit the table's whole filter surface"
+    );
+
+    // The table itself still accepts it.
+    parse_query(
+        br#"{"type":"substrate","fromBlock":0,"events":[{"name":["Balances.Transfer"]}]}"#,
+        &substrate,
+    )
+    .expect("the underlying table keeps its own filters");
+}
+
+/// Closing the surface must not close it on anything real. Every filter the
+/// reference implementation accepts is exercised here, so a catalog that drifts
+/// away from it fails rather than silently rejecting a working query.
+#[test]
+fn reference_filters_are_all_accepted() {
+    // (dataset, request key, filter keys) — mirrors the reference's requests.
+    let cases: &[(&str, &str, &[&str])] = &[
+        ("evm", "transactions", &["from", "to", "sighash", "firstNonce", "lastNonce"]),
+        ("evm", "logs", &["address", "topic0", "topic1", "topic2", "topic3"]),
+        (
+            "evm",
+            "traces",
+            &[
+                "type", "createFrom", "createResultAddress", "callFrom", "callTo",
+                "callSighash", "callCallType", "suicideAddress", "suicideRefundAddress",
+                "rewardAuthor",
+            ],
+        ),
+        ("evm", "stateDiffs", &["address", "key", "kind"]),
+        (
+            "solana",
+            "instructions",
+            &[
+                "programId", "discriminator", "d1", "d2", "d4", "d8", "mentionsAccount",
+                "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9", "a10", "a11",
+                "a12", "a13", "a14", "a15", "isCommitted",
+            ],
+        ),
+        ("solana", "transactions", &["feePayer", "mentionsAccount"]),
+        ("solana", "logs", &["programId", "kind"]),
+        ("solana", "balances", &["account"]),
+        (
+            "solana",
+            "tokenBalances",
+            &[
+                "account", "preMint", "postMint", "preProgramId", "postProgramId",
+                "preOwner", "postOwner",
+            ],
+        ),
+        ("solana", "rewards", &["pubkey"]),
+        ("substrate", "events", &["name"]),
+        ("substrate", "calls", &["name"]),
+        ("bitcoin", "outputs", &["scriptPubKeyAddress", "scriptPubKeyType"]),
+        (
+            "bitcoin",
+            "inputs",
+            &["type", "prevoutScriptPubKeyAddress", "prevoutScriptPubKeyType", "prevoutGenerated"],
+        ),
+        ("fuel", "receipts", &["type", "contract"]),
+        (
+            "fuel",
+            "inputs",
+            &["type", "coinOwner", "coinAssetId", "contractContract", "messageSender", "messageRecipient"],
+        ),
+        ("fuel", "outputs", &["type"]),
+    ];
+
+    for (dataset, request_key, filters) in cases {
+        let metadata = meta(dataset);
+        for filter in *filters {
+            // A permissive value: every filter accepts a list of strings or an
+            // empty list, and this test is about the surface, not the values.
+            let json = format!(
+                r#"{{"type":"{}","fromBlock":0,"{request_key}":[{{"{filter}":[]}}]}}"#,
+                metadata.name
+            );
+            parse_query(json.as_bytes(), &metadata)
+                .unwrap_or_else(|e| panic!("{dataset}.{request_key}.{filter} must stay filterable: {e}"));
+        }
+    }
 }

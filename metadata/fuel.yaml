@@ -2,6 +2,7 @@ name: fuel
 
 tables:
   blocks:
+    filters: []
     block_number_column: number
     field_name: block
     sort_key: [ number ]
@@ -35,6 +36,7 @@ tables:
         type: uint32
 
   transactions:
+    filters: [ type ]
     query_name: transactions
     field_name: transaction
     item_order_keys: [ index ]
@@ -147,6 +149,7 @@ tables:
         system: true
 
   receipts:
+    filters: [ contract ]
     query_name: receipts
     field_name: receipt
     item_order_keys: [ transaction_index, index ]
@@ -249,6 +252,7 @@ tables:
         system: true
 
   inputs:
+    filters: [ type, coin_owner, coin_asset_id, contract_contract, message_sender, message_recipient ]
     query_name: inputs
     field_name: input
     item_order_keys: [ transaction_index, index ]
@@ -367,6 +371,7 @@ tables:
             - { column: message_predicate_data, field: predicateData }
 
   outputs:
+    filters: [ type ]
     query_name: outputs
     field_name: output
     item_order_keys: [ transaction_index, index ]
