@@ -453,3 +453,168 @@ fn filtering_a_present_column_still_works() {
         "fixture must contain ERC-20 transfers"
     );
 }
+
+// ---------------------------------------------------------------------------
+// INV-E5 — fork detection
+// ---------------------------------------------------------------------------
+
+/// The parent hash of the first block a chunk can speak about, read from the
+/// fixture itself so the test is not pinned to a hard-coded chain.
+fn parent_hash_of(dataset: &str, metadata: &DatasetDescription, block: u64) -> String {
+    let body = run(
+        dataset,
+        metadata,
+        format!(
+            r#"{{"type":"{}","fromBlock":{block},"toBlock":{block},"includeAllBlocks":true,
+                 "fields":{{"block":{{"number":true,"parentHash":true}}}}}}"#,
+            metadata.name
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    let line = body.split(|b| *b == b'\n').find(|l| !l.is_empty()).unwrap();
+    let block: serde_json::Value = serde_json::from_slice(line).unwrap();
+    block["header"]["parentHash"].as_str().unwrap().to_string()
+}
+
+/// A client paging through a chain sends back the hash it believes the previous
+/// block has. Accepting the field and ignoring it — which is what happened
+/// before — serves data from a branch the client did not ask about, with nothing
+/// in the response to say so.
+#[test]
+fn a_mismatched_parent_block_hash_is_reported() {
+    let evm = meta("evm");
+    const FROM: u64 = 17881391;
+
+    let query = |parent: &str| {
+        format!(
+            r#"{{"type":"evm","fromBlock":{FROM},"toBlock":{FROM},"includeAllBlocks":true,
+                 "parentBlockHash":"{parent}",
+                 "fields":{{"block":{{"number":true}}}}}}"#
+        )
+        .into_bytes()
+    };
+
+    // The chunk agrees: the query is answered.
+    let actual_parent = parent_hash_of("ethereum", &evm, FROM);
+    let body = run("ethereum", &evm, &query(&actual_parent)).unwrap();
+    assert!(!body.is_empty(), "a matching parent hash must be served");
+
+    // The chunk disagrees: the client is told, and told what the chunk has.
+    let err = run("ethereum", &evm, &query("0xdeadbeef"))
+        .expect_err("a mismatched parent hash must be reported");
+    let reported = err
+        .downcast_ref::<sqd_query_engine::output::UnexpectedBaseBlock>()
+        .expect("the error must be an UnexpectedBaseBlock a client can act on");
+    assert_eq!(reported.expected_hash, "0xdeadbeef");
+    let parent = reported.prev_blocks.last().expect("prev_blocks must not be empty");
+    assert_eq!(parent.number, FROM - 1);
+    assert_eq!(parent.hash, actual_parent);
+}
+
+/// The chunk's own first block still settles the question — its row carries its
+/// parent's hash — so the check fires there too.
+#[test]
+fn the_first_block_of_a_chunk_still_settles_its_parent() {
+    let evm = meta("evm");
+    let actual_parent = parent_hash_of("ethereum", &meta("evm"), 17881390);
+
+    run(
+        "ethereum",
+        &evm,
+        format!(
+            r#"{{"type":"evm","fromBlock":17881390,"toBlock":17881390,"includeAllBlocks":true,
+                 "parentBlockHash":"{actual_parent}",
+                 "fields":{{"block":{{"number":true}}}}}}"#
+        )
+        .as_bytes(),
+    )
+    .expect("a matching parent hash must be served");
+
+    run(
+        "ethereum",
+        &evm,
+        br#"{"type":"evm","fromBlock":17881390,"toBlock":17881390,"includeAllBlocks":true,
+             "parentBlockHash":"0xnot-the-parent-of-anything",
+             "fields":{"block":{"number":true}}}"#,
+    )
+    .expect_err("a mismatched parent hash must be reported");
+}
+
+/// A chunk holding no evidence about the parent must stay quiet rather than
+/// reject the request: the chunk not knowing is not the chain having forked.
+#[test]
+fn an_invisible_parent_block_is_not_a_fork() {
+    let evm = meta("evm");
+    // The chunk starts at 17881390, so nothing in it speaks about this window.
+    run(
+        "ethereum",
+        &evm,
+        br#"{"type":"evm","fromBlock":17000000,"toBlock":17000001,"includeAllBlocks":true,
+             "parentBlockHash":"0xnot-the-parent-of-anything",
+             "fields":{"block":{"number":true}}}"#,
+    )
+    .expect("a parent the chunk cannot see must not be reported as a fork");
+}
+
+/// The field is a hash, and a non-string is rejected at parse time rather than
+/// quietly ignored.
+#[test]
+fn a_malformed_parent_block_hash_is_rejected() {
+    let evm = meta("evm");
+    for json in [
+        r#"{"type":"evm","fromBlock":0,"parentBlockHash":123}"#,
+        r#"{"type":"evm","fromBlock":0,"parentBlockHash":["0xabc"]}"#,
+    ] {
+        assert!(
+            parse_query(json.as_bytes(), &evm).is_err(),
+            "expected an error for {json}"
+        );
+    }
+}
+
+/// A chain that skips numbers has no block at `fromBlock - 1`, so the
+/// predecessor has to be read from the parent-number column rather than
+/// computed. Solana slot 217710449 follows 217710447.
+#[test]
+fn fork_detection_follows_a_chain_that_skips_numbers() {
+    let solana = meta("solana");
+    const FROM: u64 = 217_710_449;
+    const PARENT: u64 = 217_710_447;
+
+    let actual_parent = parent_hash_of("solana", &solana, FROM);
+
+    let err = run(
+        "solana",
+        &solana,
+        format!(
+            r#"{{"type":"solana","fromBlock":{FROM},"toBlock":{FROM},"includeAllBlocks":true,
+                 "parentBlockHash":"not-the-parent",
+                 "fields":{{"block":{{"number":true}}}}}}"#
+        )
+        .as_bytes(),
+    )
+    .expect_err("a mismatched parent hash must be reported");
+
+    let reported = err
+        .downcast_ref::<sqd_query_engine::output::UnexpectedBaseBlock>()
+        .expect("the error must be an UnexpectedBaseBlock");
+    let parent = reported.prev_blocks.last().unwrap();
+    assert_eq!(
+        parent.number, PARENT,
+        "the predecessor is the declared parent slot, not fromBlock - 1"
+    );
+    assert_eq!(parent.hash, actual_parent);
+
+    run(
+        "solana",
+        &solana,
+        format!(
+            r#"{{"type":"solana","fromBlock":{FROM},"toBlock":{FROM},"includeAllBlocks":true,
+                 "parentBlockHash":"{actual_parent}",
+                 "fields":{{"block":{{"number":true}}}}}}"#
+        )
+        .as_bytes(),
+    )
+    .expect("a matching parent hash must be served");
+}

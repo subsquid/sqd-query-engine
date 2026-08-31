@@ -2,6 +2,8 @@ name: solana
 
 tables:
   blocks:
+    parent_hash_column: parent_hash
+    parent_number_column: parent_number
     block_number_column: number
     field_name: block
     sort_key: [ number ]

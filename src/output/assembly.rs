@@ -194,6 +194,10 @@ fn execute_chunk_fmt(
 
     let t_total = timer!();
 
+    // 0. A reorg between two pages must be reported, not paved over with data
+    //    from the branch the client did not ask about.
+    crate::output::fork::check_parent_block(plan, metadata, chunk)?;
+
     // 1. Scan all tables specified in the plan
     let mut table_outputs: HashMap<String, TableOutput> = HashMap::new();
 

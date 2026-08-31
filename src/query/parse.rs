@@ -8,6 +8,9 @@ pub struct Query {
     pub from_block: u64,
     pub to_block: Option<u64>,
     pub include_all_blocks: bool,
+    /// Hash the client believes the block before `from_block` has. When set, a
+    /// mismatch against the chunk means the chain reorganised between pages.
+    pub parent_block_hash: Option<String>,
     /// Field selections: table_name → ordered list of column names (snake_case).
     /// Order matches the query JSON for deterministic output key ordering.
     pub fields: HashMap<String, Vec<String>>,
@@ -105,6 +108,15 @@ pub fn parse_query(json_bytes: &[u8], metadata: &DatasetDescription) -> Result<Q
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
+    let parent_block_hash = match obj.get("parentBlockHash") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(v) => Some(
+            v.as_str()
+                .ok_or_else(|| anyhow!("'parentBlockHash' must be a string, got {}", v))?
+                .to_string(),
+        ),
+    };
+
     // Build lookup maps: query_name → table_name, field_name → table_name
     let query_name_to_table: HashMap<&str, &str> = metadata
         .tables
@@ -182,6 +194,7 @@ pub fn parse_query(json_bytes: &[u8], metadata: &DatasetDescription) -> Result<Q
         from_block,
         to_block,
         include_all_blocks,
+        parent_block_hash,
         fields,
         items,
     })

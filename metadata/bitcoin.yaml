@@ -2,6 +2,7 @@ name: bitcoin
 
 tables:
   blocks:
+    parent_hash_column: parent_hash
     block_number_column: number
     field_name: block
     sort_key: [ number ]
