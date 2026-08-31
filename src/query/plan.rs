@@ -47,6 +47,8 @@ pub struct Plan {
     pub from_block: u64,
     pub to_block: Option<u64>,
     pub include_all_blocks: bool,
+    /// Hash the client believes the block before `from_block` has, if supplied.
+    pub parent_block_hash: Option<String>,
     /// The blocks table name (e.g., "blocks").
     pub block_table: String,
     /// Output columns for the blocks table.
@@ -253,6 +255,7 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
         from_block: query.from_block,
         to_block: query.to_block,
         include_all_blocks: query.include_all_blocks,
+        parent_block_hash: query.parent_block_hash.clone(),
         block_table,
         block_output_columns,
         table_plans,

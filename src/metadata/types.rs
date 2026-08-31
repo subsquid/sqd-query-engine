@@ -40,6 +40,17 @@ pub struct TableDescription {
     #[serde(default = "default_block_number_column")]
     pub block_number_column: String,
 
+    /// Column holding the hash of the preceding block. Only the block table sets
+    /// it; declaring it is what enables fork detection for the dataset.
+    #[serde(default)]
+    pub parent_hash_column: Option<String>,
+
+    /// Column holding the *number* of the preceding block. Chains that skip
+    /// numbers (Solana slots) need it; where it is absent the predecessor is
+    /// taken to be `number - 1`.
+    #[serde(default)]
+    pub parent_number_column: Option<String>,
+
     /// Hierarchical address column for children/parents relations.
     /// E.g., "instruction_address" for Solana instructions, "trace_address" for EVM traces.
     #[serde(default)]
