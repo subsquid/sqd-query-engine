@@ -16,8 +16,11 @@ const DEFAULT_ROW_WEIGHT: u64 = 32;
 pub(crate) struct TableOutput {
     /// The primary table's filtered rows.
     pub(crate) batches: Vec<RecordBatch>,
-    /// Relation results keyed by target table name.
-    pub(crate) relation_batches: HashMap<String, Vec<RecordBatch>>,
+    /// Relation results, keyed by the relation's position in the table plan.
+    /// Two relations of one query item can name the same target table — and then
+    /// the same rows — so each keeps its own entry and the overlap is resolved by
+    /// deduplication rather than by concatenation.
+    pub(crate) relation_batches: HashMap<usize, Vec<RecordBatch>>,
 }
 
 /// A batch source with its weight parameters.
@@ -67,8 +70,8 @@ pub(crate) fn apply_weight_limit(
                 weight_cols: weight_col_names,
             });
 
-        for rel in &table_plan.relations {
-            if let Some(rel_batches) = output.relation_batches.get(&rel.target_table) {
+        for (rel_idx, rel) in table_plan.relations.iter().enumerate() {
+            if let Some(rel_batches) = output.relation_batches.get(&rel_idx) {
                 let rel_desc = metadata.table(&rel.target_table);
                 let rel_weight_cols = weight_projection(&rel.output_columns, rel_desc);
                 let (rel_fixed, rel_weight_col_names) =
@@ -148,10 +151,23 @@ pub(crate) fn apply_weight_limit(
                 Some(c) => c,
                 None => continue,
             };
+            // A header's weight is its fixed part plus whatever its
+            // data-dependent columns say, exactly as in the include-all-blocks
+            // branch above. Counting only the fixed part makes a header carrying
+            // withdrawals weigh the same as an empty one.
+            let weight_arrays: Vec<_> = header_weight_cols
+                .iter()
+                .filter_map(|c| batch.column_by_name(c))
+                .collect();
+
             for i in 0..batch.num_rows() {
                 if let Some(block_num) = get_block_number(bn_col.as_ref(), i) {
                     if blocks_with_items.contains(&block_num) {
-                        *block_weights.entry(block_num).or_default() += header_fixed;
+                        let dynamic: u64 = weight_arrays
+                            .iter()
+                            .map(|col| get_weight_value(col.as_ref(), i))
+                            .sum();
+                        *block_weights.entry(block_num).or_default() += header_fixed + dynamic;
                     }
                 }
             }
@@ -190,6 +206,27 @@ pub(crate) fn weight_scan_columns(
     for c in weight_cols {
         if !cols.contains(&c) {
             cols.push(c);
+        }
+    }
+    cols
+}
+
+/// Columns the block-header scan must read: the block number, the requested
+/// header columns, and the `*_size` companion of any of them whose weight is
+/// data-dependent. A declared `weight: <column>` that is never projected is a
+/// weight of zero, so the header under-weighs and truncation lands past the cap
+/// (INV-B10).
+pub(crate) fn block_scan_columns(
+    block_output_columns: &[String],
+    block_desc: &TableDescription,
+) -> Vec<String> {
+    let (_fixed, weight_cols) = compute_weight_params(block_output_columns, Some(block_desc));
+
+    let mut cols = Vec::with_capacity(block_output_columns.len() + weight_cols.len() + 1);
+    cols.push(block_desc.block_number_column.clone());
+    for col in block_output_columns.iter().chain(weight_cols.iter()) {
+        if !cols.contains(col) {
+            cols.push(col.clone());
         }
     }
     cols
@@ -567,6 +604,55 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Tests: block_scan_columns — a declared weight column must be read
+    // -----------------------------------------------------------------------
+
+    /// `withdrawals` and `extra_data` declare a `*_size` companion. The header
+    /// scan used to project the block number and the requested columns only, so
+    /// the companion was absent from the batch, `get_weight_value` found nothing,
+    /// and a block carrying two kilobytes of withdrawals weighed the 32 bytes of
+    /// an empty one.
+    #[test]
+    fn test_block_scan_reads_the_weight_columns_it_declares() {
+        let meta = evm_meta();
+        let blocks = meta.table("blocks").unwrap();
+
+        let requested: Vec<String> = ["number", "withdrawals", "extra_data"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let scanned = block_scan_columns(&requested, blocks);
+
+        for col in ["number", "withdrawals", "extra_data"] {
+            assert!(scanned.iter().any(|c| c == col), "'{col}' must be read");
+        }
+        for col in ["withdrawals_size", "extra_data_size"] {
+            assert!(
+                scanned.iter().any(|c| c == col),
+                "'{col}' is what makes its column's weight data-dependent"
+            );
+        }
+    }
+
+    /// A fixed-weight column brings no companion, and nothing is read twice.
+    #[test]
+    fn test_block_scan_adds_nothing_for_fixed_weight_columns() {
+        let meta = evm_meta();
+        let blocks = meta.table("blocks").unwrap();
+
+        let requested: Vec<String> = ["number", "logs_bloom"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let scanned = block_scan_columns(&requested, blocks);
+
+        assert_eq!(
+            scanned,
+            vec!["number".to_string(), "logs_bloom".to_string()]
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // Tests: compute_weight_params — documents what columns contribute to weight
     // -----------------------------------------------------------------------
 
@@ -577,7 +663,11 @@ mod tests {
 
         for col in ["data_size", "accounts_size", "accounts_bloom", "b9"] {
             let (fixed, dynamic) = weight_for(&[col], Some(instr));
-            assert_eq!(fixed, 0, "system column '{}' must not contribute weight", col);
+            assert_eq!(
+                fixed, 0,
+                "system column '{}' must not contribute weight",
+                col
+            );
             assert!(dynamic.is_empty());
         }
     }
@@ -649,7 +739,10 @@ mod tests {
         // "accounts" is a virtual roll → [a0, a1, ..., a15, rest_accounts]
         // a0 → accounts_size (dynamic), a1-a15 + rest_accounts → weight=0
         let (fixed, dynamic) = weight_for(&["accounts"], Some(instr));
-        assert_eq!(fixed, 0, "all account columns have weight=0 except a0 which is dynamic");
+        assert_eq!(
+            fixed, 0,
+            "all account columns have weight=0 except a0 which is dynamic"
+        );
         assert_eq!(dynamic, vec!["accounts_size"]);
     }
 
@@ -712,10 +805,7 @@ mod tests {
         let instr = meta.table("instructions").unwrap();
 
         // Combining multiple columns: program_id(32) + data(data_size) + is_committed(32)
-        let (fixed, dynamic) = weight_for(
-            &["program_id", "data", "is_committed"],
-            Some(instr),
-        );
+        let (fixed, dynamic) = weight_for(&["program_id", "data", "is_committed"], Some(instr));
         assert_eq!(fixed, 64, "program_id(32) + is_committed(32)");
         assert_eq!(dynamic, vec!["data_size"]);
     }
@@ -732,7 +822,13 @@ mod tests {
         // weight_projection adds primary key: [block_number, transaction_index, instruction_address]
         // User output: [transaction_index, instruction_address, program_id, accounts, data]
         let (fixed, dynamic) = legacy_weight_for(
-            &["transaction_index", "instruction_address", "program_id", "accounts", "data"],
+            &[
+                "transaction_index",
+                "instruction_address",
+                "program_id",
+                "accounts",
+                "data",
+            ],
             Some(instr),
         );
 
@@ -783,7 +879,13 @@ mod tests {
         // weight_projection adds primary key: [block_number, transaction_index, log_index]
         // User output: [log_index, transaction_index, address, data, topics]
         let (fixed, dynamic) = legacy_weight_for(
-            &["log_index", "transaction_index", "address", "data", "topics"],
+            &[
+                "log_index",
+                "transaction_index",
+                "address",
+                "data",
+                "topics",
+            ],
             Some(logs),
         );
 
@@ -800,10 +902,8 @@ mod tests {
 
         // weight_projection adds primary key: [block_number, transaction_index]
         // User output: [hash, from, to, input, value, gas]
-        let (fixed, dynamic) = legacy_weight_for(
-            &["hash", "from", "to", "input", "value", "gas"],
-            Some(txs),
-        );
+        let (fixed, dynamic) =
+            legacy_weight_for(&["hash", "from", "to", "input", "value", "gas"], Some(txs));
 
         // block_number(32) + transaction_index(32) + hash(32) + from(32) + to(32) +
         // value(32) + gas(32) + input(input_size)
@@ -830,14 +930,8 @@ mod tests {
             relations: vec![crate::query::RelationPlan {
                 target_table: "transactions".to_string(),
                 kind: crate::query::RelationKind::Join,
-                left_key: vec![
-                    "block_number".to_string(),
-                    "transaction_index".to_string(),
-                ],
-                right_key: vec![
-                    "block_number".to_string(),
-                    "transaction_index".to_string(),
-                ],
+                left_key: vec!["block_number".to_string(), "transaction_index".to_string()],
+                right_key: vec!["block_number".to_string(), "transaction_index".to_string()],
                 output_columns: vec![],
                 source_predicates: None,
             }],
@@ -870,14 +964,8 @@ mod tests {
             relations: vec![crate::query::RelationPlan {
                 target_table: "transactions".to_string(),
                 kind: crate::query::RelationKind::Join,
-                left_key: vec![
-                    "block_number".to_string(),
-                    "transaction_index".to_string(),
-                ],
-                right_key: vec![
-                    "block_number".to_string(),
-                    "transaction_index".to_string(),
-                ],
+                left_key: vec!["block_number".to_string(), "transaction_index".to_string()],
+                right_key: vec!["block_number".to_string(), "transaction_index".to_string()],
                 output_columns: vec![],
                 source_predicates: Some(vec![crate::scan::predicate::RowPredicate::new(vec![
                     crate::scan::predicate::col_eq(
@@ -908,10 +996,7 @@ mod tests {
         // Scenario: user requests [program_id, data] only.
         // Even if is_committed is used as a source predicate for a relation,
         // it should NOT inflate the weight.
-        let (fixed, dynamic) = legacy_weight_for(
-            &["program_id", "data"],
-            Some(instr),
-        );
+        let (fixed, dynamic) = legacy_weight_for(&["program_id", "data"], Some(instr));
 
         // Primary key: block_number(32) + transaction_index(32) + instruction_address(32)
         // User output: program_id(32) + data(data_size)
@@ -920,10 +1005,8 @@ mod tests {
         assert_eq!(dynamic.len(), 1, "1 dynamic column (data_size)");
 
         // Contrast: if user DID request is_committed in output, it would be counted
-        let (fixed_with, dynamic_with) = legacy_weight_for(
-            &["program_id", "data", "is_committed"],
-            Some(instr),
-        );
+        let (fixed_with, dynamic_with) =
+            legacy_weight_for(&["program_id", "data", "is_committed"], Some(instr));
         assert_eq!(fixed_with, 5 * 32, "5 fixed columns (with is_committed)");
         assert_eq!(dynamic_with.len(), 1);
     }

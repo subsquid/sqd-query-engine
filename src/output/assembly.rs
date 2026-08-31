@@ -1,21 +1,24 @@
 use crate::metadata::DatasetDescription;
+use crate::output::arrow_out::{
+    dedup_first, filter_to_blocks, hexify_group, project_columns, write_arrow_frames, ArrowOutput,
+    OutputFormat,
+};
 use crate::output::block_index::{
     build_block_index, collect_block_numbers, collect_boundary_blocks, compute_block_range,
 };
-use crate::output::columns::{find_address_column, group_keys_for_relation, physical_output_columns, required_output_columns, resolve_output_columns, resolve_relation_output_columns};
+use crate::output::columns::{
+    find_address_column, group_keys_for_relation, physical_output_columns, required_output_columns,
+    resolve_output_columns, resolve_relation_output_columns,
+};
 use crate::output::encoder::{encode_json_string, snake_to_camel};
 use crate::output::row_writer::{
     build_field_writers, build_full_sort_columns, build_grouped_writers, resolve_grouped_writers,
     resolve_sort_columns, resolve_writers, IndexedBatches,
 };
 use crate::output::weight::{
-    accumulate_block_weights, apply_weight_limit, get_block_number, get_weight_value,
-    primary_weight_params, weight_cutoff_block, weight_scan_columns, TableOutput,
+    accumulate_block_weights, apply_weight_limit, block_scan_columns, get_block_number,
+    get_weight_value, primary_weight_params, weight_cutoff_block, weight_scan_columns, TableOutput,
     MAX_RESPONSE_BYTES,
-};
-use crate::output::arrow_out::{
-    dedup_first, filter_to_blocks, hexify_group, project_columns, write_arrow_frames, ArrowOutput,
-    OutputFormat,
 };
 use crate::output::writer::QueryOutput;
 use crate::query::{Plan, RelationKind};
@@ -297,7 +300,12 @@ fn execute_chunk_fmt(
                 });
                 header_to_block = effective_to_block;
             }
-            elapsed!(t_phase1, "weight pre-scan", "cutoff -> {:?}", effective_to_block);
+            elapsed!(
+                t_phase1,
+                "weight pre-scan",
+                "cutoff -> {:?}",
+                effective_to_block
+            );
         }
 
         // Budget early-stop applies to block-sorted, non-include-all-blocks tables
@@ -374,7 +382,7 @@ fn execute_chunk_fmt(
         let (actual_min_block, actual_max_block) = compute_block_range(&batches, bn_col_name);
 
         // Execute relations (skip if primary scan returned no rows)
-        let mut relation_batches: HashMap<String, Vec<RecordBatch>> = HashMap::new();
+        let mut relation_batches: HashMap<usize, Vec<RecordBatch>> = HashMap::new();
 
         let has_primary_rows = batches.iter().any(|b| b.num_rows() > 0);
         if has_primary_rows && !table_plan.relations.is_empty() {
@@ -497,7 +505,7 @@ fn execute_chunk_fmt(
 
             // Scan + join relations in parallel
             let t_rel = timer!();
-            let rel_results: Vec<(String, Result<Vec<RecordBatch>>)> = (0..table_plan
+            let rel_results: Vec<(usize, Result<Vec<RecordBatch>>)> = (0..table_plan
                 .relations
                 .len())
                 .into_par_iter()
@@ -518,16 +526,14 @@ fn execute_chunk_fmt(
                     let rel_req_cols = rel_table_desc
                         .map(|d| required_output_columns(&rel.output_columns, d))
                         .unwrap_or_default();
-                    let rel_req_refs: Vec<&str> =
-                        rel_req_cols.iter().map(|s| s.as_str()).collect();
+                    let rel_req_refs: Vec<&str> = rel_req_cols.iter().map(|s| s.as_str()).collect();
 
                     let mut rel_request = ScanRequest::new(rel_col_refs);
                     rel_request.from_block = actual_min_block;
                     rel_request.to_block = actual_max_block;
                     rel_request.required_columns = rel_req_refs;
                     if let Some(desc) = rel_table_desc {
-                        rel_request.block_number_column =
-                            Some(desc.block_number_column.as_str());
+                        rel_request.block_number_column = Some(desc.block_number_column.as_str());
                     }
                     rel_request.key_filter = kf_opt.as_ref();
                     rel_request.hierarchical_filter = hf_opt.as_ref();
@@ -539,7 +545,7 @@ fn execute_chunk_fmt(
                     };
                     let rel_all_batches = match chunk.scan(&rel.target_table, &rel_request) {
                         Ok(b) => b,
-                        Err(e) => return Some((rel.target_table.clone(), Err(e))),
+                        Err(e) => return Some((rel_idx, Err(e))),
                     };
                     let scan_rows: usize = rel_all_batches.iter().map(|b| b.num_rows()).sum();
                     if let Some(t) = t_scan {
@@ -582,8 +588,8 @@ fn execute_chunk_fmt(
                         RelationKind::Children => {
                             if let Some(desc) = rel_table_desc {
                                 if let Some(target_addr) = find_address_column(desc) {
-                                    let source_addr = find_address_column(table_desc)
-                                        .unwrap_or(target_addr);
+                                    let source_addr =
+                                        find_address_column(table_desc).unwrap_or(target_addr);
                                     // Cross-table → inclusive prefix, same-table → strict prefix
                                     let inclusive = source_addr != target_addr;
                                     let gk =
@@ -610,8 +616,8 @@ fn execute_chunk_fmt(
                         RelationKind::Parents => {
                             if let Some(desc) = rel_table_desc {
                                 if let Some(target_addr) = find_address_column(desc) {
-                                    let source_addr = find_address_column(table_desc)
-                                        .unwrap_or(target_addr);
+                                    let source_addr =
+                                        find_address_column(table_desc).unwrap_or(target_addr);
                                     // Cross-table → inclusive prefix, same-table → strict prefix
                                     let inclusive = source_addr != target_addr;
                                     let gk =
@@ -637,22 +643,22 @@ fn execute_chunk_fmt(
                         eprintln!("    {} join: {:.2?}", rel.target_table, t.elapsed());
                     }
 
-                    Some((rel.target_table.clone(), joined))
+                    Some((rel_idx, joined))
                 })
                 .collect();
 
             elapsed!(t_rel, "relation scans+joins");
 
-            for (target_table, result) in rel_results {
+            for (rel_idx, result) in rel_results {
                 let rows: Vec<RecordBatch> = result?;
                 if profile {
                     let n: usize = rows.iter().map(|b| b.num_rows()).sum();
-                    eprintln!("    {}: {} rows", target_table, n);
+                    eprintln!(
+                        "    {}: {} rows",
+                        table_plan.relations[rel_idx].target_table, n
+                    );
                 }
-                relation_batches
-                    .entry(target_table)
-                    .or_default()
-                    .extend(rows);
+                relation_batches.entry(rel_idx).or_default().extend(rows);
             }
         }
 
@@ -671,14 +677,11 @@ fn execute_chunk_fmt(
     let block_batches = if chunk.has_table(&plan.block_table) && block_table_desc.is_some() {
         let block_desc = block_table_desc.unwrap();
 
-        // Always read block_number column + requested output columns
+        // Block number + requested output columns + the weight companions those
+        // columns declare (see `block_scan_columns`).
         let bn_col = block_desc.block_number_column.as_str();
-        let mut block_cols: HashSet<&str> = HashSet::default();
-        block_cols.insert(bn_col);
-        for col in &plan.block_output_columns {
-            block_cols.insert(col);
-        }
-        let block_col_vec: Vec<&str> = block_cols.into_iter().collect();
+        let block_cols = block_scan_columns(&plan.block_output_columns, block_desc);
+        let block_col_vec: Vec<&str> = block_cols.iter().map(|s| s.as_str()).collect();
         let block_req_cols = required_output_columns(&plan.block_output_columns, block_desc);
         let block_req_refs: Vec<&str> = block_req_cols.iter().map(|s| s.as_str()).collect();
 
@@ -759,16 +762,22 @@ fn execute_chunk_fmt(
             if let Some(output) = table_outputs.get(&table_plan.table) {
                 let td = metadata.table(&table_plan.table).unwrap();
                 srcs.push(Src {
-                    qn: td.query_name.clone().unwrap_or_else(|| table_plan.table.clone()),
+                    qn: td
+                        .query_name
+                        .clone()
+                        .unwrap_or_else(|| table_plan.table.clone()),
                     td,
                     out_cols: &table_plan.output_columns,
                     batches: &output.batches,
                 });
-                for rel in &table_plan.relations {
-                    if let Some(rb) = output.relation_batches.get(&rel.target_table) {
+                for (rel_idx, rel) in table_plan.relations.iter().enumerate() {
+                    if let Some(rb) = output.relation_batches.get(&rel_idx) {
                         if let Some(rd) = metadata.table(&rel.target_table) {
                             srcs.push(Src {
-                                qn: rd.query_name.clone().unwrap_or_else(|| rel.target_table.clone()),
+                                qn: rd
+                                    .query_name
+                                    .clone()
+                                    .unwrap_or_else(|| rel.target_table.clone()),
                                 td: rd,
                                 out_cols: &rel.output_columns,
                                 batches: rb,
@@ -882,7 +891,14 @@ fn execute_chunk_fmt(
                 projected
             };
 
-            groups.push((qn.clone(), if binary { hexify_group(batches, td) } else { batches }));
+            groups.push((
+                qn.clone(),
+                if binary {
+                    hexify_group(batches, td)
+                } else {
+                    batches
+                },
+            ));
         }
 
         let data = write_arrow_frames(Vec::new(), &groups, compress)?;
@@ -934,8 +950,8 @@ fn execute_chunk_fmt(
                 sort_col_resolved,
             });
 
-            for rel in &table_plan.relations {
-                if let Some(rel_batches) = relation_batches.remove(&rel.target_table) {
+            for (rel_idx, rel) in table_plan.relations.iter().enumerate() {
+                if let Some(rel_batches) = relation_batches.remove(&rel_idx) {
                     if let Some(rd) = metadata.table(&rel.target_table) {
                         let rel_bn = rd.block_number_column.as_str();
                         let rel_qn = rd.query_name.as_deref().unwrap_or(&rel.target_table);
@@ -1183,12 +1199,21 @@ mod tests {
 
         // `topics` (virtual Roll) is expanded to physical topic0..3, not dropped.
         let cols = &frames["logs"].0;
-        assert!(cols.contains(&"topic0".to_string()), "topic0 present: {cols:?}");
+        assert!(
+            cols.contains(&"topic0".to_string()),
+            "topic0 present: {cols:?}"
+        );
         assert!(cols.contains(&"topic1".to_string()), "topic1 present");
         assert!(cols.contains(&"address".to_string()));
-        assert!(cols.contains(&"block_number".to_string()), "join key present");
+        assert!(
+            cols.contains(&"block_number".to_string()),
+            "join key present"
+        );
         // Internal scan/weight columns must NOT leak into output.
-        assert!(!cols.contains(&"data_size".to_string()), "no internal data_size: {cols:?}");
+        assert!(
+            !cols.contains(&"data_size".to_string()),
+            "no internal data_size: {cols:?}"
+        );
     }
 
     #[test]
@@ -1281,7 +1306,9 @@ mod tests {
         let jcounts = json_item_counts(&json);
         let frames = read_arrow_frames(&arrow);
         assert_eq!(frames["instructions"].1, jcounts["instructions"]);
-        assert!(frames["instructions"].0.contains(&"instruction_address".to_string()));
+        assert!(frames["instructions"]
+            .0
+            .contains(&"instruction_address".to_string()));
     }
 
     #[test]
@@ -1323,15 +1350,31 @@ mod tests {
             if name == "logs" {
                 let reader = StreamReader::try_new(Cursor::new(payload), None).unwrap();
                 let schema = reader.schema();
-                let addr = schema.field_with_name("address").unwrap().data_type().clone();
-                let topic0 = schema.field_with_name("topic0").unwrap().data_type().clone();
-                let topic3 = schema.field_with_name("topic3").unwrap().data_type().clone();
+                let addr = schema
+                    .field_with_name("address")
+                    .unwrap()
+                    .data_type()
+                    .clone();
+                let topic0 = schema
+                    .field_with_name("topic0")
+                    .unwrap()
+                    .data_type()
+                    .clone();
+                let topic3 = schema
+                    .field_with_name("topic3")
+                    .unwrap()
+                    .data_type()
+                    .clone();
                 let data = schema.field_with_name("data").unwrap().data_type().clone();
                 assert_eq!(addr, DataType::Binary, "address hex → Binary");
                 assert_eq!(topic0, DataType::Binary, "topic0 hex → Binary");
                 // topic3 is all-null for 3-topic Transfer logs but is still Binary:
                 // the type comes from metadata, not from the values present.
-                assert_eq!(topic3, DataType::Binary, "all-null topic3 → Binary (stable)");
+                assert_eq!(
+                    topic3,
+                    DataType::Binary,
+                    "all-null topic3 → Binary (stable)"
+                );
                 assert_eq!(data, DataType::Binary, "data hex → Binary");
                 checked = true;
             }
