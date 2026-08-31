@@ -116,14 +116,15 @@ pub fn find_children(
             .column(addr_idx)
             .as_any()
             .downcast_ref::<GenericListArray<i32>>()
-            .ok_or_else(|| {
-                anyhow!(
-                    "'{}' must be a List<UInt32> column",
-                    source_address_column
-                )
-            })?;
+            .ok_or_else(|| anyhow!("'{}' must be a List<UInt32> column", source_address_column))?;
 
         for row in 0..batch.num_rows() {
+            // A null address is not the empty address: a row that belongs to no
+            // call would otherwise index as the root one and drag every root call
+            // into the answer.
+            if addr_array.is_null(row) {
+                continue;
+            }
             let Some(gk) = make_group_key(batch, row, &key_indices)? else {
                 continue;
             };
@@ -144,12 +145,7 @@ pub fn find_children(
             .column(addr_idx)
             .as_any()
             .downcast_ref::<GenericListArray<i32>>()
-            .ok_or_else(|| {
-                anyhow!(
-                    "'{}' must be a List<UInt32> column",
-                    target_address_column
-                )
-            })?;
+            .ok_or_else(|| anyhow!("'{}' must be a List<UInt32> column", target_address_column))?;
 
         let mut matches = Vec::with_capacity(batch.num_rows());
         for row in 0..batch.num_rows() {
@@ -231,14 +227,15 @@ pub fn find_parents(
             .column(addr_idx)
             .as_any()
             .downcast_ref::<GenericListArray<i32>>()
-            .ok_or_else(|| {
-                anyhow!(
-                    "'{}' must be a List<UInt32> column",
-                    source_address_column
-                )
-            })?;
+            .ok_or_else(|| anyhow!("'{}' must be a List<UInt32> column", source_address_column))?;
 
         for row in 0..batch.num_rows() {
+            // A null address is not the empty address: a row that belongs to no
+            // call would otherwise index as the root one and drag every root call
+            // into the answer.
+            if addr_array.is_null(row) {
+                continue;
+            }
             let Some(gk) = make_group_key(batch, row, &key_indices)? else {
                 continue;
             };
@@ -259,12 +256,7 @@ pub fn find_parents(
             .column(addr_idx)
             .as_any()
             .downcast_ref::<GenericListArray<i32>>()
-            .ok_or_else(|| {
-                anyhow!(
-                    "'{}' must be a List<UInt32> column",
-                    target_address_column
-                )
-            })?;
+            .ok_or_else(|| anyhow!("'{}' must be a List<UInt32> column", target_address_column))?;
 
         let mut matches = Vec::with_capacity(batch.num_rows());
         for row in 0..batch.num_rows() {
@@ -355,6 +347,103 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    /// A batch whose address column is nullable, so a source row can say "no
+    /// address" rather than "the empty address".
+    fn batch_with_null_addresses(
+        block_numbers: Vec<u64>,
+        tx_indices: Vec<u32>,
+        addresses: Vec<Option<Vec<u32>>>,
+        data: Vec<&str>,
+    ) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("block_number", DataType::UInt64, false),
+            Field::new("transaction_index", DataType::UInt32, false),
+            Field::new(
+                "instruction_address",
+                DataType::List(Arc::new(Field::new("item", DataType::UInt32, true))),
+                true,
+            ),
+            Field::new("data", DataType::Utf8, false),
+        ]));
+
+        let mut list_builder = ListBuilder::new(UInt32Builder::new()).with_field(Field::new(
+            "item",
+            DataType::UInt32,
+            true,
+        ));
+        for addr in &addresses {
+            match addr {
+                Some(addr) => {
+                    for &v in addr {
+                        list_builder.values().append_value(v);
+                    }
+                    list_builder.append(true);
+                }
+                None => list_builder.append(false),
+            }
+        }
+
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(UInt64Array::from(block_numbers)),
+                Arc::new(UInt32Array::from(tx_indices)),
+                Arc::new(list_builder.finish()),
+                Arc::new(StringArray::from(data)),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// A null address is not the empty address. Both serialize to zero elements,
+    /// so a source row that belongs to nothing used to index as the root and pull
+    /// the root row into every answer.
+    #[test]
+    fn test_a_null_source_address_matches_nothing() {
+        let source = vec![batch_with_null_addresses(
+            vec![1],
+            vec![0],
+            vec![None],
+            vec!["belongs to no call"],
+        )];
+        let target = vec![make_instruction_batch(
+            vec![1, 1],
+            vec![0, 0],
+            vec![vec![], vec![0]],
+            vec!["root", "child"],
+        )];
+
+        for (label, found) in [
+            (
+                "parents",
+                find_parents(
+                    &source,
+                    &target,
+                    &["block_number", "transaction_index"],
+                    "instruction_address",
+                    "instruction_address",
+                    true,
+                )
+                .unwrap(),
+            ),
+            (
+                "children",
+                find_children(
+                    &source,
+                    &target,
+                    &["block_number", "transaction_index"],
+                    "instruction_address",
+                    "instruction_address",
+                    true,
+                )
+                .unwrap(),
+            ),
+        ] {
+            let rows: usize = found.iter().map(|b| b.num_rows()).sum();
+            assert_eq!(rows, 0, "{label}: a null address relates to nothing");
+        }
     }
 
     #[test]
