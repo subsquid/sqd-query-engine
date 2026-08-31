@@ -99,6 +99,24 @@ pub struct TableDescription {
 
 }
 
+impl TableDescription {
+    /// Whether a `fields` key names something this table can emit: an ordinary
+    /// column, a virtual field, or a field-group request key. System columns —
+    /// blooms, size counters, filter-only extractions — are not selectable, and
+    /// neither is anything the catalog does not know.
+    pub fn is_selectable_field(&self, name: &str) -> bool {
+        if let Some(col) = self.columns.get(name) {
+            return !col.system;
+        }
+        if self.virtual_fields.contains_key(name) {
+            return true;
+        }
+        self.field_groups
+            .as_ref()
+            .is_some_and(|fg| fg.physical_column_for_request(name).is_some())
+    }
+}
+
 fn default_block_number_column() -> String {
     "block_number".to_string()
 }
