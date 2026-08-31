@@ -575,20 +575,27 @@ mod tests {
         let meta = solana_meta();
         let instr = meta.table("instructions").unwrap();
 
-        // d1 is system=true, should contribute 0 weight
-        let (fixed, dynamic) = weight_for(&["d1"], Some(instr));
-        assert_eq!(fixed, 0, "system columns should not contribute weight");
-        assert!(dynamic.is_empty());
+        for col in ["data_size", "accounts_size", "accounts_bloom", "b9"] {
+            let (fixed, dynamic) = weight_for(&[col], Some(instr));
+            assert_eq!(fixed, 0, "system column '{}' must not contribute weight", col);
+            assert!(dynamic.is_empty());
+        }
+    }
 
-        // d8 is also system
-        let (fixed, dynamic) = weight_for(&["d8"], Some(instr));
-        assert_eq!(fixed, 0);
-        assert!(dynamic.is_empty());
+    /// A column read by a filter is not thereby an internal column. The
+    /// selectable discriminator prefixes are emitted, so they must be weighed;
+    /// counting them as zero under-weighs a block and truncates later than the
+    /// cap allows (INV-B10).
+    #[test]
+    fn test_selectable_discriminator_columns_are_weighed() {
+        let meta = solana_meta();
+        let instr = meta.table("instructions").unwrap();
 
-        // data_size is system
-        let (fixed, dynamic) = weight_for(&["data_size"], Some(instr));
-        assert_eq!(fixed, 0);
-        assert!(dynamic.is_empty());
+        for col in ["d1", "d2", "d4", "d8"] {
+            let (fixed, dynamic) = weight_for(&[col], Some(instr));
+            assert_eq!(fixed, 32, "'{}' is selectable and must be weighed", col);
+            assert!(dynamic.is_empty());
+        }
     }
 
     #[test]
@@ -746,9 +753,8 @@ mod tests {
         let meta = solana_meta();
         let instr = meta.table("instructions").unwrap();
 
-        // Same as above but user also requests d1, d8, is_committed
-        // d1 and d8 are system → excluded from weight
-        // is_committed is NOT system → 32 bytes
+        // Same as above but the user also requests d1, d8 and is_committed —
+        // all three are selectable, so all three are weighed.
         let (fixed, dynamic) = legacy_weight_for(
             &[
                 "transaction_index",
@@ -763,10 +769,9 @@ mod tests {
             Some(instr),
         );
 
-        // block_number(32) + transaction_index(32) + instruction_address(32) +
-        // program_id(32) + is_committed(32) + accounts_roll(0) + data(dynamic) +
-        // d1(system=0) + d8(system=0)
-        assert_eq!(fixed, 5 * 32, "5 non-system non-dynamic columns × 32");
+        // block_number, transaction_index, instruction_address, program_id,
+        // is_committed, d1, d8 — accounts rolls to 0 and data is dynamic.
+        assert_eq!(fixed, 7 * 32, "7 non-system non-dynamic columns × 32");
         assert_eq!(dynamic.len(), 2);
     }
 

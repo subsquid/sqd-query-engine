@@ -12,6 +12,7 @@ pub fn resolve_encoder(data_type: &DataType, encoding: Option<&JsonEncoding>) ->
     match encoding {
         Some(JsonEncoding::String) => encode_bignum,
         Some(JsonEncoding::Json) => encode_json_passthrough,
+        Some(JsonEncoding::HexNumber) => resolve_hex_number_encoder(data_type),
         Some(JsonEncoding::SolanaTxVersion) => encode_solana_tx_version,
         Some(JsonEncoding::TimestampMillisecond) => encode_timestamp_millisecond_raw,
         Some(JsonEncoding::Hex) | Some(JsonEncoding::Base58) | None => {
@@ -448,6 +449,40 @@ fn encode_hex_bytes(bytes: &[u8], buf: &mut Vec<u8>) {
     }
     buf.push(b'"');
 }
+
+/// `hexNumber` renders an unsigned integer as a quoted, zero-padded hex string
+/// of the column's physical width. The width comes from the array rather than
+/// the catalog so that a `uint16` always renders four digits, whatever value it
+/// holds.
+fn resolve_hex_number_encoder(data_type: &DataType) -> EncoderFn {
+    match data_type {
+        DataType::UInt8 => encode_hex_number_u8,
+        DataType::UInt16 => encode_hex_number_u16,
+        DataType::UInt32 => encode_hex_number_u32,
+        DataType::UInt64 => encode_hex_number_u64,
+        // A hex_number declaration on a non-integer column is a catalog error,
+        // caught at load; fall back to the column's natural rendering.
+        other => resolve_value_encoder(other),
+    }
+}
+
+macro_rules! hex_number_encoder {
+    ($name:ident, $array:ty) => {
+        fn $name(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
+            if array.is_null(row) {
+                buf.extend_from_slice(b"null");
+                return;
+            }
+            let a = array.as_any().downcast_ref::<$array>().unwrap();
+            encode_hex_bytes(&a.value(row).to_be_bytes(), buf);
+        }
+    };
+}
+
+hex_number_encoder!(encode_hex_number_u8, UInt8Array);
+hex_number_encoder!(encode_hex_number_u16, UInt16Array);
+hex_number_encoder!(encode_hex_number_u32, UInt32Array);
+hex_number_encoder!(encode_hex_number_u64, UInt64Array);
 
 fn encode_list(array: &GenericListArray<i32>, row: usize, buf: &mut Vec<u8>) {
     let values = array.value(row);
