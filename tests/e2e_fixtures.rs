@@ -152,7 +152,6 @@ solana_fixture!(log_program_id);
 solana_fixture!(rewards);
 solana_fixture!(tx_instructions_from_instruction);
 
-
 // ---------------------------------------------------------------------------
 // Ethereum (EVM) fixtures
 // ---------------------------------------------------------------------------
@@ -223,7 +222,6 @@ evm_fixture!(state_diffs_no_predicate_with_transaction);
 evm_fixture!(trace_call_type);
 evm_fixture!(trace_value_non_zero);
 
-
 evm_fixture!(transaction_traces_for_traces);
 
 // ---------------------------------------------------------------------------
@@ -249,28 +247,6 @@ bitcoin_fixture!(input_script_type_filtering);
 bitcoin_fixture!(output_address_filtering);
 bitcoin_fixture!(output_filtering_with_tx_data);
 bitcoin_fixture!(output_script_type_filtering);
-
-// ---------------------------------------------------------------------------
-// Fuel fixtures
-// ---------------------------------------------------------------------------
-
-macro_rules! fuel_fixture {
-    ($name:ident) => {
-        paste::paste! {
-            #[test]
-            fn [<fuel_ $name>]() {
-                test_fixture("fuel", "metadata/fuel.yaml", stringify!($name));
-            }
-        }
-    };
-}
-
-fuel_fixture!(asset_transfers);
-fuel_fixture!(created_contracts);
-fuel_fixture!(log_data_from_contract);
-// NET-92: requesting a schema column absent from the parquet is a hard error.
-fuel_fixture!(missing_block_fields);
-fuel_fixture!(missing_field_with_join);
 
 // ---------------------------------------------------------------------------
 // Optimism fixtures (uses EVM metadata)
@@ -462,7 +438,12 @@ fn fixture_declarations_match_the_fixture_tree() {
             .lines()
             .skip(index)
             .take(12)
-            .find_map(|l| l.split_once("test_fixture(\"")?.1.split_once('\"').map(|p| p.0))
+            .find_map(|l| {
+                l.split_once("test_fixture(\"")?
+                    .1
+                    .split_once('\"')
+                    .map(|p| p.0)
+            })
             .unwrap_or_else(|| panic!("macro {name} has no test_fixture call"));
         macro_dataset.push((name.to_string(), dataset.to_string()));
     }
@@ -505,9 +486,15 @@ fn fixture_declarations_match_the_fixture_tree() {
 
     for (dataset, dirs) in &declared {
         for dir in dirs {
-            let query = root.join(dataset).join("queries").join(dir).join("query.json");
+            let query = root
+                .join(dataset)
+                .join("queries")
+                .join(dir)
+                .join("query.json");
             if !query.exists() {
-                problems.push(format!("{dataset}/{dir}: declared, but no query.json on disk"));
+                problems.push(format!(
+                    "{dataset}/{dir}: declared, but no query.json on disk"
+                ));
             }
         }
     }
@@ -527,7 +514,9 @@ fn fixture_declarations_match_the_fixture_tree() {
                 .to_string_lossy()
                 .to_string();
             if !known.contains(&name) {
-                problems.push(format!("{dataset}/{name}: fixture on disk, but no test declares it"));
+                problems.push(format!(
+                    "{dataset}/{name}: fixture on disk, but no test declares it"
+                ));
             }
         }
     }

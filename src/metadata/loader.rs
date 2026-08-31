@@ -604,15 +604,29 @@ tables:
     #[test]
     fn test_bundled_catalogs_validate() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("metadata");
-        let mut loaded = 0;
+        let mut loaded: Vec<String> = Vec::new();
         for entry in std::fs::read_dir(&dir).unwrap() {
             let path = entry.unwrap().path();
             if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
                 continue;
             }
             load_dataset_description(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-            loaded += 1;
+            loaded.push(path.file_stem().unwrap().to_string_lossy().to_string());
         }
-        assert!(loaded >= 7, "expected the bundled catalogs, found {loaded}");
+        loaded.sort();
+
+        // Named rather than counted: a dataset appearing or disappearing is a
+        // decision, and it should read as one here.
+        assert_eq!(
+            loaded,
+            [
+                "bitcoin",
+                "evm",
+                "hyperliquid_fills",
+                "hyperliquid_replica_cmds",
+                "solana",
+                "substrate",
+            ]
+        );
     }
 }
