@@ -765,6 +765,18 @@ pub fn scan(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<RecordBat
         }
     }
 
+    // The same applies to a *filtered* column. Reading it is what makes the
+    // filter mean anything, and a filter that cannot be evaluated does not
+    // narrow the scan — it widens it to everything, which no client can detect
+    // in the response (INV-X3).
+    for pred in &request.predicates {
+        for col in pred.required_columns() {
+            if table.column_index(col).is_none() {
+                anyhow::bail!("column '{}' is not found in '{}'", col, table.name());
+            }
+        }
+    }
+
     // 1. Determine all columns we need to read (output + predicate + block range)
     let all_columns = collect_read_columns(table, request);
 
