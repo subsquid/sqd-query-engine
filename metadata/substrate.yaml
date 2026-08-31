@@ -191,18 +191,23 @@ tables:
         type: list_string
       _evm_log_address:
         type: string
+        json_encoding: hex
         system: true
       _evm_log_topic0:
         type: string
+        json_encoding: hex
         system: true
       _evm_log_topic1:
         type: string
+        json_encoding: hex
         system: true
       _evm_log_topic2:
         type: string
+        json_encoding: hex
         system: true
       _evm_log_topic3:
         type: string
+        json_encoding: hex
         system: true
       _contract_address:
         type: string

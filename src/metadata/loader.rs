@@ -99,12 +99,44 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
         // query — it removes a filter, and the query it was meant to narrow
         // comes back wrong instead.
         for filter in &table.filters {
+            let column = table.columns.get(filter).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "table '{}': filter '{}' not found in columns",
+                    table_name,
+                    filter
+                )
+            })?;
             anyhow::ensure!(
-                table.columns.contains_key(filter),
-                "table '{}': filter '{}' not found in columns",
+                !column.system,
+                "table '{}': filter '{}' names a system column, which is not part of the \
+                 public surface",
                 table_name,
                 filter
             );
+        }
+
+        // A special filter reaches its column the same way a declared filter
+        // does, and a typo in one is just as invisible.
+        for (filter_name, special) in &table.special_filters {
+            let columns: Vec<&String> = match special {
+                crate::metadata::SpecialFilter::Discriminator { columns } => {
+                    columns.values().collect()
+                }
+                crate::metadata::SpecialFilter::BloomFilter { column, .. }
+                | crate::metadata::SpecialFilter::RangeGte { column }
+                | crate::metadata::SpecialFilter::RangeLte { column }
+                | crate::metadata::SpecialFilter::ColumnAlias { column }
+                | crate::metadata::SpecialFilter::GteConst { column, .. } => vec![column],
+            };
+            for column in columns {
+                anyhow::ensure!(
+                    table.columns.contains_key(column),
+                    "table '{}': special filter '{}' targets column '{}', which is not there",
+                    table_name,
+                    filter_name,
+                    column
+                );
+            }
         }
 
         // Fork detection is off when nothing is declared, so a typo here would
@@ -152,6 +184,29 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
                 key,
                 column,
                 alias.table
+            );
+        }
+
+        // An implicit predicate is what makes an alias a *narrower* view of its
+        // table. Naming a column that is not there widens it back to the whole
+        // table without saying so.
+        for column in alias.implicit_predicates.keys() {
+            anyhow::ensure!(
+                table.columns.contains_key(column),
+                "alias '{}': implicit predicate on '{}', which '{}' does not have",
+                alias_name,
+                column,
+                alias.table
+            );
+        }
+
+        for (relation_name, relation) in &alias.relations {
+            anyhow::ensure!(
+                desc.tables.contains_key(&relation.table),
+                "alias '{}': relation '{}' targets table '{}', which the dataset does not have",
+                alias_name,
+                relation_name,
+                relation.table
             );
         }
     }
@@ -380,6 +435,7 @@ tables:
 query_aliases:
   view:
     table: no_such_table
+    filters: []
 "#;
         assert!(parse_dataset_description(bad_table).is_err());
 
@@ -398,7 +454,9 @@ query_aliases:
     table: items
     filters: [ no_such_column ]
 "#;
-        let err = parse_dataset_description(bad_filter).unwrap_err().to_string();
+        let err = parse_dataset_description(bad_filter)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("no_such_column"), "got: {err}");
 
         let bad_target = r#"
@@ -552,8 +610,7 @@ tables:
             if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
                 continue;
             }
-            load_dataset_description(&path)
-                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            load_dataset_description(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
             loaded += 1;
         }
         assert!(loaded >= 7, "expected the bundled catalogs, found {loaded}");
