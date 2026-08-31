@@ -57,6 +57,23 @@ const KNOWN_TOP_KEYS: &[&str] = &[
     "parentBlockHash",
 ];
 
+/// A block bound is an unsigned 64-bit integer or absent. A present-but-malformed
+/// bound is an error rather than a default: coercing `{"fromBlock": "18000000"}`
+/// to genesis answers a different question than the one asked, and says nothing
+/// about it.
+fn parse_block_bound(value: Option<&serde_json::Value>, key: &str) -> Result<Option<u64>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    value
+        .as_u64()
+        .map(Some)
+        .ok_or_else(|| anyhow!("'{}' must be an unsigned integer, got {}", key, value))
+}
+
 /// Parse a JSON query against a dataset description.
 pub fn parse_query(json_bytes: &[u8], metadata: &DatasetDescription) -> Result<Query> {
     let raw: serde_json::Value = serde_json::from_slice(json_bytes)?;
@@ -77,8 +94,8 @@ pub fn parse_query(json_bytes: &[u8], metadata: &DatasetDescription) -> Result<Q
     );
 
     // Block range
-    let from_block = obj.get("fromBlock").and_then(|v| v.as_u64()).unwrap_or(0);
-    let to_block = obj.get("toBlock").and_then(|v| v.as_u64());
+    let from_block = parse_block_bound(obj.get("fromBlock"), "fromBlock")?.unwrap_or(0);
+    let to_block = parse_block_bound(obj.get("toBlock"), "toBlock")?;
     if let Some(to) = to_block {
         ensure!(from_block <= to, "'toBlock' must be >= 'fromBlock'");
     }
@@ -468,5 +485,61 @@ mod tests {
         }"#;
         let query = parse_query(json, &meta).unwrap();
         assert!(query.items.contains_key("blocks"));
+    }
+
+    /// INV-Q4: a present-but-malformed block bound is an error, never
+    /// coerced. `{"fromBlock": "18000000"}` is a common client bug; silently
+    /// scanning from genesis hides it.
+    #[test]
+    fn test_malformed_block_bounds_error() {
+        let meta = evm_metadata();
+        let bad = [
+            br#"{"type":"evm","fromBlock":"18000000"}"#.to_vec(),
+            br#"{"type":"evm","fromBlock":"abc"}"#.to_vec(),
+            br#"{"type":"evm","fromBlock":-1}"#.to_vec(),
+            br#"{"type":"evm","fromBlock":1.5}"#.to_vec(),
+            br#"{"type":"evm","fromBlock":1e30}"#.to_vec(),
+            br#"{"type":"evm","toBlock":-1}"#.to_vec(),
+            br#"{"type":"evm","toBlock":"100"}"#.to_vec(),
+            br#"{"type":"evm","toBlock":[]}"#.to_vec(),
+        ];
+        for json in &bad {
+            assert!(
+                parse_query(json, &meta).is_err(),
+                "expected error for {}",
+                std::str::from_utf8(json).unwrap()
+            );
+        }
+    }
+
+    /// The defaults survive: absent means genesis / unbounded (INV-Q9), and an
+    /// explicit `null` is treated as absent rather than as a malformed value.
+    #[test]
+    fn test_block_bounds_defaults_and_null() {
+        let meta = evm_metadata();
+        let q = parse_query(br#"{"type":"evm"}"#, &meta).unwrap();
+        assert_eq!(q.from_block, 0);
+        assert_eq!(q.to_block, None);
+
+        let q = parse_query(
+            br#"{"type":"evm","fromBlock":null,"toBlock":null}"#,
+            &meta,
+        )
+        .unwrap();
+        assert_eq!(q.from_block, 0);
+        assert_eq!(q.to_block, None);
+    }
+
+    /// INV-P14: a well-formed bound beyond the chunk's physical range matches
+    /// nothing — it is not a parse error.
+    #[test]
+    fn test_out_of_chunk_range_block_bound_is_not_an_error() {
+        let meta = evm_metadata();
+        let q = parse_query(
+            br#"{"type":"evm","fromBlock":1099511627776}"#,
+            &meta,
+        )
+        .unwrap();
+        assert_eq!(q.from_block, 1_099_511_627_776);
     }
 }
