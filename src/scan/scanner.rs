@@ -6,9 +6,7 @@ use arrow::array::*;
 use arrow::compute::kernels::boolean::and;
 use arrow::compute::kernels::cmp::{gt_eq, lt_eq};
 use arrow::datatypes::{Schema, SchemaRef};
-use parquet::arrow::arrow_reader::{
-    ArrowPredicateFn, ParquetRecordBatchReaderBuilder, RowFilter, RowSelection, RowSelector,
-};
+use parquet::arrow::arrow_reader::{ArrowPredicateFn, ParquetRecordBatchReaderBuilder, RowFilter};
 use parquet::arrow::ProjectionMask;
 use rayon::prelude::*;
 use rustc_hash::FxHashSet as HashSet;
@@ -150,6 +148,9 @@ impl KeyFilter {
                     .and_then(|c| TypedKeyColumn::resolve(c.as_ref()));
                 if let (Some(c0), Some(c1)) = (c0, c1) {
                     for row in 0..batch.num_rows() {
+                        if c0.is_null(row) || c1.is_null(row) {
+                            continue;
+                        }
                         set.insert(pack16(c0.get_u64(row), c1.get_u64(row)));
                     }
                 }
@@ -175,14 +176,12 @@ impl KeyFilter {
                 let mut key_buf = Vec::with_capacity(left_keys.len() * 8);
                 for row in 0..batch.num_rows() {
                     key_buf.clear();
-                    for tc in &typed_cols {
-                        if let Some(tc) = tc {
-                            tc.append_to(&mut key_buf, row);
-                        } else {
-                            key_buf.extend_from_slice(&0u64.to_le_bytes());
-                        }
+                    let complete = typed_cols
+                        .iter()
+                        .all(|tc| matches!(tc, Some(tc) if tc.append_to(&mut key_buf, row)));
+                    if complete {
+                        set.insert(key_buf.clone());
                     }
-                    set.insert(key_buf.clone());
                 }
             }
             CompositeKeySet::Wide(set)
@@ -274,13 +273,16 @@ impl HierarchicalFilter {
 
             let mut key_buf = Vec::with_capacity(group_key_columns.len() * 8);
             for row in 0..batch.num_rows() {
+                if addr_list.is_null(row) {
+                    continue;
+                }
+
                 key_buf.clear();
-                for tc in &typed_keys {
-                    if let Some(tc) = tc {
-                        tc.append_to(&mut key_buf, row);
-                    } else {
-                        key_buf.extend_from_slice(&0u64.to_le_bytes());
-                    }
+                let complete = typed_keys
+                    .iter()
+                    .all(|tc| matches!(tc, Some(tc) if tc.append_to(&mut key_buf, row)));
+                if !complete {
+                    continue;
                 }
                 let addr = extract_address_values(addr_list, row);
                 source_addresses
@@ -372,7 +374,7 @@ fn hierarchical_mask(
         if let (Some(ref c0), Some(ref c1)) = (&typed_keys[0], &typed_keys[1]) {
             let mut key_buf = [0u8; 16];
             for row in 0..len {
-                if addr_list.is_null(row) {
+                if addr_list.is_null(row) || c0.is_null(row) || c1.is_null(row) {
                     builder.append(false);
                     continue;
                 }
@@ -403,12 +405,12 @@ fn hierarchical_mask(
         }
 
         key_buf.clear();
-        for tc in &typed_keys {
-            if let Some(tc) = tc {
-                tc.append_to(&mut key_buf, row);
-            } else {
-                key_buf.extend_from_slice(&0u64.to_le_bytes());
-            }
+        let complete = typed_keys
+            .iter()
+            .all(|tc| matches!(tc, Some(tc) if tc.append_to(&mut key_buf, row)));
+        if !complete {
+            builder.append(false);
+            continue;
         }
 
         let matches = source_addresses
@@ -572,7 +574,29 @@ impl<'a> TypedKeyColumn<'a> {
     }
 
     #[inline(always)]
-    fn append_to(&self, buf: &mut Vec<u8>, row: usize) {
+    fn is_null(&self, row: usize) -> bool {
+        match self {
+            Self::U64(a) => a.is_null(row),
+            Self::U32(a) => a.is_null(row),
+            Self::U16(a) => a.is_null(row),
+            Self::U8(a) => a.is_null(row),
+            Self::I64(a) => a.is_null(row),
+            Self::I32(a) => a.is_null(row),
+            Self::I16(a) => a.is_null(row),
+            Self::Str(a) => a.is_null(row),
+            Self::List(a) => a.is_null(row),
+        }
+    }
+
+    /// Append this column's value at `row`, or report that there is none. A null
+    /// list serializes byte-for-byte like an empty one, so without this a row
+    /// that says "no call" joins to the call at the empty address.
+    #[inline(always)]
+    fn append_to(&self, buf: &mut Vec<u8>, row: usize) -> bool {
+        if self.is_null(row) {
+            return false;
+        }
+
         match self {
             Self::U64(a) => buf.extend_from_slice(&a.value(row).to_le_bytes()),
             Self::U32(a) => buf.extend_from_slice(&(a.value(row) as u64).to_le_bytes()),
@@ -618,6 +642,8 @@ impl<'a> TypedKeyColumn<'a> {
                 }
             }
         }
+
+        true
     }
 
     /// Get value as u64. Only for integer types.
@@ -684,7 +710,9 @@ fn composite_key_in_set_mask(
         CompositeKeySet::Fixed16(set) => {
             if let [Some(c0), Some(c1)] = typed_cols.as_slice() {
                 for row in 0..len {
-                    builder.append(set.contains(&pack16(c0.get_u64(row), c1.get_u64(row))));
+                    let present = !c0.is_null(row) && !c1.is_null(row);
+                    builder
+                        .append(present && set.contains(&pack16(c0.get_u64(row), c1.get_u64(row))));
                 }
             } else {
                 builder.append_n(len, false);
@@ -696,14 +724,10 @@ fn composite_key_in_set_mask(
             let mut key_buf = Vec::with_capacity(key_columns.len() * 8);
             for row in 0..len {
                 key_buf.clear();
-                for typed_col in &typed_cols {
-                    if let Some(tc) = typed_col {
-                        tc.append_to(&mut key_buf, row);
-                    } else {
-                        key_buf.extend_from_slice(&0u64.to_le_bytes());
-                    }
-                }
-                builder.append(set.contains(key_buf.as_slice()));
+                let complete = typed_cols
+                    .iter()
+                    .all(|tc| matches!(tc, Some(tc) if tc.append_to(&mut key_buf, row)));
+                builder.append(complete && set.contains(key_buf.as_slice()));
             }
         }
     }
@@ -714,10 +738,7 @@ fn composite_key_in_set_mask(
 /// Determine all columns a scan must read: requested output + predicate columns
 /// + block-number column + any key/hierarchical filter columns, restricted to
 /// those that actually exist in the table.
-fn collect_read_columns<'a, 'b>(
-    table: &ParquetTable,
-    request: &'b ScanRequest<'a>,
-) -> Vec<&'b str>
+fn collect_read_columns<'a, 'b>(table: &ParquetTable, request: &'b ScanRequest<'a>) -> Vec<&'b str>
 where
     'a: 'b,
 {
@@ -1083,9 +1104,7 @@ fn scan_row_groups(
             // Pass 1: Read only key columns (cheap integers), find matching row indices
             // Pass 2: Read address + data columns only for matching rows via RowSelection
             // This avoids decoding the expensive List column for 98%+ of rows.
-            return scan_hierarchical_two_pass(
-                table, row_groups, request, hf, output_schema,
-            );
+            return scan_hierarchical_two_pass(table, row_groups, request, hf, output_schema);
         } else if let Some(kf) = request.key_filter {
             // KeyFilter only (no hierarchical) — standalone stage
             let key_col_indices: Vec<usize> = kf
@@ -1712,8 +1731,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "hierarchical_filter and predicates must not be set simultaneously")]
     fn test_hierarchical_filter_with_predicates_panics() {
-        let table =
-            ParquetTable::open(&solana_chunk_path().join("instructions.parquet")).unwrap();
+        let table = ParquetTable::open(&solana_chunk_path().join("instructions.parquet")).unwrap();
 
         let pred = RowPredicate::new(vec![crate::scan::predicate::ColumnPredicate {
             column: "program_id".to_string(),

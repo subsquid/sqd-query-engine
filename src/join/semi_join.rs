@@ -1,4 +1,4 @@
-use anyhow::{anyhow, ensure, Result};
+use anyhow::{anyhow, Result};
 use arrow::array::*;
 use arrow::compute;
 use arrow::datatypes::SchemaRef;
