@@ -9,8 +9,7 @@ Delete an entry when the gap closes. If the spec turns out to be wrong and the
 implementation right, fix the spec and delete the entry. The document should tend
 toward empty.
 
-Compared against the reference implementation at
-`/Users/mo4islona/Projects/subsquid/data/crates/query`, as of 2026-07-09.
+Compared against the reference implementation, as of 2026-08-31.
 
 ---
 
@@ -27,20 +26,10 @@ Compared against the reference implementation at
 
 | # | Gap | Invariant | Sev |
 |---|---|---|---|
-| 1 | Filtering on a column absent from the chunk matches **every row** | [INV-X3](07-invariants.md#inv-x3) | **S1** |
-| 2 | `parentBlockHash` is accepted and ignored — no fork detection | [INV-E5](07-invariants.md#inv-e5) | **S1** |
-| 3 | Unknown field names in `fields` are silently dropped | [INV-Q7](07-invariants.md#inv-q7) | **S1** |
-| 4 | Malformed `fromBlock` / `toBlock` coerced to `0` / unbounded | [INV-Q4](07-invariants.md#inv-q4) | **S1** |
-| 5 | The filter surface is open: any column is filterable, including `system` ones | [INV-P15](07-invariants.md#inv-p15) | **S1** |
-| 6 | Scalar string filters are not case-folded; `inList` filters are | [INV-P8](07-invariants.md#inv-p8) | **S1** |
-| 7 | `inList` silently drops values it cannot parse | [INV-Q12](07-invariants.md#inv-q12) | **S1** |
-| 8 | 26 `prod_pattern_*` e2e tests have no fixtures on disk and report green | §8.1 | **S1** |
-| 13 | Solana `d1/d2/d4/d8` emit raw JSON numbers, not `hexNumber` — `d8` loses precision above 2⁵³ | [INV-O9](07-invariants.md#inv-o9) | **S1** |
 | 9 | `tron` dataset is entirely absent | [03-catalog.md §3.4](03-catalog.md) | **S2** |
 | 10 | Five of six Substrate aliases are missing | [03-catalog.md §3.3](03-catalog.md) | **S2** |
-| 11 | EVM `blocks` is missing 5 selectable fields | [03-catalog.md §3.1](03-catalog.md) | **S2** |
-| 12 | EVM `transactions` is missing 4 selectable fields | [03-catalog.md §3.1](03-catalog.md) | **S2** |
 | 14 | Negative values cannot filter signed columns | [INV-P14](07-invariants.md#inv-p14) | **S2** |
+| 24 | The Fuel catalog trails the reference's field list | [03-catalog.md §3.6](03-catalog.md) | **S2** |
 | 15 | `discriminator: []` errors instead of matching nothing | [INV-P3](07-invariants.md#inv-p3) | **S3** |
 | 16 | Bloom ≤ 10 and discriminator-exclusivity validations are absent | [INV-Q10](07-invariants.md#inv-q10), [INV-Q11](07-invariants.md#inv-q11) | **S3** |
 | 17 | Relation block-number collection hardcodes the name `block_number` | [INV-X1](07-invariants.md#inv-x1) | **S3** |
@@ -51,157 +40,8 @@ Compared against the reference implementation at
 | 22 | Weight accumulation is unchecked; a negative size column yields ~`u64::MAX` | [INV-B9](07-invariants.md#inv-b9) | **S4** |
 | 23 | No request byte cap and no `inList` length cap | [INV-Q13](07-invariants.md#inv-q13) | **S4** |
 
----
-
-## S1 — Silent wrong results
-
-### 1. Filtering on an absent column matches every row
-
-`src/scan/predicate.rs:819` — `RowPredicate::evaluate` skips a column predicate
-whose column is not in the batch, and a predicate with no evaluable columns
-returns an all-true mask.
-
-A chunk written before `sighash` existed, queried with
-`{"transactions":[{"sighash":["0xa9059cbb"]}]}`, returns **every transaction in
-the chunk**. The client sees a `200`, a plausible body, and no way to tell.
-
-The reference implementation raises `missing column: sighash`. The engine already
-hard-errors for a *selected* column absent from the parquet; the same check is
-simply not applied to *filtered* columns.
-
-This is the highest-severity item in the document. Fix: resolve every predicate
-column against the chunk schema before scanning, and fail with `ColumnNotFound`.
-
-### 2. `parentBlockHash` is accepted and ignored
-
-`src/query/parse.rs:57` lists `parentBlockHash` among the known top-level keys.
-Nothing ever reads it.
-
-The reference implementation walks back up to 100 blocks from `fromBlock`, finds
-the parent, compares hashes, and fails with `UnexpectedBaseBlock` — carrying the
-recent block hashes — on mismatch. That is how a client detects that the chain
-reorganised between two pages.
-
-Today, a client that supplies `parentBlockHash` after a reorg is served data from
-a chain it did not ask about, with no indication.
-
-### 3. Unknown field names are silently dropped
-
-`src/query/parse.rs:198` keeps only the keys whose value is exactly `true` and
-never checks that the key names a real field. `{"fields":{"log":{"logIndx":true}}}`
-returns a `200` and logs without `logIndex`.
-
-The reference implementation uses `deny_unknown_fields` on every selection struct
-and rejects it.
-
-### 4. Malformed block bounds are coerced
-
-`src/query/parse.rs:80-81` — `fromBlock` falls back to `0` and `toBlock` to
-unbounded whenever `as_u64()` fails. `{"fromBlock": "18000000"}` (a string, a
-common client bug) silently scans from block zero.
-
-### 5. The filter surface is open
-
-`src/query/parse.rs` resolves an item-request key against, in order, the table's
-relations, the alias's filter aliases, the table's special filters, and then
-**any column of the table**. There is no declared filter list.
-
-Consequences:
-
-- `system` columns are filterable: `{"logs":[{"dataSize":[100]}]}`,
-  `{"transactions":[{"accountsBloom":["0x…"]}]}`,
-  `{"events":[{"_evmLogAddress":["0x…"]}]}` are all accepted.
-- The catalog's column list becomes the public API. Adding a column adds a filter.
-- The reference implementation's closed allowlist means these queries are
-  rejected. Any client relying on the open surface is relying on a bug.
-
-Fix: add a `filters:` declaration per table to the catalog and resolve against it.
-This is also the natural home for the `hexBytes` case-folding flag, the
-`columnAlias` mappings that already exist as `special_filters`, and the closed set
-[03-catalog.md](03-catalog.md) specifies.
-
-### 6. Case-folding is inconsistent
-
-`src/query/plan.rs:418` lowercases `inList` values when the column's
-`json_encoding` is `hex`. The scalar-string path (`as_str` → equality) does not.
-
-`{"to": ["0xA0B8…"]}` matches; `{"to": "0xA0B8…"}` does not. The two should mean
-the same thing ([INV-P8](07-invariants.md#inv-p8)).
-
-Separately, the current rule folds *every* hex-encoded column, where the
-reference folds a specific list. The two agree on all catalog columns today
-(`statediffs.key` and `traces.type` are not hex-encoded, and so are not folded in
-either), but the rule should be stated and tested rather than coincidental.
-
-### 7. `inList` silently drops unparseable values
-
-`compile_in_list` (`src/query/plan.rs:409`) filters values through
-`parse_hex(...).filter(|b| b.len() == N)`. A list of two discriminators, one with
-the wrong byte length, silently becomes a filter on one value. A list where *every*
-value is unparseable becomes an empty `inList`, which matches nothing — the right
-answer for the wrong reason, indistinguishable from a correctly-empty filter.
-
-`ColumnType::ListUInt32` additionally truncates with an unchecked `n as u32`.
-
-Per [INV-Q12](07-invariants.md#inv-q12), a malformed value is an error. Per
-[INV-P14](07-invariants.md#inv-p14), a well-formed but out-of-range value matches
-nothing. The current code cannot distinguish the two.
-
-### 8. 26 e2e tests report green with no fixtures
-
-`tests/e2e_fixtures.rs` prints `SKIP` and returns when a fixture's chunk or
-`query.json` is absent. The test passes.
-
-Verified: `ls tests/fixtures/*/queries/ | grep -c prod_pattern` → **0**. All 26
-macro-generated `prod_pattern_*` tests (11 Solana, 15 EVM) — the ones derived from
-real production traffic — have never run.
-
-Fix: assert an expected fixture count per dataset, and fail on a shortfall. §8.8
-rule 2.
-
-### 13. Solana discriminator columns emit raw numbers, and `d8` loses precision
-
-`metadata/solana.yaml` marks `d1`…`d16` as `system: true`. That flag is honoured
-in `src/output/weight.rs:276` and in `required_output_columns`
-(`src/output/columns.rs:198`) — but **not at emission time**. `output_columns`
-comes from the user's `fields` selection, and the row writer emits whatever is in
-it.
-
-So the columns *are* selectable, and they render by physical type. Measured
-against `data/solana/chunk`, selecting `{"instruction":{"d1":true,"d8":true}}`:
-
-| | `d1` | `d8` |
-|---|---|---|
-| this engine | `248` | `17926189716184860616` |
-| reference | `"0xf8"` | `"0xf8c69e91e17587c8"` |
-
-The reference encodes them as `hexNumber` — quoted, zero-padded to the column's
-width ([INV-O9](07-invariants.md#inv-o9)). There is no `hexNumber` encoding in
-this engine at all.
-
-`d8` is a `uint64`. Emitted as a JSON number, `17926189716184860616` exceeds 2⁵³
-and every JavaScript client silently reads it back as `17926189716184860000`. The
-discriminator a client receives is not the discriminator that was stored. This is
-why the gap is S1 and not, as first recorded here, "not selectable".
-
-Two further consequences of the misplaced `system` flag:
-
-- The columns contribute **zero weight**, so blocks selecting them are
-  under-weighed and truncation lands later than it should
-  ([INV-B10](07-invariants.md#inv-b10)).
-- `required_output_columns` skips them, so selecting a `d1` that is absent from
-  the chunk yields `null` rather than `ColumnNotFound`
-  ([INV-E3](07-invariants.md#inv-e3)).
-
-A column being *read by a filter* does not make it a `system` column. The catalog
-conflates "internal, never emitted" with "used by a special filter", and `d1`…`d8`
-are the columns where the two come apart.
-
-**Why no test caught it.** `d8` appears in exactly two fixture queries
-(`solana/whirpool_usdc_sol_swaps`, `solana/is_committed`) and in both it is a
-*filter*, never a selected field. No `query.json` selects `d1/d2/d4/d8`; no
-`result.json` contains such a key. The fixture suite cannot observe this gap —
-see §8.1.
+There are no open S1 entries. Every silent-wrong-answer gap recorded here has
+been closed, with a test pinning the invariant behind it.
 
 ---
 
@@ -232,21 +72,6 @@ See [03-catalog.md §3.4](03-catalog.md).
 
 The first four are catalog edits. `reviveContractEmitted` needs columns added.
 
-### 11–12. Missing EVM columns
-
-`metadata/evm.yaml` omits, versus the reference's selectable field lists:
-
-- `blocks`: `uncles`, `withdrawals`, `withdrawals_root`, `parent_beacon_block_root`, `requests_hash`
-- `transactions`: `access_list`, `logs_bloom`, `blob_gas_used`, `blob_gas_price`
-
-`withdrawals` and `access_list` also carry weight columns (`withdrawals_size`,
-`access_list_size`) in the reference's weight model, so adding them changes block
-weights and hence where truncation lands.
-
-A query selecting any of these fields today gets a `200` with the field silently
-absent, by gap 3. After gap 3 is fixed it will get `UnknownField` — which is at
-least loud, but still wrong.
-
 ### 14. Negative values cannot filter signed columns
 
 The scalar filter path (`src/query/plan.rs`) has `as_bool`, `as_u64` and `as_str`
@@ -259,6 +84,25 @@ Solana `transactions.version` is `int16` and holds `-1` for legacy transactions.
 the reference implementation either, so no client depends on it — but the
 catalog permits it (gap 5), and once the filter surface is closed this becomes a
 deliberate choice rather than an accident.
+
+### 24. The Fuel catalog trails the reference's field list
+
+`metadata/fuel.yaml` mirrors an older Fuel archive layout than the reference's
+selection lists do. `blocks` is missing `event_inbox_root` and
+`message_outbox_root`; `transactions` is missing `is_upgrade`, `is_upload`,
+`bytecode_root`, `subsection_index`, `subsections_number`, `proof_set`,
+`mint_gas_price` and the four `policies_*` fields; and the reference reads
+`input_contract_*` / `output_contract_*` as flat columns where this catalog has
+one struct column each.
+
+The fixture chunk has the older layout too, so nothing here can be verified
+against data on hand. Adding the columns blind would be worse than the gap:
+a declared column absent from a chunk is a hard error ([INV-E3](07-invariants.md#inv-e3)),
+so a wrong guess turns a working query into a failing one. This needs a current
+Fuel chunk before it can be closed.
+
+Since the field surface is now closed, these names are rejected rather than
+silently dropped.
 
 ---
 
@@ -305,13 +149,13 @@ read from the catalog.
 ### 19. Catalog validation is partial
 
 `loader::validate` checks `block_number_column`, `item_order_keys`, `sort_key`,
-`weight` sources and `children`. It does not check: relation targets and keys,
-special-filter columns, field-group tag and mapped columns, virtual-field roll
-columns, `address_column`, `parent_key`, aliases, or `query_name` / `field_name`
-uniqueness.
+`weight` sources, `children`, the declared `filters`, the parent-hash and
+parent-number columns, and every alias reference. It does not check: relation
+targets and keys, special-filter columns, field-group tag and mapped columns,
+virtual-field roll columns, `address_column`, `parent_key`, or
+`query_name` / `field_name` uniqueness.
 
-Each unchecked item is a deploy-time landmine. An alias pointing at a missing
-table panics on the first query that uses it. A typo in a `tag_column` silently
+Each unchecked item is a deploy-time landmine. A typo in a `tag_column` silently
 drops every variant field. A typo in a roll column silently shortens every array.
 
 [INV-D1](07-invariants.md#inv-d1), [INV-D2](07-invariants.md#inv-d2),
@@ -390,16 +234,15 @@ Permitted; must not change the meaning of anything above.
 
 ## Suggested order of work
 
-1. **Gap 1** (absent filtered column → match everything). One check, and it is the
-   only entry that can hand a client the wrong answer with no way to notice.
-2. **Gaps 3, 4, 7, 13** (silent drops, coercions, and a `uint64` emitted as a JSON
-   number). Cheap, and each converts a silent wrong answer into an error or a
-   correct value.
-3. **Gap 8** (skipped tests). Until this is fixed the suite cannot tell you
-   whether anything else is fixed.
-4. **Gap 5** (closed filter surface) + **gap 19** (catalog validation). These are
-   one change: introduce `filters:` in the catalog, and validate the whole catalog
-   properly. Everything in [03-catalog.md](03-catalog.md) becomes checkable.
-5. **Gap 2** (fork detection). Needed before any client pages across a reorg.
-6. **Gaps 9–12** (missing surface). Mechanical catalog work, gated on 4.
-7. The rest.
+1. **Gap 19** (catalog validation). The catalog now carries the filter surface
+   and the fork-detection columns, so more of what the engine does is declared —
+   and more of it fails quietly when misspelled. Finishing the validator makes
+   everything in [03-catalog.md](03-catalog.md) checkable at load.
+2. **Gaps 15, 16** (request validation). Small, and each is a loud failure where
+   the spec asks for a quiet one, or the reverse.
+3. **Gaps 17, 18** (hardcoded names, panics). Robustness against a catalog or a
+   chunk the engine has not seen before.
+4. **Gaps 9, 10, 24** (missing surface). Mechanical catalog work; gap 24 is
+   blocked on a current Fuel chunk.
+5. **Gaps 20–23** (latent). None is reachable from a well-formed request against
+   a well-formed chunk today.
