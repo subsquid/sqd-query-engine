@@ -352,6 +352,9 @@ tables:
       transaction_logs:
         table: logs
         key: [ block_number, transaction_index ]
+      transaction_traces:
+        table: traces
+        key: [ block_number, transaction_index ]
       subtraces:
         table: traces
         kind: children

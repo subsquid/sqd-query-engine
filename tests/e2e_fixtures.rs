@@ -39,10 +39,14 @@ fn test_fixture(dataset: &str, meta_path: &str, query_name: &str) {
     let query_file = base.join("queries").join(query_name).join("query.json");
     let result_file = base.join("queries").join(query_name).join("result.json");
 
-    if !chunk.exists() || !query_file.exists() {
-        eprintln!("SKIP {}/{}: fixtures not found", dataset, query_name);
-        return;
-    }
+    assert!(
+        chunk.exists(),
+        "{dataset}/{query_name}: no chunk at {chunk:?}"
+    );
+    assert!(
+        query_file.exists(),
+        "{dataset}/{query_name}: no query.json at {query_file:?}"
+    );
 
     let query_json = std::fs::read(&query_file).unwrap();
     let actual =
@@ -69,18 +73,15 @@ fn test_fixture(dataset: &str, meta_path: &str, query_name: &str) {
         };
 
     if !result_file.exists() {
-        // No expected result — write actual for manual review
+        // Nothing to compare against is not a passing test. Write what we
+        // produced so it can be reviewed and promoted to result.json.
         let actual_path = base
             .join("queries")
             .join(query_name)
             .join("actual.temp.json");
         serde_json::to_writer_pretty(std::fs::File::create(&actual_path).unwrap(), &actual)
             .unwrap();
-        eprintln!(
-            "SKIP {}/{}: no result.json, wrote actual to {:?}",
-            dataset, query_name, actual_path
-        );
-        return;
+        panic!("{dataset}/{query_name}: no result.json; wrote actual to {actual_path:?}");
     }
 
     let expected_bytes = std::fs::read(&result_file).unwrap();
@@ -136,18 +137,6 @@ solana_fixture!(log_program_id);
 solana_fixture!(rewards);
 solana_fixture!(tx_instructions_from_instruction);
 
-// Production query patterns (from ClickHouse worker_query_logs)
-solana_fixture!(prod_pattern_01_instr_d1_d4_x11_inner_logs_tx_tokbal);
-solana_fixture!(prod_pattern_02_instr_d1_d8_x3_inner_logs_tx_tokbal);
-solana_fixture!(prod_pattern_03_instr_d1_d8_x3_inner_tx_tokbal);
-solana_fixture!(prod_pattern_04_instr_a0_a1_x14_inner_tx_txinstr_tokbal);
-solana_fixture!(prod_pattern_05_instr_a1_d1_x4_inner_logs_tx_bal);
-solana_fixture!(prod_pattern_06_instr_d8_programId_inner_tx_tokbal);
-solana_fixture!(prod_pattern_07_instr_d1_d8_x8_inner_logs_tx_tokbal);
-solana_fixture!(prod_pattern_08_instr_d8_programId_x2_inner_logs_tx_tokbal);
-solana_fixture!(prod_pattern_09_instr_programId_inner_logs_tx_tokbal);
-solana_fixture!(prod_pattern_10_instr_d8_programId_inner_tx);
-solana_fixture!(prod_pattern_11_instr_a0_a1_x13_inner_tx_tokbal);
 
 // ---------------------------------------------------------------------------
 // Ethereum (EVM) fixtures
@@ -219,52 +208,8 @@ evm_fixture!(state_diffs_no_predicate_with_transaction);
 evm_fixture!(trace_call_type);
 evm_fixture!(trace_value_non_zero);
 
-// Production query patterns (from ClickHouse worker_query_logs)
-evm_fixture!(
-    evm_prod_01_multi_log_with_tx,
-    "prod_pattern_01_logs_address_topic0_x7_with_tx"
-);
-evm_fixture!(evm_prod_02_fields_only, "prod_pattern_02_fields_only");
-evm_fixture!(evm_prod_03_logs_topic0, "prod_pattern_03_logs_topic0");
-evm_fixture!(
-    evm_prod_04_txs_with_logs_all_blocks,
-    "prod_pattern_04_txs_with_logs_all_blocks"
-);
-evm_fixture!(
-    evm_prod_05_logs_addr_topic0,
-    "prod_pattern_05_logs_address_topic0"
-);
-evm_fixture!(evm_prod_06_fields_only_2, "prod_pattern_06_fields_only");
-evm_fixture!(
-    evm_prod_07_logs_topic0_with_tx,
-    "prod_pattern_07_logs_topic0_with_tx"
-);
-evm_fixture!(
-    evm_prod_08_logs_addr_topic0_x2,
-    "prod_pattern_08_logs_address_topic0_x2"
-);
-evm_fixture!(evm_prod_09_logs_topic0_2, "prod_pattern_09_logs_topic0");
-evm_fixture!(
-    evm_prod_10_logs_all_all_blocks,
-    "prod_pattern_10_logs_all_all_blocks"
-);
-evm_fixture!(
-    evm_prod_11_multi_table_heavy,
-    "prod_pattern_11_logs_topic0_x2_with_tx_txs_traces"
-);
-evm_fixture!(
-    evm_prod_12_logs_topic0_with_tx_2,
-    "prod_pattern_12_logs_topic0_with_tx"
-);
-evm_fixture!(evm_prod_13_all_blocks, "prod_pattern_13_all_blocks");
-evm_fixture!(
-    evm_prod_14_logs_addr_topic0_with_tx,
-    "prod_pattern_14_logs_address_topic0_with_tx"
-);
-evm_fixture!(
-    evm_prod_15_logs_addr_topic0_x2_with_tx,
-    "prod_pattern_15_logs_address_topic0_x2_with_tx"
-);
+
+evm_fixture!(transaction_traces_for_traces);
 
 // ---------------------------------------------------------------------------
 // Bitcoin fixtures
@@ -463,3 +408,101 @@ hyperliquid_replica_cmds_fixture!(action_type);
 hyperliquid_replica_cmds_fixture!(action_user);
 hyperliquid_replica_cmds_fixture!(include_all_blocks);
 hyperliquid_replica_cmds_fixture!(order_action);
+
+// ---------------------------------------------------------------------------
+// Suite integrity
+// ---------------------------------------------------------------------------
+
+/// The suite is only as good as the fixtures behind it, and a declaration with
+/// no data on disk used to print SKIP and pass. This walks the declarations in
+/// this file against the fixture tree in both directions, so neither a test
+/// without data nor data without a test can go unnoticed.
+///
+/// Datasets with no catalog entry yet are listed as exemptions: their fixtures
+/// are on disk waiting for the dataset to be supported, and the list is meant to
+/// shrink.
+#[test]
+fn fixture_declarations_match_the_fixture_tree() {
+    const UNSUPPORTED_DATASETS: &[&str] = &["tron"];
+
+    let source = include_str!("e2e_fixtures.rs");
+
+    // macro name → fixture directory, read from each macro's own body.
+    let mut macro_dataset: Vec<(String, String)> = Vec::new();
+    for (index, line) in source.lines().enumerate() {
+        let Some(rest) = line.trim().strip_prefix("macro_rules! ") else {
+            continue;
+        };
+        let Some(name) = rest.strip_suffix(" {") else {
+            continue;
+        };
+        let dataset = source
+            .lines()
+            .skip(index)
+            .take(12)
+            .find_map(|l| l.split_once("test_fixture(\"")?.1.split_once('\"').map(|p| p.0))
+            .unwrap_or_else(|| panic!("macro {name} has no test_fixture call"));
+        macro_dataset.push((name.to_string(), dataset.to_string()));
+    }
+    assert!(!macro_dataset.is_empty(), "found no fixture macros");
+
+    // Declared fixture directories, per dataset. Both macro forms are used:
+    // `m!(name)` takes the directory from the name, `m!(name, "dir")` names it.
+    let mut declared: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+        Default::default();
+    for line in source.lines() {
+        let line = line.trim();
+        for (macro_name, dataset) in &macro_dataset {
+            let Some(args) = line
+                .strip_prefix(&format!("{macro_name}!("))
+                .and_then(|r| r.strip_suffix(");"))
+            else {
+                continue;
+            };
+            let dir = match args.split_once(',') {
+                Some((_, explicit)) => explicit.trim().trim_matches('"').to_string(),
+                None => args.trim().to_string(),
+            };
+            declared.entry(dataset.clone()).or_default().insert(dir);
+            break;
+        }
+    }
+
+    let root = fixture_dir();
+    let mut problems = Vec::new();
+
+    for (dataset, dirs) in &declared {
+        for dir in dirs {
+            let query = root.join(dataset).join("queries").join(dir).join("query.json");
+            if !query.exists() {
+                problems.push(format!("{dataset}/{dir}: declared, but no query.json on disk"));
+            }
+        }
+    }
+
+    for entry in std::fs::read_dir(&root).unwrap() {
+        let path = entry.unwrap().path();
+        let dataset = path.file_name().unwrap().to_string_lossy().to_string();
+        let queries = path.join("queries");
+        if !queries.is_dir() || UNSUPPORTED_DATASETS.contains(&dataset.as_str()) {
+            continue;
+        }
+        let known = declared.get(&dataset).cloned().unwrap_or_default();
+        for query_entry in std::fs::read_dir(&queries).unwrap() {
+            let name = query_entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .to_string();
+            if !known.contains(&name) {
+                problems.push(format!("{dataset}/{name}: fixture on disk, but no test declares it"));
+            }
+        }
+    }
+
+    assert!(
+        problems.is_empty(),
+        "fixture suite is out of step with the fixture tree:\n  {}",
+        problems.join("\n  ")
+    );
+}
