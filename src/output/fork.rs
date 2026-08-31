@@ -106,11 +106,16 @@ fn read_prev_blocks(
     parent_hash_column: &str,
     chunk: &dyn ChunkReader,
 ) -> Result<Vec<BlockRef>> {
-    let has_parent_number = table.parent_number_column.is_some();
-    let number_column = table
-        .parent_number_column
-        .as_deref()
-        .unwrap_or(table.block_number_column.as_str());
+    // Whether the *chunk* carries a parent-number column, not whether the catalog
+    // declares one: a chunk written before the column existed still answers the
+    // check by falling back to `n - 1`, which is what the reference does.
+    let parent_number_column = table.parent_number_column.as_deref().filter(|col| {
+        chunk
+            .table_schema(&plan.block_table)
+            .is_some_and(|schema| schema.column_with_name(col).is_some())
+    });
+    let has_parent_number = parent_number_column.is_some();
+    let number_column = parent_number_column.unwrap_or(table.block_number_column.as_str());
 
     // With a parent-number column the window is over parent numbers, so it stops
     // one short of `from_block`; without one it is over block numbers, and the
@@ -125,6 +130,9 @@ fn read_prev_blocks(
     request.from_block = Some(plan.from_block.saturating_sub(LOOKBACK));
     request.to_block = Some(upper);
     request.block_number_column = Some(number_column);
+    // A chunk that cannot produce the hash cannot clear the client's `parentBlockHash`.
+    // Serving the query regardless is the reorg being served silently.
+    request.required_columns = vec![parent_hash_column];
 
     let batches = chunk.scan(&plan.block_table, &request)?;
 
@@ -139,12 +147,11 @@ fn read_prev_blocks(
         let hashes = hashes
             .as_any()
             .downcast_ref::<arrow::array::StringArray>()
-            .ok_or_else(|| {
-                anyhow::anyhow!("'{parent_hash_column}' must be a string column")
-            })?;
+            .ok_or_else(|| anyhow::anyhow!("'{parent_hash_column}' must be a string column"))?;
 
         for row in 0..batch.num_rows() {
-            let Some(number) = crate::output::weight::get_block_number(numbers.as_ref(), row) else {
+            let Some(number) = crate::output::weight::get_block_number(numbers.as_ref(), row)
+            else {
                 continue;
             };
             let number = if has_parent_number {
