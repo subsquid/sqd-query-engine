@@ -754,21 +754,21 @@ where
         .collect()
 }
 
-/// Execute a scan against a parquet table: read, filter, project.
-/// Returns filtered RecordBatches with only the output columns.
-pub fn scan(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<RecordBatch>> {
-    // 0. A user-requested column declared in metadata but absent from this
-    //    parquet file is a hard error (matches legacy `ColumnDoesNotExist`).
+/// A user-requested column declared in metadata but absent from this parquet
+/// file is a hard error (matches legacy `ColumnDoesNotExist`).
+///
+/// The same applies to a *filtered* column. Reading it is what makes the filter
+/// mean anything, and a filter that cannot be evaluated does not narrow the scan
+/// — it widens it to everything, which no client can detect in the response
+/// (INV-X3). Every scan entry point runs this; a query reaching the budget walk
+/// instead of the plain scan is an engine-internal routing decision.
+fn ensure_columns_present(table: &ParquetTable, request: &ScanRequest) -> Result<()> {
     for &col in &request.required_columns {
         if table.column_index(col).is_none() {
             anyhow::bail!("column '{}' is not found in '{}'", col, table.name());
         }
     }
 
-    // The same applies to a *filtered* column. Reading it is what makes the
-    // filter mean anything, and a filter that cannot be evaluated does not
-    // narrow the scan — it widens it to everything, which no client can detect
-    // in the response (INV-X3).
     for pred in &request.predicates {
         for col in pred.required_columns() {
             if table.column_index(col).is_none() {
@@ -776,6 +776,14 @@ pub fn scan(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<RecordBat
             }
         }
     }
+
+    Ok(())
+}
+
+/// Execute a scan against a parquet table: read, filter, project.
+/// Returns filtered RecordBatches with only the output columns.
+pub fn scan(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<RecordBatch>> {
+    ensure_columns_present(table, request)?;
 
     // 1. Determine all columns we need to read (output + predicate + block range)
     let all_columns = collect_read_columns(table, request);
@@ -835,6 +843,8 @@ pub fn scan_waves_until_budget<F>(
 where
     F: FnMut(&[RecordBatch]) -> u64,
 {
+    ensure_columns_present(table, request)?;
+
     let mut row_groups = select_row_groups(table, request)?;
     if row_groups.is_empty() {
         return Ok(Vec::new());
@@ -856,8 +866,22 @@ where
     let all_columns = collect_read_columns(table, request);
     let output_schema = build_output_schema(table.schema(), &request.output_columns);
 
+    // The block bounds of one row group, or None when the file carries no usable
+    // statistic — in which case nothing below may assume anything about layout.
+    let block_bound = |rg: usize, upper: bool| -> Option<u64> {
+        let bn_col = request.block_number_column?;
+        let stats = table.column_stats(rg, bn_col)?;
+        let bound = if upper { stats.max } else { stats.min };
+        stat_value_to_u64(&bound?)
+    };
+
     let wave_size = wave_size.max(1);
     let mut all_batches = Vec::new();
+    // The highest block any row group read so far may have contributed, and how
+    // far into `row_groups` the walk has got.
+    let mut read_max: Option<u64> = Some(0);
+    let mut scanned = 0usize;
+
     for wave in row_groups.chunks(wave_size) {
         let wave_batches: Vec<RecordBatch> = if wave.len() == 1 {
             scan_row_groups(table, wave, &all_columns, request, &output_schema)?
@@ -875,8 +899,38 @@ where
 
         let cumulative = weight_of(&wave_batches);
         all_batches.extend(wave_batches);
-        if cumulative > budget {
+        for &rg in wave {
+            read_max = match (read_max, block_bound(rg, true)) {
+                (Some(seen), Some(rg_max)) => Some(seen.max(rg_max)),
+                _ => None,
+            };
+        }
+        scanned += wave.len();
+
+        if cumulative <= budget {
+            continue;
+        }
+
+        // Stopping here is only sound once every block already read is whole. Row
+        // groups overlap in block range far more often than a declared
+        // block-leading sort key suggests — in the EVM chunks every row group of
+        // every table spans the entire chunk — and a block that loses rows to an
+        // unread row group is indistinguishable, to the client, from a block that
+        // genuinely had fewer rows. When no safe cut exists the walk reads on and
+        // the budget is enforced by the exact `apply_weight_limit` instead.
+        let unread = &row_groups[scanned..];
+        if unread.is_empty() {
             break;
+        }
+
+        let unread_min = unread
+            .iter()
+            .try_fold(u64::MAX, |acc, &rg| Some(acc.min(block_bound(rg, false)?)));
+
+        if let (Some(read_max), Some(unread_min)) = (read_max, unread_min) {
+            if read_max < unread_min {
+                break;
+            }
         }
     }
 
