@@ -189,7 +189,7 @@ pub fn parse_query(json_bytes: &[u8], metadata: &DatasetDescription) -> Result<Q
 
 fn parse_fields(
     fields_value: Option<&serde_json::Value>,
-    _metadata: &DatasetDescription,
+    metadata: &DatasetDescription,
     field_name_to_table: &HashMap<&str, &str>,
 ) -> Result<HashMap<String, Vec<String>>> {
     let mut result = HashMap::new();
@@ -209,12 +209,30 @@ fn parse_fields(
             .as_object()
             .ok_or_else(|| anyhow!("fields.{} must be an object", key))?;
 
+        let table_desc = metadata
+            .table(table_name)
+            .ok_or_else(|| anyhow!("field group '{}' targets unknown table", key))?;
+
         // Preserve insertion order from JSON for deterministic output key ordering
-        let columns: Vec<String> = field_obj
-            .iter()
-            .filter(|(_, v)| v.as_bool() == Some(true))
-            .map(|(k, _)| camel_to_snake(k))
-            .collect();
+        let mut columns = Vec::new();
+        for (field_key, selected) in field_obj {
+            let column = camel_to_snake(field_key);
+
+            // A misspelled name is rejected whether or not it was switched on:
+            // `{"logIndx": false}` is as much a typo as `{"logIndx": true}`, and
+            // answering it with a 200 sends the client looking for the bug
+            // everywhere except in its own request.
+            ensure!(
+                table_desc.is_selectable_field(&column),
+                "unknown field '{}' in fields.{}",
+                field_key,
+                key
+            );
+
+            if selected.as_bool() == Some(true) {
+                columns.push(column);
+            }
+        }
 
         result.insert(table_name.to_string(), columns);
     }

@@ -69,6 +69,20 @@ tables:
       excess_blob_gas:
         type: string
         json_encoding: hex
+      uncles:
+        type: list_string
+      withdrawals:
+        type: list_struct
+        weight: withdrawals_size
+      withdrawals_root:
+        type: string
+        json_encoding: hex
+      parent_beacon_block_root:
+        type: string
+        json_encoding: hex
+      requests_hash:
+        type: string
+        json_encoding: hex
       l1_block_number:
         type: uint64
       # Tempo-specific block header fields (nullable; only present in Tempo chunks).
@@ -83,6 +97,9 @@ tables:
         json_encoding: hex
       # system
       extra_data_size:
+        type: uint64
+        system: true
+      withdrawals_size:
         type: uint64
         system: true
 
@@ -238,8 +255,24 @@ tables:
         type: list_struct
       key_authorization:
         type: struct
+      access_list:
+        type: list_struct
+        weight: access_list_size
+      logs_bloom:
+        type: string
+        json_encoding: hex
+        weight: 512
+      blob_gas_used:
+        type: string
+        json_encoding: hex
+      blob_gas_price:
+        type: string
+        json_encoding: hex
       # system
       input_size:
+        type: uint64
+        system: true
+      access_list_size:
         type: uint64
         system: true
 

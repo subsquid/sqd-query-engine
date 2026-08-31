@@ -247,3 +247,104 @@ fn discriminator_hex_is_a_prefix_chain() {
     }
     assert!(checked > 0, "fixture must contain whirlpool instructions");
 }
+
+// ---------------------------------------------------------------------------
+// INV-Q7 — a `fields` key that names nothing selectable is an error
+// ---------------------------------------------------------------------------
+
+/// A misspelled field name used to come back as a 200 with the field missing,
+/// which sends the client looking for the bug everywhere except in its own
+/// request.
+#[test]
+fn unknown_field_names_are_rejected() {
+    let evm = meta("evm");
+    let rejected = [
+        r#"{"type":"evm","fromBlock":0,"fields":{"log":{"logIndx":true}}}"#,
+        // A typo is a typo whether or not it was switched on.
+        r#"{"type":"evm","fromBlock":0,"fields":{"log":{"logIndx":false}}}"#,
+        // System columns back blooms and size counters; they are not selectable.
+        r#"{"type":"evm","fromBlock":0,"fields":{"log":{"dataSize":true}}}"#,
+        // A real column, but of a different table.
+        r#"{"type":"evm","fromBlock":0,"fields":{"log":{"sighash":true}}}"#,
+    ];
+    for json in rejected {
+        assert!(
+            parse_query(json.as_bytes(), &evm).is_err(),
+            "expected an error for {json}"
+        );
+    }
+}
+
+/// The check must not overreach: ordinary columns, virtual fields and
+/// field-group request keys all stay selectable.
+#[test]
+fn selectable_field_shapes_are_accepted() {
+    let evm = meta("evm");
+    let accepted = [
+        // Ordinary column.
+        r#"{"type":"evm","fromBlock":0,"fields":{"log":{"logIndex":true}}}"#,
+        // Virtual field rolled from topic0..topic3.
+        r#"{"type":"evm","fromBlock":0,"fields":{"log":{"topics":true}}}"#,
+        // Field-group request key on the polymorphic trace table.
+        r#"{"type":"evm","fromBlock":0,"fields":{"trace":{"callCallType":true}}}"#,
+    ];
+    for json in accepted {
+        parse_query(json.as_bytes(), &evm)
+            .unwrap_or_else(|e| panic!("expected {json} to parse, got {e}"));
+    }
+}
+
+/// Every field the reference implementation lets a client select must still be
+/// selectable here, or closing the surface would reject working queries. The
+/// reference's own lists are the oracle; this pins the datasets that are in
+/// sync so they cannot drift back.
+#[test]
+fn reference_selectable_fields_are_all_accepted() {
+    // (dataset, field group, fields) — mirrors the reference's field selections.
+    let cases: &[(&str, &str, &[&str])] = &[
+        (
+            "evm",
+            "block",
+            &[
+                "number", "hash", "parentHash", "timestamp", "transactionsRoot",
+                "receiptsRoot", "stateRoot", "logsBloom", "sha3Uncles", "extraData",
+                "miner", "nonce", "mixHash", "size", "gasLimit", "gasUsed",
+                "difficulty", "totalDifficulty", "baseFeePerGas", "uncles",
+                "withdrawals", "withdrawalsRoot", "blobGasUsed", "excessBlobGas",
+                "parentBeaconBlockRoot", "requestsHash", "l1BlockNumber",
+            ],
+        ),
+        (
+            "evm",
+            "transaction",
+            &[
+                "transactionIndex", "hash", "nonce", "from", "to", "input", "value",
+                "gas", "gasPrice", "maxFeePerGas", "maxPriorityFeePerGas", "v", "r",
+                "s", "yParity", "chainId", "sighash", "contractAddress",
+                "gasUsed", "cumulativeGasUsed", "effectiveGasPrice", "type",
+                "status", "accessList", "logsBloom", "blobGasUsed", "blobGasPrice",
+            ],
+        ),
+        (
+            "solana",
+            "instruction",
+            &[
+                "transactionIndex", "instructionAddress", "programId", "accounts",
+                "data", "d1", "d2", "d4", "d8", "error", "computeUnitsConsumed",
+                "isCommitted", "hasDroppedLogMessages",
+            ],
+        ),
+    ];
+
+    for (dataset, group, fields) in cases {
+        let metadata = meta(dataset);
+        for field in *fields {
+            let json = format!(
+                r#"{{"type":"{dataset}","fromBlock":0,"fields":{{"{group}":{{"{field}":true}}}}}}"#
+            );
+            parse_query(json.as_bytes(), &metadata).unwrap_or_else(|e| {
+                panic!("{dataset}.{group}.{field} must stay selectable: {e}")
+            });
+        }
+    }
+}
