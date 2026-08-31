@@ -2,6 +2,7 @@ name: solana
 
 tables:
   blocks:
+    filters: []
     parent_hash_column: parent_hash
     parent_number_column: parent_number
     block_number_column: number
@@ -25,6 +26,7 @@ tables:
         type: timestamp_second
 
   transactions:
+    filters: [ fee_payer ]
     query_name: transactions
     field_name: transaction
     item_order_keys: [ transaction_index ]
@@ -118,6 +120,7 @@ tables:
         system: true
 
   instructions:
+    filters: [ program_id, d1, d2, d4, d8, is_committed, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15 ]
     address_column: instruction_address
     query_name: instructions
     field_name: instruction
@@ -365,6 +368,7 @@ tables:
         columns: [ a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, rest_accounts ]
 
   logs:
+    filters: [ program_id, kind ]
     query_name: logs
     field_name: log
     item_order_keys: [ transaction_index, log_index ]
@@ -405,6 +409,7 @@ tables:
         system: true
 
   balances:
+    filters: [ account ]
     query_name: balances
     field_name: balance
     item_order_keys: [ transaction_index, account ]
@@ -435,6 +440,7 @@ tables:
         json_encoding: string
 
   token_balances:
+    filters: [ account, pre_mint, post_mint, pre_program_id, post_program_id, pre_owner, post_owner ]
     query_name: tokenBalances
     field_name: tokenBalance
     item_order_keys: [ transaction_index, account ]
@@ -505,6 +511,7 @@ tables:
         json_encoding: string
 
   rewards:
+    filters: [ pubkey ]
     query_name: rewards
     field_name: reward
     item_order_keys: [ pubkey, reward_type ]

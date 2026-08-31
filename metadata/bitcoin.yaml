@@ -2,6 +2,7 @@ name: bitcoin
 
 tables:
   blocks:
+    filters: []
     parent_hash_column: parent_hash
     block_number_column: number
     field_name: block
@@ -40,6 +41,7 @@ tables:
         type: uint64
 
   transactions:
+    filters: []
     query_name: transactions
     field_name: transaction
     item_order_keys: [ transaction_index ]
@@ -78,6 +80,7 @@ tables:
         type: uint32
 
   inputs:
+    filters: [ type, prevout_script_pub_key_address, prevout_script_pub_key_type, prevout_generated ]
     query_name: inputs
     field_name: input
     item_order_keys: [ transaction_index, input_index ]
@@ -142,6 +145,7 @@ tables:
         dictionary: true
 
   outputs:
+    filters: [ script_pub_key_address, script_pub_key_type ]
     query_name: outputs
     field_name: output
     item_order_keys: [ transaction_index, output_index ]

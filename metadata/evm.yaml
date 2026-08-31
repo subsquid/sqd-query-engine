@@ -2,6 +2,7 @@ name: evm
 
 tables:
   blocks:
+    filters: []
     parent_hash_column: parent_hash
     block_number_column: number
     field_name: block
@@ -105,6 +106,7 @@ tables:
         system: true
 
   transactions:
+    filters: [ from, to, sighash ]
     query_name: transactions
     field_name: transaction
     item_order_keys: [ transaction_index ]
@@ -278,6 +280,7 @@ tables:
         system: true
 
   logs:
+    filters: [ address, topic0, topic1, topic2, topic3 ]
     query_name: logs
     field_name: log
     item_order_keys: [ transaction_index, log_index ]
@@ -341,6 +344,7 @@ tables:
         columns: [ topic0, topic1, topic2, topic3 ]
 
   traces:
+    filters: [ type, create_from, create_result_address, call_from, call_to, call_sighash, suicide_address, suicide_refund_address, reward_author ]
     address_column: trace_address
     query_name: traces
     field_name: trace
@@ -537,6 +541,7 @@ tables:
             - { column: reward_type, field: type }
 
   statediffs:
+    filters: [ address, key, kind ]
     query_name: stateDiffs
     field_name: stateDiff
     item_order_keys: [ transaction_index, address, key ]

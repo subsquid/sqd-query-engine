@@ -2,6 +2,7 @@ name: hyperliquidFills
 
 tables:
   blocks:
+    filters: []
     parent_hash_column: parent_hash
     block_number_column: number
     field_name: block
@@ -19,6 +20,7 @@ tables:
         json_encoding: timestamp_millisecond
 
   fills:
+    filters: [ user, coin, dir, cloid, fee_token, builder ]
     query_name: fills
     field_name: fill
     item_order_keys: [ fill_index ]

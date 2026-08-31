@@ -30,6 +30,10 @@ pub struct QueryAlias {
     /// Relations available (same format as table relations).
     #[serde(default)]
     pub relations: BTreeMap<String, RelationDef>,
+    /// Column filters this alias accepts, in place of the table's own list. An
+    /// alias is a narrower view of its table and usually exposes fewer filters.
+    #[serde(default)]
+    pub filters: Vec<String>,
 }
 
 /// Description of a single parquet table within a dataset.
@@ -96,6 +100,14 @@ pub struct TableDescription {
     /// Special filters not directly mapped to a single column.
     #[serde(default)]
     pub special_filters: BTreeMap<String, SpecialFilter>,
+
+    /// Column filters this table accepts, each naming a column of the same name.
+    /// Declaring them is what keeps the filter surface closed: without a list,
+    /// every column — blooms, size counters, denormalised extractions — would be
+    /// filterable, and the column list would become the public API.
+    /// `special_filters` and `relations` are accepted in addition.
+    #[serde(default)]
+    pub filters: Vec<String>,
 
     /// Virtual fields that combine multiple columns into one output field.
     /// E.g., "accounts" → roll(a0..a15, rest_accounts), "topics" → roll(topic0..topic3)

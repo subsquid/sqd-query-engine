@@ -299,8 +299,22 @@ fn parse_query_item(
             continue;
         }
 
-        // Must be a column filter
-        if table.columns.contains_key(&snake_key) {
+        // A declared column filter. The list is what the table (or, when the
+        // request came through an alias, the alias) says is filterable — not
+        // whatever columns happen to exist. Tables carry blooms, size counters
+        // and denormalised extractions that are no client's business, and
+        // filtering on any column would make the column list the public API.
+        let declared = match alias {
+            Some(alias_def) => &alias_def.filters,
+            None => &table.filters,
+        };
+        if declared.iter().any(|f| *f == snake_key) {
+            ensure!(
+                table.columns.contains_key(&snake_key),
+                "filter '{}' of table '{}' names no column",
+                snake_key,
+                table_name
+            );
             filters.push((snake_key, val.clone()));
             continue;
         }
