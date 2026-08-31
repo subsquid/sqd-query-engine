@@ -87,6 +87,41 @@ fn hex_filters_fold_case_in_both_shapes() {
     assert_eq!(scalar_lower, scalar_upper, "scalar filter must fold case");
 }
 
+/// Case folding must follow the column an alias *resolves to*, not the name the
+/// client wrote. `evmLogs.address` reaches a system column on the substrate
+/// events table, and a client sending a checksummed address gets a 200 with no
+/// events — the shape of answer that means "this address emitted nothing".
+#[test]
+fn an_alias_folds_case_on_the_column_it_resolves_to() {
+    let substrate = meta("substrate");
+    const ADDR_LOWER: &str = "0x00261a16442bc063573d2cbb0b5f398f9e1e14b9";
+    const ADDR_UPPER: &str = "0x00261A16442BC063573D2CBB0B5F398F9E1E14B9";
+
+    let query = |addr: &str| {
+        format!(
+            r#"{{"type":"substrate","fromBlock":0,
+                 "fields":{{"block":{{"number":true}},"event":{{"name":true,"args":true}}}},
+                 "evmLogs":[{{"address":["{addr}"]}}]}}"#
+        )
+        .into_bytes()
+    };
+
+    let lower = run("moonbeam", &substrate, &query(ADDR_LOWER)).unwrap();
+    let upper = run("moonbeam", &substrate, &query(ADDR_UPPER)).unwrap();
+
+    let found = count_items(&lower, "events");
+    assert!(
+        found > 0,
+        "the fixture must carry EVM logs for this contract"
+    );
+    assert_eq!(
+        found,
+        count_items(&upper, "events"),
+        "an alias filter must fold case like any other"
+    );
+    assert!(lower == upper, "the two responses must be identical");
+}
+
 /// The rule is the column's encoding, not "lowercase everything": a non-hex
 /// column still compares byte-exactly.
 #[test]
@@ -315,32 +350,85 @@ fn reference_selectable_fields_are_all_accepted() {
             "evm",
             "block",
             &[
-                "number", "hash", "parentHash", "timestamp", "transactionsRoot",
-                "receiptsRoot", "stateRoot", "logsBloom", "sha3Uncles", "extraData",
-                "miner", "nonce", "mixHash", "size", "gasLimit", "gasUsed",
-                "difficulty", "totalDifficulty", "baseFeePerGas", "uncles",
-                "withdrawals", "withdrawalsRoot", "blobGasUsed", "excessBlobGas",
-                "parentBeaconBlockRoot", "requestsHash", "l1BlockNumber",
+                "number",
+                "hash",
+                "parentHash",
+                "timestamp",
+                "transactionsRoot",
+                "receiptsRoot",
+                "stateRoot",
+                "logsBloom",
+                "sha3Uncles",
+                "extraData",
+                "miner",
+                "nonce",
+                "mixHash",
+                "size",
+                "gasLimit",
+                "gasUsed",
+                "difficulty",
+                "totalDifficulty",
+                "baseFeePerGas",
+                "uncles",
+                "withdrawals",
+                "withdrawalsRoot",
+                "blobGasUsed",
+                "excessBlobGas",
+                "parentBeaconBlockRoot",
+                "requestsHash",
+                "l1BlockNumber",
             ],
         ),
         (
             "evm",
             "transaction",
             &[
-                "transactionIndex", "hash", "nonce", "from", "to", "input", "value",
-                "gas", "gasPrice", "maxFeePerGas", "maxPriorityFeePerGas", "v", "r",
-                "s", "yParity", "chainId", "sighash", "contractAddress",
-                "gasUsed", "cumulativeGasUsed", "effectiveGasPrice", "type",
-                "status", "accessList", "logsBloom", "blobGasUsed", "blobGasPrice",
+                "transactionIndex",
+                "hash",
+                "nonce",
+                "from",
+                "to",
+                "input",
+                "value",
+                "gas",
+                "gasPrice",
+                "maxFeePerGas",
+                "maxPriorityFeePerGas",
+                "v",
+                "r",
+                "s",
+                "yParity",
+                "chainId",
+                "sighash",
+                "contractAddress",
+                "gasUsed",
+                "cumulativeGasUsed",
+                "effectiveGasPrice",
+                "type",
+                "status",
+                "accessList",
+                "logsBloom",
+                "blobGasUsed",
+                "blobGasPrice",
             ],
         ),
         (
             "solana",
             "instruction",
             &[
-                "transactionIndex", "instructionAddress", "programId", "accounts",
-                "data", "d1", "d2", "d4", "d8", "error", "computeUnitsConsumed",
-                "isCommitted", "hasDroppedLogMessages",
+                "transactionIndex",
+                "instructionAddress",
+                "programId",
+                "accounts",
+                "data",
+                "d1",
+                "d2",
+                "d4",
+                "d8",
+                "error",
+                "computeUnitsConsumed",
+                "isCommitted",
+                "hasDroppedLogMessages",
             ],
         ),
     ];
@@ -351,9 +439,8 @@ fn reference_selectable_fields_are_all_accepted() {
             let json = format!(
                 r#"{{"type":"{dataset}","fromBlock":0,"fields":{{"{group}":{{"{field}":true}}}}}}"#
             );
-            parse_query(json.as_bytes(), &metadata).unwrap_or_else(|e| {
-                panic!("{dataset}.{group}.{field} must stay selectable: {e}")
-            });
+            parse_query(json.as_bytes(), &metadata)
+                .unwrap_or_else(|e| panic!("{dataset}.{group}.{field} must stay selectable: {e}"));
         }
     }
 }
@@ -463,6 +550,524 @@ fn filtering_a_present_column_still_works() {
     );
 }
 
+/// Which of the two scan entry points a query lands on is decided by the table's
+/// declared sort key, which no client can see. `transactions` leads with
+/// `sighash` and takes the plain scan; `statediffs` leads with the block number
+/// and takes the budget walk. The guarantee has to hold on both.
+#[test]
+fn filtering_an_absent_column_is_an_error_on_a_block_sorted_table() {
+    let evm = meta("evm");
+    let chunk = chunk_without_column("ethereum", "statediffs", "address");
+    let query = br#"{"type":"evm","fromBlock":17881390,"toBlock":17881391,
+                     "fields":{"stateDiff":{"key":true}},
+                     "stateDiffs":[{"address":["0xdac17f958d2ee523a2206206994597c13d831ec7"]}]}"#;
+
+    let parsed = parse_query(query, &evm).unwrap();
+    let plan = compile(&parsed, &evm).unwrap();
+
+    let err = match execute_plan(&plan, &evm, chunk.path()) {
+        Err(e) => e,
+        Ok(out) => {
+            let items = count_items(
+                &out.map(|o| o.into_json_lines()).unwrap_or_default(),
+                "stateDiffs",
+            );
+            panic!("filtering on an absent column must error; got {items} state diffs instead");
+        }
+    };
+    assert!(
+        err.root_cause().to_string().contains("address"),
+        "the error must name the missing column, got: {}",
+        err.root_cause()
+    );
+}
+
+/// Query items are alternatives, but the reference implementation still refuses
+/// the whole request when any one of them names a column the chunk lacks —
+/// verified against it directly. Pinned because "make the unanswerable item match
+/// nothing instead" reads like the kinder behaviour and would silently diverge.
+#[test]
+fn one_unanswerable_item_rejects_the_whole_request() {
+    let evm = meta("evm");
+    let chunk = chunk_without_column("ethereum", "traces", "reward_author");
+    let query = br#"{"type":"evm","fromBlock":17881390,"toBlock":17881391,
+                     "fields":{"trace":{"transactionIndex":true,"type":true}},
+                     "traces":[{"type":["call"]},
+                               {"rewardAuthor":["0xdead000000000000000000000000000000000000"]}]}"#;
+
+    let parsed = parse_query(query, &evm).unwrap();
+    let plan = compile(&parsed, &evm).unwrap();
+    let err = match execute_plan(&plan, &evm, chunk.path()) {
+        Err(e) => e,
+        Ok(_) => panic!("an item naming an absent column must reject the request"),
+    };
+
+    assert!(
+        err.root_cause().to_string().contains("reward_author"),
+        "the error must name the missing column, got: {}",
+        err.root_cause()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A filter value means the same thing scalar or in a list
+// ---------------------------------------------------------------------------
+
+/// A one-element list and the bare value are the same request, so they must
+/// compile through the same code. They used to take separate branches: the list
+/// branch parsed hex against the column's type, the scalar branch compared a
+/// `Utf8` against whatever the column was. On a string column that happened to
+/// work; on `d1`, `d2`, `d4`, `d8` it matched nothing and said 200.
+#[test]
+fn a_scalar_filter_means_the_same_as_a_one_element_list() {
+    let cases: &[(&str, &str, u64, u64, &str, &str, &str)] = &[
+        // dataset, chunk, fromBlock, toBlock, request key, filter, value
+        (
+            "solana",
+            "solana",
+            217710049,
+            217710050,
+            "instructions",
+            "d1",
+            r#""0x02""#,
+        ),
+        (
+            "solana",
+            "solana",
+            217710049,
+            217710050,
+            "instructions",
+            "d2",
+            r#""0x0200""#,
+        ),
+        (
+            "solana",
+            "solana",
+            217710049,
+            217710956,
+            "instructions",
+            "programId",
+            r#""whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc""#,
+        ),
+        (
+            "evm",
+            "ethereum",
+            17881390,
+            17881391,
+            "logs",
+            "address",
+            r#""0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48""#,
+        ),
+        (
+            "evm",
+            "ethereum",
+            17881390,
+            17881391,
+            "transactions",
+            "sighash",
+            r#""0xa9059cbb""#,
+        ),
+    ];
+
+    let mut exercised = 0;
+
+    for (dataset, chunk, from, to, key, filter, value) in cases {
+        let metadata = meta(dataset);
+        let query = |wrapped: bool| {
+            let value = if wrapped {
+                format!("[{value}]")
+            } else {
+                value.to_string()
+            };
+            format!(
+                r#"{{"type":"{}","fromBlock":{from},"toBlock":{to},
+                     "{key}":[{{"{filter}":{value}}}]}}"#,
+                metadata.name
+            )
+            .into_bytes()
+        };
+
+        let as_list = run(chunk, &metadata, &query(true))
+            .unwrap_or_else(|e| panic!("{dataset}.{filter} as a list: {e}"));
+        let as_scalar = run(chunk, &metadata, &query(false))
+            .unwrap_or_else(|e| panic!("{dataset}.{filter} as a scalar: {e}"));
+
+        assert_eq!(
+            count_items(&as_list, key),
+            count_items(&as_scalar, key),
+            "{dataset}.{key}.{filter}: a scalar and a one-element list must match the same rows"
+        );
+        assert!(
+            as_list == as_scalar,
+            "{dataset}.{key}.{filter}: responses differ"
+        );
+
+        if count_items(&as_list, key) > 0 {
+            exercised += 1;
+        }
+    }
+
+    assert!(
+        exercised >= 4,
+        "at least four of these filters must actually match rows, or the test proves nothing"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// INV-Q12 / request surface — a malformed request is refused, never coerced
+// ---------------------------------------------------------------------------
+
+/// Hex parsing walks the value two characters at a time. A multi-byte character
+/// landing across one of those boundaries used to split it and take the whole
+/// query thread down with it; the value is simply not hex, and saying so is the
+/// entire job.
+#[test]
+fn a_non_ascii_hex_value_is_rejected_not_a_panic() {
+    let solana = meta("solana");
+
+    for value in [
+        "0x\u{20ac}1",
+        "0x\u{20ac}\u{20ac}",
+        "0xff\u{20ac}1",
+        "0x\u{4e2d}\u{6587}",
+    ] {
+        let query = format!(
+            r#"{{"type":"solana","fromBlock":406021645,"toBlock":406021646,
+                 "instructions":[{{"d8":["{value}"]}}]}}"#
+        );
+        let err = parse_query(query.as_bytes(), &solana)
+            .and_then(|parsed| compile(&parsed, &solana))
+            .err()
+            .unwrap_or_else(|| panic!("{value:?} is not hex and must be refused"));
+
+        assert!(
+            err.to_string().contains("hex"),
+            "the error must say the value is not hex, got: {err}"
+        );
+    }
+}
+
+/// A field selector is a boolean. `{"logIndex": 1}` is as much a mistake as
+/// `{"logIndx": true}`, and answering it with a 200 that quietly omits the
+/// column sends the client looking for the bug everywhere except in its request.
+/// The reference rejects it: `invalid type: integer 1, expected a boolean`.
+#[test]
+fn a_non_boolean_field_selector_is_rejected() {
+    let evm = meta("evm");
+
+    for selector in ["1", "\"true\"", "null", "[]", "{}"] {
+        let query = format!(
+            r#"{{"type":"evm","fromBlock":17881390,"toBlock":17881390,
+                 "logs":[{{}}],"fields":{{"log":{{"logIndex":{selector},"address":true}}}}}}"#
+        );
+        assert!(
+            parse_query(query.as_bytes(), &evm).is_err(),
+            "fields.log.logIndex = {selector} must be refused"
+        );
+    }
+
+    parse_query(
+        br#"{"type":"evm","fromBlock":17881390,"toBlock":17881390,
+             "logs":[{}],"fields":{"log":{"logIndex":false,"address":true}}}"#,
+        &evm,
+    )
+    .expect("an explicit `false` is a valid selector");
+}
+
+/// `includeAllBlocks` decides whether the response carries every block in range
+/// or only the ones with matches — the difference between two very different
+/// answers. It was read with `.unwrap_or(false)`, so a wrong type picked one of
+/// them silently, right next to `fromBlock`/`toBlock` which refuse the same shape.
+#[test]
+fn a_non_boolean_include_all_blocks_is_rejected() {
+    let evm = meta("evm");
+
+    for value in ["\"true\"", "1", "[]"] {
+        let query = format!(
+            r#"{{"type":"evm","fromBlock":17881390,"toBlock":17881391,
+                 "includeAllBlocks":{value},"fields":{{"block":{{"number":true}}}}}}"#
+        );
+        assert!(
+            parse_query(query.as_bytes(), &evm).is_err(),
+            "includeAllBlocks = {value} must be refused"
+        );
+    }
+
+    for value in ["true", "false", "null"] {
+        let query = format!(
+            r#"{{"type":"evm","fromBlock":17881390,"toBlock":17881391,
+                 "includeAllBlocks":{value},"fields":{{"block":{{"number":true}}}}}}"#
+        );
+        parse_query(query.as_bytes(), &evm)
+            .unwrap_or_else(|e| panic!("includeAllBlocks = {value} must be accepted: {e}"));
+    }
+}
+
+/// A well-formed value that cannot fit the column is not an error — it matches
+/// nothing (INV-P14), which is what the reference does too. Pinned so the
+/// rejection above does not get widened into this.
+#[test]
+fn a_hex_value_too_wide_for_the_column_matches_nothing() {
+    let solana = meta("solana");
+    let query = |filter: &str| {
+        format!(
+            r#"{{"type":"solana","fromBlock":217710049,"toBlock":217710050,
+                 "instructions":[{{"d1":[{filter}]}}],
+                 "fields":{{"block":{{"number":true}},"instruction":{{"programId":true}}}}}}"#
+        )
+        .into_bytes()
+    };
+
+    // The same filter with a value that does fit, so "zero" below means the value
+    // was dropped rather than the range being empty.
+    let fits = run("solana", &solana, &query(r#""0x02""#)).unwrap();
+    assert!(
+        count_items(&fits, "instructions") > 0,
+        "the range must carry instructions"
+    );
+
+    let too_wide = run("solana", &solana, &query(r#""0x1234""#))
+        .expect("a value that cannot fit is not a malformed value");
+    assert_eq!(count_items(&too_wide, "instructions"), 0);
+
+    // The same rule for a number past the column's physical width, in either
+    // shape. It used to be an error for the scalar and a no-match for the list.
+    for shape in ["256", "[256]"] {
+        let body = run(
+            "solana",
+            &solana,
+            format!(
+                r#"{{"type":"solana","fromBlock":217710049,"toBlock":217710050,
+                     "instructions":[{{"d1":{shape}}}],
+                     "fields":{{"instruction":{{"programId":true}}}}}}"#
+            )
+            .as_bytes(),
+        )
+        .unwrap_or_else(|e| panic!("d1 = {shape} is out of range, not malformed: {e}"));
+
+        assert_eq!(count_items(&body, "instructions"), 0);
+    }
+
+    // Wrong *kind*, on the other hand, is malformed and is refused.
+    for shape in [r#""nonsense""#, r#"["nonsense"]"#, "true"] {
+        let query = format!(
+            r#"{{"type":"solana","fromBlock":217710049,"toBlock":217710050,
+                 "instructions":[{{"d1":{shape}}}]}}"#
+        );
+        let compiled =
+            parse_query(query.as_bytes(), &solana).and_then(|parsed| compile(&parsed, &solana));
+        assert!(compiled.is_err(), "d1 = {shape} must be refused");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Relations — a row is emitted once, however many relations reach it
+// ---------------------------------------------------------------------------
+
+/// Every item a response carries under one table key, as `(block, item)` pairs.
+fn items_of(body: &[u8], table_key: &str) -> Vec<(u64, serde_json::Value)> {
+    body.split(|b| *b == b'\n')
+        .filter(|line| !line.is_empty())
+        .flat_map(|line| {
+            let block: serde_json::Value = serde_json::from_slice(line).unwrap();
+            let number = block["header"]["number"].as_u64().unwrap();
+            block
+                .get(table_key)
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(move |item| (number, item))
+        })
+        .collect()
+}
+
+/// A relation result carries the rows the source rows point at, and no others.
+/// A null key is not a key: an event that belongs to no call used to serialize
+/// byte-for-byte like an event whose call is the root one (address `[]`), so
+/// asking for `call` returned every inherent's root call on top of the real
+/// answer — extra rows, no filter that could exclude them, and nothing in the
+/// response to say so.
+#[test]
+fn a_null_join_key_matches_nothing() {
+    let substrate = meta("substrate");
+    let body = run(
+        "moonbeam",
+        &substrate,
+        br#"{"type":"substrate","fromBlock":4668500,"toBlock":4668502,
+             "events":[{"call":true}],
+             "fields":{"block":{"number":true},
+                       "event":{"name":true,"callAddress":true,"extrinsicIndex":true},
+                       "call":{"name":true,"address":true,"extrinsicIndex":true}}}"#,
+    )
+    .unwrap();
+
+    let events = items_of(&body, "events");
+    let calls = items_of(&body, "calls");
+    assert!(
+        !events.is_empty() && !calls.is_empty(),
+        "the fixture must carry both"
+    );
+
+    // What the events actually point at.
+    let pointed_at: std::collections::HashSet<_> = events
+        .iter()
+        .filter(|(_, event)| !event["callAddress"].is_null())
+        .map(|(block, event)| {
+            (
+                *block,
+                event["extrinsicIndex"].clone(),
+                event["callAddress"].clone(),
+            )
+        })
+        .collect();
+
+    let orphans: Vec<_> = calls
+        .iter()
+        .filter(|(block, call)| {
+            !pointed_at.contains(&(
+                *block,
+                call["extrinsicIndex"].clone(),
+                call["address"].clone(),
+            ))
+        })
+        .collect();
+
+    assert!(
+        orphans.is_empty(),
+        "{} of {} calls are in the response with no event pointing at them, first: {:?}",
+        orphans.len(),
+        calls.len(),
+        orphans.first()
+    );
+}
+
+/// The same rule on the hierarchical path: `stack` walks from an event up to the
+/// root call, and an event with no call has no stack. Indexing its null address
+/// as the empty one made every inherent's root call an ancestor of it.
+#[test]
+fn a_null_address_has_no_ancestors() {
+    let substrate = meta("substrate");
+    let body = run(
+        "moonbeam",
+        &substrate,
+        br#"{"type":"substrate","fromBlock":4668500,"toBlock":4668502,
+             "events":[{"stack":true}],
+             "fields":{"block":{"number":true},
+                       "event":{"name":true,"callAddress":true,"extrinsicIndex":true},
+                       "call":{"name":true,"address":true,"extrinsicIndex":true}}}"#,
+    )
+    .unwrap();
+
+    let events = items_of(&body, "events");
+    let calls = items_of(&body, "calls");
+    assert!(
+        !events.is_empty() && !calls.is_empty(),
+        "the fixture must carry both"
+    );
+
+    let address_of = |item: &serde_json::Value| -> Vec<serde_json::Value> {
+        item["address"]
+            .as_array()
+            .or_else(|| item["callAddress"].as_array())
+            .cloned()
+            .unwrap_or_default()
+    };
+
+    let orphans: Vec<_> = calls
+        .iter()
+        .filter(|(block, call)| {
+            let ancestor = address_of(call);
+            !events.iter().any(|(event_block, event)| {
+                event_block == block
+                    && event["extrinsicIndex"] == call["extrinsicIndex"]
+                    && !event["callAddress"].is_null()
+                    && address_of(event).starts_with(&ancestor)
+            })
+        })
+        .collect();
+
+    assert!(
+        orphans.is_empty(),
+        "{} of {} calls are ancestors of no event in the response, first: {:?}",
+        orphans.len(),
+        calls.len(),
+        orphans.first()
+    );
+}
+
+/// Two relations of the same item can name the same rows — `transactionTraces`
+/// returns every trace of the transaction and so contains `subtraces` whole. The
+/// overlap is the normal case, not a malformed query, and the row belongs in the
+/// response once.
+#[test]
+fn stacked_relations_do_not_duplicate_rows() {
+    let evm = meta("evm");
+    let body = run(
+        "ethereum",
+        &evm,
+        br#"{"type":"evm","fromBlock":17881391,"toBlock":17881391,
+             "traces":[{"callSighash":["0xe21fd0e9"],
+                        "transactionTraces":true,"subtraces":true}],
+             "fields":{"block":{"number":true},
+                       "trace":{"transactionIndex":true,"traceAddress":true,"type":true}}}"#,
+    )
+    .unwrap();
+
+    let items = items_of(&body, "traces");
+    assert!(!items.is_empty(), "the fixture must match traces");
+
+    let mut seen = std::collections::HashSet::new();
+    let duplicates: Vec<_> = items
+        .iter()
+        .filter(|(block, item)| {
+            !seen.insert((
+                *block,
+                item["transactionIndex"].clone(),
+                item["traceAddress"].clone(),
+            ))
+        })
+        .collect();
+
+    assert!(
+        duplicates.is_empty(),
+        "{} of {} traces came back twice, first: {:?}",
+        duplicates.len(),
+        items.len(),
+        duplicates.first()
+    );
+}
+
+/// The same row reached through one relation or through two must produce the same
+/// response: adding a relation that names rows already present widens nothing.
+#[test]
+fn adding_an_overlapping_relation_changes_nothing() {
+    let evm = meta("evm");
+    let query = |relations: &str| {
+        format!(
+            r#"{{"type":"evm","fromBlock":17881391,"toBlock":17881391,
+                 "traces":[{{"callSighash":["0xe21fd0e9"],{relations}}}],
+                 "fields":{{"block":{{"number":true}},
+                            "trace":{{"transactionIndex":true,"traceAddress":true,"type":true}}}}}}"#
+        )
+        .into_bytes()
+    };
+
+    let alone = run("ethereum", &evm, &query(r#""transactionTraces":true"#)).unwrap();
+    let with_subtraces = run(
+        "ethereum",
+        &evm,
+        &query(r#""transactionTraces":true,"subtraces":true"#),
+    )
+    .unwrap();
+
+    assert!(!alone.is_empty(), "the fixture must match traces");
+    assert_eq!(
+        alone, with_subtraces,
+        "`subtraces` names a subset of `transactionTraces`, so it adds nothing"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // INV-E5 — fork detection
 // ---------------------------------------------------------------------------
@@ -516,7 +1121,10 @@ fn a_mismatched_parent_block_hash_is_reported() {
         .downcast_ref::<sqd_query_engine::output::UnexpectedBaseBlock>()
         .expect("the error must be an UnexpectedBaseBlock a client can act on");
     assert_eq!(reported.expected_hash, "0xdeadbeef");
-    let parent = reported.prev_blocks.last().expect("prev_blocks must not be empty");
+    let parent = reported
+        .prev_blocks
+        .last()
+        .expect("prev_blocks must not be empty");
     assert_eq!(parent.number, FROM - 1);
     assert_eq!(parent.hash, actual_parent);
 }
@@ -585,6 +1193,89 @@ fn a_malformed_parent_block_hash_is_rejected() {
 /// A chain that skips numbers has no block at `fromBlock - 1`, so the
 /// predecessor has to be read from the parent-number column rather than
 /// computed. Solana slot 217710449 follows 217710447.
+/// Fork detection reads two columns out of the block table. When the chunk does
+/// not carry them the check cannot run — and it used to answer the query anyway,
+/// which is the one outcome `parentBlockHash` exists to prevent. The reference
+/// refuses: `column 'parent_hash' is not found in 'blocks'`.
+#[test]
+fn a_chunk_that_cannot_answer_the_fork_check_is_an_error() {
+    let evm = meta("evm");
+    let chunk = chunk_without_column("ethereum", "blocks", "parent_hash");
+    let parent = parent_hash_of("ethereum", &evm, 17881390);
+    let query = format!(
+        r#"{{"type":"evm","fromBlock":17881390,"toBlock":17881391,
+             "parentBlockHash":"{parent}",
+             "fields":{{"block":{{"number":true}}}},"logs":[{{}}]}}"#
+    );
+
+    let parsed = parse_query(query.as_bytes(), &evm).unwrap();
+    let plan = compile(&parsed, &evm).unwrap();
+    let err = match execute_plan(&plan, &evm, chunk.path()) {
+        Err(e) => e,
+        Ok(_) => panic!("a chunk without 'parent_hash' cannot serve a fork-checked query"),
+    };
+
+    assert!(
+        err.root_cause().to_string().contains("parent_hash"),
+        "the error must name the missing column, got: {}",
+        err.root_cause()
+    );
+}
+
+/// Two behaviours below are pinned because they read like defects and are not:
+/// both were compared against the reference implementation on this chunk and
+/// produce its message verbatim. Changing either is a divergence, not a fix.
+
+/// A hash is compared byte for byte. Every *filter* value in this engine folds
+/// case, so an upper-cased hash looks like it should be accepted — the reference
+/// rejects it, and a client that upper-cases hashes is broken against both
+/// engines identically rather than against one of them.
+#[test]
+fn a_parent_block_hash_is_compared_byte_for_byte() {
+    let evm = meta("evm");
+    let parent = parent_hash_of("ethereum", &evm, 17881390);
+    let query = |hash: &str| {
+        format!(
+            r#"{{"type":"evm","fromBlock":17881390,"toBlock":17881391,
+                 "parentBlockHash":"{hash}",
+                 "fields":{{"block":{{"number":true}}}},"logs":[{{}}]}}"#
+        )
+        .into_bytes()
+    };
+
+    run("ethereum", &evm, &query(&parent)).expect("the true parent hash is accepted");
+
+    let upper = parent.to_uppercase().replace("0X", "0x");
+    assert!(
+        run("ethereum", &evm, &query(&upper)).is_err(),
+        "an upper-cased hash is a different hash, as it is for the reference"
+    );
+}
+
+/// With `fromBlock` past the end of the chunk, the comparison lands on the last
+/// block the chunk holds rather than on a real predecessor, and reports a fork.
+/// The reference does the same thing on the same chunk — the check is a chunk's
+/// answer about the data it has, and a caller handing it the wrong chunk gets the
+/// same answer from both engines.
+#[test]
+fn a_from_block_past_the_chunk_compares_against_what_the_chunk_holds() {
+    let evm = meta("evm");
+    let parent = parent_hash_of("ethereum", &evm, 17881390);
+    let query = format!(
+        r#"{{"type":"evm","fromBlock":17882796,"toBlock":17882800,
+             "parentBlockHash":"{parent}",
+             "fields":{{"block":{{"number":true}}}},"logs":[{{}}]}}"#
+    );
+
+    let err = run("ethereum", &evm, query.as_bytes())
+        .err()
+        .expect("the chunk's last block is not the expected parent");
+    assert!(
+        err.to_string().contains("unexpected base block"),
+        "got: {err}"
+    );
+}
+
 #[test]
 fn fork_detection_follows_a_chain_that_skips_numbers() {
     let solana = meta("solana");
@@ -640,15 +1331,29 @@ fn undeclared_columns_are_not_filterable() {
     let evm = meta("evm");
     let rejected = [
         // System columns backing the weight model.
-        (r#"{"type":"evm","fromBlock":0,"logs":[{"dataSize":[100]}]}"#, "data_size"),
+        (
+            r#"{"type":"evm","fromBlock":0,"logs":[{"dataSize":[100]}]}"#,
+            "data_size",
+        ),
         // A real, emitted column that the reference does not let a client filter.
-        (r#"{"type":"evm","fromBlock":0,"logs":[{"logIndex":[3]}]}"#, "log_index"),
-        (r#"{"type":"evm","fromBlock":0,"transactions":[{"gasUsed":["0x1"]}]}"#, "gas_used"),
+        (
+            r#"{"type":"evm","fromBlock":0,"logs":[{"logIndex":[3]}]}"#,
+            "log_index",
+        ),
+        (
+            r#"{"type":"evm","fromBlock":0,"transactions":[{"gasUsed":["0x1"]}]}"#,
+            "gas_used",
+        ),
     ];
     for (json, column) in rejected {
         let table = evm.table("logs").unwrap();
         assert!(
-            table.columns.contains_key(column) || evm.table("transactions").unwrap().columns.contains_key(column),
+            table.columns.contains_key(column)
+                || evm
+                    .table("transactions")
+                    .unwrap()
+                    .columns
+                    .contains_key(column),
             "the test is only meaningful while '{column}' is a real column"
         );
         assert!(
@@ -697,14 +1402,29 @@ fn an_alias_has_its_own_filter_surface() {
 fn reference_filters_are_all_accepted() {
     // (dataset, request key, filter keys) — mirrors the reference's requests.
     let cases: &[(&str, &str, &[&str])] = &[
-        ("evm", "transactions", &["from", "to", "sighash", "firstNonce", "lastNonce"]),
-        ("evm", "logs", &["address", "topic0", "topic1", "topic2", "topic3"]),
+        (
+            "evm",
+            "transactions",
+            &["from", "to", "sighash", "firstNonce", "lastNonce"],
+        ),
+        (
+            "evm",
+            "logs",
+            &["address", "topic0", "topic1", "topic2", "topic3"],
+        ),
         (
             "evm",
             "traces",
             &[
-                "type", "createFrom", "createResultAddress", "callFrom", "callTo",
-                "callSighash", "callCallType", "suicideAddress", "suicideRefundAddress",
+                "type",
+                "createFrom",
+                "createResultAddress",
+                "callFrom",
+                "callTo",
+                "callSighash",
+                "callCallType",
+                "suicideAddress",
+                "suicideRefundAddress",
                 "rewardAuthor",
             ],
         ),
@@ -713,9 +1433,30 @@ fn reference_filters_are_all_accepted() {
             "solana",
             "instructions",
             &[
-                "programId", "discriminator", "d1", "d2", "d4", "d8", "mentionsAccount",
-                "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9", "a10", "a11",
-                "a12", "a13", "a14", "a15", "isCommitted",
+                "programId",
+                "discriminator",
+                "d1",
+                "d2",
+                "d4",
+                "d8",
+                "mentionsAccount",
+                "a0",
+                "a1",
+                "a2",
+                "a3",
+                "a4",
+                "a5",
+                "a6",
+                "a7",
+                "a8",
+                "a9",
+                "a10",
+                "a11",
+                "a12",
+                "a13",
+                "a14",
+                "a15",
+                "isCommitted",
             ],
         ),
         ("solana", "transactions", &["feePayer", "mentionsAccount"]),
@@ -725,26 +1466,33 @@ fn reference_filters_are_all_accepted() {
             "solana",
             "tokenBalances",
             &[
-                "account", "preMint", "postMint", "preProgramId", "postProgramId",
-                "preOwner", "postOwner",
+                "account",
+                "preMint",
+                "postMint",
+                "preProgramId",
+                "postProgramId",
+                "preOwner",
+                "postOwner",
             ],
         ),
         ("solana", "rewards", &["pubkey"]),
         ("substrate", "events", &["name"]),
         ("substrate", "calls", &["name"]),
-        ("bitcoin", "outputs", &["scriptPubKeyAddress", "scriptPubKeyType"]),
+        (
+            "bitcoin",
+            "outputs",
+            &["scriptPubKeyAddress", "scriptPubKeyType"],
+        ),
         (
             "bitcoin",
             "inputs",
-            &["type", "prevoutScriptPubKeyAddress", "prevoutScriptPubKeyType", "prevoutGenerated"],
+            &[
+                "type",
+                "prevoutScriptPubKeyAddress",
+                "prevoutScriptPubKeyType",
+                "prevoutGenerated",
+            ],
         ),
-        ("fuel", "receipts", &["type", "contract"]),
-        (
-            "fuel",
-            "inputs",
-            &["type", "coinOwner", "coinAssetId", "contractContract", "messageSender", "messageRecipient"],
-        ),
-        ("fuel", "outputs", &["type"]),
     ];
 
     for (dataset, request_key, filters) in cases {
@@ -756,8 +1504,9 @@ fn reference_filters_are_all_accepted() {
                 r#"{{"type":"{}","fromBlock":0,"{request_key}":[{{"{filter}":[]}}]}}"#,
                 metadata.name
             );
-            parse_query(json.as_bytes(), &metadata)
-                .unwrap_or_else(|e| panic!("{dataset}.{request_key}.{filter} must stay filterable: {e}"));
+            parse_query(json.as_bytes(), &metadata).unwrap_or_else(|e| {
+                panic!("{dataset}.{request_key}.{filter} must stay filterable: {e}")
+            });
         }
     }
 }
