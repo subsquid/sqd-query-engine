@@ -269,10 +269,7 @@ pub fn encode_bignum(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
             write_i64(buf, a.value(row) as i64);
         }
         DataType::Decimal128(_, scale) => {
-            let a = array
-                .as_any()
-                .downcast_ref::<Decimal128Array>()
-                .unwrap();
+            let a = array.as_any().downcast_ref::<Decimal128Array>().unwrap();
             let v = a.value(row);
             if *scale == 0 {
                 write_i128(buf, v);
@@ -456,33 +453,48 @@ fn encode_hex_bytes(bytes: &[u8], buf: &mut Vec<u8>) {
 /// holds.
 fn resolve_hex_number_encoder(data_type: &DataType) -> EncoderFn {
     match data_type {
-        DataType::UInt8 => encode_hex_number_u8,
-        DataType::UInt16 => encode_hex_number_u16,
-        DataType::UInt32 => encode_hex_number_u32,
-        DataType::UInt64 => encode_hex_number_u64,
-        // A hex_number declaration on a non-integer column is a catalog error,
-        // caught at load; fall back to the column's natural rendering.
+        DataType::UInt8 | DataType::Int8 => encode_hex_number_u8,
+        DataType::UInt16 | DataType::Int16 => encode_hex_number_u16,
+        DataType::UInt32 | DataType::Int32 => encode_hex_number_u32,
+        DataType::UInt64 | DataType::Int64 => encode_hex_number_u64,
+        // The declaration is checked at load (`metadata::loader::validate`), so
+        // reaching here means the chunk stores something other than an integer
+        // under a column the catalog calls one. Signed widths are accepted above
+        // because physical and declared types disagree routinely, and rendering
+        // `d8` as a bare JSON number would round it past 2^53.
         other => resolve_value_encoder(other),
     }
 }
 
+/// Renders one integer column as a zero-padded hex string of its physical width.
+/// The signed array of the same width is read through its unsigned twin, so the
+/// digits do not depend on how the writer chose to type the column.
 macro_rules! hex_number_encoder {
-    ($name:ident, $array:ty) => {
+    ($name:ident, $unsigned_array:ty, $signed_array:ty, $unsigned:ty) => {
         fn $name(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
             if array.is_null(row) {
                 buf.extend_from_slice(b"null");
                 return;
             }
-            let a = array.as_any().downcast_ref::<$array>().unwrap();
-            encode_hex_bytes(&a.value(row).to_be_bytes(), buf);
+
+            let value = if let Some(a) = array.as_any().downcast_ref::<$unsigned_array>() {
+                a.value(row)
+            } else if let Some(a) = array.as_any().downcast_ref::<$signed_array>() {
+                a.value(row) as $unsigned
+            } else {
+                buf.extend_from_slice(b"null");
+                return;
+            };
+
+            encode_hex_bytes(&value.to_be_bytes(), buf);
         }
     };
 }
 
-hex_number_encoder!(encode_hex_number_u8, UInt8Array);
-hex_number_encoder!(encode_hex_number_u16, UInt16Array);
-hex_number_encoder!(encode_hex_number_u32, UInt32Array);
-hex_number_encoder!(encode_hex_number_u64, UInt64Array);
+hex_number_encoder!(encode_hex_number_u8, UInt8Array, Int8Array, u8);
+hex_number_encoder!(encode_hex_number_u16, UInt16Array, Int16Array, u16);
+hex_number_encoder!(encode_hex_number_u32, UInt32Array, Int32Array, u32);
+hex_number_encoder!(encode_hex_number_u64, UInt64Array, Int64Array, u64);
 
 fn encode_list(array: &GenericListArray<i32>, row: usize, buf: &mut Vec<u8>) {
     let values = array.value(row);
@@ -738,7 +750,9 @@ mod tests {
 
     #[test]
     fn test_decimal128_scale_zero() {
-        let arr = Decimal128Array::from(vec![12345i128]).with_precision_and_scale(38, 0).unwrap();
+        let arr = Decimal128Array::from(vec![12345i128])
+            .with_precision_and_scale(38, 0)
+            .unwrap();
         let mut buf = Vec::new();
         encode_bignum(&arr, 0, &mut buf);
         assert_eq!(String::from_utf8(buf).unwrap(), "\"12345\"");
@@ -746,7 +760,9 @@ mod tests {
 
     #[test]
     fn test_decimal128_scale_nonzero() {
-        let arr = Decimal128Array::from(vec![12345i128]).with_precision_and_scale(38, 2).unwrap();
+        let arr = Decimal128Array::from(vec![12345i128])
+            .with_precision_and_scale(38, 2)
+            .unwrap();
         let mut buf = Vec::new();
         encode_bignum(&arr, 0, &mut buf);
         assert_eq!(String::from_utf8(buf).unwrap(), "\"123.45\"");
@@ -754,7 +770,9 @@ mod tests {
 
     #[test]
     fn test_decimal128_scale_negative_value() {
-        let arr = Decimal128Array::from(vec![-12345i128]).with_precision_and_scale(38, 3).unwrap();
+        let arr = Decimal128Array::from(vec![-12345i128])
+            .with_precision_and_scale(38, 3)
+            .unwrap();
         let mut buf = Vec::new();
         encode_bignum(&arr, 0, &mut buf);
         assert_eq!(String::from_utf8(buf).unwrap(), "\"-12.345\"");
@@ -763,7 +781,9 @@ mod tests {
     #[test]
     fn test_decimal128_scale_small_value() {
         // 5 with scale 3 → "0.005"
-        let arr = Decimal128Array::from(vec![5i128]).with_precision_and_scale(38, 3).unwrap();
+        let arr = Decimal128Array::from(vec![5i128])
+            .with_precision_and_scale(38, 3)
+            .unwrap();
         let mut buf = Vec::new();
         encode_bignum(&arr, 0, &mut buf);
         assert_eq!(String::from_utf8(buf).unwrap(), "\"0.005\"");
@@ -772,9 +792,53 @@ mod tests {
     #[test]
     fn test_decimal128_negative_small_value() {
         // -5 with scale 3 → "-0.005"
-        let arr = Decimal128Array::from(vec![-5i128]).with_precision_and_scale(38, 3).unwrap();
+        let arr = Decimal128Array::from(vec![-5i128])
+            .with_precision_and_scale(38, 3)
+            .unwrap();
         let mut buf = Vec::new();
         encode_bignum(&arr, 0, &mut buf);
         assert_eq!(String::from_utf8(buf).unwrap(), "\"-0.005\"");
+    }
+
+    fn rendered_as_hex_number(array: std::sync::Arc<dyn Array>) -> String {
+        let encoder = resolve_encoder(array.data_type(), Some(&JsonEncoding::HexNumber));
+        let mut buf = Vec::new();
+        encoder(array.as_ref(), 0, &mut buf);
+        String::from_utf8(buf).unwrap()
+    }
+
+    /// The width comes from the column, so `d2` is four digits whatever it holds
+    /// — that is the shape a client parses.
+    #[test]
+    fn test_hex_number_pads_to_the_column_width() {
+        assert_eq!(
+            rendered_as_hex_number(std::sync::Arc::new(UInt8Array::from(vec![1u8]))),
+            "\"0x01\""
+        );
+        assert_eq!(
+            rendered_as_hex_number(std::sync::Arc::new(UInt16Array::from(vec![1600u16]))),
+            "\"0x0640\""
+        );
+        assert_eq!(
+            rendered_as_hex_number(std::sync::Arc::new(UInt32Array::from(vec![1600u32]))),
+            "\"0x00000640\""
+        );
+    }
+
+    /// Physical and declared types disagree routinely in these chunks. A signed
+    /// array of the same width must still render hex: falling through to the
+    /// numeric encoder emits a `uint64` discriminator as a bare JSON number,
+    /// which every parser with 53-bit floats silently rounds.
+    #[test]
+    fn test_hex_number_survives_a_signed_physical_column() {
+        assert_eq!(
+            rendered_as_hex_number(std::sync::Arc::new(Int16Array::from(vec![1600i16]))),
+            "\"0x0640\""
+        );
+        assert_eq!(
+            rendered_as_hex_number(std::sync::Arc::new(Int64Array::from(vec![-1i64]))),
+            "\"0xffffffffffffffff\"",
+            "the bytes are the column's, not a re-reading of its sign"
+        );
     }
 }

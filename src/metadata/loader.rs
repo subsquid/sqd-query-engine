@@ -63,6 +63,28 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
             }
         }
 
+        // A `hex_number` column renders as a zero-padded hex string of its
+        // physical width, which only means anything for an unsigned integer. The
+        // encoder assumes this check exists.
+        for (col_name, col) in &table.columns {
+            if col.json_encoding == Some(crate::metadata::JsonEncoding::HexNumber) {
+                anyhow::ensure!(
+                    matches!(
+                        col.data_type,
+                        crate::metadata::ColumnType::UInt8
+                            | crate::metadata::ColumnType::UInt16
+                            | crate::metadata::ColumnType::UInt32
+                            | crate::metadata::ColumnType::UInt64
+                    ),
+                    "table '{}': column '{}' declares json_encoding hex_number, \
+                     which needs an unsigned integer column, not {:?}",
+                    table_name,
+                    col_name,
+                    col.data_type
+                );
+            }
+        }
+
         // Validate children references
         for child in &table.children {
             anyhow::ensure!(
@@ -392,11 +414,132 @@ tables:
 query_aliases:
   view:
     table: items
+    filters: []
     filter_aliases:
       topic0: no_such_column
 "#;
-        let err = parse_dataset_description(bad_target).unwrap_err().to_string();
+        let err = parse_dataset_description(bad_target)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("no_such_column"), "got: {err}");
+    }
+
+    /// A catalog is written by hand and read by nothing else. Each check below
+    /// covers a mistake that would otherwise load clean and change an answer.
+    #[test]
+    fn test_validate_rejects_catalog_mistakes() {
+        // `{defect}` is spliced into an otherwise valid two-table catalog.
+        let catalog = |defect: &str| {
+            format!(
+                r#"
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    columns:
+      number: {{ type: uint64 }}
+  items:
+    columns:
+      block_number: {{ type: uint64 }}
+      user: {{ type: string }}
+      user_bloom: {{ type: string, system: true }}
+    filters: [ user ]
+{defect}
+"#
+            )
+        };
+
+        let rejected: &[(&str, &str)] = &[
+            (
+                "an alias that omits its filter surface",
+                "query_aliases:\n  view:\n    table: items",
+            ),
+            (
+                "a misspelled alias key",
+                "query_aliases:\n  view:\n    table: items\n    filters: []\n    filter: [ user ]",
+            ),
+            (
+                "an implicit predicate on a column that is not there",
+                "query_aliases:\n  view:\n    table: items\n    filters: []\n\
+                 \x20   implicit_predicates:\n      no_such_column: [ x ]",
+            ),
+            (
+                "an alias relation to a table that is not there",
+                "query_aliases:\n  view:\n    table: items\n    filters: []\n    relations:\n\
+                 \x20     thing:\n        table: no_such_table\n        left_key: [ block_number ]\n\
+                 \x20       right_key: [ block_number ]",
+            ),
+        ];
+
+        for (what, defect) in rejected {
+            assert!(
+                parse_dataset_description(&catalog(defect)).is_err(),
+                "{what} must be refused"
+            );
+        }
+    }
+
+    /// A filter naming a system column would publish an internal column as API.
+    #[test]
+    fn test_validate_rejects_a_filter_on_a_system_column() {
+        let yaml = r#"
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    columns:
+      number: { type: uint64 }
+  items:
+    columns:
+      block_number: { type: uint64 }
+      user_bloom: { type: string, system: true }
+    filters: [ user_bloom ]
+"#;
+        let err = parse_dataset_description(yaml).unwrap_err().to_string();
+        assert!(err.contains("system column"), "got: {err}");
+    }
+
+    /// A special filter reaches a column the same way a declared filter does.
+    #[test]
+    fn test_validate_rejects_a_special_filter_on_a_missing_column() {
+        let yaml = r#"
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    columns:
+      number: { type: uint64 }
+  items:
+    columns:
+      block_number: { type: uint64 }
+    special_filters:
+      callValueNonZero:
+        type: gte_const
+        column: no_such_column
+        value: "0x1"
+"#;
+        let err = parse_dataset_description(yaml).unwrap_err().to_string();
+        assert!(err.contains("no_such_column"), "got: {err}");
+    }
+
+    /// `hex_number` renders the column's physical width as hex digits, which only
+    /// means anything for an unsigned integer. The encoder relies on this check.
+    #[test]
+    fn test_validate_rejects_hex_number_on_a_non_integer_column() {
+        let yaml = r#"
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    columns:
+      number: { type: uint64 }
+  items:
+    columns:
+      block_number: { type: uint64 }
+      label: { type: string, json_encoding: hex_number }
+"#;
+        let err = parse_dataset_description(yaml).unwrap_err().to_string();
+        assert!(err.contains("hex_number"), "got: {err}");
     }
 
     /// Every catalog shipped with the engine must load.
