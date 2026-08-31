@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 /// Top-level dataset description. One per chain type (evm, solana, etc.).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DatasetDescription {
     /// Dataset name (e.g., "solana", "evm")
     pub name: String,
@@ -18,6 +19,7 @@ pub struct DatasetDescription {
 
 /// A query alias that maps to an existing table with implicit predicates and filter aliases.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QueryAlias {
     /// The actual table name this alias refers to.
     pub table: String,
@@ -32,12 +34,16 @@ pub struct QueryAlias {
     pub relations: BTreeMap<String, RelationDef>,
     /// Column filters this alias accepts, in place of the table's own list. An
     /// alias is a narrower view of its table and usually exposes fewer filters.
-    #[serde(default)]
+    ///
+    /// Required, with no default: an alias that omits the key would silently
+    /// accept no filters at all, and every client filter on it would 400.
+    /// Declaring `filters: []` says that on purpose.
     pub filters: Vec<String>,
 }
 
 /// Description of a single parquet table within a dataset.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TableDescription {
     /// Column that holds the block number for block range filtering.
     /// Defaults to "block_number". The blocks table typically overrides this to "number".
@@ -119,7 +125,6 @@ pub struct TableDescription {
     /// E.g., EVM traces: `create_from` → `action.from` when type=create.
     #[serde(default)]
     pub field_groups: Option<FieldGrouping>,
-
 }
 
 impl TableDescription {
@@ -154,6 +159,7 @@ pub enum WeightSource {
 
 /// Description of a single column in a table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ColumnDescription {
     /// Arrow/parquet data type
     #[serde(rename = "type")]
@@ -295,6 +301,7 @@ pub enum JsonEncoding {
 
 /// Description of a relation available in query items.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RelationDef {
     /// Target table name.
     pub table: String,
@@ -384,6 +391,7 @@ pub enum SpecialFilter {
 /// - `suicide` → `action.{address,refundAddress,balance}`
 /// - `reward` → `action.{author,value,type}`
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FieldGrouping {
     /// Column that determines the variant (e.g., "type").
     pub tag_column: String,
@@ -414,6 +422,7 @@ impl FieldGrouping {
 
 /// Maps a physical column to a JSON field name within a group.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FieldMapping {
     /// Physical column name in parquet.
     pub column: String,
