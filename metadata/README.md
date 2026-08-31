@@ -15,11 +15,12 @@ YAML files live in [`metadata/`](../../metadata/).
    - [Weight](#weight)
    - [System Columns](#system-columns)
 4. [Relations](#relations)
-5. [Special Filters](#special-filters)
-6. [Virtual Fields](#virtual-fields)
-7. [Field Groups (Polymorphic Output)](#field-groups-polymorphic-output)
-8. [Query Aliases](#query-aliases)
-9. [Complete Minimal Example](#complete-minimal-example)
+5. [Filters](#filters)
+6. [Special Filters](#special-filters)
+7. [Virtual Fields](#virtual-fields)
+8. [Field Groups (Polymorphic Output)](#field-groups-polymorphic-output)
+9. [Query Aliases](#query-aliases)
+10. [Complete Minimal Example](#complete-minimal-example)
 
 ---
 
@@ -58,6 +59,8 @@ The distinction matters because queries use plural names for filters (`"logs": [
 | Property | Type | Required | Description |
 |---|---|---|---|
 | `block_number_column` | string | no | Column holding the block number. Defaults to `"block_number"`. The blocks table typically uses `"number"`. Used for block range filtering, block grouping, and cross-table joins. |
+| `parent_hash_column` | string | no | Column holding the *preceding* block's hash. Only the block table sets it, and declaring it is what turns on fork detection: a client's `parentBlockHash` is compared against it, and a mismatch means the chain reorganised between two pages. A dataset that declares nothing opts out. |
+| `parent_number_column` | string | no | Column holding the preceding block's *number*. Needed by chains that skip numbers — a Solana slot's predecessor is not `number - 1`. Where it is absent the predecessor is taken to be `number - 1`. |
 
 ### Sorting & Ordering
 
@@ -148,6 +151,7 @@ The `json_encoding` field controls how a column's value is serialized to JSON ou
 | `base58` | Bytes displayed as base58 string | `So11111111111111111111111111111112` |
 | `string` | Integer as quoted decimal string (avoids JS precision loss for >2^53) | `5000` → `"5000"` |
 | `json` | String containing JSON — parsed and embedded as raw JSON in output | `"{\"a\":1}"` → `{"a":1}` |
+| `hex_number` | Unsigned integer as a quoted hex string, zero-padded to the column's physical width | `uint16` `1600` → `"0x0640"` |
 | `solana_tx_version` | Solana transaction version: `-1` → `"legacy"`, otherwise the number | `-1` → `"legacy"`, `0` → `0` |
 | `timestamp_millisecond` | Millisecond timestamp, output as integer | `1710000000000` |
 
@@ -193,7 +197,14 @@ Columns with `system: true` are internal to the storage layer and are never expo
 Common system columns:
 - **Size columns**: `data_size`, `input_size`, `accounts_size`, `signatures_size`, etc. — used as weight sources.
 - **Bloom filters**: `accounts_bloom` — used for `mentions_account` special filter.
-- **Discriminator columns**: `d1` through `d16`, `b9` — used for Solana instruction discriminator matching.
+- **Filter-only discriminator widths**: `d3`, `d5`–`d7`, `d9`–`d16`, `b9` — read by the `discriminator` filter and never emitted.
+
+Being *read by a filter* does not make a column a system column. Solana's `d1`,
+`d2`, `d4` and `d8` are selectable, so they are ordinary columns: they are
+emitted (as `hex_number`), they carry weight, and selecting one absent from a
+chunk is an error. Marking them `system` made them weightless and rendered them
+by physical type, which silently rounded a `uint64` `d8` in every JavaScript
+client.
 
 In YAML files, system columns are conventionally separated from data columns with a `# system` comment.
 
@@ -240,6 +251,28 @@ relations:
 - **`join`** (default): Hash-based equi-join. Returns rows from the target table whose key matches the source. With KeyFilter pushdown, matching is done during the scan itself.
 - **`children`**: Hierarchical join using `address_column`. Finds rows in the target whose address is a prefix-child of the source row's address (e.g., trace `[0]` has children `[0,0]`, `[0,1]`, etc.).
 - **`parents`**: Inverse of children. Finds rows whose address is a prefix-parent of the source (e.g., instruction `[1,2,3]` has parents `[1]` and `[1,2]`).
+
+---
+
+## Filters
+
+Every table declares which filters it accepts. A query key naming an undeclared
+column is rejected even when a column of that name exists.
+
+```yaml
+logs:
+  filters: [ address, topic0, topic1, topic2, topic3 ]
+```
+
+The list is what keeps the surface closed. Without it, resolving a filter key
+against "any column of the table" exposes the blooms, size counters and
+denormalised extractions a table carries for the engine's own use — and makes
+the column list the public API, so that adding a column adds a filter clients
+can come to depend on.
+
+Each entry names a column of the same name. `special_filters` and `relations`
+are accepted in addition to this list; a table that declares nothing accepts no
+column filters, which is right for `blocks`.
 
 ---
 
@@ -388,6 +421,7 @@ query_aliases:
 | `implicit_predicates` | map | no | Column → values filters automatically applied to every query through this alias. |
 | `filter_aliases` | map | no | Maps query filter keys to physical column names (e.g., `topic0` → `_evm_log_topic0`). |
 | `relations` | map | no | Relations available when querying via this alias. Same structure as table-level relations. |
+| `filters` | list | no | Column filters this alias accepts, **in place of** the table's own list. An alias is a narrower view of its table: `evmLogs` accepts the log filters it aliases, not the whole event surface. |
 
 ### Use Cases
 
@@ -404,12 +438,17 @@ name: my_chain
 tables:
   blocks:
     block_number_column: number
+    parent_hash_column: parent_hash
     sort_key: [number]
+    filters: []
     columns:
       number:
         type: uint64
         stats: true
       hash:
+        type: string
+        json_encoding: hex
+      parent_hash:
         type: string
         json_encoding: hex
       timestamp:
@@ -420,6 +459,7 @@ tables:
     field_name: transaction
     item_order_keys: [transaction_index]
     sort_key: [to, block_number, transaction_index]
+    filters: [to]
     columns:
       block_number:
         type: uint64
