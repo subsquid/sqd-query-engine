@@ -97,9 +97,15 @@ pub(crate) fn apply_weight_limit(
         let bn_col_name = table_desc
             .map(|d| d.block_number_column.as_str())
             .unwrap_or("block_number");
-        let dedup_keys: Vec<&str> = table_desc
-            .map(|d| d.item_order_keys.iter().map(|s| s.as_str()).collect())
+        // The same key the row writer dedups on. `item_order_keys` alone is a
+        // prefix of it for any table with an address column: every EVM trace of
+        // one transaction shares its `transaction_index`, so all of them would
+        // collapse to a single counted row while all of them are emitted, and
+        // the response overshoots the cap by the trace count (INV-B6/B10).
+        let dedup_keys = table_desc
+            .map(crate::output::row_writer::build_full_sort_columns)
             .unwrap_or_default();
+        let dedup_keys: Vec<&str> = dedup_keys.iter().map(String::as_str).collect();
 
         if contribs.len() == 1 {
             // Single source — no dedup needed, fast path.
@@ -297,8 +303,12 @@ fn compute_weight_params(
                     }
                 }
             }
-        } else if desc.columns.contains_key(col_name.as_str()) {
-            projected.insert(col_name.as_str());
+        } else if let Some(phys) = desc.physical_output_column(col_name) {
+            // A field-group request key names its column indirectly
+            // (`call_call_type` → `call_type`). Missing that resolution here
+            // while `required_output_columns` makes it gives the row a weight of
+            // zero, so it is emitted and never counted (INV-B10).
+            projected.insert(phys);
         }
     }
 
@@ -514,8 +524,8 @@ fn weight_projection(
                     }
                 }
             }
-        } else if desc.columns.contains_key(col_name.as_str()) {
-            cols.insert(col_name.clone());
+        } else if let Some(phys) = desc.physical_output_column(col_name) {
+            cols.insert(phys.to_string());
         }
     }
 
