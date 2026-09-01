@@ -188,12 +188,9 @@ pub(crate) fn required_output_columns(
             continue;
         }
         // Resolve field-group request keys (e.g. `call_call_type` → `call_type`).
-        let phys = table_desc
-            .field_groups
-            .as_ref()
-            .filter(|_| !table_desc.columns.contains_key(col.as_str()))
-            .and_then(|fg| fg.physical_column_for_request(col.as_str()))
-            .unwrap_or(col.as_str());
+        let Some(phys) = table_desc.physical_output_column(col) else {
+            continue;
+        };
         if let Some(desc) = table_desc.columns.get(phys) {
             if !desc.system {
                 cols.push(phys.to_string());
