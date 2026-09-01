@@ -27,8 +27,23 @@ fn fixture_chunk(dataset: &str) -> PathBuf {
 
 /// Whether the fixture tree is checked out at all. It is not in the repository,
 /// so in a plain checkout the tests that read it have nothing to run against.
+///
+/// A skip that looks like a pass is what this branch set out to remove, so it is
+/// only allowed where nobody was promised coverage. Setting
+/// `SQD_REQUIRE_FIXTURES=1` — which CI should — turns an absent tree into a
+/// failure rather than a silent green run.
 fn fixture_tree_is_present() -> bool {
-    fixture_chunk("ethereum").is_dir()
+    if fixture_chunk("ethereum").is_dir() {
+        return true;
+    }
+
+    assert!(
+        std::env::var_os("SQD_REQUIRE_FIXTURES").is_none(),
+        "SQD_REQUIRE_FIXTURES is set but tests/fixtures is not checked out, so these \
+         tests would report green having compared nothing"
+    );
+
+    false
 }
 
 /// Block numbers are stored with whatever integer width the writer chose, so
