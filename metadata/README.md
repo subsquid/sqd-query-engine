@@ -59,7 +59,7 @@ The distinction matters because queries use plural names for filters (`"logs": [
 | Property | Type | Required | Description |
 |---|---|---|---|
 | `block_number_column` | string | no | Column holding the block number. Defaults to `"block_number"`. The blocks table typically uses `"number"`. Used for block range filtering, block grouping, and cross-table joins. |
-| `parent_hash_column` | string | no | Column holding the *preceding* block's hash. Only the block table sets it, and declaring it is what turns on fork detection: a client's `parentBlockHash` is compared against it, and a mismatch means the chain reorganised between two pages. A dataset that declares nothing opts out. |
+| `parent_hash_column` | string | no | Column holding the *preceding* block's hash. Only the block table sets it, and declaring it is what turns on fork detection: a client's `parentBlockHash` is compared against it, and a mismatch means the chain reorganised between two pages. A dataset that declares nothing cannot answer the question, so it *refuses* `parentBlockHash` rather than accepting and ignoring it. |
 | `parent_number_column` | string | no | Column holding the preceding block's *number*. Needed by chains that skip numbers — a Solana slot's predecessor is not `number - 1`. Where it is absent the predecessor is taken to be `number - 1`. |
 
 ### Sorting & Ordering
@@ -76,6 +76,14 @@ The distinction matters because queries use plural names for filters (`"logs": [
 |---|---|---|---|
 | `children` | list[string] | no | Tables that are children of this table (e.g., transactions has children `[logs, balances, token_balances]`). Currently informational. |
 | `parent_key` | list[string] | no | Key columns linking this table to its parent (e.g., `[block_number, transaction_index]`). Currently informational. |
+
+### Query Surface
+
+| Property | Type | Required | Description |
+|---|---|---|---|
+| `filters` | list[string] | **yes** | Column filters this table accepts. See [Filters](#filters). |
+| `special_filters` | map | no | Filters that do not map to a single column comparison. See [Special Filters](#special-filters). |
+| `relations` | map | no | Relations a query item on this table may request. See [Relations](#relations). |
 
 ---
 
@@ -197,7 +205,8 @@ Columns with `system: true` are internal to the storage layer and are never expo
 Common system columns:
 - **Size columns**: `data_size`, `input_size`, `accounts_size`, `signatures_size`, etc. — used as weight sources.
 - **Bloom filters**: `accounts_bloom` — used for `mentions_account` special filter.
-- **Filter-only discriminator widths**: `d3`, `d5`–`d7`, `d9`–`d16`, `b9` — read by the `discriminator` filter and never emitted.
+- **Filter-only discriminator widths**: `d3`, `d5`–`d7`, `d9`–`d16` — read by the `discriminator` filter and never emitted.
+- **Sort-key columns**: `b9` — part of the physical sort key of Solana `instructions`, so its row group statistics prune, but no filter names it and no client sees it.
 
 Being *read by a filter* does not make a column a system column. Solana's `d1`,
 `d2`, `d4` and `d8` are selectable, so they are ordinary columns: they are
@@ -270,9 +279,15 @@ denormalised extractions a table carries for the engine's own use — and makes
 the column list the public API, so that adding a column adds a filter clients
 can come to depend on.
 
-Each entry names a column of the same name. `special_filters` and `relations`
-are accepted in addition to this list; a table that declares nothing accepts no
-column filters, which is right for `blocks`.
+Each entry names a column of the same name, and no entry may name a `system`
+column: publishing one makes an engine-internal detail part of the request API.
+`special_filters` and `relations` are accepted in addition to this list.
+
+The key is required, with no default, on a table and on a query alias alike. A
+table that omits it accepts no column filters and rejects every one a client
+sends — which is right for `blocks`, and a silent mistake anywhere else, since
+`deny_unknown_fields` catches a misspelled key but not an absent one. Writing
+`filters: []` says it on purpose.
 
 ---
 
@@ -421,7 +436,7 @@ query_aliases:
 | `implicit_predicates` | map | no | Column → values filters automatically applied to every query through this alias. |
 | `filter_aliases` | map | no | Maps query filter keys to physical column names (e.g., `topic0` → `_evm_log_topic0`). |
 | `relations` | map | no | Relations available when querying via this alias. Same structure as table-level relations. |
-| `filters` | list | no | Column filters this alias accepts, **in place of** the table's own list. An alias is a narrower view of its table: `evmLogs` accepts the log filters it aliases, not the whole event surface. |
+| `filters` | list | **yes** | Column filters this alias accepts, **in place of** the table's own list. An alias is a narrower view of its table: `evmLogs` accepts the log filters it aliases, not the whole event surface. Required for the same reason it is on a table — see [Filters](#filters). |
 
 ### Use Cases
 

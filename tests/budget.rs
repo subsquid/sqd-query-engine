@@ -25,6 +25,7 @@ tables:
     block_number_column: number
     field_name: block
     sort_key: [number]
+    filters: []
     columns:
       number:
         type: uint64
@@ -34,6 +35,7 @@ tables:
     block_number_column: block_number
     item_order_keys: [log_index]
     sort_key: [block_number, log_index]
+    filters: []
     columns:
       block_number:
         type: uint64
@@ -52,6 +54,7 @@ tables:
     block_number_column: block_number
     item_order_keys: [transaction_index]
     sort_key: [block_number, transaction_index]
+    filters: []
     columns:
       block_number:
         type: uint64

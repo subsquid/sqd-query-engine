@@ -112,7 +112,11 @@ pub struct TableDescription {
     /// every column — blooms, size counters, denormalised extractions — would be
     /// filterable, and the column list would become the public API.
     /// `special_filters` and `relations` are accepted in addition.
-    #[serde(default)]
+    ///
+    /// Required, with no default, for the same reason [`QueryAlias::filters`] is:
+    /// omitting the key would accept no filters at all and 400 every client
+    /// filter on the table, and `deny_unknown_fields` does not catch an absent
+    /// key the way it catches a misspelled one. `filters: []` says it on purpose.
     pub filters: Vec<String>,
 
     /// Virtual fields that combine multiple columns into one output field.
@@ -132,6 +136,24 @@ impl TableDescription {
     /// column, a virtual field, or a field-group request key. System columns —
     /// blooms, size counters, filter-only extractions — are not selectable, and
     /// neither is anything the catalog does not know.
+    /// The physical parquet column an output key reads, when the catalog
+    /// declares one: an ordinary column, or a field-group request key that
+    /// renames it (`call_call_type` → `call_type`).
+    ///
+    /// A virtual field resolves to nothing — it rolls several columns, and the
+    /// caller expands it. Everything that projects, weighs or requires an output
+    /// column goes through here, so the three cannot disagree on what a key
+    /// means.
+    pub fn physical_output_column(&self, key: &str) -> Option<&str> {
+        if let Some((name, _)) = self.columns.get_key_value(key) {
+            return Some(name.as_str());
+        }
+
+        self.field_groups
+            .as_ref()
+            .and_then(|fg| fg.physical_column_for_request(key))
+    }
+
     pub fn is_selectable_field(&self, name: &str) -> bool {
         if let Some(col) = self.columns.get(name) {
             return !col.system;
