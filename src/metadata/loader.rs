@@ -98,22 +98,12 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
         // Validate the declared filter surface. A typo here does not fail a
         // query — it removes a filter, and the query it was meant to narrow
         // comes back wrong instead.
-        for filter in &table.filters {
-            let column = table.columns.get(filter).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "table '{}': filter '{}' not found in columns",
-                    table_name,
-                    filter
-                )
-            })?;
-            anyhow::ensure!(
-                !column.system,
-                "table '{}': filter '{}' names a system column, which is not part of the \
-                 public surface",
-                table_name,
-                filter
-            );
-        }
+        check_filter_surface(
+            &format!("table '{}'", table_name),
+            &table.filters,
+            table_name,
+            table,
+        )?;
 
         // A special filter reaches its column the same way a declared filter
         // does, and a typo in one is just as invisible.
@@ -137,6 +127,22 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
                     column
                 );
             }
+        }
+
+        // A relation naming a table that is not there does not fail: the scan
+        // returns nothing for an unknown table and assembly skips the source, so
+        // the relation comes back empty at 200. A mistyped key column is worse —
+        // an unresolvable key makes the key set guaranteed-empty, so the relation
+        // is empty rather than absent.
+        for (relation_name, relation) in &table.relations {
+            check_relation(
+                &format!("table '{}'", table_name),
+                relation_name,
+                relation,
+                table_name,
+                table,
+                desc,
+            )?;
         }
 
         // Fork detection is off when nothing is declared, so a typo here would
@@ -166,15 +172,14 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
             )
         })?;
 
-        for filter in &alias.filters {
-            anyhow::ensure!(
-                table.columns.contains_key(filter),
-                "alias '{}': filter '{}' not found in columns of '{}'",
-                alias_name,
-                filter,
-                alias.table
-            );
-        }
+        // An alias is the one place the closed filter surface can be reopened, so
+        // it is held to the table's rules, system columns included.
+        check_filter_surface(
+            &format!("alias '{}'", alias_name),
+            &alias.filters,
+            &alias.table,
+            table,
+        )?;
 
         for (key, column) in &alias.filter_aliases {
             anyhow::ensure!(
@@ -201,12 +206,89 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
         }
 
         for (relation_name, relation) in &alias.relations {
-            anyhow::ensure!(
-                desc.tables.contains_key(&relation.table),
-                "alias '{}': relation '{}' targets table '{}', which the dataset does not have",
-                alias_name,
+            check_relation(
+                &format!("alias '{}'", alias_name),
                 relation_name,
-                relation.table
+                relation,
+                &alias.table,
+                table,
+                desc,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Every name in a declared filter list must be a non-system column of `table`.
+///
+/// System columns — blooms, size counters, denormalised extractions — are the
+/// engine's own, and publishing one as a filter makes an internal detail part of
+/// the request API.
+fn check_filter_surface(
+    owner: &str,
+    filters: &[String],
+    table_name: &str,
+    table: &crate::metadata::TableDescription,
+) -> Result<()> {
+    for filter in filters {
+        let column = table.columns.get(filter).ok_or_else(|| {
+            anyhow::anyhow!(
+                "{}: filter '{}' not found in columns of '{}'",
+                owner,
+                filter,
+                table_name
+            )
+        })?;
+
+        anyhow::ensure!(
+            !column.system,
+            "{}: filter '{}' names a system column, which is not part of the public surface",
+            owner,
+            filter
+        );
+    }
+
+    Ok(())
+}
+
+/// A relation must name a table the dataset has, and key columns both sides
+/// actually carry: left keys in `source`, right keys in the target.
+fn check_relation(
+    owner: &str,
+    relation_name: &str,
+    relation: &crate::metadata::RelationDef,
+    source_name: &str,
+    source: &crate::metadata::TableDescription,
+    desc: &DatasetDescription,
+) -> Result<()> {
+    let target = desc.tables.get(&relation.table).ok_or_else(|| {
+        anyhow::anyhow!(
+            "{}: relation '{}' targets table '{}', which the dataset does not have",
+            owner,
+            relation_name,
+            relation.table
+        )
+    })?;
+
+    for (side, keys, table_name, table) in [
+        ("left", relation.effective_left_key(), source_name, source),
+        (
+            "right",
+            relation.effective_right_key(),
+            relation.table.as_str(),
+            target,
+        ),
+    ] {
+        for key in keys {
+            anyhow::ensure!(
+                table.columns.contains_key(key),
+                "{}: relation '{}' joins on {} key '{}', which '{}' does not have",
+                owner,
+                relation_name,
+                side,
+                key,
+                table_name
             );
         }
     }
@@ -226,6 +308,7 @@ tables:
   blocks:
     block_number_column: number
     sort_key: [number]
+    filters: []
     columns:
       number:
         type: uint64
@@ -248,6 +331,7 @@ tables:
 name: test
 tables:
   transactions:
+    filters: []
     columns:
       block_number: { type: uint64 }
 "#;
@@ -263,6 +347,7 @@ name: test
 tables:
   blocks:
     block_number_column: number
+    filters: []
     columns:
       number: { type: uint64 }
       hash:
@@ -294,6 +379,7 @@ name: test
 tables:
   blocks:
     block_number_column: nonexistent
+    filters: []
     columns:
       number: { type: uint64 }
 "#;
@@ -370,6 +456,7 @@ tables:
   blocks:
     block_number_column: number
     children: [missing_table]
+    filters: []
     columns:
       number: { type: uint64 }
 "#;
@@ -391,6 +478,7 @@ name: test
 tables:
   blocks:
     block_number_column: number
+    filters: []
     columns:
       number: { type: uint64 }
   items:
@@ -414,6 +502,7 @@ tables:
   blocks:
     block_number_column: number
     {column}: no_such_column
+    filters: []
     columns:
       number: {{ type: uint64 }}
 "#
@@ -430,6 +519,7 @@ name: test
 tables:
   blocks:
     block_number_column: number
+    filters: []
     columns:
       number: { type: uint64 }
 query_aliases:
@@ -444,9 +534,11 @@ name: test
 tables:
   blocks:
     block_number_column: number
+    filters: []
     columns:
       number: { type: uint64 }
   items:
+    filters: []
     columns:
       block_number: { type: uint64 }
 query_aliases:
@@ -464,9 +556,11 @@ name: test
 tables:
   blocks:
     block_number_column: number
+    filters: []
     columns:
       number: { type: uint64 }
   items:
+    filters: []
     columns:
       block_number: { type: uint64 }
 query_aliases:
@@ -494,6 +588,7 @@ name: test
 tables:
   blocks:
     block_number_column: number
+    filters: []
     columns:
       number: {{ type: uint64 }}
   items:
@@ -527,6 +622,16 @@ tables:
                  \x20     thing:\n        table: no_such_table\n        left_key: [ block_number ]\n\
                  \x20       right_key: [ block_number ]",
             ),
+            (
+                "an alias filter on a system column, which the table itself may not declare",
+                "query_aliases:\n  view:\n    table: items\n    filters: [ user_bloom ]",
+            ),
+            (
+                "an alias relation joining on a key the target does not have",
+                "query_aliases:\n  view:\n    table: items\n    filters: []\n    relations:\n\
+                 \x20     thing:\n        table: blocks\n        left_key: [ block_number ]\n\
+                 \x20       right_key: [ no_such_column ]",
+            ),
         ];
 
         for (what, defect) in rejected {
@@ -537,6 +642,81 @@ tables:
         }
     }
 
+    /// A table relation is validated like an alias one. A mistyped target table
+    /// makes the relation come back empty at 200 — the scan returns nothing for a
+    /// table it does not know and assembly skips the source. A mistyped key column
+    /// is worse: the key set is then guaranteed-empty, so the relation is empty
+    /// rather than absent.
+    #[test]
+    fn test_validate_rejects_broken_table_relations() {
+        let catalog = |table: &str, right_key: &str| {
+            format!(
+                r#"
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    filters: []
+    columns:
+      number: {{ type: uint64 }}
+  items:
+    filters: []
+    relations:
+      kids:
+        table: {table}
+        left_key: [ block_number, index ]
+        right_key: [ block_number, {right_key} ]
+    columns:
+      block_number: {{ type: uint64 }}
+      index: {{ type: uint32 }}
+  children:
+    filters: []
+    columns:
+      block_number: {{ type: uint64 }}
+      parent_index: {{ type: uint32 }}
+"#
+            )
+        };
+
+        parse_dataset_description(&catalog("children", "parent_index"))
+            .expect("a relation naming real tables and columns must load");
+
+        for (what, yaml) in [
+            (
+                "a relation target that is not a table",
+                catalog("no_such_table", "parent_index"),
+            ),
+            (
+                "a right key the target does not have",
+                catalog("children", "no_such_column"),
+            ),
+        ] {
+            assert!(
+                parse_dataset_description(&yaml).is_err(),
+                "{what} must be refused"
+            );
+        }
+    }
+
+    /// A table that omits `filters` accepts no filters at all and 400s every one
+    /// a client sends, which `deny_unknown_fields` cannot catch — it sees an
+    /// absent key, not a misspelled one.
+    #[test]
+    fn test_validate_rejects_a_table_without_a_filter_surface() {
+        let yaml = r#"
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    columns:
+      number: { type: uint64 }
+"#;
+        // The missing key is a serde error, so it arrives as the cause rather than
+        // the context line.
+        let err = format!("{:#}", parse_dataset_description(yaml).unwrap_err());
+        assert!(err.contains("filters"), "got: {err}");
+    }
+
     /// A filter naming a system column would publish an internal column as API.
     #[test]
     fn test_validate_rejects_a_filter_on_a_system_column() {
@@ -545,6 +725,7 @@ name: test
 tables:
   blocks:
     block_number_column: number
+    filters: []
     columns:
       number: { type: uint64 }
   items:
@@ -565,9 +746,11 @@ name: test
 tables:
   blocks:
     block_number_column: number
+    filters: []
     columns:
       number: { type: uint64 }
   items:
+    filters: []
     columns:
       block_number: { type: uint64 }
     special_filters:
@@ -589,9 +772,11 @@ name: test
 tables:
   blocks:
     block_number_column: number
+    filters: []
     columns:
       number: { type: uint64 }
   items:
+    filters: []
     columns:
       block_number: { type: uint64 }
       label: { type: string, json_encoding: hex_number }
