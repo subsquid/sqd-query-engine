@@ -128,8 +128,8 @@ unsigned 64-bit integers. A string, float, negative, or out-of-range value is
 *Test:* `{"fromBlock": "abc"}`, `{"toBlock": -1}`, `{"fromBlock": 1.5}`, `{"fromBlock": 1e30}` each error.
 
 ### INV-Q5
-**At most 100 item requests**, summed across every table and alias. Otherwise
-`TooManyItemRequests`.
+**At most `P-MAX-ITEM-REQUESTS` item requests**, summed across every table and
+alias. Otherwise `TooManyItemRequests`.
 
 *Why:* each item request is an independent scan. The bound must be global, or an alias becomes a way to buy another hundred.
 *Test:* 100 requests split across tables passes; 101 fails; 100 aimed at an alias of an already-requested table fails when the total exceeds 100.
@@ -154,29 +154,55 @@ selectable field of `X` is `UnknownField`. It MUST NOT be silently dropped.
 `fields` = `{}`. `parentBlockHash` = absent. Every item request array = `[]`.
 Inside an item request, every filter absent and every relation flag `false`.
 
-*Test:* `{"type": "evm"}` is valid and returns headers for the chunk's boundary blocks with empty header objects.
+A default applies to an *absent* key only. A key that is present with the wrong
+type is an error, never its default: reading `{"fields": []}` as "no selection"
+answers 200 with every projection the client asked for missing, which is
+indistinguishable from a dataset that has none of those columns. This is the same
+rule INV-Q4 states for the block bounds, and it holds for every optional key.
+
+*Test:* `{"type": "evm"}` is valid and returns headers for the chunk's boundary blocks with empty header objects. `{"fields": []}`, `{"fields": false}` and `{"includeAllBlocks": 1}` each error.
 
 ### INV-Q10
-**Bloom filters take at most 10 values.** Otherwise `TooManyBloomValues`.
+**Bloom filters take at most `P-MAX-BLOOM-VALUES` values.** Otherwise
+`TooManyBloomValues`.
 
 ### INV-Q11
-**At most one discriminator-family filter per item request.** For Solana
+**At most `P-MAX-DISCRIMINATOR-FILTERS` discriminator-family filter per item
+request.** For Solana
 instructions, at most one of `discriminator`, `d1`, `d2`, `d4`, `d8`. Otherwise
 `ConflictingFilters`.
 
 ### INV-Q12
-**Hex values are well-formed.** `0x` or `0X` prefix, even number of hex digits.
-A discriminator value is at most 16 bytes. Otherwise `InvalidHex` or
-`DiscriminatorTooLong`.
+**Hex values are well-formed.** `0x` or `0X` prefix, even number of hex digits,
+and nothing but hex digits between them. A discriminator value is at most
+`P-MAX-DISCRIMINATOR-BYTES`. Otherwise `InvalidHex` or `DiscriminatorTooLong`.
+
+Which values these are follows the *column*, exactly as case folding does
+([INV-P8](#inv-p8)): every filter value on a `hexBytes` column, whether the
+column is stored as text or as bytes. A `hexBytes` column stores lowercase `0x…`
+values by §1.5, so a filter value that is not one of those can never equal a
+stored value — and answering that with an empty `200` tells the client nothing.
 
 *Note:* a well-formed value that cannot match anything is not an error. See [INV-P14](#inv-p14).
 
 ### INV-Q13
-**Requests are bounded in size.** An engine SHOULD reject a request exceeding a
-configured byte bound, or containing an `inList` longer than a configured length
-bound, with `RequestTooLarge`.
+**Requests are bounded in size.** An engine SHOULD reject a request exceeding
+`P-MAX-REQUEST-BYTES`, or containing an `inList` longer than `P-MAX-IN-LIST`,
+with `RequestTooLarge`.
 
 *Why:* 100 item requests, each with a million-address filter list, is well-formed under every rule above and a memory-amplification attack in practice.
+
+### INV-Q14
+**The field surface is closed.** A table's selectable fields are the ones the
+catalog declares, enumerated per dataset in
+[03-catalog.md](03-catalog.md). A key naming an undeclared field is
+`UnknownField`, even when a column of that name exists. Deriving the surface from
+the column list instead — "every non-`system` column is selectable" — is not
+conforming, because it exposes columns the catalog carries for filtering,
+grouping, joining and rolling.
+
+*Why:* the same reason [INV-P15](#inv-p15) closes the filter surface. An open output surface makes the physical column layout part of the wire contract, and every column an archive writer adds becomes a field clients may pin on.
+*Test:* for every dataset and table, assert `fields` accepts exactly the §3 list. In particular `{"fields":{"log":{"blockNumber":true}}}` and `{"fields":{"log":{"topic0":true}}}` error, though `block_number` and `topic0` are real columns.
 
 ---
 
@@ -216,6 +242,10 @@ including the empty one.
 **Case folding follows the column, not the filter.** Values of `hexBytes`
 columns compare case-insensitively, for both `inList` and scalar `equals`
 filters. All other columns compare byte-exactly.
+
+Folding is one-sided: stored `hexBytes` values are lowercase by §1.5, so only
+the filter value is folded. A chunk storing upper-case hex is malformed, and no
+engine is required to match it.
 
 *Why:* clients send checksummed addresses. Folding lists but not scalars makes `{"to": ["0xAB…"]}` and `{"to": "0xAB…"}` mean different things.
 *Test:* upper-casing every hex filter value in a query leaves the response byte-identical. Upper-casing a value of a non-hex column (`statediffs.key`, `traces.type`) changes it.
@@ -375,7 +405,8 @@ block, after deduplication.
 
 ### INV-B6
 **Selection is a weighted prefix.** Sort candidate blocks ascending, accumulate
-weight, keep the longest prefix whose cumulative weight does not exceed 20 MiB.
+weight, keep the longest prefix whose cumulative weight does not exceed
+`P-WEIGHT-BUDGET`.
 Always keep at least one block, however heavy.
 
 *Test:* a chunk whose first block alone exceeds the budget still returns that block, in full.
@@ -515,7 +546,24 @@ block preceding `fromBlock`, its hash MUST be compared. A mismatch is
 `(blockNumber, hash)` pairs. Accepting the field and ignoring it silently serves
 data from a chain the client did not ask about.
 
-When the chunk cannot see the preceding block, the check is skipped without error.
+Each block row carries its own parent's hash, so the row at `fromBlock` answers
+the question, and only that row does; the window around it exists to carry the
+recent pairs a client needs to find the fork point, not to answer in its place.
+The check is skipped without error when the chunk does not hold that row —
+whether because the window caught nothing at all, or because the chunk ends
+below `fromBlock`. A chunk that cannot see the block is not evidence about it.
+
+A dataset whose block table declares no parent-hash column cannot answer the
+question at all. Such a dataset MUST reject `parentBlockHash`
+(`UnsupportedRequestField`) rather than accept it and skip the check — a skipped
+check is indistinguishable, at the client, from a chain that did not reorganise.
+
+The same holds one level down. A *chunk* that holds a block of the window but
+carries neither the block table nor the parent-hash column cannot answer either,
+and MUST fail rather than return data. Only a chunk the window does not reach is
+the skipped case: it is silent because it was never asked.
+
+*Test:* supply a wrong `parentBlockHash` for the chunk's first block and assert `UnexpectedBaseBlock`; supply any `parentBlockHash` to a dataset with no parent-hash column and assert `UnsupportedRequestField`; supply one to a chunk inside the window whose block table lacks the column and assert an error; supply one with `fromBlock` below the chunk, and one with `fromBlock` above it, and assert the query succeeds in both.
 
 ### INV-E6
 **Error kinds are stable and machine-readable.** Clients switch on the kind; only
@@ -549,3 +597,9 @@ the answer to any query that neither selects nor filters on it.
 
 *Why:* the single most dangerous silent failure available. Treating an absent column as matching everything turns a selective query into a full table scan and returns the entire chunk to a client that asked for four rows. It is indistinguishable, at the client, from a correct answer.
 *Test:* delete `sighash` from a fixture chunk; assert `{"transactions":[{"sighash":["0xa9059cbb"]}]}` errors rather than returning every transaction.
+
+This covers a relation's join key too: an unevaluable key does not narrow the
+relation scan, so every row of the target table in range is attached to every
+source row. The catalog is checked at load for the shapes that cannot narrow —
+an empty key, sides of unequal length, and a key not led by the block number,
+which joins across blocks within a chunk.

@@ -15,10 +15,13 @@ serves the others.
 - Relation notation `name : kind → table [leftKey ↔ rightKey]`. Where the keys
   are equal on both sides, one list is shown.
 - `bn` abbreviates the table's block number column, always the first key column.
-- **Selectable fields** of a table are, by rule, its non-`system` columns plus
-  its virtual fields plus its field-group request keys, in camelCase (§2.3). Only
-  departures from that rule, and columns with non-default encodings, are called
-  out.
+- **Selectable fields** are listed per table, in camelCase. The list is the
+  normative output surface (§2.3): a name absent from it is `UnknownField`, even
+  when a column of that name exists. A catalog usually derives the list from its
+  non-`system` columns plus virtual fields plus field-group request keys, but
+  where that derivation and the list disagree, the list wins
+  ([INV-Q14](07-invariants.md#inv-q14)). Columns with non-default encodings are
+  called out separately.
 
 ### Compatibility markers
 
@@ -165,13 +168,13 @@ Tables: `blocks`, `transactions`, `instructions`, `logs`, `balances`,
 | Table | Filter | Kind | Column |
 |---|---|---|---|
 | `transactions` | `feePayer` | inList (exact) | `feePayer` |
-| | `mentionsAccount` | bloom (64 bytes, 7 hashes), ≤ 10 values | `accountsBloom` |
+| | `mentionsAccount` | bloom (64 bytes, 7 hashes), ≤ `P-MAX-BLOOM-VALUES` | `accountsBloom` |
 | `instructions` | `programId` | inList (exact) | same |
 | | `discriminator` | discriminator → `d1`…`d16` | — |
 | | `d1`, `d2`, `d4`, `d8` | inList (hex, fixed byte length 1/2/4/8) | same |
 | | `a0` … `a15` | inList (exact) | same |
 | | `isCommitted` | equals (boolean) | same |
-| | `mentionsAccount` | bloom, ≤ 10 values | `accountsBloom` |
+| | `mentionsAccount` | bloom, ≤ `P-MAX-BLOOM-VALUES` | `accountsBloom` |
 | `logs` | `programId`, `kind` | inList (exact) | same |
 | `balances` | `account` | inList (exact) | same |
 | `token_balances` | `account`, `preMint`, `postMint`, `preProgramId`, `postProgramId`, `preOwner`, `postOwner` | inList (exact) | same |
@@ -275,6 +278,7 @@ compatible extension.
 
 | Table | Relation | Definition |
 |---|---|---|
+| `extrinsics` | `events` **[X]** | join → `events` [bn, index ↔ bn, extrinsicIndex] |
 | `calls` | `extrinsic` | join → `extrinsics` [bn, extrinsicIndex ↔ bn, index] |
 | | `subcalls` | children → `calls`, group [bn, extrinsicIndex], address `address` |
 | | `stack` | parents → `calls`, group [bn, extrinsicIndex], address `address` |
@@ -379,6 +383,26 @@ Tables: `blocks`, `transactions`, `logs`, `internal_transactions`.
 
 Tron sighashes are 8 hex digits with **no** `0x` prefix.
 
+### Selectable fields
+
+`blocks`: `number, hash, parentHash, txTrieRoot, version, timestamp,
+witnessAddress, witnessSignature`
+
+`transactions`: `transactionIndex, hash, ret, signature, type, parameter,
+permissionId, refBlockBytes, refBlockHash, feeLimit, expiration, timestamp,
+rawDataHex, fee, contractResult, contractAddress, resMessage, withdrawAmount,
+unfreezeAmount, withdrawExpireAmount, cancelUnfreezeV2Amount, result, energyFee,
+energyUsage, energyUsageTotal, netUsage, netFee, originEnergyUsage,
+energyPenaltyTotal`
+
+`logs`: `transactionIndex, logIndex, address, data, topics`
+
+`internal_transactions`: `transactionIndex, internalTransactionIndex, hash,
+callerAddress, transferToAddress, callValueInfo, note, rejected, extra`
+
+The `_`-prefixed columns backing the three aliases are `system` and never
+emitted.
+
 ---
 
 ## 3.5 `bitcoin`
@@ -436,73 +460,18 @@ scriptPubKeyAsm, scriptPubKeyDesc, scriptPubKeyType, scriptPubKeyAddress`
 
 ---
 
-## 3.6 `fuel`
+## 3.6 `fuel` — not served
 
-Tables: `blocks`, `transactions`, `receipts`, `inputs`, `outputs`.
+The engine does not serve `fuel`. The dataset is out of scope
+([ADR-10](decisions/ADR-10-fuel-is-out-of-scope.md)): it is not being ported from
+the reference implementation, and no conforming engine is required to answer a
+`{"type": "fuel"}` query.
 
-| Table | queryName | fieldName | itemOrderKeys |
-|---|---|---|---|
-| `blocks` | `blocks` | `block` | — |
-| `transactions` | `transactions` | `transaction` | `index` |
-| `receipts` | `receipts` | `receipt` | `transactionIndex, index` |
-| `inputs` | `inputs` | `input` | `transactionIndex, index` |
-| `outputs` | `outputs` | `output` | `transactionIndex, index` |
+The section number is kept so that §3.7 and §3.8 do not move.
 
-The transaction's own key column is `index`, not `transactionIndex`. Child
-tables refer to it as `transactionIndex`. Relation keys must bridge the two.
-
-### Filters
-
-| Table | Filter | Kind | Column |
-|---|---|---|---|
-| `transactions` | `type` | inList (exact) | `type` |
-| `receipts` | `type` | inList (exact), columnAlias | `receiptType` |
-| | `contract` | inList (exact) | `contract` |
-| `inputs` | `type` | inList (exact) | `type` |
-| | `coinOwner`, `coinAssetId`, `contractContract`, `messageSender`, `messageRecipient` | inList (exact) | same |
-| `outputs` | `type` | inList (exact) | `type` |
-
-Fuel values are not case-folded.
-
-### Relations
-
-| Table | Relation | Definition |
-|---|---|---|
-| `transactions` | `receipts`, `inputs`, `outputs` | join → resp. [bn, index ↔ bn, transactionIndex] |
-| `receipts` | `transaction` | join → `transactions` [bn, transactionIndex ↔ bn, index] |
-| `inputs` | `transaction` | join → `transactions` [bn, transactionIndex ↔ bn, index] |
-| `outputs` | `transaction` | join → `transactions` [bn, transactionIndex ↔ bn, index] |
-
-### Field groups — `inputs`
-
-Tag column `type`. Base fields: `transactionIndex`, `index`, `type`. Every group
-is `_` (flattened).
-
-| Tag | Request key → output field |
-|---|---|
-| `InputCoin` | `coinUtxoId`→`utxoId`, `coinOwner`→`owner`, `coinAmount`→`amount`, `coinAssetId`→`assetId`, `coinTxPointer`→`txPointer`, `coinWitnessIndex`→`witnessIndex`, `coinPredicateGasUsed`→`predicateGasUsed`, `coinPredicate`→`predicate`, `coinPredicateData`→`predicateData` |
-| `InputContract` | `contractUtxoId`→`utxoId`, `contractBalanceRoot`→`balanceRoot`, `contractStateRoot`→`stateRoot`, `contractTxPointer`→`txPointer`, `contractContractId`→`contractId` |
-| `InputMessage` | `messageSender`→`sender`, `messageRecipient`→`recipient`, `messageAmount`→`amount`, `messageNonce`→`nonce`, `messageWitnessIndex`→`witnessIndex`, `messagePredicateGasUsed`→`predicateGasUsed`, `messageData`→`data`, `messagePredicate`→`predicate`, `messagePredicateData`→`predicateData` |
-
-### Field groups — `outputs`
-
-Tag column `type`. Base fields: `transactionIndex`, `index`, `type`. Groups `_`.
-
-| Tag | Request key → output field |
-|---|---|
-| `CoinOutput` | `coinTo`→`to`, `coinAmount`→`amount`, `coinAssetId`→`assetId` |
-| `ContractOutput` | `contractInputIndex`→`inputIndex`, `contractBalanceRoot`→`balanceRoot`, `contractStateRoot`→`stateRoot` |
-| `ChangeOutput` | `changeTo`→`to`, `changeAmount`→`amount`, `changeAssetId`→`assetId` |
-| `VariableOutput` | `variableTo`→`to`, `variableAmount`→`amount`, `variableAssetId`→`assetId` |
-| `ContractCreated` | `contractCreatedContract`→`contract`, `contractCreatedStateRoot`→`stateRoot` |
-
-### Notable encodings
-
-`blocks.daHeight`, `blocks.time`: `decimalString`. `transactions.status`,
-`upgradePurpose`: `jsonVerbatim`. Most `receipts` numeric fields and the Fuel
-policy/mint amounts: `decimalString`. `outputs.CoinOutput.amount` is a plain
-number, not a `decimalString` — an inconsistency inherited from the wire format
-and preserved deliberately.
+An engine that ships a `fuel` catalog anyway is serving a dataset this document
+does not describe. Nothing above constrains it, and nothing below may depend on
+it.
 
 ---
 
@@ -574,8 +543,8 @@ Each also accepts `user`, `vaultAddress`, `status`.
 `containsAsset` and `containsCloid` are `listContainsAny` filters. The target
 columns are `system` and never emitted.
 
-Item requests through aliases count toward the global cap of 100 exactly like
-any other ([INV-Q5](07-invariants.md#inv-q5)).
+Item requests through aliases count toward `P-MAX-ITEM-REQUESTS` exactly like any
+other ([INV-Q5](07-invariants.md#inv-q5)).
 
 ### Notable encodings
 

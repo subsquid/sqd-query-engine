@@ -77,9 +77,14 @@ every `L` including the empty list. There is no filter syntax that selects nulls
 
 ### 4.2.4 Case folding
 
-Values of columns declared `hexBytes` compare **case-insensitively**: the engine
-folds both the filter values and the stored values to lowercase before comparing
+Values of columns declared `hexBytes` compare **case-insensitively**
 ([INV-P8](07-invariants.md#inv-p8)). Everything else compares byte-exactly.
+
+The folding is one-sided. A `hexBytes` column's stored values are lowercase by
+the encoding's definition (§1.5), so an engine folds the *filter* values and
+compares against the stored bytes as they are. An upper-case digit in a stored
+`hexBytes` value is a malformed chunk, not a value the engine is obliged to
+match.
 
 This is a property of the *column*, not of the filter. `evm.statediffs.key` holds
 hex-looking strings but is not declared `hexBytes`, so `key` filters are
@@ -93,7 +98,8 @@ and `{"to": "0xAB…"}` mean different things.
 
 A bloom filter tests membership of any of up to ten values against a fixed-size
 bloom column. It is an **over-approximation**: it has no false negatives and MAY
-have false positives ([INV-P9](07-invariants.md#inv-p9)).
+have false positives ([INV-P9](07-invariants.md#inv-p9),
+[ADR-8](decisions/ADR-8-bloom-false-positives-are-contract.md)).
 
 Rows that do not mention the requested account therefore MAY appear in the
 response. This is part of the contract, not a defect. Clients that need exactness
@@ -222,7 +228,8 @@ resolve(rel, ⋃ᵢ Match(sᵢ))` — relations distribute over union.
 
 ### 4.3.2 One hop
 
-Relations resolve exactly once ([INV-R2](07-invariants.md#inv-r2)). Rows in
+Relations resolve exactly once ([INV-R2](07-invariants.md#inv-r2),
+[ADR-7](decisions/ADR-7-relations-resolve-one-hop.md)). Rows in
 `Related(U)` do **not** have `U`'s relations applied to them, even when the same
 query requests those relations elsewhere.
 

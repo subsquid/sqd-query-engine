@@ -9,3 +9,6 @@ ISSUES.md
 /.release
 /deploy
 /.bench_baseline_P4.md
+
+# Python bytecode from the spec checker and its tests.
+__pycache__/
