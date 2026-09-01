@@ -4,3 +4,8 @@
 tests/fixtures
 ISSUES.md
 .claude/settings.local.json
+
+# Local working files. Not part of the engine and not for publication.
+/.release
+/deploy
+/.bench_baseline_P4.md
