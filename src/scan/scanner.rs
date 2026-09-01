@@ -781,20 +781,30 @@ where
 /// The same applies to a *filtered* column. Reading it is what makes the filter
 /// mean anything, and a filter that cannot be evaluated does not narrow the scan
 /// — it widens it to everything, which no client can detect in the response
-/// (INV-X3). Every scan entry point runs this; a query reaching the budget walk
-/// instead of the plain scan is an engine-internal routing decision.
+/// (INV-X3). Every scan entry point runs this, over every filter kind: a
+/// relation's join key is as load-bearing as a predicate, and an unresolvable
+/// one makes the pushdown drop itself while assembly still skips the join that
+/// would have corrected it.
 fn ensure_columns_present(table: &ParquetTable, request: &ScanRequest) -> Result<()> {
-    for &col in &request.required_columns {
-        if table.column_index(col).is_none() {
-            anyhow::bail!("column '{}' is not found in '{}'", col, table.name());
-        }
-    }
+    let mut required: Vec<&str> = request.required_columns.clone();
 
     for pred in &request.predicates {
-        for col in pred.required_columns() {
-            if table.column_index(col).is_none() {
-                anyhow::bail!("column '{}' is not found in '{}'", col, table.name());
-            }
+        required.extend(pred.required_columns());
+    }
+
+    if let Some(kf) = &request.key_filter {
+        required.push(&kf.block_number_column);
+        required.extend(kf.columns.iter().map(String::as_str));
+    }
+
+    if let Some(hf) = &request.hierarchical_filter {
+        required.extend(hf.group_key_columns.iter().map(String::as_str));
+        required.push(&hf.address_column);
+    }
+
+    for col in required {
+        if table.column_index(col).is_none() {
+            anyhow::bail!("column '{}' is not found in '{}'", col, table.name());
         }
     }
 
@@ -898,9 +908,7 @@ where
 
     let wave_size = wave_size.max(1);
     let mut all_batches = Vec::new();
-    // The highest block any row group read so far may have contributed, and how
-    // far into `row_groups` the walk has got.
-    let mut read_max: Option<u64> = Some(0);
+    // How far into `row_groups` the walk has got.
     let mut scanned = 0usize;
 
     for wave in row_groups.chunks(wave_size) {
@@ -920,25 +928,26 @@ where
 
         let cumulative = weight_of(&wave_batches);
         all_batches.extend(wave_batches);
-        for &rg in wave {
-            read_max = match (read_max, block_bound(rg, true)) {
-                (Some(seen), Some(rg_max)) => Some(seen.max(rg_max)),
-                _ => None,
-            };
-        }
         scanned += wave.len();
 
         if cumulative <= budget {
             continue;
         }
 
-        // Stopping here is only sound once every block already read is whole. Row
-        // groups overlap in block range far more often than a declared
-        // block-leading sort key suggests — in the EVM chunks every row group of
-        // every table spans the entire chunk — and a block that loses rows to an
-        // unread row group is indistinguishable, to the client, from a block that
-        // genuinely had fewer rows. When no safe cut exists the walk reads on and
-        // the budget is enforced by the exact `apply_weight_limit` instead.
+        // Stopping here is only sound once every block kept is whole. Row groups
+        // overlap in block range far more often than a declared block-leading
+        // sort key suggests — chunks written today share the boundary block
+        // between neighbouring row groups, and in the fixture chunks every row
+        // group of every table spans the whole chunk — and a block that loses
+        // rows to an unread row group is indistinguishable, to the client, from a
+        // block that genuinely had fewer rows.
+        //
+        // So the cut is not "is there a gap between the row groups" (there never
+        // is, which made this walk a full scan) but "which blocks can no unread
+        // row group still add to": those below every unread group's first block.
+        // The block straddling that line is dropped along with everything after
+        // it. When that leaves nothing the walk reads on, and the budget is
+        // enforced by the exact `apply_weight_limit` instead.
         let unread = &row_groups[scanned..];
         if unread.is_empty() {
             break;
@@ -948,14 +957,79 @@ where
             .iter()
             .try_fold(u64::MAX, |acc, &rg| Some(acc.min(block_bound(rg, false)?)));
 
-        if let (Some(read_max), Some(unread_min)) = (read_max, unread_min) {
-            if read_max < unread_min {
-                break;
+        let (Some(unread_min), Some(bn_col)) = (unread_min, request.block_number_column) else {
+            continue;
+        };
+
+        if let Some(whole) = retain_blocks_below(&all_batches, bn_col, unread_min) {
+            if !whole.is_empty() {
+                return Ok(whole);
             }
         }
     }
 
     Ok(all_batches)
+}
+
+/// Keep only the rows whose block number is strictly below `limit`, dropping the
+/// batches that end up empty.
+///
+/// `None` when a batch does not carry the block-number column, or carries it in a
+/// physical type this cannot read. No cut is justified then, and answering with
+/// a guess is exactly the partial block the caller is avoiding.
+fn retain_blocks_below(
+    batches: &[RecordBatch],
+    bn_column: &str,
+    limit: u64,
+) -> Option<Vec<RecordBatch>> {
+    let mut kept = Vec::with_capacity(batches.len());
+
+    for batch in batches {
+        let column = batch.column_by_name(bn_column)?;
+        let mask = block_below_mask(column.as_ref(), limit)?;
+        let filtered = arrow::compute::filter_record_batch(batch, &mask).ok()?;
+
+        if filtered.num_rows() > 0 {
+            kept.push(filtered);
+        }
+    }
+
+    Some(kept)
+}
+
+/// Mask of the rows whose block number is strictly below `limit`, or `None` when
+/// no cut can be justified: a physical type this does not recognise, or a null
+/// block number, which is neither below the limit nor above it.
+///
+/// The type is resolved once per batch. Signed widths are read as unsigned, the
+/// way row-group statistics are: a writer storing block numbers in `Int32`
+/// carries anything above 2^31 as a negative value, and reading it signed would
+/// place it before every block instead of after.
+fn block_below_mask(column: &dyn Array, limit: u64) -> Option<BooleanArray> {
+    macro_rules! mask_over {
+        ($array:ty, $unsigned:ty) => {
+            if let Some(a) = column.as_any().downcast_ref::<$array>() {
+                if a.null_count() > 0 {
+                    return None;
+                }
+                let below: Vec<bool> = a
+                    .values()
+                    .iter()
+                    .map(|&v| ((v as $unsigned) as u64) < limit)
+                    .collect();
+                return Some(BooleanArray::from(below));
+            }
+        };
+    }
+
+    mask_over!(UInt64Array, u64);
+    mask_over!(UInt32Array, u32);
+    mask_over!(UInt16Array, u16);
+    mask_over!(Int64Array, u64);
+    mask_over!(Int32Array, u32);
+    mask_over!(Int16Array, u16);
+
+    None
 }
 
 /// Select which row groups need to be scanned, skipping those that
