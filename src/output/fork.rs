@@ -87,11 +87,14 @@ pub(crate) fn check_parent_block(
         plan.block_table
     );
 
-    let refs = read_prev_blocks(plan, table, parent_hash_column, chunk)?;
+    let (refs, answer) = read_prev_blocks(plan, table, parent_hash_column, chunk)?;
 
-    // The chunk starts at or after `from_block`, so it holds no evidence about
-    // the parent. Skipping is right: the caller's next chunk will carry it.
-    let Some(parent) = refs.last() else {
+    // Only the row *at* `from_block` states what precedes it; every other row in
+    // the window is there so the client can find the fork point. Comparing
+    // against the highest row the chunk happens to hold reports a fork whenever
+    // the chunk ends below `from_block` — the chunk not reaching the block is
+    // not the chain having moved under the client.
+    let Some(parent) = answer else {
         return Ok(());
     };
 
@@ -107,7 +110,8 @@ pub(crate) fn check_parent_block(
 }
 
 /// Read `(preceding block number, its hash)` for the blocks in the lookback
-/// window, ascending.
+/// window, ascending, along with the one that answers the client's question —
+/// the ref contributed by the row at `from_block`, if the chunk holds it.
 ///
 /// Each row of the block table carries its own parent's hash, so a row is read
 /// as a statement about the block before it. Where the dataset declares a parent
@@ -118,7 +122,7 @@ fn read_prev_blocks(
     table: &TableDescription,
     parent_hash_column: &str,
     chunk: &dyn ChunkReader,
-) -> Result<Vec<BlockRef>> {
+) -> Result<(Vec<BlockRef>, Option<BlockRef>)> {
     // Whether the *chunk* carries a parent-number column, not whether the catalog
     // declares one: a chunk written before the column existed still answers the
     // check by falling back to `n - 1`, which is what the reference does.
@@ -139,7 +143,17 @@ fn read_prev_blocks(
         plan.from_block
     };
 
-    let mut request = ScanRequest::new(vec![number_column, parent_hash_column]);
+    // The window is filtered on `number_column`, which is the parent number where
+    // one is declared — so the block number is read separately when it differs.
+    // Without it there is no way to tell the row at `from_block` from any other
+    // row the window caught.
+    let block_column = table.block_number_column.as_str();
+    let mut columns = vec![number_column, parent_hash_column];
+    if block_column != number_column {
+        columns.push(block_column);
+    }
+
+    let mut request = ScanRequest::new(columns);
     request.from_block = Some(plan.from_block.saturating_sub(LOOKBACK));
     request.to_block = Some(upper);
     request.block_number_column = Some(number_column);
@@ -164,10 +178,11 @@ fn read_prev_blocks(
             parent_hash_column,
             plan.block_table
         );
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     }
 
     let mut refs = Vec::new();
+    let mut answer = None;
     for batch in &batches {
         let (Some(numbers), Some(hashes)) = (
             batch.column_by_name(number_column),
@@ -175,34 +190,51 @@ fn read_prev_blocks(
         ) else {
             continue;
         };
+        let blocks = batch.column_by_name(block_column);
         let hashes = hashes
             .as_any()
             .downcast_ref::<arrow::array::StringArray>()
             .ok_or_else(|| anyhow::anyhow!("'{parent_hash_column}' must be a string column"))?;
 
         for row in 0..batch.num_rows() {
-            let Some(number) = crate::output::weight::get_block_number(numbers.as_ref(), row)
+            let Some(filtered) = crate::output::weight::get_block_number(numbers.as_ref(), row)
             else {
                 continue;
             };
+
+            // Which block this row is *about*, which is what says whether it
+            // answers the question. Where the parent number is the filtered
+            // column the block number is a separate array; otherwise the two are
+            // the same column and `filtered` already holds it.
+            let row_block = match (&blocks, has_parent_number) {
+                (Some(col), _) => crate::output::weight::get_block_number(col.as_ref(), row),
+                (None, false) => Some(filtered),
+                (None, true) => None,
+            };
+
             // At block 0 the saturating subtraction labels genesis its own
             // predecessor. The *hash* it reports is still the one block 0 stores,
             // so the comparison is right and only the label is odd; the reference
             // does the same, and a client paging from genesis is not a real case.
             let number = if has_parent_number {
-                number
+                filtered
             } else {
-                number.saturating_sub(1)
+                filtered.saturating_sub(1)
             };
             let hash = if hashes.is_null(row) {
                 String::new()
             } else {
                 hashes.value(row).to_string()
             };
-            refs.push(BlockRef { number, hash });
+
+            let block_ref = BlockRef { number, hash };
+            if row_block == Some(plan.from_block) {
+                answer = Some(block_ref.clone());
+            }
+            refs.push(block_ref);
         }
     }
 
     refs.sort_by_key(|r| r.number);
-    Ok(refs)
+    Ok((refs, answer))
 }
