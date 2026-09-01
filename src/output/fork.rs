@@ -53,12 +53,17 @@ impl std::error::Error for UnexpectedBaseBlock {}
 /// that skips numbers has no predecessor at `from_block - 1`.
 const LOOKBACK: u64 = 100;
 
-/// Compare the client's `parentBlockHash` against the chunk, if both the client
+/// Compare the client's `parentBlockHash` against the chunk, if the client
 /// supplied one and the chunk can see the preceding block.
 ///
-/// Returns `Ok(())` when they agree, when no hash was supplied, when the dataset
-/// declares no parent-hash column, or when the predecessor is outside this
-/// chunk — a chunk that cannot see the block is not evidence of a fork.
+/// Returns `Ok(())` when they agree, when no hash was supplied, or when the
+/// predecessor is outside this chunk — a chunk that cannot see the block is not
+/// evidence of a fork. A chunk that *should* be able to see it but cannot
+/// produce the hash is an error: a quiet "no fork" there is the answer this
+/// check exists to prevent.
+///
+/// A dataset that declares no parent-hash column at all is refused earlier, in
+/// [`crate::query::compile`]; by the time execution runs, the column is declared.
 pub(crate) fn check_parent_block(
     plan: &Plan,
     metadata: &DatasetDescription,
@@ -73,6 +78,14 @@ pub(crate) fn check_parent_block(
     let Some(parent_hash_column) = table.parent_hash_column.as_deref() else {
         return Ok(());
     };
+
+    // A scan of a table the chunk does not have returns no rows rather than an
+    // error, which would read here as "no evidence of a fork".
+    anyhow::ensure!(
+        chunk.has_table(&plan.block_table),
+        "chunk has no '{}' table, so 'parentBlockHash' cannot be checked",
+        plan.block_table
+    );
 
     let refs = read_prev_blocks(plan, table, parent_hash_column, chunk)?;
 
@@ -130,11 +143,29 @@ fn read_prev_blocks(
     request.from_block = Some(plan.from_block.saturating_sub(LOOKBACK));
     request.to_block = Some(upper);
     request.block_number_column = Some(number_column);
-    // A chunk that cannot produce the hash cannot clear the client's `parentBlockHash`.
-    // Serving the query regardless is the reorg being served silently.
-    request.required_columns = vec![parent_hash_column];
+
+    // A chunk that cannot produce the hash cannot clear the client's
+    // `parentBlockHash`, and serving the query regardless is the reorg being
+    // served silently. But only a chunk that reaches into the lookback window
+    // owes an answer: `required_columns` is checked before row groups are pruned,
+    // so requiring it unconditionally fails a whole multi-chunk request over a
+    // chunk that was never going to contribute a predecessor.
+    let carries_parent_hash = chunk
+        .table_schema(&plan.block_table)
+        .is_some_and(|schema| schema.column_with_name(parent_hash_column).is_some());
 
     let batches = chunk.scan(&plan.block_table, &request)?;
+
+    if !carries_parent_hash {
+        let reaches_window = batches.iter().any(|b| b.num_rows() > 0);
+        anyhow::ensure!(
+            !reaches_window,
+            "column '{}' is not found in '{}', so 'parentBlockHash' cannot be checked",
+            parent_hash_column,
+            plan.block_table
+        );
+        return Ok(Vec::new());
+    }
 
     let mut refs = Vec::new();
     for batch in &batches {
@@ -154,6 +185,10 @@ fn read_prev_blocks(
             else {
                 continue;
             };
+            // At block 0 the saturating subtraction labels genesis its own
+            // predecessor. The *hash* it reports is still the one block 0 stores,
+            // so the comparison is right and only the label is odd; the reference
+            // does the same, and a client paging from genesis is not a real case.
             let number = if has_parent_number {
                 number
             } else {
