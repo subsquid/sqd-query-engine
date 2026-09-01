@@ -1,4 +1,4 @@
-use crate::metadata::{FieldGrouping, JsonEncoding, TableDescription, VirtualField};
+use crate::metadata::{ColumnType, FieldGrouping, JsonEncoding, TableDescription, VirtualField};
 use crate::output::encoder::{
     encode_json_string, encode_roll, resolve_encoder, snake_to_camel, EncoderFn,
     ResolvedRollEncoder,
@@ -89,6 +89,9 @@ pub(crate) enum FieldWriter {
         json_key_prefix: Vec<u8>,
         column_name: String,
         encoding: Option<JsonEncoding>,
+        /// The catalog's type for `column_name`, which the parquet file does not
+        /// always match. `hexNumber` pads to the declared width.
+        declared_type: Option<ColumnType>,
     },
 }
 
@@ -155,10 +158,15 @@ pub(crate) fn resolve_writers(
                 json_key_prefix,
                 column_name,
                 encoding,
+                declared_type,
             } => {
                 let idx = batch.schema().index_of(column_name).ok();
                 let encoder = idx.map(|i| {
-                    resolve_encoder(batch.column(i).data_type(), encoding.as_ref())
+                    resolve_encoder(
+                        batch.column(i).data_type(),
+                        encoding.as_ref(),
+                        declared_type.as_ref(),
+                    )
                 });
                 ResolvedFieldWriter {
                     json_key_prefix: json_key_prefix.clone(),
@@ -200,14 +208,13 @@ pub(crate) fn build_field_writers(
             encode_json_string(&snake_to_camel(col_name), &mut prefix);
             prefix.push(b':');
 
-            let encoding = table_desc
-                .and_then(|d| d.columns.get(col_name))
-                .and_then(|c| c.json_encoding.clone());
+            let declared = table_desc.and_then(|d| d.columns.get(col_name));
 
             FieldWriter::Regular {
                 json_key_prefix: prefix,
                 column_name: col_name.clone(),
-                encoding,
+                encoding: declared.and_then(|c| c.json_encoding.clone()),
+                declared_type: declared.map(|c| c.data_type.clone()),
             }
         })
         .collect()
@@ -265,14 +272,12 @@ pub(crate) fn build_grouped_writers(
             let mut prefix = Vec::with_capacity(col_name.len() + 4);
             encode_json_string(&snake_to_camel(col_name), &mut prefix);
             prefix.push(b':');
-            let encoding = table_desc
-                .columns
-                .get(col_name)
-                .and_then(|c| c.json_encoding.clone());
+            let declared = table_desc.columns.get(col_name);
             base_writers.push(FieldWriter::Regular {
                 json_key_prefix: prefix,
                 column_name: col_name.clone(),
-                encoding,
+                encoding: declared.and_then(|c| c.json_encoding.clone()),
+                declared_type: declared.map(|c| c.data_type.clone()),
             });
         } else if let Some(&(variant, group, field_name, phys_col)) =
             col_to_group.get(col_name.as_str())
@@ -282,10 +287,7 @@ pub(crate) fn build_grouped_writers(
             let mut prefix = Vec::with_capacity(field_name.len() + 4);
             encode_json_string(field_name, &mut prefix);
             prefix.push(b':');
-            let encoding = table_desc
-                .columns
-                .get(phys_col)
-                .and_then(|c| c.json_encoding.clone());
+            let declared = table_desc.columns.get(phys_col);
             variant_groups
                 .entry(variant.to_string())
                 .or_default()
@@ -294,7 +296,8 @@ pub(crate) fn build_grouped_writers(
                 .push(FieldWriter::Regular {
                     json_key_prefix: prefix,
                     column_name: phys_col.to_string(),
-                    encoding,
+                    encoding: declared.and_then(|c| c.json_encoding.clone()),
+                    declared_type: declared.map(|c| c.data_type.clone()),
                 });
         }
         // else: column not in base or any group — skip (e.g., weight columns)

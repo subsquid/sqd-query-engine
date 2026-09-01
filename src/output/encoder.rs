@@ -1,4 +1,4 @@
-use crate::metadata::JsonEncoding;
+use crate::metadata::{ColumnType, JsonEncoding};
 use arrow::array::*;
 use arrow::datatypes::DataType;
 use serde::Serializer;
@@ -8,11 +8,15 @@ pub type EncoderFn = fn(&dyn Array, usize, &mut Vec<u8>);
 
 /// Resolve an encoder function once per column based on DataType and encoding.
 /// Eliminates per-row DataType match + downcast dispatch in the hot loop.
-pub fn resolve_encoder(data_type: &DataType, encoding: Option<&JsonEncoding>) -> EncoderFn {
+pub fn resolve_encoder(
+    data_type: &DataType,
+    encoding: Option<&JsonEncoding>,
+    declared_type: Option<&ColumnType>,
+) -> EncoderFn {
     match encoding {
         Some(JsonEncoding::String) => encode_bignum,
         Some(JsonEncoding::Json) => encode_json_passthrough,
-        Some(JsonEncoding::HexNumber) => resolve_hex_number_encoder(data_type),
+        Some(JsonEncoding::HexNumber) => resolve_hex_number_encoder(data_type, declared_type),
         Some(JsonEncoding::SolanaTxVersion) => encode_solana_tx_version,
         Some(JsonEncoding::TimestampMillisecond) => encode_timestamp_millisecond_raw,
         Some(JsonEncoding::Hex) | Some(JsonEncoding::Base58) | None => {
@@ -451,50 +455,93 @@ fn encode_hex_bytes(bytes: &[u8], buf: &mut Vec<u8>) {
 /// of the column's physical width. The width comes from the array rather than
 /// the catalog so that a `uint16` always renders four digits, whatever value it
 /// holds.
-fn resolve_hex_number_encoder(data_type: &DataType) -> EncoderFn {
-    match data_type {
-        DataType::UInt8 | DataType::Int8 => encode_hex_number_u8,
-        DataType::UInt16 | DataType::Int16 => encode_hex_number_u16,
-        DataType::UInt32 | DataType::Int32 => encode_hex_number_u32,
-        DataType::UInt64 | DataType::Int64 => encode_hex_number_u64,
+/// The padding width is the *declared* one (§1.5): `"0x0640"` and `"0x640"` are
+/// different discriminators, so the digits may not depend on how the writer
+/// happened to type the column, and physical and declared types disagree
+/// routinely in these chunks. The physical width is the fallback for a column the
+/// catalog says nothing about.
+fn resolve_hex_number_encoder(
+    data_type: &DataType,
+    declared_type: Option<&ColumnType>,
+) -> EncoderFn {
+    let physical_bytes = match data_type {
+        DataType::UInt8 | DataType::Int8 => 1,
+        DataType::UInt16 | DataType::Int16 => 2,
+        DataType::UInt32 | DataType::Int32 => 4,
+        DataType::UInt64 | DataType::Int64 => 8,
         // The declaration is checked at load (`metadata::loader::validate`), so
         // reaching here means the chunk stores something other than an integer
-        // under a column the catalog calls one. Signed widths are accepted above
-        // because physical and declared types disagree routinely, and rendering
-        // `d8` as a bare JSON number would round it past 2^53.
-        other => resolve_value_encoder(other),
+        // under a column the catalog calls one.
+        other => return resolve_value_encoder(other),
+    };
+
+    match declared_type {
+        Some(ColumnType::UInt8) => encode_hex_number_u8,
+        Some(ColumnType::UInt16) => encode_hex_number_u16,
+        Some(ColumnType::UInt32) => encode_hex_number_u32,
+        Some(ColumnType::UInt64) => encode_hex_number_u64,
+        _ => match physical_bytes {
+            1 => encode_hex_number_u8,
+            2 => encode_hex_number_u16,
+            4 => encode_hex_number_u32,
+            _ => encode_hex_number_u64,
+        },
     }
 }
 
-/// Renders one integer column as a zero-padded hex string of its physical width.
-/// The signed array of the same width is read through its unsigned twin, so the
-/// digits do not depend on how the writer chose to type the column.
+/// The stored value of an integer column, whatever width and signedness the
+/// writer chose. A signed array is read through its unsigned twin: physical and
+/// declared types disagree routinely, and `d8` rendered as a signed number would
+/// be a different discriminator.
+fn unsigned_at(array: &dyn Array, row: usize) -> Option<u64> {
+    macro_rules! read {
+        ($array:ty, $unsigned:ty) => {
+            if let Some(a) = array.as_any().downcast_ref::<$array>() {
+                return Some((a.value(row) as $unsigned) as u64);
+            }
+        };
+    }
+
+    read!(UInt8Array, u8);
+    read!(UInt16Array, u16);
+    read!(UInt32Array, u32);
+    read!(UInt64Array, u64);
+    read!(Int8Array, u8);
+    read!(Int16Array, u16);
+    read!(Int32Array, u32);
+    read!(Int64Array, u64);
+
+    None
+}
+
+/// Renders one integer column as a zero-padded hex string of the given width.
 macro_rules! hex_number_encoder {
-    ($name:ident, $unsigned_array:ty, $signed_array:ty, $unsigned:ty) => {
+    ($name:ident, $unsigned:ty) => {
         fn $name(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
             if array.is_null(row) {
                 buf.extend_from_slice(b"null");
                 return;
             }
 
-            let value = if let Some(a) = array.as_any().downcast_ref::<$unsigned_array>() {
-                a.value(row)
-            } else if let Some(a) = array.as_any().downcast_ref::<$signed_array>() {
-                a.value(row) as $unsigned
-            } else {
-                buf.extend_from_slice(b"null");
-                return;
-            };
-
-            encode_hex_bytes(&value.to_be_bytes(), buf);
+            match unsigned_at(array, row) {
+                // A stored value too wide for the declared type means the catalog
+                // is wrong about the column. Rendering it at the declared width
+                // would truncate it into a different discriminator, so it is
+                // rendered at the width it actually needs.
+                Some(value) => match <$unsigned>::try_from(value) {
+                    Ok(narrowed) => encode_hex_bytes(&narrowed.to_be_bytes(), buf),
+                    Err(_) => encode_hex_bytes(&value.to_be_bytes(), buf),
+                },
+                None => buf.extend_from_slice(b"null"),
+            }
         }
     };
 }
 
-hex_number_encoder!(encode_hex_number_u8, UInt8Array, Int8Array, u8);
-hex_number_encoder!(encode_hex_number_u16, UInt16Array, Int16Array, u16);
-hex_number_encoder!(encode_hex_number_u32, UInt32Array, Int32Array, u32);
-hex_number_encoder!(encode_hex_number_u64, UInt64Array, Int64Array, u64);
+hex_number_encoder!(encode_hex_number_u8, u8);
+hex_number_encoder!(encode_hex_number_u16, u16);
+hex_number_encoder!(encode_hex_number_u32, u32);
+hex_number_encoder!(encode_hex_number_u64, u64);
 
 fn encode_list(array: &GenericListArray<i32>, row: usize, buf: &mut Vec<u8>) {
     let values = array.value(row);
@@ -801,7 +848,19 @@ mod tests {
     }
 
     fn rendered_as_hex_number(array: std::sync::Arc<dyn Array>) -> String {
-        let encoder = resolve_encoder(array.data_type(), Some(&JsonEncoding::HexNumber));
+        rendered_as_declared(array, None)
+    }
+
+    /// Render with an explicit catalog type, which is what sets the width.
+    fn rendered_as_declared(
+        array: std::sync::Arc<dyn Array>,
+        declared: Option<ColumnType>,
+    ) -> String {
+        let encoder = resolve_encoder(
+            array.data_type(),
+            Some(&JsonEncoding::HexNumber),
+            declared.as_ref(),
+        );
         let mut buf = Vec::new();
         encoder(array.as_ref(), 0, &mut buf);
         String::from_utf8(buf).unwrap()
@@ -822,6 +881,43 @@ mod tests {
         assert_eq!(
             rendered_as_hex_number(std::sync::Arc::new(UInt32Array::from(vec![1600u32]))),
             "\"0x00000640\""
+        );
+    }
+
+    /// §1.5 pins the width to the *declared* type, not to whatever the writer
+    /// chose. `"0x0640"` and `"0x640"` are different discriminators, so a `uint16`
+    /// `d2` stored in a `uint32` column must still render four digits.
+    #[test]
+    fn test_hex_number_pads_to_the_declared_width_not_the_physical_one() {
+        assert_eq!(
+            rendered_as_declared(
+                std::sync::Arc::new(UInt32Array::from(vec![1600u32])),
+                Some(ColumnType::UInt16)
+            ),
+            "\"0x0640\"",
+            "the catalog says uint16, so the rendering is four digits"
+        );
+        assert_eq!(
+            rendered_as_declared(
+                std::sync::Arc::new(Int32Array::from(vec![1600i32])),
+                Some(ColumnType::UInt64)
+            ),
+            "\"0x0000000000000640\"",
+            "a `d8` stored narrow and signed still renders at its declared width"
+        );
+    }
+
+    /// Padding is not truncation: a value that does not fit the declared width
+    /// says the catalog is wrong about the column, and rendering it short would
+    /// emit a different discriminator than the one stored.
+    #[test]
+    fn test_hex_number_never_truncates_a_value_too_wide_to_declare() {
+        assert_eq!(
+            rendered_as_declared(
+                std::sync::Arc::new(UInt32Array::from(vec![0x12345u32])),
+                Some(ColumnType::UInt16)
+            ),
+            "\"0x0000000000012345\""
         );
     }
 
