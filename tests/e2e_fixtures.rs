@@ -40,8 +40,22 @@ fn run_fixture_query(
 
 /// Whether the fixture tree is checked out at all. Absent, there is nothing to
 /// compare against and every test in the file would fail for the same reason.
+///
+/// Skipping the suite is right for a plain checkout and wrong for CI, where a
+/// green run is read as "the conformance suite passed". `SQD_REQUIRE_FIXTURES=1`
+/// says coverage was expected, and makes an absent tree a failure.
 fn fixture_tree_is_present() -> bool {
-    fixture_dir().join("ethereum").join("chunk").is_dir()
+    if fixture_dir().join("ethereum").join("chunk").is_dir() {
+        return true;
+    }
+
+    assert!(
+        std::env::var_os("SQD_REQUIRE_FIXTURES").is_none(),
+        "SQD_REQUIRE_FIXTURES is set but tests/fixtures is not checked out, so the \
+         fixture suite would report green having compared nothing"
+    );
+
+    false
 }
 
 fn test_fixture(dataset: &str, meta_path: &str, query_name: &str) {

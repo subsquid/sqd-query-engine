@@ -17,9 +17,24 @@ fn fixture_chunk(dataset: &str) -> PathBuf {
 }
 
 /// Whether the fixture tree is checked out at all. It is not in the repository,
-/// so a test that reads one has nothing to run against in a plain checkout.
+/// so in a plain checkout the tests that read it have nothing to run against.
+///
+/// A skip that looks like a pass is what this branch set out to remove, so it is
+/// only allowed where nobody was promised coverage. Setting
+/// `SQD_REQUIRE_FIXTURES=1` — which CI should — turns an absent tree into a
+/// failure rather than a silent green run.
 fn fixture_tree_is_present() -> bool {
-    fixture_chunk("ethereum").is_dir()
+    if fixture_chunk("ethereum").is_dir() {
+        return true;
+    }
+
+    assert!(
+        std::env::var_os("SQD_REQUIRE_FIXTURES").is_none(),
+        "SQD_REQUIRE_FIXTURES is set but tests/fixtures is not checked out, so these \
+         tests would report green having compared nothing"
+    );
+
+    false
 }
 
 fn meta(name: &str) -> DatasetDescription {
@@ -1407,26 +1422,64 @@ fn a_parent_block_hash_is_compared_byte_for_byte() {
     );
 }
 
-/// With `fromBlock` past the end of the chunk, the comparison lands on the last
-/// block the chunk holds rather than on a real predecessor, and reports a fork.
-/// The reference does the same thing on the same chunk — the check is a chunk's
-/// answer about the data it has, and a caller handing it the wrong chunk gets the
-/// same answer from both engines.
+/// Only the row *at* `fromBlock` states what precedes it (INV-E5). With
+/// `fromBlock` past the end of the chunk there is no such row, and the highest
+/// row the chunk does hold describes a different block — comparing against it
+/// reports a fork on a chain that never reorganised.
+///
+/// The reference compares against that row anyway, so this is a deliberate
+/// divergence, in the same direction as the one already taken for an empty
+/// window: a chunk that cannot see the block is not evidence about it.
 #[test]
-fn a_from_block_past_the_chunk_compares_against_what_the_chunk_holds() {
+fn a_from_block_past_the_chunk_is_not_evidence_of_a_fork() {
     let evm = meta("evm");
-    let parent = parent_hash_of("ethereum", &evm, 17881390);
-    let query = format!(
-        r#"{{"type":"evm","fromBlock":17882796,"toBlock":17882800,
-             "parentBlockHash":"{parent}",
-             "fields":{{"block":{{"number":true}}}},"logs":[{{}}]}}"#
-    );
+    let query = |parent: &str| {
+        format!(
+            r#"{{"type":"evm","fromBlock":17882796,"toBlock":17882800,
+                 "parentBlockHash":"{parent}",
+                 "fields":{{"block":{{"number":true}}}},"logs":[{{}}]}}"#
+        )
+        .into_bytes()
+    };
 
-    let err = run("ethereum", &evm, query.as_bytes())
-        .expect_err("the chunk's last block is not the expected parent");
+    // The hash of a real block's parent, and a hash of nothing at all. Neither
+    // describes the parent of 17882796, and the chunk cannot say what does.
+    for hash in [
+        parent_hash_of("ethereum", &evm, 17881390),
+        "0xdeadbeef".to_string(),
+    ] {
+        assert!(
+            run("ethereum", &evm, &query(&hash)).is_ok(),
+            "a chunk that does not reach fromBlock must not report a fork"
+        );
+    }
+}
+
+/// The counterpart: where the chunk *does* hold the row at `fromBlock`, that row
+/// is the one compared, and a wrong hash is still a fork.
+#[test]
+fn the_row_at_from_block_is_the_one_compared() {
+    let evm = meta("evm");
+    const FROM: u64 = 17881500;
+
+    let query = |parent: &str| {
+        format!(
+            r#"{{"type":"evm","fromBlock":{FROM},"toBlock":{FROM},
+                 "parentBlockHash":"{parent}","includeAllBlocks":true,
+                 "fields":{{"block":{{"number":true}}}}}}"#
+        )
+        .into_bytes()
+    };
+
+    let its_own_parent = parent_hash_of("ethereum", &evm, FROM);
+    assert!(run("ethereum", &evm, &query(&its_own_parent)).is_ok());
+
+    // An earlier block's parent hash is inside the lookback window, so it would
+    // pass if any row of the window could answer. Only one can.
+    let earlier = parent_hash_of("ethereum", &evm, FROM - 10);
     assert!(
-        err.to_string().contains("unexpected base block"),
-        "got: {err}"
+        run("ethereum", &evm, &query(&earlier)).is_err(),
+        "a hash from elsewhere in the window is not the parent of {FROM}"
     );
 }
 
@@ -1813,6 +1866,34 @@ fn a_non_boolean_flag_filter_is_rejected() {
         assert!(
             run("ethereum", &evm, &query(malformed)).is_err(),
             "callValueNonZero: {malformed} must be refused, not read as 'off'"
+        );
+    }
+}
+
+/// A `fields` of the wrong type read as absent, so `{"fields": []}` answered 200
+/// with every projection the client asked for missing — which reads as a dataset
+/// that has no such columns. A non-object *inside* `fields` was already refused,
+/// and so are the block bounds and `includeAllBlocks` next to it.
+#[test]
+fn a_non_object_fields_is_rejected() {
+    let evm = meta("evm");
+
+    let query = |fields: &str| {
+        format!(
+            r#"{{"type":"evm","fromBlock":17881390,"toBlock":17881391,
+                "fields":{fields},"logs":[{{}}]}}"#
+        )
+        .into_bytes()
+    };
+
+    assert!(run("ethereum", &evm, &query(r#"{"log":{"address":true}}"#)).is_ok());
+    assert!(run("ethereum", &evm, &query("{}")).is_ok());
+    assert!(run("ethereum", &evm, &query("null")).is_ok());
+
+    for malformed in ["[]", "false", "0", r#""log""#] {
+        assert!(
+            run("ethereum", &evm, &query(malformed)).is_err(),
+            "'fields': {malformed} must be refused, not read as no selection"
         );
     }
 }
