@@ -16,6 +16,12 @@ fn fixture_chunk(dataset: &str) -> PathBuf {
         .join("chunk")
 }
 
+/// Whether the fixture tree is checked out at all. It is not in the repository,
+/// so a test that reads one has nothing to run against in a plain checkout.
+fn fixture_tree_is_present() -> bool {
+    fixture_chunk("ethereum").is_dir()
+}
+
 fn meta(name: &str) -> DatasetDescription {
     load_dataset_description(Path::new(&format!("metadata/{name}.yaml"))).unwrap()
 }
@@ -1222,10 +1228,159 @@ fn a_chunk_that_cannot_answer_the_fork_check_is_an_error() {
     );
 }
 
+/// A chunk with no block table at all cannot answer the check either, and the
+/// scan of a table a chunk does not have returns no rows rather than an error —
+/// which reads here as "no evidence of a fork" and serves the query.
+#[test]
+fn a_chunk_with_no_block_table_cannot_clear_the_fork_check() {
+    use arrow::array::{ArrayRef, UInt32Array, UInt64Array};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use sqd_query_engine::metadata::parse_dataset_description;
+    use sqd_query_engine::output::execute_chunk;
+    use sqd_query_engine::scan::ParquetChunkReader;
+    use std::sync::Arc;
+
+    let catalog = parse_dataset_description(
+        r#"
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    parent_hash_column: parent_hash
+    sort_key: [number]
+    filters: []
+    columns:
+      number: { type: uint64 }
+      parent_hash: { type: string }
+  logs:
+    query_name: logs
+    field_name: log
+    block_number_column: block_number
+    item_order_keys: [log_index]
+    sort_key: [block_number, log_index]
+    filters: []
+    columns:
+      block_number: { type: uint64 }
+      log_index: { type: uint32 }
+"#,
+    )
+    .unwrap();
+
+    // Only the item table is on disk.
+    let dir = tempfile::tempdir().unwrap();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("block_number", DataType::UInt64, false),
+        Field::new("log_index", DataType::UInt32, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(vec![10u64, 11])) as ArrayRef,
+            Arc::new(UInt32Array::from(vec![0u32, 0])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    let file = std::fs::File::create(dir.path().join("logs.parquet")).unwrap();
+    let mut writer = parquet::arrow::ArrowWriter::try_new(file, schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+
+    let answer = |query: &str| {
+        let parsed = parse_query(query.as_bytes(), &catalog).unwrap();
+        let plan = compile(&parsed, &catalog).unwrap();
+        let reader = ParquetChunkReader::open(dir.path()).unwrap();
+        execute_chunk(&plan, &catalog, &reader, false)
+    };
+
+    assert!(
+        answer(r#"{"type":"test","fromBlock":10,"toBlock":11,"logs":[{}]}"#).is_ok(),
+        "without the field the chunk answers as before"
+    );
+    assert!(
+        answer(
+            r#"{"type":"test","fromBlock":10,"toBlock":11,
+                "parentBlockHash":"0xabcd","logs":[{}]}"#
+        )
+        .is_err(),
+        "a chunk with no block table holds no answer, and must say so"
+    );
+}
+
+/// The column is required only of a chunk that reaches into the lookback window.
+/// `required_columns` is checked before row groups are pruned, so requiring it of
+/// every chunk fails a whole multi-chunk request over one that was never going to
+/// carry the predecessor — a chunk far below `fromBlock` says nothing about it
+/// either way.
+#[test]
+fn a_chunk_below_the_lookback_window_is_not_asked_for_the_parent_hash() {
+    use arrow::array::{ArrayRef, UInt64Array};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use sqd_query_engine::metadata::parse_dataset_description;
+    use sqd_query_engine::output::execute_chunk;
+    use sqd_query_engine::scan::ParquetChunkReader;
+    use std::sync::Arc;
+
+    let catalog = parse_dataset_description(
+        r#"
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    parent_hash_column: parent_hash
+    sort_key: [number]
+    filters: []
+    columns:
+      number: { type: uint64, stats: true }
+      parent_hash: { type: string }
+"#,
+    )
+    .unwrap();
+
+    // Blocks 1000..1009, written before `parent_hash` existed.
+    let dir = tempfile::tempdir().unwrap();
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "number",
+        DataType::UInt64,
+        false,
+    )]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(UInt64Array::from((1000u64..1010).collect::<Vec<_>>())) as ArrayRef],
+    )
+    .unwrap();
+    let file = std::fs::File::create(dir.path().join("blocks.parquet")).unwrap();
+    let mut writer = parquet::arrow::ArrowWriter::try_new(file, schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+
+    let answer = |from: u64, to: u64| {
+        let query = format!(
+            r#"{{"type":"test","fromBlock":{from},"toBlock":{to},
+                "parentBlockHash":"0xabcd","includeAllBlocks":true}}"#
+        );
+        let parsed = parse_query(query.as_bytes(), &catalog).unwrap();
+        let plan = compile(&parsed, &catalog).unwrap();
+        let reader = ParquetChunkReader::open(dir.path()).unwrap();
+        execute_chunk(&plan, &catalog, &reader, false)
+    };
+
+    assert!(
+        answer(5000, 5010).is_ok(),
+        "the window is blocks 4900..5000 and this chunk ends at 1009, so it is not \
+         being asked anything"
+    );
+    assert!(
+        answer(1005, 1009).is_err(),
+        "this chunk does hold the predecessor and cannot produce its hash"
+    );
+}
+
 /// Two behaviours below are pinned because they read like defects and are not:
 /// both were compared against the reference implementation on this chunk and
 /// produce its message verbatim. Changing either is a divergence, not a fix.
-
+///
 /// A hash is compared byte for byte. Every *filter* value in this engine folds
 /// case, so an upper-cased hash looks like it should be accepted — the reference
 /// rejects it, and a client that upper-cases hashes is broken against both
@@ -1268,8 +1423,7 @@ fn a_from_block_past_the_chunk_compares_against_what_the_chunk_holds() {
     );
 
     let err = run("ethereum", &evm, query.as_bytes())
-        .err()
-        .expect("the chunk's last block is not the expected parent");
+        .expect_err("the chunk's last block is not the expected parent");
     assert!(
         err.to_string().contains("unexpected base block"),
         "got: {err}"
@@ -1509,4 +1663,248 @@ fn reference_filters_are_all_accepted() {
             });
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// INV-P14 / INV-Q12 — a filter that cannot be evaluated must not widen the query
+// ---------------------------------------------------------------------------
+
+/// A bloom filter was the one filter shape in the engine that failed *open*.
+/// Non-string elements were dropped and an empty needle set compiled to no
+/// predicate at all, so `{"mentionsAccount": []}` returned every instruction in
+/// range at 200 — the widest possible answer to the narrowest possible filter.
+/// The reference marks an empty list `is_never`, which matches nothing.
+#[test]
+fn an_empty_bloom_filter_matches_nothing_rather_than_everything() {
+    if !fixture_tree_is_present() {
+        return;
+    }
+    let solana = meta("solana");
+
+    let query = |filter: &str| {
+        format!(
+            r#"{{"type":"solana","fromBlock":217710049,"toBlock":217710060,
+                "fields":{{"instruction":{{"programId":true}}}},
+                "instructions":[{{{filter}}}]}}"#
+        )
+        .into_bytes()
+    };
+
+    let unfiltered = run("solana", &solana, &query(r#""isCommitted":true"#)).unwrap();
+    assert!(
+        count_items(&unfiltered, "instructions") > 0,
+        "the fixture must carry instructions for this to mean anything"
+    );
+
+    let empty_list = run("solana", &solana, &query(r#""mentionsAccount":[]"#)).unwrap();
+    assert_eq!(
+        count_items(&empty_list, "instructions"),
+        0,
+        "a filter no value can pass must match nothing, not everything"
+    );
+}
+
+/// The same filter rejects an element that is not a string, rather than dropping
+/// it and narrowing to whatever survived. The reference types the field as a list
+/// of strings and refuses the request.
+#[test]
+fn a_bloom_filter_rejects_a_non_string_element() {
+    let solana = meta("solana");
+    let query = br#"{"type":"solana","fromBlock":217710049,"toBlock":217710060,
+        "instructions":[{"mentionsAccount":[123]}]}"#;
+
+    assert!(
+        run("solana", &solana, query).is_err(),
+        "a numeric account is a client error, not a filter on the rest of the list"
+    );
+}
+
+/// Most of the engine's hex surface is string-typed — every EVM address, topic,
+/// hash and sighash — and a malformed value there compares unequal to every
+/// stored value. The answer is 200 with no rows and nothing to say why, which is
+/// the failure INV-Q12 exists to prevent.
+#[test]
+fn a_malformed_hex_filter_is_rejected_on_a_string_column() {
+    let evm = meta("evm");
+
+    let query = |address: &str| {
+        format!(
+            r#"{{"type":"evm","fromBlock":17881390,"toBlock":17881391,
+                "fields":{{"log":{{"address":true}}}},
+                "logs":[{{"address":["{address}"]}}]}}"#
+        )
+        .into_bytes()
+    };
+
+    // Well-formed, and accepted whether or not it matches anything.
+    assert!(run(
+        "ethereum",
+        &evm,
+        &query("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
+    )
+    .is_ok());
+
+    for malformed in [
+        "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",   // no 0x
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb4",  // odd length
+        "0xZZb86991c6218b36c1d19d4a2e9eb0ce3606eb48", // not hex digits
+    ] {
+        assert!(
+            run("ethereum", &evm, &query(malformed)).is_err(),
+            "{malformed} must be refused, not answered with an empty 200"
+        );
+    }
+}
+
+/// Pinned, not a defect: a *well-formed* value the column cannot hold matches
+/// nothing rather than erroring (INV-P14). The reference parses `d8` with a
+/// fixed-width hex reader and drops what does not fit, leaving an empty list that
+/// its `PredicateBuilder` marks `is_never`. Both engines answer an empty 200.
+#[test]
+fn a_hex_value_of_the_wrong_width_matches_nothing_without_erroring() {
+    if !fixture_tree_is_present() {
+        return;
+    }
+    let solana = meta("solana");
+
+    let query = |d8: &str| {
+        format!(
+            r#"{{"type":"solana","fromBlock":217710049,"toBlock":217710060,
+                "fields":{{"instruction":{{"programId":true}}}},
+                "instructions":[{{"d8":["{d8}"]}}]}}"#
+        )
+        .into_bytes()
+    };
+
+    // Six bytes on an eight-byte column: well-formed hex, but not a `d8`.
+    let narrow = run("solana", &solana, &query("0xf8c69e91e175"))
+        .expect("a well-formed value that cannot match is not an error");
+    assert_eq!(count_items(&narrow, "instructions"), 0);
+
+    // Not hex at all, which is.
+    assert!(run("solana", &solana, &query("zz")).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// INV-Q — a flag filter is a boolean
+// ---------------------------------------------------------------------------
+
+/// `callValueNonZero` and its siblings used to read any non-boolean as "off",
+/// answering a strictly wider question than the one asked. The reference types
+/// the field `bool` and refuses all four shapes below — as this engine already
+/// did for `includeAllBlocks` and the block bounds.
+#[test]
+fn a_non_boolean_flag_filter_is_rejected() {
+    let evm = meta("evm");
+
+    let query = |value: &str| {
+        format!(
+            r#"{{"type":"evm","fromBlock":17881390,"toBlock":17881391,
+                "fields":{{"trace":{{"type":true}}}},
+                "traces":[{{"type":["call"],"callValueNonZero":{value}}}]}}"#
+        )
+        .into_bytes()
+    };
+
+    assert!(run("ethereum", &evm, &query("true")).is_ok());
+    assert!(run("ethereum", &evm, &query("false")).is_ok());
+
+    for malformed in ["\"true\"", "1", "[]", "null", "{}"] {
+        assert!(
+            run("ethereum", &evm, &query(malformed)).is_err(),
+            "callValueNonZero: {malformed} must be refused, not read as 'off'"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// INV-E5 — parentBlockHash is answered or refused, never ignored
+// ---------------------------------------------------------------------------
+
+/// A dataset whose block table declares no parent-hash column cannot answer the
+/// question at all. Accepting the field and returning data is the reorg being
+/// served silently, so the request is refused before a chunk is opened.
+#[test]
+fn parent_block_hash_is_refused_where_the_catalog_cannot_answer_it() {
+    use sqd_query_engine::metadata::parse_dataset_description;
+    use sqd_query_engine::query::{compile, parse_query};
+
+    let without_parent_hash = r#"
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    sort_key: [number]
+    filters: []
+    columns:
+      number: { type: uint64 }
+      hash: { type: string }
+"#;
+    let with_parent_hash = format!("{without_parent_hash}      parent_hash: {{ type: string }}\n")
+        .replace(
+            "    sort_key: [number]",
+            "    sort_key: [number]\n    parent_hash_column: parent_hash",
+        );
+
+    let query = br#"{"type":"test","fromBlock":10,"parentBlockHash":"0xabcd"}"#;
+
+    let silent = parse_dataset_description(without_parent_hash).unwrap();
+    let parsed = parse_query(query, &silent).unwrap();
+    let err = compile(&parsed, &silent).unwrap_err().to_string();
+    assert!(
+        err.contains("parentBlockHash"),
+        "the refusal must name the field the client sent, got: {err}"
+    );
+
+    let answerable = parse_dataset_description(&with_parent_hash).unwrap();
+    let parsed = parse_query(query, &answerable).unwrap();
+    assert!(
+        compile(&parsed, &answerable).is_ok(),
+        "a catalog that declares the column must still accept the field"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// INV-B10 — every emitted row is counted against the response budget
+// ---------------------------------------------------------------------------
+
+/// A field-group request key names its column indirectly: `callCallType` reads
+/// `call_type`. Projection resolved that; the weight model did not, so the column
+/// was emitted at a weight of zero and the response ran past the cap. Selecting
+/// it must cost what selecting the same column under its own name costs.
+#[test]
+fn a_field_group_request_key_weighs_what_its_column_weighs() {
+    if !fixture_tree_is_present() {
+        return;
+    }
+    let evm = meta("evm");
+
+    let query = |field: &str| {
+        format!(
+            r#"{{"type":"evm","fromBlock":17881390,"toBlock":17882786,
+                "fields":{{"trace":{{"{field}":true}}}},
+                "traces":[{{}}]}}"#
+        )
+        .into_bytes()
+    };
+
+    let by_column = run("ethereum", &evm, &query("callType")).unwrap();
+    let by_request_key = run("ethereum", &evm, &query("callCallType")).unwrap();
+
+    let blocks = |body: &[u8]| {
+        body.split(|b| *b == b'\n')
+            .filter(|l| !l.is_empty())
+            .count()
+    };
+
+    assert_eq!(
+        blocks(&by_request_key),
+        blocks(&by_column),
+        "the two names read the same column, so they must be trimmed at the same block"
+    );
+    assert!(
+        by_request_key.len() as u64 <= 20 * 1024 * 1024,
+        "a response the budget model did not count ran to {} bytes",
+        by_request_key.len()
+    );
 }
