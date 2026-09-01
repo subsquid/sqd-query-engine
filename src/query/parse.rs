@@ -233,6 +233,17 @@ fn parse_fields(
 ) -> Result<HashMap<String, Vec<String>>> {
     let mut result = HashMap::new();
 
+    // A present-but-wrong `fields` is refused rather than read as absent:
+    // `"fields": []` would otherwise answer 200 with every projection the client
+    // asked for missing, which reads as "this dataset has no such columns".
+    if let Some(value) = fields_value {
+        ensure!(
+            value.is_null() || value.is_object(),
+            "'fields' must be an object, got {}",
+            value
+        );
+    }
+
     let Some(fields_obj) = fields_value.and_then(|v| v.as_object()) else {
         return Ok(result);
     };
