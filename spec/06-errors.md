@@ -31,6 +31,7 @@ body:
 | Select a field the catalog lacks | Drop it | Error ([INV-Q7](07-invariants.md#inv-q7)) |
 | `fromBlock: "abc"` | Coerce to 0 | Error ([INV-Q4](07-invariants.md#inv-q4)) |
 | `parentBlockHash` mismatch | Serve the data | Fork error ([INV-E5](07-invariants.md#inv-e5)) |
+| `parentBlockHash` on a dataset with no parent-hash column | Accept and skip the check | Error ([INV-E5](07-invariants.md#inv-e5)) |
 | Join key of an unsupported type | Match nothing | Error ([INV-E7](07-invariants.md#inv-e7)) |
 
 **Errors are stable.** Each error has a machine-readable kind. Clients switch on
@@ -50,13 +51,14 @@ Raised from the request and catalog, before any data is read.
 | `UnknownField` | A key inside `fields.X` names no selectable field of `X`. |
 | `InvalidBlockRange` | `toBlock < fromBlock`. |
 | `InvalidBlockNumber` | `fromBlock` or `toBlock` is not an unsigned 64-bit integer. |
-| `TooManyItemRequests` | More than 100 item requests across all tables. |
-| `TooManyBloomValues` | More than 10 values in one bloom filter. |
+| `TooManyItemRequests` | More than `P-MAX-ITEM-REQUESTS` item requests across all tables. |
+| `TooManyBloomValues` | More than `P-MAX-BLOOM-VALUES` values in one bloom filter. |
 | `ConflictingFilters` | More than one discriminator-family filter in one item request. |
 | `InvalidHex` | A hex value lacks `0x`, has odd length, or contains a non-hex digit. |
-| `DiscriminatorTooLong` | A discriminator value exceeds 16 bytes. |
+| `DiscriminatorTooLong` | A discriminator value exceeds `P-MAX-DISCRIMINATOR-BYTES`. |
 | `InvalidFilterValue` | A filter value has a form the filter kind does not accept. |
 | `RequestTooLarge` | The request exceeds an engine-configured byte or list-length bound. |
+| `UnsupportedRequestField` | A reserved key the dataset cannot honour — `parentBlockHash` where the block table declares no parent-hash column. |
 
 An engine SHOULD report the offending path (`transactions[2].sighash`) and, for
 unknown names, the resolved internal spelling. A client that misspells a
@@ -92,8 +94,11 @@ Carries the expected hash and enough recent `(blockNumber, hash)` pairs for the
 client to locate the common ancestor and rewind. This is how a client learns a
 reorg happened between two pages.
 
-The check is skipped, without error, when the chunk cannot see the block before
-`fromBlock`.
+The check is skipped, without error, only when no block of the search window is
+in the chunk — `fromBlock` lies outside it. It is never skipped merely because
+`fromBlock` is the chunk's first block: that block's row carries its parent's
+hash. A dataset with no parent-hash column rejects the field instead
+(`UnsupportedRequestField`).
 
 ### `UnsupportedKeyType`
 
@@ -129,4 +134,4 @@ For symmetry, because over-erroring is its own failure mode:
 | `includeAllBlocks: true` over a range with no items | Headers for every block. |
 | A tag value not in the catalog's field groups | Base fields only. |
 | A bloom filter admitting a row that does not mention the account | A legal false positive. |
-| The response exceeding 20 MiB because one block does | The block is emitted whole. |
+| The response exceeding `P-WEIGHT-BUDGET` because one block does | The block is emitted whole. |

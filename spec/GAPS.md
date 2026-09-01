@@ -29,7 +29,6 @@ Compared against the reference implementation, as of 2026-08-31.
 | 9 | `tron` dataset is entirely absent | [03-catalog.md §3.4](03-catalog.md) | **S2** |
 | 10 | Five of six Substrate aliases are missing | [03-catalog.md §3.3](03-catalog.md) | **S2** |
 | 14 | Negative values cannot filter signed columns | [INV-P14](07-invariants.md#inv-p14) | **S2** |
-| 24 | The Fuel catalog trails the reference's field list | [03-catalog.md §3.6](03-catalog.md) | **S2** |
 | 15 | `discriminator: []` errors instead of matching nothing | [INV-P3](07-invariants.md#inv-p3) | **S3** |
 | 16 | Bloom ≤ 10 and discriminator-exclusivity validations are absent | [INV-Q10](07-invariants.md#inv-q10), [INV-Q11](07-invariants.md#inv-q11) | **S3** |
 | 17 | Relation block-number collection hardcodes the name `block_number` | [INV-X1](07-invariants.md#inv-x1) | **S3** |
@@ -39,9 +38,19 @@ Compared against the reference implementation, as of 2026-08-31.
 | 21 | `base58` encoding is a no-op; a physically-`Binary` column would emit hex | [INV-O9](07-invariants.md#inv-o9) | **S4** |
 | 22 | Weight accumulation is unchecked; a negative size column yields ~`u64::MAX` | [INV-B9](07-invariants.md#inv-b9) | **S4** |
 | 23 | No request byte cap and no `inList` length cap | [INV-Q13](07-invariants.md#inv-q13) | **S4** |
+| 27 | The output field surface is open: every non-`system` column is selectable | [INV-Q14](07-invariants.md#inv-q14) | **S4** |
+| 28 | Errors carry prose, not machine-readable kinds | [INV-E6](07-invariants.md#inv-e6) | **S4** |
+| 29 | No job runs the test, lint or format gates | [08-conformance.md §8.12](08-conformance.md#812-merge-gates) | **S4** |
+| 30 | The fork window is inherited, not derived | [INV-E5](07-invariants.md#inv-e5) | **S4** |
 
 There are no open S1 entries. Every silent-wrong-answer gap recorded here has
 been closed, with a test pinning the invariant behind it.
+
+`fuel` is out of scope ([03-catalog.md §3.6](03-catalog.md)); the one gap this
+document carried against it is gone with it, and its catalog file with it, so the
+engine no longer serves the dataset. The Fuel fixtures are still in the fixture
+tree and no test reads them. [ADR-10](decisions/ADR-10-fuel-is-out-of-scope.md)
+records why.
 
 ---
 
@@ -84,25 +93,6 @@ Solana `transactions.version` is `int16` and holds `-1` for legacy transactions.
 the reference implementation either, so no client depends on it — but the
 catalog permits it (gap 5), and once the filter surface is closed this becomes a
 deliberate choice rather than an accident.
-
-### 24. The Fuel catalog trails the reference's field list
-
-`metadata/fuel.yaml` mirrors an older Fuel archive layout than the reference's
-selection lists do. `blocks` is missing `event_inbox_root` and
-`message_outbox_root`; `transactions` is missing `is_upgrade`, `is_upload`,
-`bytecode_root`, `subsection_index`, `subsections_number`, `proof_set`,
-`mint_gas_price` and the four `policies_*` fields; and the reference reads
-`input_contract_*` / `output_contract_*` as flat columns where this catalog has
-one struct column each.
-
-The fixture chunk has the older layout too, so nothing here can be verified
-against data on hand. Adding the columns blind would be worse than the gap:
-a declared column absent from a chunk is a hard error ([INV-E3](07-invariants.md#inv-e3)),
-so a wrong guess turns a working query into a failing one. This needs a current
-Fuel chunk before it can be closed.
-
-Since the field surface is now closed, these names are rejected rather than
-silently dropped.
 
 ---
 
@@ -149,10 +139,13 @@ read from the catalog.
 ### 19. Catalog validation is partial
 
 `loader::validate` checks `block_number_column`, `item_order_keys`, `sort_key`,
-`weight` sources, `children`, the declared `filters`, the parent-hash and
-parent-number columns, and every alias reference. It does not check: relation
-targets and keys, special-filter columns, field-group tag and mapped columns,
-virtual-field roll columns, `address_column`, `parent_key`, or
+`weight` sources, `hex_number` columns, `children`, the declared `filters`, the
+special-filter columns, the parent-hash and parent-number columns, every alias
+reference, and relations — target table, key columns on both sides, equal key
+lengths, block number first, and an address column on the target of a `children`
+or `parents` relation. It does not check: field-group tag and mapped columns,
+virtual-field roll columns, `gteConst` targets, discriminator length mappings,
+the *source* side's `address_column`, `parent_key`, or
 `query_name` / `field_name` uniqueness.
 
 Each unchecked item is a deploy-time landmine. A typo in a `tag_column` silently
@@ -196,6 +189,98 @@ A negative size (a corrupt chunk) becomes ~`u64::MAX`, and the block is dropped 
 the accumulator wraps. Saturating arithmetic and a rejected-negative check both
 belong here.
 
+### 27. The output field surface is open
+
+`is_selectable_field` answers "is this a non-`system` column, a virtual field, or
+a field-group request key". That is the *derivation* [03-catalog.md](03-catalog.md)
+describes as a convenience, used as the definition — so every column the catalog
+carries for filtering, grouping, joining or rolling is also a selectable output
+field. [INV-Q14](07-invariants.md#inv-q14) requires the declared list instead.
+
+Measured against the reference implementation, the engine accepts these extra
+field names:
+
+| Where | Extra names | Why the catalog carries the column |
+|---|---|---|
+| every item table of every dataset (16 tables) | `blockNumber` | grouping, joining, ordering; already in `header.number` |
+| `evm.logs` | `topic0`, `topic1`, `topic2`, `topic3` | filter columns, rolled into `topics` |
+| `solana.instructions` | `a0`…`a15`, `restAccounts` | filter columns, rolled into `accounts` |
+| `solana.transactions` | `costUnits` | no reference field |
+| `hyperliquidReplicaCmds.actions` | `actionType` | filter column |
+
+Note that `solana.instructions.d1/d2/d4/d8` are *not* in this list. They are
+filter columns and selectable fields both, deliberately
+([03-catalog.md §3.2](03-catalog.md)) — which is why `system` cannot be the
+discriminator and the surface has to be declared.
+
+Nothing returns a wrong answer today, which is why this is S4 and not S2: the
+engine accepts a superset of what it should. It matters because the superset is
+"whatever columns the archive happens to have". A client that pins `topic0`
+today breaks the day the archiver stops writing it, on a field the catalog never
+promised.
+
+Marking the columns `system` is not the fix — a `system` column contributes zero
+weight ([INV-D9](07-invariants.md#inv-d9)), so hiding `topic0…3` that way would
+silently drop the `topics` roll out of the weight model.
+
+*First test:* `{"fields":{"log":{"blockNumber":true}}}` and
+`{"fields":{"log":{"topic0":true}}}` must both raise `UnknownField`.
+
+### 28. Errors carry prose, not kinds
+
+[06-errors.md](06-errors.md) names sixteen error kinds and
+[INV-E6](07-invariants.md#inv-e6) requires clients to switch on them. The engine
+has one typed error — `UnexpectedBaseBlock` — and returns everything else as a
+formatted message: `"unknown table filter '{}' in query"`, `"'{}' must be an
+unsigned integer, got {}"`, and so on.
+
+The reference implementation is the same, so this is not a regression; the
+taxonomy is a contract the specification proposes and neither engine implements.
+It is recorded here rather than removed from §6 because the alternative — a
+client library string-matching on messages — is worse, and because the taxonomy
+is already the structure the request-validation tests are written against
+([CT-2](08-conformance.md#83-ct-2--request-validation) asserts the *kind*, which today it cannot).
+
+Mechanically small: one enum over the §6.2 and §6.3 rows, carried alongside the
+message. The work is in the call sites, not the design.
+
+*First test:* the [CT-2](08-conformance.md#83-ct-2--request-validation) table asserts a kind per
+row rather than a substring.
+
+### 29. No job runs the test, lint or format gates
+
+The repository's only CI job runs the spec checker. `make test`, `make lint` and
+`make fmt` exist and pass nothing on: a change that breaks the suite, trips the
+linter or is unformatted merges green.
+
+So [MG-3](08-conformance.md#812-merge-gates) and
+[MG-8](08-conformance.md#812-merge-gates) are advisory, and
+[HC-12](08-conformance.md#813-harness-capability-register) is **P** rather than
+**C** — the commands are built, the wiring is not. Closing this is a workflow
+file and a decision about what the format gate does with the code that does not
+satisfy it today.
+
+*First test:* a job that runs `make test` and fails on a deliberately broken test.
+
+---
+
+### 30. The fork window is inherited, not derived
+
+`P-FORK-WINDOW` is a fixed 100 blocks. [§2.2](02-request.md) asks for a window at
+least as wide as the largest gap the dataset's block numbering permits, and
+nothing derives it, records it per dataset, or checks it. A dataset that skips
+more than 100 numbers in a row loses fork detection at that point and says
+nothing — the failure [INV-E5](07-invariants.md#inv-e5) exists to prevent.
+
+The reference implementation carries the same constant and a standing note about
+it; the divergence table below records that the spec names the defect rather than
+inheriting it. This entry is the engine's own side of it.
+
+*First test:* a chunk whose block numbers skip more than the window, asserting
+the parent is still found or the request is refused.
+
+---
+
 ### 23. No request size bound
 
 The only guard is the 100-item-request cap. One hundred item requests, each with
@@ -217,7 +302,8 @@ the one that is wrong. Listed so nobody "fixes" them back.
 | Empty result | `[]` (array writer) or empty (lines writer) | Zero bytes ([INV-O1](07-invariants.md#inv-o1)) | NDJSON is the only format; zero bytes concatenates. |
 | Response field order | Declaration order in the query DSL | Catalog column order ([INV-O6](07-invariants.md#inv-o6)) | Both are stable; the catalog is the single source of truth. Values are equal, bytes are not — the parity suite must compare values, not bytes. |
 | String escaping | `\u`-escapes non-ASCII | Raw UTF-8 | Both valid JSON. Same reason as above. |
-| Fuel `ContractOutput.stateRoot` | Reads the column `state_root`, not `contract_state_root` | *Unresolved* | Preserved as a catalog quirk pending a check against real Fuel chunks. Flagged so it is not silently "corrected" into a regression. |
+| `parentBlockHash` when `fromBlock` is outside the chunk | Errors: *"block N is not present in the chunk"* | Skip the check ([INV-E5](07-invariants.md#inv-e5)) | A chunk that cannot see the block is not evidence of a fork. The reference turns a routing artefact into a client-visible failure. |
+| Fork search window | Fixed 100 blocks, with a standing FIXME that a longer gap in block numbering misses the parent | A window wide enough for the dataset's largest numbering gap ([§2.2](02-request.md)) | Same defect, named rather than inherited. Both implementations currently use 100. |
 
 ## Extensions beyond the reference
 
@@ -242,7 +328,9 @@ Permitted; must not change the meaning of anything above.
    the spec asks for a quiet one, or the reverse.
 3. **Gaps 17, 18** (hardcoded names, panics). Robustness against a catalog or a
    chunk the engine has not seen before.
-4. **Gaps 9, 10, 24** (missing surface). Mechanical catalog work; gap 24 is
-   blocked on a current Fuel chunk.
-5. **Gaps 20–23** (latent). None is reachable from a well-formed request against
+4. **Gaps 9, 10** (missing surface). Mechanical catalog work.
+5. **Gap 27** (open field surface). Mechanical once the per-dataset lists in
+   [03-catalog.md](03-catalog.md) are in the catalog: 16 tables, one declared
+   list each, and [INV-Q14](07-invariants.md#inv-q14) becomes checkable in a loop.
+6. **Gaps 20–23** (latent). None is reachable from a well-formed request against
    a well-formed chunk today.

@@ -11,7 +11,8 @@ followed by a newline, including the last
 {"header":{"number":18000001},"logs":[…]}\n
 ```
 
-An empty result is a **zero-byte** response. Not `[]`, not a newline.
+An empty result is a **zero-byte** response. Not `[]`, not a newline
+([ADR-1](decisions/ADR-1-ndjson-is-the-only-json-framing.md)).
 
 Two properties follow, and both are relied on:
 
@@ -24,7 +25,8 @@ An engine MAY additionally offer a columnar encoding (Arrow IPC or similar). Suc
 an encoding MUST carry the same rows, the same blocks, and the same values as the
 JSON form; it MAY differ in nesting and in field naming
 ([INV-O14](07-invariants.md#inv-o14)). It is an alternative rendering of the same
-response, never a different query result.
+response, never a different query result
+([ADR-11](decisions/ADR-11-columnar-encoding-is-a-rendering.md)).
 
 ## 5.2 Block objects
 
@@ -49,7 +51,7 @@ Order:
 | Blocks | ascending block number | [INV-O3](07-invariants.md#inv-o3) |
 | Item arrays within a block | catalog table order | [INV-O4](07-invariants.md#inv-o4) |
 | Items within an array | item key, ascending | [INV-O5](07-invariants.md#inv-o5) |
-| Fields within an item | catalog column order, virtual fields after real ones | [INV-O6](07-invariants.md#inv-o6) |
+| Fields within an item | catalog column order, virtual fields after real ones ([ADR-5](decisions/ADR-5-catalog-order-for-output-fields.md)) | [INV-O6](07-invariants.md#inv-o6) |
 
 None of these orders is the order the data sits in storage, and none may depend
 on it ([INV-D8](07-invariants.md#inv-d8)). Item keys are unique within a block
@@ -109,14 +111,15 @@ no groups, and MUST NOT be an error or a crash
 ## 5.4 Weight
 
 Every response is bounded by a **weight budget** rather than a row count, because
-rows differ in size by four orders of magnitude.
+rows differ in size by four orders of magnitude
+([ADR-2](decisions/ADR-2-weight-budget-not-row-count.md)).
 
 The weight of a row is the sum of the weights of the columns *actually emitted*
 for it ([INV-B10](07-invariants.md#inv-b10)):
 
 | Column's catalog `weight` | Contribution per row |
 |---|---|
-| absent | 32 |
+| absent | `P-DEFAULT-COLUMN-WEIGHT` |
 | an integer `n` | `n` |
 | the name of a size column | the value of that size column in this row |
 | — and the column is `system` | 0 ([INV-D9](07-invariants.md#inv-d9)) |
@@ -156,8 +159,8 @@ They are emitted with header weight only, and are subject to truncation like any
 other block.
 
 **Selection.** Sort the candidates ascending. Accumulate weight. Keep the longest
-prefix whose cumulative weight does not exceed **20 MiB** (`20 × 1024 × 1024`).
-Always keep at least one block, however heavy
+prefix whose cumulative weight does not exceed **`P-WEIGHT-BUDGET`**. Always keep
+at least one block, however heavy
 ([INV-B6](07-invariants.md#inv-b6)).
 
 Blocks are atomic. A block is emitted whole or not at all

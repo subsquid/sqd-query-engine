@@ -25,18 +25,63 @@ misplaced or too vague, and should be fixed.
 | [05-response.md](05-response.md) | Response shape, ordering, encoding, weight, pagination | yes |
 | [06-errors.md](06-errors.md) | Error taxonomy and when each error fires | yes |
 | [07-invariants.md](07-invariants.md) | The invariant list — every rule, numbered and testable | yes |
-| [08-conformance.md](08-conformance.md) | How to build a TDD suite from this spec | advisory |
+| [08-conformance.md](08-conformance.md) | Test classes, traceability matrix, merge gates, harness register | §8.1–8.10 advisory; §8.11–8.14 current state |
+| [09-parameters.md](09-parameters.md) | Every constant the spec depends on | yes |
+| [decisions/](decisions/) | The ADR log — why the load-bearing choices are what they are | rationale, not rules |
 | [GAPS.md](GAPS.md) | Where the current implementation diverges | **non-normative** |
 
-Read them in order the first time. After that, [07-invariants.md](07-invariants.md)
-is the working document; everything else exists to explain it.
+Read 01 through 07 in order the first time. After that,
+[07-invariants.md](07-invariants.md) is the working document; everything else
+exists to explain it.
 
-## Requirement levels
+## Conventions
+
+### Requirement levels
 
 The words MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are used as in RFC 2119.
 
 A statement with no requirement word is descriptive: it explains the model but
 imposes no obligation.
+
+### Identifiers
+
+Every rule has a stable ID. IDs are never reused and never renumbered; a deleted
+rule leaves a hole.
+
+| Prefix | What it names | Home |
+|---|---|---|
+| `INV-D` `INV-Q` `INV-P` `INV-R` `INV-B` `INV-O` `INV-E` `INV-X` | Invariants, banded by domain | [07-invariants.md](07-invariants.md) |
+| `CT-n` | Test class | [08-conformance.md](08-conformance.md) |
+| `MG-n` | Merge gate | [08-conformance.md](08-conformance.md) |
+| `HC-n` | Harness capability | [08-conformance.md](08-conformance.md) |
+| `P-*` | Parameter | [09-parameters.md](09-parameters.md) |
+| `ADR-n` | Decision | [decisions/](decisions/) |
+| gap numbers | Implementation divergence | [GAPS.md](GAPS.md) |
+
+Invariants are banded by letter rather than numbered straight through, so a new
+rule about relations lands next to the other relation rules without moving
+anything. `INV-D` is the data model and catalog, `INV-Q` request validation,
+`INV-P` the filter algebra, `INV-R` relations, `INV-B` blocks and weight, `INV-O`
+the response format, `INV-E` errors, `INV-X` cross-cutting.
+
+### Constants
+
+No normative sentence contains a number. Every constant is a `P-*` symbol
+resolved in [09-parameters.md](09-parameters.md), with an *observed* column
+saying what the engine does today and a *target* column saying what it should do.
+A ⚠ marks a target nobody has ratified.
+
+### What changes, and when
+
+Two files are **mutable**: [09-parameters.md](09-parameters.md) and §8.11–8.14 of
+[08-conformance.md](08-conformance.md). They track the current state, and change
+as the engine does.
+
+[decisions/](decisions/) is **append-only**. An accepted ADR is never rewritten.
+Changing course means a new ADR whose Context cites the old one, and the old
+one's Status becoming `Superseded by ADR-n` — the only edit ever permitted.
+
+Everything else changes only when intended behaviour changes.
 
 ## What the engine does
 
@@ -105,3 +150,34 @@ because a spec that describes today's bugs cannot be used to find them.
 When a gap is closed, delete its entry. When the spec is wrong and the
 implementation is right, fix the spec and delete the entry. The document should
 tend toward empty.
+
+The distinction between a gap and a decision matters. A gap is a divergence
+somebody intends to close. A divergence somebody intends to *keep* is a decision,
+and it lives in [decisions/](decisions/) with the reasoning attached — otherwise
+the next reader closes it as a bug.
+
+## How to use this
+
+Checking an engine: read 01–07, then work down the traceability matrix in
+[§8.11](08-conformance.md) and write the tests for the rows marked **U**.
+
+Changing the engine: the gates in [§8.12](08-conformance.md) say what a change
+has to pass. `make spec-check` is one of them and runs in milliseconds.
+`--list-checks` prints the rules; `--severity` decides what is printed and
+`--gate` decides what fails, which are deliberately separate — CI prints
+everything and fails on errors alone.
+
+The checker has its own tests — `make spec-test` — one mutation per rule. A check
+that silently does nothing prints what a satisfied check prints, so the only way
+to know a rule works is to break something and watch it complain.
+
+A finding can be suppressed by a line in `spec/.speccheck-ignore`, written
+`check | file-glob | message-regex`. All three are required, the check must be
+one real name — there is no wildcard — and a malformed line is a usage error
+rather than a rule silently dropped. Every run reports how many findings it
+suppressed, and a run that suppressed anything never prints `clean`. A gate with
+a quiet off switch is not a gate.
+
+Changing the spec: a new rule gets an ID, a matrix row and a test class in the
+same change. A new constant gets a `P-*` symbol and a registry row. A choice a
+future maintainer could relitigate gets an ADR.

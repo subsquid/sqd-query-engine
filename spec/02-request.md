@@ -61,9 +61,28 @@ This is not decoration. Clients use it to detect that the chain reorganised
 under them between one page and the next. An engine that accepts the field and
 ignores it silently serves data from a chain the client did not ask about.
 
-If the chunk cannot see the parent block — because `fromBlock` is the chunk's
-first block, and the parent lives elsewhere — the check is skipped and no error
-is raised.
+Every row of the block table carries its own parent's hash, so the row *at*
+`fromBlock` is the one that answers the question. The check therefore works even
+when `fromBlock` is the chunk's first block. Where a dataset numbers blocks with
+gaps, the block table also declares a parent-*number* column, and the engine
+matches on that instead of assuming `fromBlock - 1`.
+
+An engine searches a window of `P-FORK-WINDOW` blocks ending at `fromBlock`. The
+window MUST be wide enough to span the largest gap the dataset's numbering
+permits; a
+parent further back than the window is not found, and the check is skipped rather
+than failed.
+
+The check is skipped, without error, in exactly one case: the chunk holds no
+block in that window, because `fromBlock` lies outside the chunk. A chunk that
+cannot see the block is not evidence of a fork.
+
+If the dataset's block table declares **no parent-hash column at all**, the
+engine MUST reject the request (`UnsupportedRequestField`;
+[ADR-9](decisions/ADR-9-reject-undecidable-fork-checks.md)). It MUST NOT accept
+the field and skip the check. A client that asks for fork detection and is
+silently given none cannot tell the difference from a chain that did not
+reorganise ([INV-E5](07-invariants.md#inv-e5)).
 
 ## 2.2 Item request arrays
 
@@ -126,10 +145,23 @@ The keys of `fields` are table `fieldName`s. An unknown one is an error
 keys names a selectable field of that table, and each value is a boolean. Only
 `true` selects.
 
-The selectable fields of a table are its non-`system` columns, its virtual
-fields, and — for tables with field groups — its field mappings' request keys.
-Names are camelCase. A key that is not a selectable field is an error
+The selectable fields of a table are the ones the catalog declares for it,
+enumerated per dataset in [03-catalog.md](03-catalog.md). Names are camelCase. A
+key that is not a selectable field is an error
 ([INV-Q7](07-invariants.md#inv-q7)).
+
+The output surface is **closed**, for the same reason the filter surface is
+(§1.6) — [ADR-4](decisions/ADR-4-closed-field-surface.md). A catalog may *derive* it — non-`system` columns, plus virtual fields,
+plus field-group request keys — but the derivation is a convenience, not the
+definition. Where it would admit a name §3 does not list, §3 wins
+([INV-Q7](07-invariants.md#inv-q7), [INV-Q14](07-invariants.md#inv-q14)).
+
+Two classes of column are declared but not selectable, and both are load-bearing:
+the block number column of an item table, which is read for grouping, joining and
+ordering and is already carried by the block header; and a filter column that the
+catalog rolls into a virtual field — `logs.topic0…3` behind `topics`,
+`instructions.a0…a15` behind `accounts`. Exposing either makes the physical
+column layout part of the wire contract.
 
 Silently ignoring an unrecognised field name is the wrong choice. A client that
 misspells `logIndx` gets a `200` and a response missing the field, and will look
@@ -150,20 +182,23 @@ An engine MUST enforce, before reading any data:
 
 | Limit | Value | Invariant |
 |---|---|---|
-| Total item requests, summed across every table | ≤ 100 | [INV-Q5](07-invariants.md#inv-q5) |
-| Values in one bloom filter | ≤ 10 | [INV-Q10](07-invariants.md#inv-q10) |
-| Discriminator-family filters per item request | ≤ 1 | [INV-Q11](07-invariants.md#inv-q11) |
-| Bytes in one discriminator value | ≤ 16 | [INV-Q12](07-invariants.md#inv-q12) |
+| Total item requests, summed across every table | ≤ `P-MAX-ITEM-REQUESTS` | [INV-Q5](07-invariants.md#inv-q5) |
+| Values in one bloom filter | ≤ `P-MAX-BLOOM-VALUES` | [INV-Q10](07-invariants.md#inv-q10) |
+| Discriminator-family filters per item request | ≤ `P-MAX-DISCRIMINATOR-FILTERS` | [INV-Q11](07-invariants.md#inv-q11) |
+| Bytes in one discriminator value | ≤ `P-MAX-DISCRIMINATOR-BYTES` | [INV-Q12](07-invariants.md#inv-q12) |
 
-The item-request cap is counted across *all* tables and aliases uniformly. A
-per-table exemption would let a client aim a hundred requests at one table and a
-hundred more at an alias of the same table.
+The item-request cap is counted across *all* tables and aliases uniformly
+([ADR-6](decisions/ADR-6-aliases-count-toward-the-request-cap.md)). A per-table
+exemption would let a client aim a hundred requests at one table and a hundred
+more at an alias of the same table.
 
-An engine SHOULD additionally bound the total request size in bytes and the
-number of values in a single `inList` ([INV-Q13](07-invariants.md#inv-q13)). One
-hundred item requests, each with a filter list of a million addresses, is a
-well-formed query by the rules above and a memory-amplification attack in
-practice.
+An engine SHOULD additionally bound the whole request to `P-MAX-REQUEST-BYTES`
+and a single `inList` to `P-MAX-IN-LIST` values
+([INV-Q13](07-invariants.md#inv-q13)). One hundred item requests, each with a
+filter list of a million addresses, is a well-formed query by the rules above and
+a memory-amplification attack in practice.
+
+Every value here is resolved in [09-parameters.md](09-parameters.md).
 
 ## 2.5 Filter value forms
 
@@ -173,9 +208,9 @@ practice.
 | `equals` | string, number, or boolean matching the column's type | arrays |
 | `rangeGte` / `rangeLte` | unsigned integer | strings, floats, negatives |
 | `gteConst` | boolean | anything else |
-| `bloom` | array of strings, ≤ 10 entries | anything else |
+| `bloom` | array of strings, ≤ `P-MAX-BLOOM-VALUES` entries | anything else |
 | `listContainsAny` | array matching the list's element type | anything else |
-| `discriminator` | array of `0x`-prefixed even-length hex strings, each ≤ 16 bytes | anything else |
+| `discriminator` | array of `0x`-prefixed even-length hex strings, each ≤ `P-MAX-DISCRIMINATOR-BYTES` | anything else |
 
 Hex strings MUST start with `0x` or `0X` and have an even number of hex digits.
 An odd-length or non-hex value is an error, not a value that matches nothing

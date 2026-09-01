@@ -147,7 +147,7 @@ per column.
 | `hexBytes` | `"0x"` followed by lowercase hex | Filters on such columns compare case-insensitively ([INV-P8](07-invariants.md#inv-p8)). |
 | `base58` | base58 string | Filters compare exactly. |
 | `utf8` | JSON string | Filters compare exactly. |
-| `decimalString` | quoted decimal, e.g. `"1000000000000000000"` | For values that exceed IEEE-754 exact integer range. |
+| `decimalString` | quoted decimal, e.g. `"1000000000000000000"` | For values that exceed IEEE 754 exact integer range. |
 | `hexNumber` | quoted, zero-padded to the declared type's width, e.g. `"0x0640"` for a `uint16` | Distinct from `hexBytes`, which is variable-length. |
 | `jsonVerbatim` | the stored bytes, spliced into the response uncopied | The stored value is already valid JSON. Empty string renders as `null`. |
 | `timestampSecond` | integer seconds | |
@@ -165,7 +165,8 @@ must not be able to corrupt the response framing.
 
 ## 1.6 Filters
 
-`filters` is a **closed allowlist**. A table declares which of its columns —
+`filters` is a **closed allowlist**
+([ADR-3](decisions/ADR-3-closed-filter-surface.md)). A table declares which of its columns —
 and which of its *special filters* — clients may filter on. A filter key that is
 not declared is an error ([INV-Q6](07-invariants.md#inv-q6)), even if a column of
 that name exists ([INV-P15](07-invariants.md#inv-p15)).

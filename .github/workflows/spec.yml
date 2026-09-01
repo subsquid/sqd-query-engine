@@ -1,0 +1,36 @@
+name: spec
+
+on:
+  # No paths filter. The job takes under a second, and MG-6 makes it a required
+  # check — GitHub reports nothing at all for a workflow a paths filter skipped,
+  # so every unrelated PR would wait on a result that never arrives. The gate
+  # also reads the Makefile and Cargo.toml, neither of which a `spec/**` filter
+  # would have noticed changing.
+  pull_request:
+  push:
+    branches: [ master ]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The freshness check compares per-file commit times, so it needs real
+          # history rather than a shallow clone.
+          fetch-depth: 0
+
+      # Annotates the diff with everything, notices included. Never gates.
+      - name: Annotate
+        run: python3 spec/check.py spec --format github --severity info
+        continue-on-error: true
+
+      # The checker's own tests run first: a broken check reports nothing, which
+      # is indistinguishable from a clean suite.
+      - name: Test the checker
+        run: make spec-test
+
+      # The gate. Exactly what `make spec-check` runs locally, so the two cannot
+      # disagree about what passes.
+      - name: Check
+        run: make spec-check
