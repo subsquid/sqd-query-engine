@@ -39,23 +39,35 @@ pub fn camel_to_snake(s: &str) -> String {
     result
 }
 
-/// Parse a hex string like "0xaabb" to bytes.
+/// Whether `s` is a well-formed hex literal: `0x`/`0X` prefix, an even number of
+/// digits, and nothing but ASCII hex digits (INV-Q12).
 ///
-/// Walks bytes rather than characters: a filter value arrives from the network
-/// and may hold any UTF-8, and slicing a multi-byte character down the middle
-/// panics. A pair that is not two ASCII hex digits is simply not hex.
+/// Checks bytes rather than characters: a filter value arrives from the network
+/// and may hold any UTF-8, and a multi-byte character is never a hex digit.
+pub fn is_hex_literal(s: &str) -> bool {
+    let Some(digits) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) else {
+        return false;
+    };
+
+    digits.len() % 2 == 0 && digits.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Parse a hex string like "0xaabb" to bytes, or `None` when it is not one.
+///
+/// The digit check is separate from the conversion because `from_str_radix`
+/// accepts a sign: it reads `"+1"` as 1, so `"0x+1+2"` would otherwise parse to
+/// the bytes of `"0x0102"` — a value the client never typed. Callers treat a
+/// `Some` as proof of well-formedness.
 pub fn parse_hex(s: &str) -> Option<Vec<u8>> {
-    let hex = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))?;
-    if hex.len() % 2 != 0 {
+    if !is_hex_literal(s) {
         return None;
     }
-    hex.as_bytes()
-        .chunks(2)
-        .map(|pair| {
-            let digits = std::str::from_utf8(pair).ok()?;
-            u8::from_str_radix(digits, 16).ok()
-        })
-        .collect()
+
+    let digits = &s.as_bytes()[2..];
+    let mut bytes = vec![0u8; digits.len() / 2];
+    faster_hex::hex_decode(digits, &mut bytes).ok()?;
+
+    Some(bytes)
 }
 
 const KNOWN_TOP_KEYS: &[&str] = &[
@@ -402,6 +414,29 @@ mod tests {
         );
         assert_eq!(parse_hex("invalid"), None);
         assert_eq!(parse_hex("0xabc"), None); // odd length
+    }
+
+    /// `from_str_radix` reads a sign, so a digit pair of `+1` used to parse as 1
+    /// and `"0x+1+2"` as the bytes of `"0x0102"`. Callers take a `Some` here as
+    /// proof of well-formedness, so that hands them a value the client never
+    /// typed — a discriminator filter matching a different discriminator.
+    #[test]
+    fn test_parse_hex_rejects_a_sign_in_a_digit_pair() {
+        assert_eq!(u8::from_str_radix("+1", 16), Ok(1), "the trap this guards");
+
+        for malformed in ["0x+1", "0x+1+2", "0x-1", "0x 1", "0x+f"] {
+            assert_eq!(parse_hex(malformed), None, "{malformed} is not hex");
+            assert!(!is_hex_literal(malformed), "{malformed} is not hex");
+        }
+    }
+
+    /// A filter value arrives from the network and may hold any UTF-8. Walking it
+    /// two bytes at a time must not slice a multi-byte character in half.
+    #[test]
+    fn test_parse_hex_survives_multi_byte_characters() {
+        for malformed in ["0xé", "0xaé", "0x\u{1F600}", "0xабвг"] {
+            assert_eq!(parse_hex(malformed), None, "{malformed:?} is not hex");
+        }
     }
 
     #[test]
