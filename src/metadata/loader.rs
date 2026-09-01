@@ -271,14 +271,35 @@ fn check_relation(
         )
     })?;
 
+    let (left, right) = (
+        relation.effective_left_key(),
+        relation.effective_right_key(),
+    );
+
+    // An empty key is not "join on nothing" — every composite key is then the
+    // same empty key, so every row of the target matches every source row.
+    anyhow::ensure!(
+        !left.is_empty() && !right.is_empty(),
+        "{}: relation '{}' declares no join key, which matches every row of '{}'",
+        owner,
+        relation_name,
+        relation.table
+    );
+
+    // The two sides are zipped column by column; a length mismatch panics the
+    // query thread rather than failing the request.
+    anyhow::ensure!(
+        left.len() == right.len(),
+        "{}: relation '{}' joins {} left keys against {} right keys",
+        owner,
+        relation_name,
+        left.len(),
+        right.len()
+    );
+
     for (side, keys, table_name, table) in [
-        ("left", relation.effective_left_key(), source_name, source),
-        (
-            "right",
-            relation.effective_right_key(),
-            relation.table.as_str(),
-            target,
-        ),
+        ("left", left, source_name, source),
+        ("right", right, relation.table.as_str(), target),
     ] {
         for key in keys {
             anyhow::ensure!(
@@ -291,6 +312,38 @@ fn check_relation(
                 table_name
             );
         }
+
+        // A relation is answered within one block: the scan is bounded by the
+        // request's block range, and a key that does not start with the block
+        // number matches rows in other blocks of the same chunk — which the
+        // response presents as belonging to this one.
+        let block_column = table.block_number_column.as_str();
+        anyhow::ensure!(
+            keys.first().map(String::as_str) == Some(block_column),
+            "{}: relation '{}' starts its {} key with '{}' rather than '{}', so it can \
+             join across blocks",
+            owner,
+            relation_name,
+            side,
+            keys.first().map(String::as_str).unwrap_or(""),
+            block_column
+        );
+    }
+
+    // `children` and `parents` walk the target's hierarchical address. Without one
+    // there is no hierarchy to walk, and the relation resolves to nothing.
+    if matches!(
+        relation.kind,
+        crate::metadata::RelationKind::Children | crate::metadata::RelationKind::Parents
+    ) {
+        anyhow::ensure!(
+            target.address_column.is_some(),
+            "{}: relation '{}' is {:?}, but '{}' declares no address column to walk",
+            owner,
+            relation_name,
+            relation.kind,
+            relation.table
+        );
     }
 
     Ok(())
@@ -693,6 +746,81 @@ tables:
         ] {
             assert!(
                 parse_dataset_description(&yaml).is_err(),
+                "{what} must be refused"
+            );
+        }
+    }
+
+    /// Existence is not enough: the *shape* of a relation key decides whether the
+    /// join means anything, and each shape below fails somewhere the response
+    /// cannot show.
+    #[test]
+    fn test_validate_rejects_a_relation_that_cannot_join() {
+        let catalog = |relation: &str| {
+            format!(
+                r#"
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    filters: []
+    columns:
+      number: {{ type: uint64 }}
+  items:
+    filters: []
+    relations:
+      kids:
+{relation}
+    columns:
+      block_number: {{ type: uint64 }}
+      index: {{ type: uint32 }}
+  children:
+    filters: []
+    columns:
+      block_number: {{ type: uint64 }}
+      parent_index: {{ type: uint32 }}
+      address: {{ type: list_uint32 }}
+"#
+            )
+        };
+
+        let good = "        table: children\n\
+                    \x20       left_key: [ block_number, index ]\n\
+                    \x20       right_key: [ block_number, parent_index ]";
+        parse_dataset_description(&catalog(good)).expect("a well-formed relation must load");
+
+        let rejected: &[(&str, &str)] = &[
+            (
+                // Every composite key is then the same empty key.
+                "a relation with no join key at all",
+                "        table: children",
+            ),
+            (
+                // The two sides are zipped, and the mismatch panics the scan.
+                "a relation whose two sides are different lengths",
+                "        table: children\n\
+                 \x20       left_key: [ block_number, index ]\n\
+                 \x20       right_key: [ block_number ]",
+            ),
+            (
+                // Joins rows of one block onto another block's items.
+                "a relation whose key does not start with the block number",
+                "        table: children\n\
+                 \x20       left_key: [ index, block_number ]\n\
+                 \x20       right_key: [ parent_index, block_number ]",
+            ),
+            (
+                // There is no hierarchy to walk, so it resolves to nothing.
+                "a children relation onto a table with no address column",
+                "        table: items\n        kind: children\n\
+                 \x20       left_key: [ block_number, index ]\n\
+                 \x20       right_key: [ block_number, index ]",
+            ),
+        ];
+
+        for (what, relation) in rejected {
+            assert!(
+                parse_dataset_description(&catalog(relation)).is_err(),
                 "{what} must be refused"
             );
         }
