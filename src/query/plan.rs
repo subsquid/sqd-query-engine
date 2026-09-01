@@ -79,6 +79,26 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
         .unwrap_or_else(|| "blocks".to_string());
 
     let block_table_desc = metadata.table(&block_table);
+
+    // Fork detection needs a column holding the predecessor's hash. Where the
+    // catalog declares none the request cannot be answered, and answering it
+    // anyway serves data from a branch the client did not ask about — the one
+    // outcome `parentBlockHash` exists to prevent (INV-E5). It is refused here
+    // rather than at execution because it is a decision about the request and
+    // the catalog, made before a chunk is opened: from inside the chunk, "this
+    // dataset has no parent hash" and "this chunk cannot see that far back" both
+    // have to return quietly.
+    if query.parent_block_hash.is_some() {
+        let declared = block_table_desc.is_some_and(|d| d.parent_hash_column.is_some());
+        ensure!(
+            declared,
+            "'parentBlockHash' is not supported for dataset '{}': its '{}' table declares \
+             no parent-hash column",
+            metadata.name,
+            block_table
+        );
+    }
+
     let block_output_columns: Vec<String> = query
         .fields
         .get(&block_table)
@@ -232,7 +252,6 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
 
 /// Order output columns according to metadata column definition order (YAML key order).
 /// Virtual fields are placed after the last column they reference, or at the end.
-
 fn order_columns_by_metadata(
     cols: &[String],
     table_desc: Option<&TableDescription>,
@@ -291,10 +310,12 @@ fn compile_item_predicates(
                     num_bytes,
                     num_hashes,
                 } => {
-                    let pred = compile_bloom_filter(value, column, *num_bytes, *num_hashes)?;
-                    if let Some(p) = pred {
-                        col_predicates.push(p);
-                    }
+                    col_predicates.push(compile_bloom_filter(
+                        value,
+                        column,
+                        *num_bytes,
+                        *num_hashes,
+                    )?);
                 }
                 SpecialFilter::RangeGte { column } => {
                     let pred = compile_range_gte(value, column, table)?;
@@ -335,8 +356,14 @@ fn compile_item_predicates(
                     column,
                     value: konst,
                 } => {
-                    // Only active when the flag is true (e.g. `callValueNonZero: true`).
-                    if value.as_bool() == Some(true) {
+                    // A non-boolean here used to mean "filter off", which answers
+                    // a strictly wider question than the one asked and says
+                    // nothing about it. The reference types the field `bool`.
+                    let enabled = value.as_bool().ok_or_else(|| {
+                        anyhow!("filter '{}' must be a boolean, got {}", key, value)
+                    })?;
+
+                    if enabled {
                         table
                             .column(column)
                             .ok_or_else(|| anyhow!("gte_const column '{}' not found", column))?;
@@ -398,6 +425,24 @@ fn compile_item_predicates(
     }
 }
 
+/// Reject a malformed value on a column declared `json_encoding: hex`
+/// (INV-Q12). Columns with any other encoding take their values verbatim.
+fn ensure_hex_for_column(s: &str, column: &str, col_desc: &ColumnDescription) -> Result<()> {
+    if col_desc.json_encoding != Some(JsonEncoding::Hex) {
+        return Ok(());
+    }
+
+    ensure!(
+        crate::query::parse::is_hex_literal(s),
+        "invalid hex value '{}' in filter on '{}': expected a 0x-prefixed, \
+         even-length hex string",
+        s,
+        column
+    );
+
+    Ok(())
+}
+
 /// Case folding follows the column, not the filter: a hex-encoded column
 /// compares case-insensitively whether the value arrives as a scalar or inside
 /// an IN-list (INV-P8). Clients send checksummed addresses.
@@ -457,8 +502,12 @@ fn compile_in_list(
 ) -> Result<ColumnPredicate> {
     match &col_desc.data_type {
         ColumnType::String => {
-            // Free-form strings (base58 keys, hex addresses, enum names) — not
-            // hex-parsed, so only the element *kind* is validated here.
+            // Stored as text (base58 keys, `0x…` hex, enum names), so the value
+            // is compared as text rather than parsed. A column declared
+            // `hex` still has its values checked for well-formedness (INV-Q12):
+            // most of the engine's hex surface is string-typed, and an address
+            // missing its `0x` compares unequal to every stored value, so
+            // without the check it answers 200 with no rows and no reason.
             let mut vals: Vec<String> = Vec::with_capacity(values.len());
             for v in values {
                 let s = v.as_str().ok_or_else(|| {
@@ -468,6 +517,7 @@ fn compile_in_list(
                         column
                     )
                 })?;
+                ensure_hex_for_column(s, column, col_desc)?;
                 vals.push(fold_for_column(s, col_desc));
             }
             let str_refs: Vec<&str> = vals.iter().map(|s| s.as_str()).collect();
@@ -571,6 +621,7 @@ fn compile_in_list(
                         column
                     )
                 })?;
+                ensure_hex_for_column(s, column, col_desc)?;
                 vals.push(fold_for_column(s, col_desc));
             }
             Ok(col_list_contains_any_string(column, vals))
@@ -664,26 +715,39 @@ fn compile_discriminator(
 }
 
 /// Compile a bloom filter predicate.
+///
+/// A non-string element is an error and an empty list matches nothing, matching
+/// the reference and every other filter shape here. Dropping the bad elements
+/// and then compiling *no predicate* — which is what this used to do — is the
+/// only way a filter in this engine could fail open: the query widens to the
+/// whole table and answers 200.
 fn compile_bloom_filter(
     value: &serde_json::Value,
     column: &str,
     num_bytes: usize,
     num_hashes: usize,
-) -> Result<Option<ColumnPredicate>> {
+) -> Result<ColumnPredicate> {
     let arr = value
         .as_array()
         .ok_or_else(|| anyhow!("bloom filter values must be an array"))?;
 
-    let needles: Vec<Vec<u8>> = arr
-        .iter()
-        .filter_map(|v| v.as_str().map(|s| s.as_bytes().to_vec()))
-        .collect();
-
-    if needles.is_empty() {
-        return Ok(None);
+    let mut needles: Vec<Vec<u8>> = Vec::with_capacity(arr.len());
+    for v in arr {
+        let s = v.as_str().ok_or_else(|| {
+            anyhow!(
+                "invalid value {} in filter on '{}': expected a string",
+                v,
+                column
+            )
+        })?;
+        needles.push(s.as_bytes().to_vec());
     }
 
-    Ok(Some(col_bloom(column, needles, num_bytes, num_hashes)))
+    if needles.is_empty() {
+        return Ok(crate::scan::predicate::col_never(column));
+    }
+
+    Ok(col_bloom(column, needles, num_bytes, num_hashes))
 }
 
 /// Compile a range >= filter.
@@ -771,9 +835,6 @@ mod tests {
         }
         panic!("chunk has no non-null d4 value");
     }
-
-    // --- A4: numeric_scalar must error (not silently coerce to UInt64) on
-    //         non-integer column types, otherwise the filter returns 0 rows. ---
 
     #[test]
     fn test_compile_evm_logs_query() {
@@ -1134,15 +1195,18 @@ tables:
   blocks:
     block_number_column: number
     sort_key: [number]
+    filters: []
     columns:
       number: { type: uint64, stats: true }
   items:
+    filters: []
     columns:
       block_number: { type: uint64 }
       transaction_index: { type: uint32 }
       kind: { type: string }
     item_order_keys: [transaction_index]
   related:
+    filters: []
     columns:
       block_number: { type: uint64 }
       transaction_index: { type: uint32 }

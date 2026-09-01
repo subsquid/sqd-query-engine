@@ -795,6 +795,31 @@ impl ArrayPredicate for ListContainsAnyPredicate {
 }
 
 // ---------------------------------------------------------------------------
+// NeverPredicate
+// ---------------------------------------------------------------------------
+
+/// A predicate no row can satisfy.
+///
+/// An empty filter list is not "no filter" — it is a filter nothing passes
+/// (INV-P14, and the reference's `is_never`). Compiling it away instead widens
+/// the query to the whole table, and the response says nothing about it.
+///
+/// Unlike an empty `InListPredicate` this does not depend on the column having
+/// statistics: `can_skip` is unconditionally true, so the row group is pruned
+/// whether or not a stat exists to prune it on.
+pub struct NeverPredicate;
+
+impl ArrayPredicate for NeverPredicate {
+    fn evaluate(&self, array: &dyn Array) -> BooleanArray {
+        BooleanArray::from(vec![false; array.len()])
+    }
+
+    fn can_skip(&self, _min: &dyn Array, _max: &dyn Array) -> bool {
+        true
+    }
+}
+
+// ---------------------------------------------------------------------------
 // RowPredicate implementation
 // ---------------------------------------------------------------------------
 
@@ -896,6 +921,14 @@ pub fn evaluate_predicates_on_batch(
 // ---------------------------------------------------------------------------
 // Constructors
 // ---------------------------------------------------------------------------
+
+/// Create a predicate on `column` that no row can satisfy.
+pub fn col_never(column: &str) -> ColumnPredicate {
+    ColumnPredicate {
+        column: column.to_string(),
+        predicate: Arc::new(NeverPredicate),
+    }
+}
 
 /// Create an equality predicate for a column.
 pub fn col_eq(column: &str, value: ScalarValue) -> ColumnPredicate {
