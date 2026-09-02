@@ -397,8 +397,8 @@ pub static EVM_FULLSCAN_QUERIES: &[(&str, &[u8])] = &[
 
 /// RPC-compatible EVM queries (node endpoint patterns), all on `data/evm/chunk`.
 pub static EVM_RPC_QUERIES: &[(&str, &[u8])] = &[
-    ("rpc/getBlockByNumber", EVM_GET_BLOCK_BY_NUMBER),
-    ("rpc/getBlockByNumber:txHashes", EVM_GET_BLOCK_BY_NUMBER_TX_HASHES),
+    ("rpc/getBlockByNumber + full tx", EVM_GET_BLOCK_BY_NUMBER),
+    ("rpc/getBlockByNumber", EVM_GET_BLOCK_BY_NUMBER_TX_HASHES),
     ("rpc/getBlockReceipts", EVM_GET_BLOCK_RECEIPTS),
     ("rpc/trace_block", EVM_TRACE_BLOCK),
     ("rpc/getLogs:1blk", EVM_GET_LOGS_1BLK),
