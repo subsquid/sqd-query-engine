@@ -61,7 +61,7 @@ Two consequences fall straight out of the measurements:
   every row group `block_number` spans the whole chunk and *no* row group is
   pruned — every row group is scanned to gather one block's rows.
 - **The single-block cost is dominated by column decode, not the scan itself.**
-  `getBlockByNumber:txHashes` (header + hashes, 2 tx columns) is **~4× faster**
+  `getBlockByNumber:txHashesOnly` (header + hashes, 2 tx columns) is **~4× faster**
   than the full variant (~17 tx columns) on the *same* scan — column projection
   is what pays off. So full `getBlockByNumber`/`getBlockReceipts` are the
   expensive RPC calls because they decode every column of every tx in the block —
@@ -163,7 +163,7 @@ is `legacy / new` (>1 means the new engine is faster).
 | evm/contract_calls+logs           | **11.13 ms** | 12.95 ms  | **1.16× faster** |
 | evm/usdc_traces+diffs             | 44.01 ms     | 40.68 ms  | 1.08× slower     |
 | **rpc/getBlockByNumber**          | **5.67 ms**  | 11.13 ms  | **1.96× faster** |
-| **rpc/getBlockByNumber:txHashes** | **1.28 ms**  | 5.94 ms   | **4.63× faster** |
+| **rpc/getBlockByNumber:txHashesOnly** | **1.28 ms**  | 5.94 ms   | **4.63× faster** |
 | **rpc/getBlockReceipts**          | **6.19 ms**  | 17.10 ms  | **2.76× faster** |
 | **rpc/trace_block**               | **14.88 ms** | 47.53 ms  | **3.19× faster** |
 | **rpc/getLogs:1blk**              | **0.51 ms**  | 2.36 ms   | **4.65× faster** |
@@ -201,7 +201,7 @@ blocks). The only regression is the heavy multi-table `usdc_traces+diffs`
 |                                 | 4   | **247**  | 193    | **1.28×** |
 |                                 | 8   | **263**  | 224    | **1.17×** |
 |                                 | 12  | **265**  | 234    | **1.13×** |
-| **rpc/getBlockByNumber:txHashes** | 1 | **770**  | 163    | **4.72×** |
+| **rpc/getBlockByNumber:txHashesOnly** | 1 | **770**  | 163    | **4.72×** |
 |                                 | 4   | **1245** | 533    | **2.34×** |
 |                                 | 8   | **1324** | 707    | **1.87×** |
 |                                 | 12  | **1355** | 773    | **1.75×** |
@@ -246,7 +246,7 @@ blocks). The only regression is the heavy multi-table `usdc_traces+diffs`
 
 The new engine wins **every** RPC benchmark at every concurrency level. The
 cheapest RPC calls — single-block `getLogs` (up to 6.9k rps) and
-`getBlockByNumber:txHashes` (up to 1.4k rps) — are also where it leads by the
+`getBlockByNumber:txHashesOnly` (up to 1.4k rps) — are also where it leads by the
 widest margin (3–5×), because legacy's per-query fixed overhead dominates there.
 Full-block `getBlockByNumber`/`getBlockReceipts` saturate early (each request
 already fans out across cores internally), so their rps is flat across
@@ -269,7 +269,7 @@ working memory.
 | evm/contract_calls+logs         | 87 MB   | 107 MB  | 160 MB ⚠️  | 110 MB     |
 | evm/usdc_traces+diffs           | 642 MB  | 678 MB  | 343 MB ⚠️  | 209 MB     |
 | rpc/getBlockByNumber            | 160 MB  | 163 MB  | 19.9 MB    | 19.5 MB    |
-| rpc/getBlockByNumber:txHashes   | 34 MB   | 36 MB   | **6.4 MB** | 10.8 MB    |
+| rpc/getBlockByNumber:txHashesOnly   | 34 MB   | 36 MB   | **6.4 MB** | 10.8 MB    |
 | rpc/getBlockReceipts            | 196 MB  | 196 MB  | **13 MB**  | 22 MB      |
 | rpc/trace_block                 | 580 MB  | 614 MB  | **30 MB**  | 57 MB      |
 | rpc/getLogs:1blk                | 6.3 MB  | 14 MB   | **4.6 MB** | 18 MB      |
@@ -285,7 +285,7 @@ Two findings:
 - **Allocator churn (alloc/query): the new engine allocates less on every
   query.** Note the huge read-amplification on single-block calls — 160 MB
   allocated to produce a 0.3 MB `getBlockByNumber` (decode every row group to
-  find one block). Column projection cuts it ~5×: `:txHashes` is 34 MB vs 160 MB.
+  find one block). Column projection cuts it ~5×: `:txHashesOnly` is 34 MB vs 160 MB.
 - **Peak working set (peak@8): a speed/memory trade-off.** On RPC and light
   queries the new engine holds **2–4× less** simultaneous heap (e.g. trace_block
   30 vs 57 MB, getLogs:1blk 4.6 vs 18 MB, sol/hard 19 vs 59 MB). But on the heavy
