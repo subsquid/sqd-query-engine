@@ -17,6 +17,8 @@
 
 #[path = "../benches/queries.rs"]
 mod queries;
+#[path = "../benches/rpc_workload.rs"]
+mod rpc_workload;
 use queries::*;
 
 use arrow::ipc::reader::StreamReader;
@@ -111,16 +113,41 @@ fn mb(bytes: usize) -> String {
 
 fn main() {
     let meta = load_dataset_description(Path::new("metadata/evm.yaml")).unwrap();
-    let chunk = ParquetChunkReader::open(Path::new("data/evm/chunk")).unwrap();
+    // Chunk is overridable so this can run on the bundled fixture (default,
+    // deterministic — the RPC queries below are block-pinned to it) or any other
+    // EVM chunk via `ARROW_PROTO_CHUNK=/path`.
+    let chunk_dir = std::env::var("ARROW_PROTO_CHUNK").unwrap_or_else(|_| "data/evm/chunk".into());
+    let chunk = ParquetChunkReader::open(Path::new(&chunk_dir)).unwrap();
 
-    let cases: &[(&str, &[u8])] = &[
-        ("usdc_transfers (flat logs)", EVM_USDC_TRANSFERS),
-        ("contract_calls+logs (nested)", EVM_CONTRACT_CALLS_WITH_LOGS),
-        ("all_logs (full scan)", EVM_ALL_LOGS),
-        ("usdc_traces+diffs (heavy)", EVM_USDC_TRACES_AND_STATEDIFFS),
-    ];
+    // On a REAL chunk (`ARROW_PROTO_CHUNK` set): RPC queries bound to that chunk's
+    // own blocks / hot keys via `rpc_workload` (one mid-chunk probe block per method), so
+    // the e2e numbers land on real response sizes — the same data the throughput
+    // bench uses. On the bundled fixture: the static indexer + block-pinned RPC set.
+    let real = std::env::var("ARROW_PROTO_CHUNK").is_ok();
+    let mut cases: Vec<(String, Vec<u8>)> = Vec::new();
+    if real {
+        let info = rpc_workload::analyze_chunk(Path::new(&chunk_dir));
+        for (name, variants) in rpc_workload::gen_variants(std::slice::from_ref(&info), 1) {
+            if let Some((_, q)) = variants.into_iter().next() {
+                cases.push((name, q));
+            }
+        }
+    } else {
+        for (n, q) in [
+            ("usdc_transfers (flat logs)", EVM_USDC_TRANSFERS),
+            ("contract_calls+logs (nested)", EVM_CONTRACT_CALLS_WITH_LOGS),
+            ("all_logs (full scan)", EVM_ALL_LOGS),
+            ("usdc_traces+diffs (heavy)", EVM_USDC_TRACES_AND_STATEDIFFS),
+        ] {
+            cases.push((n.to_string(), q.to_vec()));
+        }
+        for (n, q) in EVM_RPC_QUERIES {
+            cases.push((n.to_string(), q.to_vec()));
+        }
+    }
 
-    for (name, query) in cases {
+    for (name, query) in &cases {
+        let query: &[u8] = query;
         let json = run_json(query, &meta, &chunk);
         let arrow = run_arrow(query, &meta, &chunk, false, false);
         let bin = run_arrow(query, &meta, &chunk, false, true);
@@ -151,7 +178,13 @@ fn main() {
         );
         println!("  {}", "-".repeat(80));
         let row = |label: &str, size: usize, prod: String, cons: String| {
-            println!("  {:<22} {:>9}  {:>22}  {:>22}", label, mb(size), prod, cons);
+            println!(
+                "  {:<22} {:>9}  {:>22}  {:>22}",
+                label,
+                mb(size),
+                prod,
+                cons
+            );
         };
         row(
             "JSON",
@@ -162,8 +195,18 @@ fn main() {
         row(
             "JSON + zstd",
             json_z.len(),
-            format!("{:.2}  ({:.2}+{:.2})", t_json_prod + t_json_zstd, t_json_prod, t_json_zstd),
-            format!("{:.2}  ({:.2}+{:.2})", t_unz_json + t_json_parse, t_unz_json, t_json_parse),
+            format!(
+                "{:.2}  ({:.2}+{:.2})",
+                t_json_prod + t_json_zstd,
+                t_json_prod,
+                t_json_zstd
+            ),
+            format!(
+                "{:.2}  ({:.2}+{:.2})",
+                t_unz_json + t_json_parse,
+                t_unz_json,
+                t_json_parse
+            ),
         );
         row(
             "Arrow flat",
@@ -174,8 +217,18 @@ fn main() {
         row(
             "Arrow flat + zstd",
             arrow_z.len(),
-            format!("{:.2}  ({:.2}+{:.2})", t_arrow_prod + t_arrow_zstd, t_arrow_prod, t_arrow_zstd),
-            format!("{:.2}  ({:.2}+{:.2})", t_unz_arrow + t_arrow_read, t_unz_arrow, t_arrow_read),
+            format!(
+                "{:.2}  ({:.2}+{:.2})",
+                t_arrow_prod + t_arrow_zstd,
+                t_arrow_prod,
+                t_arrow_zstd
+            ),
+            format!(
+                "{:.2}  ({:.2}+{:.2})",
+                t_unz_arrow + t_arrow_read,
+                t_unz_arrow,
+                t_arrow_read
+            ),
         );
         row(
             "Arrow Binary",
@@ -186,8 +239,18 @@ fn main() {
         row(
             "Arrow Binary + zstd",
             bin_z.len(),
-            format!("{:.2}  ({:.2}+{:.2})", t_bin_prod + t_bin_zstd, t_bin_prod, t_bin_zstd),
-            format!("{:.2}  ({:.2}+{:.2})", t_unz_bin + t_bin_read, t_unz_bin, t_bin_read),
+            format!(
+                "{:.2}  ({:.2}+{:.2})",
+                t_bin_prod + t_bin_zstd,
+                t_bin_prod,
+                t_bin_zstd
+            ),
+            format!(
+                "{:.2}  ({:.2}+{:.2})",
+                t_unz_bin + t_bin_read,
+                t_unz_bin,
+                t_bin_read
+            ),
         );
     }
     println!();
