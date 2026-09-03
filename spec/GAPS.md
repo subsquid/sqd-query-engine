@@ -24,87 +24,42 @@ Compared against the reference implementation, as of 2026-09-03.
 
 ## Summary
 
-| # | Gap | Invariant | Sev |
-|---|---|---|---|
-| 9 | `tron` dataset is entirely absent | [03-catalog.md §3.4](03-catalog.md) | **S2** |
-| 10 | Five of six Substrate aliases are missing | [03-catalog.md §3.3](03-catalog.md) | **S2** |
-| 14 | Negative values cannot filter signed columns | [INV-P14](07-invariants.md#inv-p14) | **S2** |
+**The register is empty.** Every dataset [chapter 3](03-catalog.md) names is
+served except `fuel`, which is out of scope
+([ADR-10](decisions/ADR-10-fuel-is-out-of-scope.md)). Nothing the reference
+answers is refused here except by the bounds the table below says are
+deliberate.
 
-What is left is missing surface: two datasets' worth of catalog and one filter
-value type. There are no open S1, S3 or S4 entries — no silent wrong answer, no
-crash where a result was due, and nothing latent that a test does not now hold
-in place.
+The last three entries were missing surface rather than wrong behaviour, and each
+closed differently:
 
-Closing the S4 set moved [INV-Q13](07-invariants.md#inv-q13),
-[INV-Q14](07-invariants.md#inv-q14) and [INV-E6](07-invariants.md#inv-e6) from
-**U** to **C** in the traceability matrix and
-[INV-Q7](07-invariants.md#inv-q7) from partial, and turned
-the portable portion of [MG-3](08-conformance.md#812-merge-gates) and
-[MG-8](08-conformance.md#812-merge-gates) into blocking gates with a job behind
-them ([HC-12](08-conformance.md#813-harness-capability-register)).
+- **`tron`** was absent outright — no catalog, no tests, ten fixture query
+  directories sitting on disk that nothing read. It is now a catalog file and
+  ten fixture tests, and its parquet needed no engine change beyond the two
+  below.
+- **Five of six Substrate aliases** were missing, which left their extraction
+  columns in every chunk and unreachable from any query.
+  `reviveContractEmitted` needed five columns the catalog never declared. Adding
+  the four aliases over `calls` and `events` exposed a second thing: the relation
+  surface was read as the *union* of an alias's relations and its table's, so
+  `ethereumTransactions` would have inherited `subcalls` from `calls`. An alias
+  is a narrower view or it is nothing ([INV-Q6](07-invariants.md#inv-q6)), so it
+  now declares its own.
+- **Negative filter values** could not reach a signed column: the scalar path
+  read `as_u64` and nothing else, and `compile_in_list` had no signed arm. Both
+  now go through one `i128` widening, which is the only representation that holds
+  a `uint64` above `i64::MAX` and a negative in the same list.
 
-It did not close [INV-O9](07-invariants.md#inv-o9) or
-[INV-B9](07-invariants.md#inv-b9). Both keep their partial status for what was
-never the gap: no test asserts that NaN and ±∞ render as `null`, and nothing
-asserts weight is the same function twice over the same chunk.
+Closing them moved [INV-P14](07-invariants.md#inv-p14) from partial to **C** —
+the signed floor and the block-bound half of it both have tests now — and left
+[INV-P8](07-invariants.md#inv-p8), [INV-Q6](07-invariants.md#inv-q6) and
+[INV-P15](07-invariants.md#inv-p15) covered from one more direction each.
 
-Closing the S3 set before it moved four invariants to **C**
-([INV-D3](07-invariants.md#inv-d3), [INV-D10](07-invariants.md#inv-d10),
-[INV-Q10](07-invariants.md#inv-q10), [INV-Q11](07-invariants.md#inv-q11)) and
-raised [INV-D1](07-invariants.md#inv-d1), [INV-D6](07-invariants.md#inv-d6) and
-[INV-P3](07-invariants.md#inv-p3) to **C** from partial. It did not close
-[INV-E1](07-invariants.md#inv-e1): the panics gap 18 named are gone and a chunk
-that disagrees with its catalog is now a test, but the fuzz sweep the invariant
-asks for still needs a chunk writer
-([HC-3](08-conformance.md#813-harness-capability-register)).
-
-`fuel` is out of scope ([03-catalog.md §3.6](03-catalog.md)); the one gap this
-document carried against it is gone with it, and its catalog file with it, so the
-engine no longer serves the dataset. The Fuel fixtures are still in the fixture
-tree and no test reads them. [ADR-10](decisions/ADR-10-fuel-is-out-of-scope.md)
-records why.
-
----
-
-## S2 — Missing capability
-
-### 9. `tron` is absent
-
-No metadata, no fixtures, no mention anywhere in `src/` or `metadata/`. The
-reference implementation serves it: 4 tables, 6 item request arrays including 3
-aliases (`transferTransactions`, `transferAssetTransactions`,
-`triggerSmartContractTransactions`), and the `internal_transactions` table whose
-`queryName` is `internalTransactions`.
-
-See [03-catalog.md §3.4](03-catalog.md).
-
-### 10. Five of six Substrate aliases are missing
-
-`metadata/substrate.yaml` declares only `evmLogs`.
-
-| Alias | Status |
-|---|---|
-| `evmLogs` | present |
-| `ethereumTransactions` | **missing** — the `_ethereum_transact_to` / `_ethereum_transact_sighash` columns exist and are unreachable |
-| `contractsEvents` | **missing** — `_contract_address` exists and is unreachable |
-| `gearMessagesEnqueued` | **missing** — `_gear_program_id` exists and is unreachable |
-| `gearUserMessagesSent` | **missing** — same column, different implicit predicate |
-| `reviveContractEmitted` | **missing** — `_revive_contract`, `_revive_topic0…3` do not exist at all |
-
-The first four are catalog edits. `reviveContractEmitted` needs columns added.
-
-### 14. Negative values cannot filter signed columns
-
-The scalar filter path (`src/query/plan.rs`) has `as_bool`, `as_u64` and `as_str`
-branches and no `as_i64`. `compile_in_list` has no `Int16` or `Int64` arm. A
-negative filter value falls through to
-`"invalid filter value for '<c>': expected array, boolean, number, or string"`.
-
-Solana `transactions.version` is `int16` and holds `-1` for legacy transactions.
-`rewards.lamports` is `int64` and is routinely negative. Neither is filterable in
-the reference implementation either, so no client depends on it — but the
-catalog permits it (gap 5), and once the filter surface is closed this becomes a
-deliberate choice rather than an accident.
+The next work is not in this document. It is the capability gaps in
+[§8.13](08-conformance.md#813-harness-capability-register) — a chunk writer and a
+query generator — which are what stand between the suite and the fourteen
+invariants nothing would notice breaking, [INV-P9](07-invariants.md#inv-p9)
+first among them.
 
 ---
 
@@ -121,6 +76,7 @@ the one that is wrong. Listed so nobody "fixes" them back.
 | Empty result | `[]` (array writer) or empty (lines writer) | Zero bytes ([INV-O1](07-invariants.md#inv-o1)) | NDJSON is the only format; zero bytes concatenates. |
 | Response field order | Declaration order in the query DSL | Catalog column order ([INV-O6](07-invariants.md#inv-o6)) | Both are stable; the catalog is the single source of truth. Values are equal, bytes are not — the parity suite must compare values, not bytes. |
 | String escaping | `\u`-escapes non-ASCII | Raw UTF-8 | Both valid JSON. Same reason as above. |
+| Signed filter values | No signed arm either; `transactions.version` and `rewards.lamports` are unfilterable | Filterable where a catalog declares it ([INV-P14](07-invariants.md#inv-p14)) | No bundled catalog declares such a filter, so nothing changes on the wire. What changed is that refusing one is now a catalog decision rather than a hole in the compiler. |
 | `parentBlockHash` when `fromBlock` is outside the chunk | Errors: *"block N is not present in the chunk"* | Skip the check ([INV-E5](07-invariants.md#inv-e5)) | A chunk that cannot see the block is not evidence of a fork. The reference turns a routing artefact into a client-visible failure. |
 | Fork search window | Searches back over *parent* numbers, with a standing FIXME that a longer gap in block numbering misses the parent | Anchor the check at `fromBlock`, whose row states its own parent's hash; the window only sizes the evidence ([§2.2](02-request.md)) | A window is a guess about how far back the parent lies. The row that answers is at a known number, so nothing has to be guessed and a numbering gap of any width is answered. |
 
@@ -134,18 +90,3 @@ Permitted; must not change the meaning of anything above.
   [INV-O14](07-invariants.md#inv-o14).
 - `evm.traces.rewardValueNonZero` — present in both, listed here because it is
   easy to miss among the other three `*NonZero` flags.
-
----
-
-## Suggested order of work
-
-1. **Gaps 9, 10** (missing surface). Mechanical catalog work, and the validator
-   now checks everything a new catalog entry can get wrong — including the
-   declared field list, which a new dataset can no longer omit.
-2. **Gap 14** (negative filter values). The one remaining case where a
-   well-formed request against a well-formed chunk is refused.
-
-After that the register is empty, and the next work is not in it: the capability
-gaps in [§8.13](08-conformance.md#813-harness-capability-register) — a chunk
-writer and a query generator — are what stand between the suite and the
-invariants it still cannot check.

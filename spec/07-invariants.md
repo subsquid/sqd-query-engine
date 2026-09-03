@@ -185,6 +185,9 @@ column is stored as text or as bytes. A `hexBytes` column stores lowercase `0x�
 values by §1.5, so a filter value that is not one of those can never equal a
 stored value — and answering that with an empty `200` tells the client nothing.
 
+A bare-hex column carries no prefix to check for, so the rule does not reach it.
+Those columns fold case ([INV-P8](#inv-p8)) and take their values as written.
+
 *Note:* a well-formed value that cannot match anything is not an error. See [INV-P14](#inv-p14).
 
 ### INV-Q13
@@ -241,16 +244,22 @@ a row matched by two item requests appears once.
 including the empty one.
 
 ### INV-P8
-**Case folding follows the column, not the filter.** Values of `hexBytes`
-columns compare case-insensitively, for both `inList` and scalar `equals`
-filters. All other columns compare byte-exactly.
+**Case folding follows the column, not the filter.** Values of a column the
+catalog marks case-insensitive compare case-insensitively, for both `inList` and
+scalar `equals` filters. All other columns compare byte-exactly.
 
-Folding is one-sided: stored `hexBytes` values are lowercase by §1.5, so only
-the filter value is folded. A chunk storing upper-case hex is malformed, and no
-engine is required to match it.
+Every `hexBytes` column is such a column. So is one holding hex the chain writes
+*without* the `0x` prefix — Tron's addresses, topics and sighashes, which render
+verbatim and are therefore `utf8` by §1.5. The encoding cannot carry the rule for
+those, so the catalog states it separately; folding is a property of what the
+values are, not of how they are rendered.
+
+Folding is one-sided: stored hex is lowercase by §1.5, so only the filter value
+is folded. A chunk storing upper-case hex is malformed, and no engine is required
+to match it.
 
 *Why:* clients send checksummed addresses. Folding lists but not scalars makes `{"to": ["0xAB…"]}` and `{"to": "0xAB…"}` mean different things.
-*Test:* upper-casing every hex filter value in a query leaves the response byte-identical. Upper-casing a value of a non-hex column (`statediffs.key`, `traces.type`) changes it.
+*Test:* upper-casing every hex filter value in a query leaves the response byte-identical, on a `hexBytes` column and on a bare-hex one alike. Upper-casing a value of a non-hex column (`statediffs.key`, `traces.type`) changes it.
 
 ### INV-P9
 **A bloom filter over-approximates.** No false negatives; false positives

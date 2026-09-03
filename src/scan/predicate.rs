@@ -81,7 +81,7 @@ pub struct InListPredicate {
     string_set: Option<HashSet<String>>,
     /// Pre-built u64 set (for UInt64 columns).
     u64_set: Option<HashSet<u64>>,
-    /// Pre-built i64 set (for Int64 columns).
+    /// Pre-built signed set, widened to i64 from any signed list type.
     i64_set: Option<HashSet<i64>>,
     /// Pre-built u32 set.
     u32_set: Option<HashSet<u32>>,
@@ -257,6 +257,19 @@ impl ArrayPredicate for EqPredicate {
 // InListPredicate
 // ---------------------------------------------------------------------------
 
+/// The signed values of an IN-list, whatever integer width it was built at.
+fn int_set(values: &dyn Array) -> Option<HashSet<i64>> {
+    macro_rules! widened {
+        ($($array:ty),+) => {
+            $(if let Some(arr) = values.as_any().downcast_ref::<$array>() {
+                return Some(arr.values().iter().map(|&v| v as i64).collect());
+            })+
+        };
+    }
+    widened!(Int8Array, Int16Array, Int32Array, Int64Array);
+    None
+}
+
 impl InListPredicate {
     pub fn new(values: Arc<dyn Array>) -> Self {
         let string_set = values
@@ -267,10 +280,10 @@ impl InListPredicate {
             .as_any()
             .downcast_ref::<UInt64Array>()
             .map(|arr| arr.values().iter().copied().collect());
-        let i64_set = values
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .map(|arr| arr.values().iter().copied().collect());
+        // One signed set whatever width the list arrived at: a declared width
+        // bounds the values, and the chunk picks its own (INV-D7), so narrowing
+        // happens where the physical array is known rather than here.
+        let i64_set = int_set(values.as_ref());
         let u32_set = values
             .as_any()
             .downcast_ref::<UInt32Array>()
@@ -371,6 +384,27 @@ impl ArrayPredicate for InListPredicate {
                 return in_list_string_fast(arr, set);
             }
         }
+        // Interpret every physical integer array at the signedness declared by
+        // the filter. Writers may use an unsigned Arrow type to carry the same
+        // bits, so (for example) UInt16::MAX is the Int16 value -1 (INV-D7).
+        if let Some(set) = self.i64_set.as_ref() {
+            macro_rules! signed_array {
+                ($array:ty, $signed:ty) => {
+                    if let Some(arr) = array.as_any().downcast_ref::<$array>() {
+                        return in_list_signed_fast(arr, set, |value| (value as $signed) as i64);
+                    }
+                };
+            }
+
+            signed_array!(Int8Array, i8);
+            signed_array!(Int16Array, i16);
+            signed_array!(Int32Array, i32);
+            signed_array!(Int64Array, i64);
+            signed_array!(UInt8Array, i8);
+            signed_array!(UInt16Array, i16);
+            signed_array!(UInt32Array, i32);
+            signed_array!(UInt64Array, i64);
+        }
         if let Some(arr) = array.as_any().downcast_ref::<UInt64Array>() {
             if let Some(set) = self.u64_set.as_ref() {
                 return in_list_primitive_fast(arr, set);
@@ -410,9 +444,6 @@ impl ArrayPredicate for InListPredicate {
             }
         }
         if let Some(arr) = array.as_any().downcast_ref::<Int64Array>() {
-            if let Some(set) = self.i64_set.as_ref() {
-                return in_list_primitive_fast(arr, set);
-            }
             // Fallback: u64 set on Int64 array (parquet physical type for UInt64)
             if let Some(set) = self.u64_set.as_ref() {
                 let as_i64: HashSet<i64> = set.iter().map(|&v| v as i64).collect();
@@ -511,6 +542,27 @@ where
             builder.append(false);
         } else {
             builder.append(set.contains(&array.value(i)));
+        }
+    }
+    BooleanArray::new(builder.finish(), array.nulls().cloned())
+}
+
+fn in_list_signed_fast<T, F>(
+    array: &PrimitiveArray<T>,
+    set: &HashSet<i64>,
+    mut signed_value: F,
+) -> BooleanArray
+where
+    T: ArrowPrimitiveType,
+    F: FnMut(T::Native) -> i64,
+{
+    let len = array.len();
+    let mut builder = BooleanBufferBuilder::new(len);
+    for i in 0..len {
+        if array.is_null(i) {
+            builder.append(false);
+        } else {
+            builder.append(set.contains(&signed_value(array.value(i))));
         }
     }
     BooleanArray::new(builder.finish(), array.nulls().cloned())
@@ -1024,6 +1076,32 @@ mod tests {
         let array = UInt64Array::from(vec![10, 20, 30, 40]);
         let result = pred.evaluate(&array);
         assert_eq!(result, BooleanArray::from(vec![true, false, true, false]));
+    }
+
+    /// Signed filters follow the declared signedness even when a writer stores
+    /// the same values in an unsigned or differently sized physical array.
+    #[test]
+    fn test_signed_in_list_at_every_physical_integer_type() {
+        let pred = InListPredicate::new(Arc::new(Int64Array::from(vec![-1, 7])));
+        let arrays: [Arc<dyn Array>; 8] = [
+            Arc::new(Int8Array::from(vec![-1, 0, 7])),
+            Arc::new(Int16Array::from(vec![-1, 0, 7])),
+            Arc::new(Int32Array::from(vec![-1, 0, 7])),
+            Arc::new(Int64Array::from(vec![-1, 0, 7])),
+            Arc::new(UInt8Array::from(vec![u8::MAX, 0, 7])),
+            Arc::new(UInt16Array::from(vec![u16::MAX, 0, 7])),
+            Arc::new(UInt32Array::from(vec![u32::MAX, 0, 7])),
+            Arc::new(UInt64Array::from(vec![u64::MAX, 0, 7])),
+        ];
+
+        for array in arrays {
+            assert_eq!(
+                pred.evaluate(array.as_ref()),
+                BooleanArray::from(vec![true, false, true]),
+                "signed IN-list over {:?}",
+                array.data_type()
+            );
+        }
     }
 
     #[test]

@@ -27,6 +27,7 @@ const DATASETS: &[(&str, &str)] = &[
     ("substrate", "kusama"),
     ("substrate", "moonbeam"),
     ("bitcoin", "bitcoin"),
+    ("tron", "tron"),
 ];
 
 /// How many blocks each generated query covers. Wide enough that filters match

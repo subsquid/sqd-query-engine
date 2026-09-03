@@ -180,7 +180,7 @@ def test_flipping_a_status_invalidates_the_stated_totals(s):
 @case
 def test_a_hand_edited_coverage_baseline_is_caught(s):
     """MG-1 ratchets on this number; it may not be loosened by typing."""
-    s.edit("09-parameters.md", "0.46 (39 of 85)", "0.99 (84 of 85)")
+    s.edit("09-parameters.md", "0.47 (40 of 85)", "0.99 (84 of 85)")
     assert "param-observed-stale" in checks_in(run(s.root)[1])
 
 

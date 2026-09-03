@@ -1559,6 +1559,7 @@ query_aliases:
                 "hyperliquid_replica_cmds",
                 "solana",
                 "substrate",
+                "tron",
             ]
         );
     }
