@@ -74,7 +74,10 @@ fn process_dataset(dataset: &str, chunk_dir: &Path, queries_dir: &Path) {
                 std::fs::write(&result_file, json_array.as_bytes()).unwrap();
                 eprintln!(
                     "  OK {}/{}: {} blocks, {} bytes",
-                    dataset, query_name, blocks.len(), json_array.len()
+                    dataset,
+                    query_name,
+                    blocks.len(),
+                    json_array.len()
                 );
             }
             Err(e) => {

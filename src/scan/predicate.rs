@@ -9,16 +9,24 @@ use std::sync::Arc;
 /// Parquet stores UInt64 as physical INT64, so stats arrive as Int64Array.
 fn stat_as_u64(arr: &dyn Array) -> Option<u64> {
     if let Some(a) = arr.as_any().downcast_ref::<UInt64Array>() {
-        if a.len() > 0 { return Some(a.value(0)); }
+        if !a.is_empty() {
+            return Some(a.value(0));
+        }
     }
     if let Some(a) = arr.as_any().downcast_ref::<Int64Array>() {
-        if a.len() > 0 { return Some(a.value(0) as u64); }
+        if !a.is_empty() {
+            return Some(a.value(0) as u64);
+        }
     }
     if let Some(a) = arr.as_any().downcast_ref::<UInt32Array>() {
-        if a.len() > 0 { return Some(a.value(0) as u64); }
+        if !a.is_empty() {
+            return Some(a.value(0) as u64);
+        }
     }
     if let Some(a) = arr.as_any().downcast_ref::<Int32Array>() {
-        if a.len() > 0 { return Some((a.value(0) as u32) as u64); }
+        if !a.is_empty() {
+            return Some((a.value(0) as u32) as u64);
+        }
     }
     None
 }
@@ -313,7 +321,7 @@ impl InListPredicate {
     /// Checks the dictionary values once, builds a key→match lookup, then maps through keys.
     fn evaluate_dictionary(&self, array: &dyn Array, value_type: &DataType) -> BooleanArray {
         match value_type {
-            DataType::Utf8 => self.eval_dict_typed::<Int32Type, StringArray>(array),
+            DataType::Utf8 => self.eval_dict_typed::<Int32Type>(array),
             _ => {
                 // Fallback: cast to values and evaluate normally
                 let decoded = arrow::compute::cast(array, value_type).unwrap();
@@ -322,11 +330,10 @@ impl InListPredicate {
         }
     }
 
-    fn eval_dict_typed<K, V>(&self, array: &dyn Array) -> BooleanArray
+    fn eval_dict_typed<K>(&self, array: &dyn Array) -> BooleanArray
     where
         K: ArrowDictionaryKeyType,
         K::Native: TryInto<usize>,
-        V: 'static,
     {
         let dict_array = array.as_any().downcast_ref::<DictionaryArray<K>>().unwrap();
         let values = dict_array.values();
@@ -375,7 +382,8 @@ impl ArrayPredicate for InListPredicate {
             }
             // Fallback: u64 set → narrow to u32
             if let Some(set) = self.u64_set.as_ref() {
-                let narrow: HashSet<u32> = set.iter().filter_map(|&v| u32::try_from(v).ok()).collect();
+                let narrow: HashSet<u32> =
+                    set.iter().filter_map(|&v| u32::try_from(v).ok()).collect();
                 return in_list_primitive_fast(arr, &narrow);
             }
         }
@@ -385,12 +393,14 @@ impl ArrayPredicate for InListPredicate {
             }
             // Fallback: u32 set → narrow to u16
             if let Some(set) = self.u32_set.as_ref() {
-                let narrow: HashSet<u16> = set.iter().filter_map(|&v| u16::try_from(v).ok()).collect();
+                let narrow: HashSet<u16> =
+                    set.iter().filter_map(|&v| u16::try_from(v).ok()).collect();
                 return in_list_primitive_fast(arr, &narrow);
             }
             // Fallback: u64 set → narrow to u16
             if let Some(set) = self.u64_set.as_ref() {
-                let narrow: HashSet<u16> = set.iter().filter_map(|&v| u16::try_from(v).ok()).collect();
+                let narrow: HashSet<u16> =
+                    set.iter().filter_map(|&v| u16::try_from(v).ok()).collect();
                 return in_list_primitive_fast(arr, &narrow);
             }
         }
@@ -416,7 +426,11 @@ impl ArrayPredicate for InListPredicate {
                 return in_list_primitive_fast(arr, &signed);
             }
             if let Some(set) = self.u64_set.as_ref() {
-                let signed: HashSet<i32> = set.iter().filter_map(|&v| u32::try_from(v).ok()).map(|v| v as i32).collect();
+                let signed: HashSet<i32> = set
+                    .iter()
+                    .filter_map(|&v| u32::try_from(v).ok())
+                    .map(|v| v as i32)
+                    .collect();
                 return in_list_primitive_fast(arr, &signed);
             }
         }
@@ -451,13 +465,19 @@ impl ArrayPredicate for InListPredicate {
                 return set.iter().all(|&v| v < rg_min || v > rg_max);
             }
             if let Some(set) = self.u32_set.as_ref() {
-                return set.iter().all(|&v| (v as u64) < rg_min || (v as u64) > rg_max);
+                return set
+                    .iter()
+                    .all(|&v| (v as u64) < rg_min || (v as u64) > rg_max);
             }
             if let Some(set) = self.u16_set.as_ref() {
-                return set.iter().all(|&v| (v as u64) < rg_min || (v as u64) > rg_max);
+                return set
+                    .iter()
+                    .all(|&v| (v as u64) < rg_min || (v as u64) > rg_max);
             }
             if let Some(set) = self.u8_set.as_ref() {
-                return set.iter().all(|&v| (v as u64) < rg_min || (v as u64) > rg_max);
+                return set
+                    .iter()
+                    .all(|&v| (v as u64) < rg_min || (v as u64) > rg_max);
             }
         }
         false
@@ -729,10 +749,7 @@ impl ListContainsAnyPredicate {
     }
 
     /// Evaluate against a list array of either offset width.
-    fn evaluate_list<O: OffsetSizeTrait>(
-        &self,
-        list_array: &GenericListArray<O>,
-    ) -> BooleanArray {
+    fn evaluate_list<O: OffsetSizeTrait>(&self, list_array: &GenericListArray<O>) -> BooleanArray {
         let mut results = Vec::with_capacity(list_array.len());
         for i in 0..list_array.len() {
             if list_array.is_null(i) {
@@ -860,10 +877,7 @@ impl RowPredicate {
 
     /// Check if the entire row group can be skipped using column statistics.
     /// Returns true if no rows can match.
-    pub fn can_skip_row_group(
-        &self,
-        stats_fn: &dyn Fn(&str) -> Option<(Arc<dyn Array>, Arc<dyn Array>)>,
-    ) -> bool {
+    pub fn can_skip_row_group(&self, stats_fn: &ColumnStats) -> bool {
         // ALL column predicates must pass for a row to match.
         // If ANY column predicate says it can skip (no matches possible), skip the group.
         for col_pred in &self.columns {
@@ -890,11 +904,12 @@ pub fn or_row_predicates(predicates: &[&RowPredicate], batch: &RecordBatch) -> B
     result.unwrap_or_else(|| BooleanArray::from(vec![false; batch.num_rows()]))
 }
 
+/// A row group's `(min, max)` statistics for one column, or `None` where the
+/// writer recorded none.
+pub type ColumnStats<'a> = dyn Fn(&str) -> Option<(Arc<dyn Array>, Arc<dyn Array>)> + 'a;
+
 /// Check if ALL row predicates (ORed) say skip for a row group.
-pub fn can_skip_row_group_or(
-    predicates: &[&RowPredicate],
-    stats_fn: &dyn Fn(&str) -> Option<(Arc<dyn Array>, Arc<dyn Array>)>,
-) -> bool {
+pub fn can_skip_row_group_or(predicates: &[&RowPredicate], stats_fn: &ColumnStats) -> bool {
     // OR: skip only if ALL predicates say skip
     predicates.iter().all(|p| p.can_skip_row_group(stats_fn))
 }
@@ -1092,17 +1107,23 @@ mod tests {
     /// Row group pruning must work when parquet stores UInt64 as physical Int64.
     #[test]
     fn test_can_skip_uint64_with_int64_stats() {
-        let eq = EqPredicate { value: ScalarValue::UInt64(100) };
+        let eq = EqPredicate {
+            value: ScalarValue::UInt64(100),
+        };
         // Stats arrive as Int64Array (parquet physical type for UInt64)
         let min = Int64Array::from(vec![200i64]);
         let max = Int64Array::from(vec![300i64]);
-        assert!(eq.can_skip(&min as &dyn Array, &max as &dyn Array),
-            "value=100 outside [200,300] — should skip");
+        assert!(
+            eq.can_skip(&min as &dyn Array, &max as &dyn Array),
+            "value=100 outside [200,300] — should skip"
+        );
 
         let min2 = Int64Array::from(vec![50i64]);
         let max2 = Int64Array::from(vec![150i64]);
-        assert!(!eq.can_skip(&min2 as &dyn Array, &max2 as &dyn Array),
-            "value=100 inside [50,150] — should NOT skip");
+        assert!(
+            !eq.can_skip(&min2 as &dyn Array, &max2 as &dyn Array),
+            "value=100 inside [50,150] — should NOT skip"
+        );
     }
 
     /// InList row group pruning with Int64 stats (parquet physical for UInt64).
@@ -1126,11 +1147,17 @@ mod tests {
         let pred = RangeGtePredicate::new(ScalarValue::UInt64(100));
         // max=50 as Int64 — all values below 100, should skip
         let max = Int64Array::from(vec![50i64]);
-        assert!(pred.can_skip(&Int64Array::from(vec![0i64]) as &dyn Array, &max as &dyn Array));
+        assert!(pred.can_skip(
+            &Int64Array::from(vec![0i64]) as &dyn Array,
+            &max as &dyn Array
+        ));
 
         // max=150 — some values >= 100, should NOT skip
         let max2 = Int64Array::from(vec![150i64]);
-        assert!(!pred.can_skip(&Int64Array::from(vec![0i64]) as &dyn Array, &max2 as &dyn Array));
+        assert!(!pred.can_skip(
+            &Int64Array::from(vec![0i64]) as &dyn Array,
+            &max2 as &dyn Array
+        ));
     }
 
     /// RangeLte pruning with Int64 stats.
@@ -1139,11 +1166,17 @@ mod tests {
         let pred = RangeLtePredicate::new(ScalarValue::UInt64(100));
         // min=200 as Int64 — all values above 100, should skip
         let min = Int64Array::from(vec![200i64]);
-        assert!(pred.can_skip(&min as &dyn Array, &Int64Array::from(vec![300i64]) as &dyn Array));
+        assert!(pred.can_skip(
+            &min as &dyn Array,
+            &Int64Array::from(vec![300i64]) as &dyn Array
+        ));
 
         // min=50 — some values <= 100, should NOT skip
         let min2 = Int64Array::from(vec![50i64]);
-        assert!(!pred.can_skip(&min2 as &dyn Array, &Int64Array::from(vec![300i64]) as &dyn Array));
+        assert!(!pred.can_skip(
+            &min2 as &dyn Array,
+            &Int64Array::from(vec![300i64]) as &dyn Array
+        ));
     }
 
     /// InList with u64 values must evaluate correctly against Int64Array (parquet physical type).
@@ -1163,14 +1196,9 @@ mod tests {
     fn test_row_predicate_missing_column_no_panic() {
         use arrow::datatypes::{Field, Schema};
 
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("a", DataType::UInt32, false),
-        ]));
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![Arc::new(UInt32Array::from(vec![1, 2, 3]))],
-        )
-        .unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::UInt32, false)]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(UInt32Array::from(vec![1, 2, 3]))]).unwrap();
 
         // Predicate on column "b" which doesn't exist in the batch
         let pred = RowPredicate::new(vec![ColumnPredicate {
@@ -1190,9 +1218,7 @@ mod tests {
     fn test_or_row_predicates_missing_column() {
         use arrow::datatypes::{Field, Schema};
 
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("a", DataType::Utf8, false),
-        ]));
+        let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Utf8, false)]));
         let batch = RecordBatch::try_new(
             schema,
             vec![Arc::new(StringArray::from(vec!["x", "y", "z"]))],
@@ -1202,7 +1228,9 @@ mod tests {
         // pred1: column "a" == "x" (exists)
         let pred1 = RowPredicate::new(vec![ColumnPredicate {
             column: "a".to_string(),
-            predicate: Arc::new(EqPredicate { value: ScalarValue::Utf8("x".to_string()) }),
+            predicate: Arc::new(EqPredicate {
+                value: ScalarValue::Utf8("x".to_string()),
+            }),
         }]);
         // pred2: column "missing" (doesn't exist)
         let pred2 = RowPredicate::new(vec![ColumnPredicate {
@@ -1239,11 +1267,8 @@ mod tests {
         let d1_array = UInt8Array::from(vec![Some(1), None, Some(2), Some(1)]);
         let d8_array = UInt64Array::from(vec![None, Some(100), Some(200), Some(100)]);
 
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![Arc::new(d1_array), Arc::new(d8_array)],
-        )
-        .unwrap();
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(d1_array), Arc::new(d8_array)]).unwrap();
 
         let pred1 = RowPredicate::new(vec![ColumnPredicate {
             column: "d1".to_string(),
@@ -1258,10 +1283,7 @@ mod tests {
 
         // With or_kleene: rows 0, 1, 3 match. Row 2 does not.
         // With plain or: row 0 would be dropped (true OR null = null) — BUG.
-        assert_eq!(
-            mask,
-            BooleanArray::from(vec![true, true, false, true]),
-        );
+        assert_eq!(mask, BooleanArray::from(vec![true, true, false, true]),);
     }
 
     /// Verify that or_row_predicates with all NULLs in one predicate's column
@@ -1354,9 +1376,8 @@ mod tests {
     // --- A2: ListContainsAny must handle List<UInt16> and LargeList ---
 
     fn list_u16(rows: &[&[u16]]) -> GenericListArray<i32> {
-        let mut b = arrow::array::builder::ListBuilder::new(
-            arrow::array::builder::UInt16Builder::new(),
-        );
+        let mut b =
+            arrow::array::builder::ListBuilder::new(arrow::array::builder::UInt16Builder::new());
         for row in rows {
             for v in *row {
                 b.values().append_value(*v);
@@ -1373,10 +1394,7 @@ mod tests {
         let pred = ListContainsAnyPredicate::new_u32(vec![3, 7]);
         let array = list_u16(&[&[1, 2], &[3, 4], &[5, 7], &[]]);
         let result = pred.evaluate(&array);
-        assert_eq!(
-            result,
-            BooleanArray::from(vec![false, true, true, false])
-        );
+        assert_eq!(result, BooleanArray::from(vec![false, true, true, false]));
     }
 
     #[test]

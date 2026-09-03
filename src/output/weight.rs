@@ -172,8 +172,9 @@ pub(crate) fn apply_weight_limit(
                         let dynamic: u64 = weight_arrays
                             .iter()
                             .map(|col| get_weight_value(col.as_ref(), i))
-                            .sum();
-                        *block_weights.entry(block_num).or_default() += header_fixed + dynamic;
+                            .fold(0u64, u64::saturating_add);
+                        let entry = block_weights.entry(block_num).or_default();
+                        *entry = entry.saturating_add(header_fixed.saturating_add(dynamic));
                     }
                 }
             }
@@ -186,7 +187,7 @@ pub(crate) fn apply_weight_limit(
 
     for &block_num in sorted_blocks {
         let block_weight = block_weights.get(&block_num).copied().unwrap_or(0);
-        cumulative_weight += block_weight;
+        cumulative_weight = cumulative_weight.saturating_add(block_weight);
 
         if selected.is_empty() || cumulative_weight <= MAX_RESPONSE_BYTES {
             selected.push(block_num);
@@ -271,7 +272,7 @@ pub(crate) fn weight_cutoff_block(
     let mut cumulative: u64 = 0;
     let mut cutoff: Option<u64> = None;
     for (i, &bn) in sorted_blocks.iter().enumerate() {
-        cumulative += block_weights.get(&bn).copied().unwrap_or(0);
+        cumulative = cumulative.saturating_add(block_weights.get(&bn).copied().unwrap_or(0));
         if i == 0 || cumulative <= MAX_RESPONSE_BYTES {
             cutoff = Some(bn);
         } else {
@@ -328,10 +329,10 @@ fn compute_weight_params(
                 weight_cols.push(wc.clone());
             }
             Some(WeightSource::Fixed(w)) => {
-                fixed_weight += w;
+                fixed_weight = fixed_weight.saturating_add(*w);
             }
             None => {
-                fixed_weight += DEFAULT_ROW_WEIGHT;
+                fixed_weight = fixed_weight.saturating_add(DEFAULT_ROW_WEIGHT);
             }
         }
     }
@@ -363,6 +364,10 @@ pub(crate) fn header_weight_params(
 }
 
 /// Get block number from an array at row index.
+///
+/// One arm per physical width, read as a table. `manual_map` would fold the last
+/// one into a `.map()` and leave the four no longer looking alike.
+#[allow(clippy::manual_map)]
 pub(crate) fn get_block_number(col: &dyn arrow::array::Array, i: usize) -> Option<u64> {
     if let Some(a) = col.as_any().downcast_ref::<UInt64Array>() {
         Some(a.value(i))
@@ -378,15 +383,21 @@ pub(crate) fn get_block_number(col: &dyn arrow::array::Array, i: usize) -> Optio
 }
 
 /// Get uint64 value from a weight column at row index.
+///
+/// A size is unsigned by the catalog, so a negative one is a corrupt chunk. Read
+/// as a `u64` it becomes ~`u64::MAX`, which drops the block from every response
+/// it appears in — or wraps the accumulator and drops the budget instead. It
+/// weighs nothing here: a model that under-counts one row emits a slightly large
+/// response, and a model that over-counts it by 2⁶⁴ emits nothing (INV-B9).
 pub(crate) fn get_weight_value(col: &dyn arrow::array::Array, i: usize) -> u64 {
     if let Some(a) = col.as_any().downcast_ref::<UInt64Array>() {
         a.value(i)
     } else if let Some(a) = col.as_any().downcast_ref::<UInt32Array>() {
         a.value(i) as u64
     } else if let Some(a) = col.as_any().downcast_ref::<Int64Array>() {
-        a.value(i) as u64
+        a.value(i).try_into().unwrap_or(0)
     } else if let Some(a) = col.as_any().downcast_ref::<Int32Array>() {
-        (a.value(i) as u32) as u64
+        a.value(i).try_into().unwrap_or(0)
     } else {
         0
     }
@@ -414,12 +425,11 @@ pub(crate) fn accumulate_block_weights(
         for i in 0..batch.num_rows() {
             if let Some(block_num) = get_block_number(bn_col.as_ref(), i) {
                 let mut row_weight = fixed_weight_per_row;
-                for wc in &wc_arrays {
-                    if let Some(arr) = wc {
-                        row_weight += get_weight_value(*arr, i);
-                    }
+                for arr in wc_arrays.iter().flatten() {
+                    row_weight = row_weight.saturating_add(get_weight_value(*arr, i));
                 }
-                *weights.entry(block_num).or_default() += row_weight;
+                let entry = weights.entry(block_num).or_default();
+                *entry = entry.saturating_add(row_weight);
             }
         }
     }
@@ -462,12 +472,11 @@ fn accumulate_block_weights_dedup(
                 }
 
                 let mut row_weight = fixed_weight_per_row;
-                for wc in &wc_arrays {
-                    if let Some(arr) = wc {
-                        row_weight += get_weight_value(*arr, i);
-                    }
+                for arr in wc_arrays.iter().flatten() {
+                    row_weight = row_weight.saturating_add(get_weight_value(*arr, i));
                 }
-                *weights.entry(block_num).or_default() += row_weight;
+                let entry = weights.entry(block_num).or_default();
+                *entry = entry.saturating_add(row_weight);
             }
         }
     }
@@ -1019,5 +1028,66 @@ mod tests {
             legacy_weight_for(&["program_id", "data", "is_committed"], Some(instr));
         assert_eq!(fixed_with, 5 * 32, "5 fixed columns (with is_committed)");
         assert_eq!(dynamic_with.len(), 1);
+    }
+
+    /// A size column is unsigned by the catalog, so a negative one is a corrupt
+    /// chunk. Read as a `u64` it was ~`u64::MAX`: the block outweighs the whole
+    /// budget and is dropped from every response it appears in.
+    #[test]
+    fn a_negative_size_weighs_nothing() {
+        let negative: [std::sync::Arc<dyn Array>; 2] = [
+            std::sync::Arc::new(Int64Array::from(vec![-1i64])),
+            std::sync::Arc::new(Int32Array::from(vec![-4096i32])),
+        ];
+
+        for col in negative {
+            assert_eq!(
+                get_weight_value(col.as_ref(), 0),
+                0,
+                "a negative {:?} size",
+                col.data_type()
+            );
+        }
+
+        let sizes: [std::sync::Arc<dyn Array>; 2] = [
+            std::sync::Arc::new(Int64Array::from(vec![4096i64])),
+            std::sync::Arc::new(UInt32Array::from(vec![4096u32])),
+        ];
+
+        for col in sizes {
+            assert_eq!(get_weight_value(col.as_ref(), 0), 4096);
+        }
+    }
+
+    /// Weight is a model, and a model that wraps stops bounding anything: the
+    /// sum comes back small and the budget lets the whole chunk through
+    /// (INV-B9).
+    #[test]
+    fn block_weight_saturates_rather_than_wrapping() {
+        use arrow::datatypes::{DataType, Field, Schema};
+
+        let schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("block_number", DataType::UInt64, false),
+            Field::new("data_size", DataType::UInt64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                std::sync::Arc::new(UInt64Array::from(vec![7u64, 7])),
+                std::sync::Arc::new(UInt64Array::from(vec![u64::MAX, u64::MAX])),
+            ],
+        )
+        .unwrap();
+
+        let mut weights = FxHashMap::default();
+        accumulate_block_weights(
+            &[batch],
+            "block_number",
+            32,
+            &["data_size".to_string()],
+            &mut weights,
+        );
+
+        assert_eq!(weights[&7], u64::MAX);
     }
 }

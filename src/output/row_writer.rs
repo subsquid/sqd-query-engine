@@ -37,6 +37,7 @@ pub(crate) enum TypedSortColumn {
 }
 
 impl TypedSortColumn {
+    #[allow(clippy::manual_map)] // one arm per physical type; they read as a table
     fn resolve(col: &dyn Array) -> Option<Self> {
         if let Some(a) = col.as_any().downcast_ref::<UInt64Array>() {
             Some(Self::UInt64(a.clone()))
@@ -114,20 +115,24 @@ pub(crate) enum ResolvedIndices {
 }
 
 /// Pre-computed structure for polymorphic field grouping (e.g., EVM traces).
+/// A variant's groups, each a JSON key and the writers that fill it. `"_"` is
+/// the flat group, which is written without a wrapping object.
+type VariantGroups<W> = HashMap<String, Vec<(Vec<u8>, Vec<W>)>>;
+
 pub(crate) struct GroupedWriters {
     /// Writers for base fields (shared across all variants).
     base_writers: Vec<FieldWriter>,
     /// Tag column name for variant dispatch.
     tag_column: String,
     /// Per-variant grouped writers: tag_value -> [(group_json_key, writers)].
-    variant_writers: HashMap<String, Vec<(Vec<u8>, Vec<FieldWriter>)>>,
+    variant_writers: VariantGroups<FieldWriter>,
 }
 
 /// Resolved grouped writers for a specific batch schema.
 pub(crate) struct ResolvedGroupedWriters {
     base_resolved: Vec<ResolvedFieldWriter>,
     tag_col_idx: Option<usize>,
-    variant_resolved: HashMap<String, Vec<(Vec<u8>, Vec<ResolvedFieldWriter>)>>,
+    variant_resolved: VariantGroups<ResolvedFieldWriter>,
 }
 
 /// Resolve field writers against a specific batch schema (done once per batch).
@@ -302,7 +307,7 @@ pub(crate) fn build_grouped_writers(
     }
 
     // Convert variant_groups into the final structure
-    let mut variant_writers: HashMap<String, Vec<(Vec<u8>, Vec<FieldWriter>)>> = HashMap::new();
+    let mut variant_writers: VariantGroups<FieldWriter> = HashMap::new();
     for (variant, groups) in variant_groups {
         let mut group_list = Vec::new();
         for (group_name, writers) in groups {
@@ -333,8 +338,7 @@ pub(crate) fn resolve_grouped_writers(
 ) -> ResolvedGroupedWriters {
     let base_resolved = resolve_writers(&gw.base_writers, batch);
     let tag_col_idx = batch.schema().index_of(&gw.tag_column).ok();
-    let mut variant_resolved: HashMap<String, Vec<(Vec<u8>, Vec<ResolvedFieldWriter>)>> =
-        HashMap::new();
+    let mut variant_resolved: VariantGroups<ResolvedFieldWriter> = HashMap::new();
     for (variant, groups) in &gw.variant_writers {
         let resolved_groups: Vec<_> = groups
             .iter()
@@ -461,6 +465,7 @@ pub(crate) fn write_header(
 }
 
 /// Write items from a table for a specific block, using pre-built index.
+#[allow(clippy::too_many_arguments)]
 fn write_table_items_indexed(
     buf: &mut Vec<u8>,
     block_num: u64,
@@ -508,6 +513,7 @@ fn write_table_items_indexed(
 
 /// Write items from multiple sources for the same output table, merging into a single JSON array.
 /// Rows are collected from all sources, deduplicated by (item_order_keys), sorted, and written.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_merged_table_items(
     buf: &mut Vec<u8>,
     block_num: u64,
@@ -675,7 +681,7 @@ pub(crate) fn resolve_sort_columns(
 /// Sort (batch_idx, row) references by pre-resolved typed sort columns.
 /// Uses (batch_idx, row_idx) as final tiebreaker to preserve parquet file order.
 fn sort_rows_by_order_keys_indexed(
-    rows: &mut Vec<(usize, usize)>,
+    rows: &mut [(usize, usize)],
     sort_col_resolved: &[Vec<Option<TypedSortColumn>>],
 ) {
     if rows.is_empty() {

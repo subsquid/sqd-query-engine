@@ -1,0 +1,59 @@
+name: rust
+
+on:
+  pull_request:
+  push:
+    branches: [ master ]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Cargo resolves optional path dependencies before feature selection. A
+      # minimal manifest lets the default feature set resolve in a standalone
+      # checkout; the optional crate is not compiled by this job.
+      - name: Resolve optional path dependency
+        run: |
+          mkdir -p ../data/crates/query/src
+          cat > ../data/crates/query/Cargo.toml <<'TOML'
+          [package]
+          name = "sqd-query"
+          version = "0.0.0"
+          edition = "2021"
+
+          [features]
+          parquet = []
+          TOML
+          : > ../data/crates/query/src/lib.rs
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Install components
+        run: rustup component add rustfmt clippy
+
+      # MG-8. Both run before the suite: they are seconds against minutes, and a
+      # PR that fails them fails them whatever the tests say.
+      - name: Format
+        run: make fmt
+
+      - name: Lint
+        run: make lint
+
+      # MG-3's portable portion. Data-backed tests are marked ignored and are
+      # run separately with `make test-data` when their inputs are available.
+      - name: Portable tests
+        run: make test

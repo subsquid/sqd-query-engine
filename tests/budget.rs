@@ -26,6 +26,7 @@ tables:
     field_name: block
     sort_key: [number]
     filters: []
+    fields: [number]
     columns:
       number:
         type: uint64
@@ -36,6 +37,7 @@ tables:
     item_order_keys: [log_index]
     sort_key: [block_number, log_index]
     filters: []
+    fields: [log_index, data]
     columns:
       block_number:
         type: uint64
@@ -55,6 +57,7 @@ tables:
     item_order_keys: [transaction_index]
     sort_key: [block_number, transaction_index]
     filters: []
+    fields: [transaction_index, input]
     columns:
       block_number:
         type: uint64
@@ -132,7 +135,11 @@ fn make_chunk(blocks: &[u64], logs: &[(u64, u64)], txs: &[(u64, u64)]) -> TempDi
     dir
 }
 
-fn run(meta: &DatasetDescription, chunk: &TempDir, query: serde_json::Value) -> Option<QueryOutput> {
+fn run(
+    meta: &DatasetDescription,
+    chunk: &TempDir,
+    query: serde_json::Value,
+) -> Option<QueryOutput> {
     let parsed = parse_query(query.to_string().as_bytes(), meta).unwrap();
     let plan = compile(&parsed, meta).unwrap();
     let reader = ParquetChunkReader::open(chunk.path()).unwrap();
@@ -172,7 +179,11 @@ fn logs_query() -> serde_json::Value {
 /// reported last block.
 #[test]
 fn budget_trim_excludes_range_end_boundary_block() {
-    let chunk = make_chunk(BLOCKS, &BLOCKS.iter().map(|&b| (b, 15 * MB)).collect::<Vec<_>>(), &[]);
+    let chunk = make_chunk(
+        BLOCKS,
+        &BLOCKS.iter().map(|&b| (b, 15 * MB)).collect::<Vec<_>>(),
+        &[],
+    );
     let meta = schema();
     let blocks = run(&meta, &chunk, logs_query()).unwrap();
 
@@ -189,7 +200,11 @@ fn budget_trim_excludes_range_end_boundary_block() {
 /// the whole data.
 #[test]
 fn untrimmed_scan_includes_all_blocks() {
-    let chunk = make_chunk(BLOCKS, &BLOCKS.iter().map(|&b| (b, 10)).collect::<Vec<_>>(), &[]);
+    let chunk = make_chunk(
+        BLOCKS,
+        &BLOCKS.iter().map(|&b| (b, 10)).collect::<Vec<_>>(),
+        &[],
+    );
     let meta = schema();
     let blocks = run(&meta, &chunk, logs_query()).unwrap();
 
@@ -271,7 +286,11 @@ fn multi_table_trim_reports_true_last_block() {
 #[test]
 fn iteration_matches_json_lines() {
     let meta = schema();
-    let chunk = make_chunk(BLOCKS, &BLOCKS.iter().map(|&b| (b, 10)).collect::<Vec<_>>(), &[]);
+    let chunk = make_chunk(
+        BLOCKS,
+        &BLOCKS.iter().map(|&b| (b, 10)).collect::<Vec<_>>(),
+        &[],
+    );
 
     let mut blocks = run(&meta, &chunk, logs_query()).unwrap();
     let mut iterated = Vec::new();
@@ -305,13 +324,19 @@ fn write_next_block_panics_when_exhausted() {
 /// The Arrow output reports the same trimmed block range as the JSON output.
 #[test]
 fn arrow_json_parity_on_trim() {
-    let chunk = make_chunk(BLOCKS, &BLOCKS.iter().map(|&b| (b, 15 * MB)).collect::<Vec<_>>(), &[]);
+    let chunk = make_chunk(
+        BLOCKS,
+        &BLOCKS.iter().map(|&b| (b, 15 * MB)).collect::<Vec<_>>(),
+        &[],
+    );
     let meta = schema();
     let parsed = parse_query(logs_query().to_string().as_bytes(), &meta).unwrap();
     let plan = compile(&parsed, &meta).unwrap();
     let reader = ParquetChunkReader::open(chunk.path()).unwrap();
 
-    let json = execute_chunk(&plan, &meta, &reader, false).unwrap().unwrap();
+    let json = execute_chunk(&plan, &meta, &reader, false)
+        .unwrap()
+        .unwrap();
     let arrow = execute_chunk_arrow(&plan, &meta, &reader, false, false)
         .unwrap()
         .unwrap();

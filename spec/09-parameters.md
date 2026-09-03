@@ -5,7 +5,7 @@ the symbol; this file resolves it.
 
 **This document is mutable.** Along with [08-conformance.md](08-conformance.md)
 it is one of the two files that may change without intended behaviour changing.
-Everything else changes only when the contract does. Observed as of **2026-09-02**.
+Everything else changes only when the contract does. Observed as of **2026-09-03**.
 
 Columns:
 
@@ -27,18 +27,18 @@ Checked before any chunk data is read ([INV-E2](07-invariants.md#inv-e2)).
 | `P-MAX-BLOOM-VALUES` | Values in one bloom filter ([INV-Q10](07-invariants.md#inv-q10)) | 10 | 10 |
 | `P-MAX-DISCRIMINATOR-FILTERS` | Discriminator-family filters in one item request ([INV-Q11](07-invariants.md#inv-q11)) | 1 | 1 |
 | `P-MAX-DISCRIMINATOR-BYTES` | Bytes in one discriminator value ([INV-Q12](07-invariants.md#inv-q12)) | 16 | 16 |
-| `P-MAX-REQUEST-BYTES` | Whole-request size bound ([INV-Q13](07-invariants.md#inv-q13)) | violated: no bound ([GAP 23](GAPS.md)) | ⚠ 1 MiB |
-| `P-MAX-IN-LIST` | Values in one `inList` ([INV-Q13](07-invariants.md#inv-q13)) | violated: no bound ([GAP 23](GAPS.md)) | ⚠ 10 000 |
+| `P-MAX-REQUEST-BYTES` | Whole-request size bound ([INV-Q13](07-invariants.md#inv-q13)) | 2 MiB | 2 MiB |
+| `P-MAX-IN-LIST` | Values in one `inList` ([INV-Q13](07-invariants.md#inv-q13)) | 100 000 | 100 000 |
 
 The discriminator family is read from the catalog, not named in code: it is the
 `discriminator` special filter plus every column it dispatches to. A dataset with
 a differently-named discriminator is bounded by the same rule with no code change
 ([INV-X1](07-invariants.md#inv-x1)).
 
-`P-MAX-REQUEST-BYTES` and `P-MAX-IN-LIST` are the two the reference
-implementation never had. The pair of them is what stands between the engine and
-a hundred million-element hash sets built before a single row is read, so the
-targets are proposals sized to be generous rather than measured.
+`P-MAX-REQUEST-BYTES` bounds parsing work and total request representation.
+`P-MAX-IN-LIST` independently bounds the set built for one filter, including the
+case where short values allow a large list to fit below the byte cap
+([ADR-13](decisions/ADR-13-request-resource-bounds.md)).
 
 ## 9.2 Response bounds
 
@@ -57,14 +57,17 @@ injectable rather than compiled in.
 
 | Parameter | Role | Observed | Target |
 |---|---|---|---|
-| `P-FORK-WINDOW` | Blocks searched backwards from `fromBlock` for the parent (§2.2, [INV-E5](07-invariants.md#inv-e5)) | 100 | ⚠ 100 |
+| `P-FORK-WINDOW` | Recent `(blockNumber, hash)` pairs an `UnexpectedBaseBlock` carries, as a span of block numbers behind `fromBlock` (§2.2, [INV-E5](07-invariants.md#inv-e5)) | 100 | 100 |
 
-The target is ⚠ because 100 is inherited, not derived ([GAP 30](GAPS.md)). It must be at least as
-wide as the largest gap the dataset's block numbering permits; the reference
-implementation carries a standing note that a longer gap misses the parent. A
-dataset that skips more than `P-FORK-WINDOW` numbers in a row silently loses fork
-detection at that point, which is the failure mode [INV-E5](07-invariants.md#inv-e5)
-exists to prevent.
+This parameter no longer decides whether the parent is found, so there is nothing
+to derive it from. The row *at* `fromBlock` states its own parent's hash, and the
+search is anchored there; the window behind it only sizes the evidence a client
+gets for locating the fork point. A dataset whose numbering skips further than the
+window returns fewer pairs, and still answers.
+
+The reference implementation searches over parent numbers instead, and carries a
+standing note that a longer gap misses the parent. That divergence is recorded in
+[GAPS.md](GAPS.md).
 
 ## 9.4 Merge-gate thresholds
 
@@ -73,7 +76,7 @@ upward only: a change may raise them, never lower them.
 
 | Parameter | Role | Observed | Target |
 |---|---|---|---|
-| `P-COV-PROPERTY` | Fraction of invariants at status **C** in the traceability matrix ([MG-1](08-conformance.md#812-merge-gates)) | 0.41 (35 of 85) | ⚠ 0.60, then ratchet |
+| `P-COV-PROPERTY` | Fraction of invariants at status **C** in the traceability matrix ([MG-1](08-conformance.md#812-merge-gates)) | 0.46 (39 of 85) | ⚠ 0.60, then ratchet |
 | `P-COV-DIFF` | Line coverage of lines a change touches ([MG-2](08-conformance.md#812-merge-gates)) | unmeasured | ⚠ 0.80 |
 | `P-COV-TOTAL` | Whole-repository line coverage floor ([MG-2](08-conformance.md#812-merge-gates)) | unmeasured | ⚠ 0.70 |
 | `P-FLAKE-RETRIES` | Retries a test gets before it is quarantined ([MG-7](08-conformance.md#812-merge-gates)) | none | ⚠ 1 |

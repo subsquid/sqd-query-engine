@@ -131,7 +131,13 @@ pub fn filter_to_blocks(
         return Ok(batch.clone());
     };
     let mask: BooleanArray = (0..batch.num_rows())
-        .map(|i| Some(get_block_number(col.as_ref(), i).map(&keep).unwrap_or(false)))
+        .map(|i| {
+            Some(
+                get_block_number(col.as_ref(), i)
+                    .map(&keep)
+                    .unwrap_or(false),
+            )
+        })
         .collect();
     Ok(filter_record_batch(batch, &mask)?)
 }
@@ -240,7 +246,11 @@ fn hexify_batch(batch: &RecordBatch, hex_idxs: &HashSet<usize>) -> Result<Record
                 Err(_) => b.append_null(),
             }
         }
-        fields.push(Field::new(field.name(), DataType::Binary, field.is_nullable()));
+        fields.push(Field::new(
+            field.name(),
+            DataType::Binary,
+            field.is_nullable(),
+        ));
         cols.push(Arc::new(b.finish()));
     }
     Ok(RecordBatch::try_new(Arc::new(Schema::new(fields)), cols)?)

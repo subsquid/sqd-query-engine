@@ -3,6 +3,10 @@ name: bitcoin
 tables:
   blocks:
     filters: []
+    fields: [
+      number, hash, parent_hash, timestamp, median_time, version, merkle_root, nonce, target,
+      bits, difficulty, chain_work, stripped_size, size, weight
+    ]
     parent_hash_column: parent_hash
     block_number_column: number
     field_name: block
@@ -42,6 +46,7 @@ tables:
 
   transactions:
     filters: []
+    fields: [ transaction_index, hex, txid, hash, size, vsize, weight, version, locktime ]
     query_name: transactions
     field_name: transaction
     item_order_keys: [ transaction_index ]
@@ -81,6 +86,12 @@ tables:
 
   inputs:
     filters: [ type, prevout_script_pub_key_address, prevout_script_pub_key_type, prevout_generated ]
+    fields: [
+      transaction_index, input_index, type, txid, vout, script_sig_hex, script_sig_asm,
+      sequence, coinbase, tx_in_witness, prevout_generated, prevout_height, prevout_value,
+      prevout_script_pub_key_hex, prevout_script_pub_key_asm, prevout_script_pub_key_desc,
+      prevout_script_pub_key_type, prevout_script_pub_key_address
+    ]
     query_name: inputs
     field_name: input
     item_order_keys: [ transaction_index, input_index ]
@@ -146,6 +157,10 @@ tables:
 
   outputs:
     filters: [ script_pub_key_address, script_pub_key_type ]
+    fields: [
+      transaction_index, output_index, value, script_pub_key_hex, script_pub_key_asm,
+      script_pub_key_desc, script_pub_key_type, script_pub_key_address
+    ]
     query_name: outputs
     field_name: output
     item_order_keys: [ transaction_index, output_index ]

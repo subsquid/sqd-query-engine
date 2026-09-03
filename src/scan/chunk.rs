@@ -118,7 +118,6 @@ impl ParquetChunkReader {
     pub fn from_cache(chunk_dir: PathBuf, cache: HashMap<String, ParquetTable>) -> Self {
         Self { chunk_dir, cache }
     }
-
 }
 
 impl ChunkReader for ParquetChunkReader {
@@ -146,8 +145,7 @@ impl ChunkReader for ParquetChunkReader {
     }
 
     fn has_table(&self, table: &str) -> bool {
-        self.cache.contains_key(table)
-            || self.chunk_dir.join(format!("{}.parquet", table)).exists()
+        self.cache.contains_key(table) || self.chunk_dir.join(format!("{}.parquet", table)).exists()
     }
 
     fn table_schema(&self, table: &str) -> Option<SchemaRef> {
@@ -187,10 +185,7 @@ impl ParquetTable {
 
     /// Logical table name (parquet file stem, e.g. `blocks`).
     pub fn name(&self) -> &str {
-        self.path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
+        self.path.file_stem().and_then(|s| s.to_str()).unwrap_or("")
     }
 
     /// Arrow schema for this table.
@@ -360,7 +355,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires external chunk data"]
     fn test_open_solana_chunk() {
+        if !crate::testing::chunks_present() {
+            return;
+        }
+
         let chunk = ParquetChunk::open(&solana_chunk_path()).unwrap();
         let mut names = chunk.table_names();
         names.sort();
@@ -379,7 +379,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires external chunk data"]
     fn test_table_metadata() {
+        if !crate::testing::chunks_present() {
+            return;
+        }
+
         let chunk = ParquetChunk::open(&solana_chunk_path()).unwrap();
         let instructions = chunk.table("instructions").unwrap();
 
@@ -391,7 +396,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires external chunk data"]
     fn test_column_stats() {
+        if !crate::testing::chunks_present() {
+            return;
+        }
+
         let chunk = ParquetChunk::open(&solana_chunk_path()).unwrap();
         let blocks = chunk.table("blocks").unwrap();
 
@@ -401,7 +411,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires external chunk data"]
     fn test_read_projected_columns() {
+        if !crate::testing::chunks_present() {
+            return;
+        }
+
         let chunk = ParquetChunk::open(&solana_chunk_path()).unwrap();
         let blocks = chunk.table("blocks").unwrap();
 
@@ -415,7 +430,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires external chunk data"]
     fn test_read_specific_row_groups() {
+        if !crate::testing::chunks_present() {
+            return;
+        }
+
         let chunk = ParquetChunk::open(&solana_chunk_path()).unwrap();
         let instructions = chunk.table("instructions").unwrap();
 
@@ -430,7 +450,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires external chunk data"]
     fn test_read_evm_logs() {
+        if !crate::testing::chunks_present() {
+            return;
+        }
+
         let chunk = ParquetChunk::open(&evm_chunk_path()).unwrap();
         let logs = chunk.table("logs").unwrap();
 

@@ -20,8 +20,10 @@ serves the others.
   when a column of that name exists. A catalog usually derives the list from its
   non-`system` columns plus virtual fields plus field-group request keys, but
   where that derivation and the list disagree, the list wins
-  ([INV-Q14](07-invariants.md#inv-q14)). Columns with non-default encodings are
-  called out separately.
+  ([INV-Q14](07-invariants.md#inv-q14)). A table addressable in `fields` — one
+  that declares a `fieldName` — declares the list, and there is no default:
+  deriving it is what makes the physical column layout part of the wire contract.
+  Columns with non-default encodings are called out separately.
 
 ### Compatibility markers
 

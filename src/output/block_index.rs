@@ -14,6 +14,7 @@ enum BlockNumberReader<'a> {
 }
 
 impl BlockNumberReader<'_> {
+    #[allow(clippy::manual_map)] // one arm per physical width; they read as a table
     fn resolve(col: &dyn Array) -> Option<BlockNumberReader<'_>> {
         if let Some(a) = col.as_any().downcast_ref::<UInt64Array>() {
             Some(BlockNumberReader::UInt64(a))

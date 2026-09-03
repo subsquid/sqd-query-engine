@@ -82,6 +82,7 @@ tables:
     address_column: trace_address
     sort_key: [block_number, transaction_index]
     filters: [ kind ]
+    fields: [transaction_index, trace_address, kind, payload]
     relations:
       transaction_traces:
         table: traces
@@ -196,6 +197,7 @@ tables:
     item_order_keys: [log_index]
     sort_key: [block_number, log_index]
     filters: [ address ]
+    fields: [log_index, transaction_index, address]
     relations:
       transaction:
         table: transactions
@@ -212,6 +214,7 @@ tables:
     item_order_keys: [transaction_index]
     sort_key: [block_number, transaction_index]
     filters: []
+    fields: [transaction_index, hash]
     columns:
       block_number: { type: uint64 }
       transaction_index: { type: uint32 }
@@ -316,6 +319,7 @@ tables:
     block_number_column: height
     sort_key: [height]
     filters: []
+    fields: [height]
     columns:
       height: { type: uint64 }
   events:
@@ -325,6 +329,7 @@ tables:
     item_order_keys: [seq]
     sort_key: [height, seq]
     filters: [ kind ]
+    fields: [seq, kind]
     relations:
       receipt:
         table: receipts
@@ -340,6 +345,9 @@ tables:
     item_order_keys: [seq]
     sort_key: [height, seq]
     filters: []
+    # `block_number` here is the block a receipt *cites*, an ordinary data
+    # column of this chain and a selectable field like any other.
+    fields: [seq, block_number, status]
     columns:
       height: { type: uint64 }
       seq: { type: uint32 }

@@ -3,6 +3,13 @@ name: evm
 tables:
   blocks:
     filters: []
+    fields: [
+      number, hash, parent_hash, timestamp, transactions_root, receipts_root, state_root,
+      logs_bloom, sha3_uncles, extra_data, miner, nonce, mix_hash, size, gas_limit, gas_used,
+      difficulty, total_difficulty, base_fee_per_gas, uncles, withdrawals, withdrawals_root,
+      blob_gas_used, excess_blob_gas, parent_beacon_block_root, requests_hash,
+      l1_block_number, main_block_general_gas_limit, shared_gas_limit, timestamp_millis_part
+    ]
     parent_hash_column: parent_hash
     block_number_column: number
     field_name: block
@@ -107,6 +114,16 @@ tables:
 
   transactions:
     filters: [ from, to, sighash ]
+    fields: [
+      transaction_index, hash, nonce, from, to, input, value, gas, gas_price, max_fee_per_gas,
+      max_priority_fee_per_gas, v, r, s, y_parity, access_list, chain_id, sighash,
+      contract_address, gas_used, logs_bloom, cumulative_gas_used, effective_gas_price, type,
+      status, blob_gas_used, blob_gas_price, max_fee_per_blob_gas, blob_versioned_hashes,
+      authorization_list, calls, nonce_key, signature, fee_token, fee_payer_v, fee_payer_r,
+      fee_payer_s, valid_before, valid_after, aa_authorization_list, key_authorization,
+      l1_fee, l1_fee_scalar, l1_gas_price, l1_gas_used, l1_blob_base_fee,
+      l1_blob_base_fee_scalar, l1_base_fee_scalar
+    ]
     query_name: transactions
     field_name: transaction
     item_order_keys: [ transaction_index ]
@@ -281,6 +298,7 @@ tables:
 
   logs:
     filters: [ address, topic0, topic1, topic2, topic3 ]
+    fields: [ log_index, transaction_index, transaction_hash, address, data, topics ]
     query_name: logs
     field_name: log
     item_order_keys: [ transaction_index, log_index ]
@@ -345,6 +363,14 @@ tables:
 
   traces:
     filters: [ type, create_from, create_result_address, call_from, call_to, call_sighash, suicide_address, suicide_refund_address, reward_author ]
+    fields: [
+      transaction_index, trace_address, subtraces, type, error, revert_reason, create_from,
+      create_value, create_gas, create_init, create_result_gas_used, create_result_code,
+      create_result_address, call_from, call_to, call_value, call_gas, call_input,
+      call_sighash, call_type, call_call_type, call_result_gas_used, call_result_output,
+      suicide_address, suicide_refund_address, suicide_balance, reward_author, reward_value,
+      reward_type
+    ]
     address_column: trace_address
     query_name: traces
     field_name: trace
@@ -542,6 +568,7 @@ tables:
 
   statediffs:
     filters: [ address, key, kind ]
+    fields: [ transaction_index, address, key, kind, prev, next ]
     query_name: stateDiffs
     field_name: stateDiff
     item_order_keys: [ transaction_index, address, key ]

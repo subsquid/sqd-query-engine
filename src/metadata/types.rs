@@ -119,6 +119,21 @@ pub struct TableDescription {
     /// key the way it catches a misspelled one. `filters: []` says it on purpose.
     pub filters: Vec<String>,
 
+    /// Output fields this table can emit, each naming a non-system column, a
+    /// virtual field, or a field-group request key.
+    ///
+    /// Declaring them is what keeps the *output* surface closed, for the reason
+    /// [`TableDescription::filters`] closes the input one: derived from the
+    /// column list instead, every column the catalog carries for filtering,
+    /// grouping, joining or rolling becomes a field a client may pin on, and the
+    /// physical layout becomes the wire contract (INV-Q14).
+    ///
+    /// Empty is "nothing is selectable", which is only meaningful for a table no
+    /// `fields` key can name. The validator requires a list from every table that
+    /// declares a `field_name`.
+    #[serde(default)]
+    pub fields: Vec<String>,
+
     /// Virtual fields that combine multiple columns into one output field.
     /// E.g., "accounts" → roll(a0..a15, rest_accounts), "topics" → roll(topic0..topic3)
     #[serde(default)]
@@ -132,10 +147,6 @@ pub struct TableDescription {
 }
 
 impl TableDescription {
-    /// Whether a `fields` key names something this table can emit: an ordinary
-    /// column, a virtual field, or a field-group request key. System columns —
-    /// blooms, size counters, filter-only extractions — are not selectable, and
-    /// neither is anything the catalog does not know.
     /// The physical parquet column an output key reads, when the catalog
     /// declares one: an ordinary column, or a field-group request key that
     /// renames it (`call_call_type` → `call_type`).
@@ -154,16 +165,12 @@ impl TableDescription {
             .and_then(|fg| fg.physical_column_for_request(key))
     }
 
+    /// Whether a `fields` key names something this table can emit. The declared
+    /// list is the answer, not the column list it is drawn from: a column exists
+    /// for whatever the engine needs it for, and only the catalog says which of
+    /// them a client may ask for (INV-Q14).
     pub fn is_selectable_field(&self, name: &str) -> bool {
-        if let Some(col) = self.columns.get(name) {
-            return !col.system;
-        }
-        if self.virtual_fields.contains_key(name) {
-            return true;
-        }
-        self.field_groups
-            .as_ref()
-            .is_some_and(|fg| fg.physical_column_for_request(name).is_some())
+        self.fields.iter().any(|f| f == name)
     }
 }
 

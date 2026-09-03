@@ -106,6 +106,11 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
             table,
         )?;
 
+        // The output surface, closed the same way and for the same reason. A
+        // name that resolves to nothing here is a field the catalog promises and
+        // the engine then refuses.
+        check_field_surface(table_name, table)?;
+
         // A special filter reaches its column the same way a declared filter
         // does, and a typo in one is just as invisible.
         for (filter_name, special) in &table.special_filters {
@@ -475,6 +480,91 @@ fn check_filter_surface(
             filter
         );
     }
+
+    Ok(())
+}
+
+/// Every name in a declared field list must resolve to something the table can
+/// emit: a non-system column, a virtual field, or a field-group request key.
+///
+/// A table addressable in `fields` — one that declares a `field_name` — must
+/// declare a list. An absent one reads as "nothing is selectable", which answers
+/// every field a client asks of it with `UnknownField` and looks, from outside,
+/// exactly like a dataset that carries no such columns.
+fn check_field_surface(table_name: &str, table: &crate::metadata::TableDescription) -> Result<()> {
+    anyhow::ensure!(
+        table.field_name.is_none() || !table.fields.is_empty(),
+        "table '{}': declares field_name '{}' but no output fields, so every \
+         selection against it would be refused",
+        table_name,
+        table.field_name.as_deref().unwrap_or_default()
+    );
+
+    for field in &table.fields {
+        if let Some(column) = table.columns.get(field) {
+            anyhow::ensure!(
+                !column.system,
+                "table '{}': field '{}' names a system column, which is not part of the \
+                 public surface",
+                table_name,
+                field
+            );
+            continue;
+        }
+
+        if let Some(crate::metadata::VirtualField::Roll { columns }) =
+            table.virtual_fields.get(field)
+        {
+            for physical in columns {
+                check_public_field_source(table_name, field, physical, table)?;
+            }
+            continue;
+        }
+
+        if let Some(physical) = table
+            .field_groups
+            .as_ref()
+            .and_then(|fg| fg.physical_column_for_request(field))
+        {
+            check_public_field_source(table_name, field, physical, table)?;
+            continue;
+        }
+
+        anyhow::bail!(
+            "table '{}': field '{}' names no column, virtual field or field-group key",
+            table_name,
+            field
+        );
+    }
+
+    Ok(())
+}
+
+/// A public field may rename or combine physical columns, but it must not expose
+/// a column that the catalog marks as internal.
+fn check_public_field_source(
+    table_name: &str,
+    field: &str,
+    physical: &str,
+    table: &crate::metadata::TableDescription,
+) -> Result<()> {
+    let column = table.columns.get(physical).ok_or_else(|| {
+        anyhow::anyhow!(
+            "table '{}': field '{}' resolves to missing column '{}'",
+            table_name,
+            field,
+            physical
+        )
+    })?;
+
+    anyhow::ensure!(
+        !column.system,
+        "table '{}': field '{}' resolves to system column '{}', which is not part of the \
+         public surface",
+        table_name,
+        field,
+        physical
+    );
 
     Ok(())
 }
@@ -1279,6 +1369,53 @@ tables:
         );
     }
 
+    /// Renaming or rolling a column does not make a system value public. The
+    /// declared field surface must validate the physical source as well as the
+    /// request key.
+    #[test]
+    fn test_validate_rejects_fields_backed_by_system_columns() {
+        let catalog = |fields: &str| {
+            format!(
+                r#"
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    sort_key: [number]
+    filters: []
+    columns:
+      number: {{ type: uint64 }}
+  items:
+    query_name: items
+    field_name: item
+    sort_key: [block_number, seq]
+    item_order_keys: [seq]
+    filters: []
+    fields: [{fields}]
+    virtual_fields:
+      rolled: {{ type: roll, columns: [hidden] }}
+    field_groups:
+      tag_column: kind
+      variants:
+        call:
+          action: [ {{ column: hidden, field: hidden, request: grouped }} ]
+    columns:
+      block_number: {{ type: uint64 }}
+      seq: {{ type: uint32 }}
+      kind: {{ type: string }}
+      hidden: {{ type: string, system: true }}
+"#
+            )
+        };
+
+        for field in ["hidden", "rolled", "grouped"] {
+            let err = parse_dataset_description(&catalog(field))
+                .expect_err("a system-backed public field must be refused")
+                .to_string();
+            assert!(err.contains("system column"), "{field}: {err}");
+        }
+    }
+
     /// A response is a sequence of blocks, so there has to be exactly one thing a
     /// block is. The engine picks the first table of that shape; a second makes
     /// the choice depend on catalog order, and none leaves every header empty
@@ -1344,6 +1481,7 @@ tables:
     sort_key: [block_number, seq]
     item_order_keys: [seq]
     filters: []
+    fields: [seq]
     columns:
       block_number: {{ type: uint64 }}
       seq: {{ type: uint32 }}
@@ -1352,6 +1490,7 @@ tables:
     sort_key: [block_number, seq]
     item_order_keys: [seq]
     filters: []
+    fields: [seq]
     columns:
       block_number: {{ type: uint64 }}
       seq: {{ type: uint32 }}

@@ -93,7 +93,9 @@ the presence of column statistics.
 selectable, is never filterable except through the filter that declares it, and
 contributes zero weight.
 
-*Test:* for every system column, assert it cannot be named in `fields`; assert response weight is unchanged by its presence.
+*Test:* for every system column, assert it cannot be named in `fields` directly,
+through a virtual field or through a field-group request key; assert response
+weight is unchanged by its presence.
 
 ### INV-D10
 **Names are unique.** Within a dataset, `queryName` is unique across tables and

@@ -49,9 +49,15 @@ impl fmt::Display for UnexpectedBaseBlock {
 
 impl std::error::Error for UnexpectedBaseBlock {}
 
-/// How far back to look for the predecessor. The window exists because a chain
-/// that skips numbers has no predecessor at `from_block - 1`.
-const LOOKBACK: u64 = 100;
+/// `P-FORK-WINDOW` (spec/09-parameters.md §9.3): how many recent
+/// `(block number, hash)` pairs an `UnexpectedBaseBlock` carries, expressed as a
+/// span of block numbers behind `from_block`.
+///
+/// It does not decide whether the parent is found. The row *at* `from_block`
+/// states its own parent's hash, and the scan is anchored there, so a dataset
+/// whose numbering skips further than this window returns fewer pairs rather
+/// than losing fork detection (INV-E5).
+const FORK_WINDOW: u64 = 100;
 
 /// Compare the client's `parentBlockHash` against the chunk, if the client
 /// supplied one and the chunk can see the preceding block.
@@ -81,8 +87,9 @@ pub(crate) fn check_parent_block(
 
     // A scan of a table the chunk does not have returns no rows rather than an
     // error, which would read here as "no evidence of a fork".
-    anyhow::ensure!(
+    crate::engine_ensure!(
         chunk.has_table(&plan.block_table),
+        crate::error::ErrorKind::TableNotFound,
         "chunk has no '{}' table, so 'parentBlockHash' cannot be checked",
         plan.block_table
     );
@@ -109,9 +116,9 @@ pub(crate) fn check_parent_block(
     .into())
 }
 
-/// Read `(preceding block number, its hash)` for the blocks in the lookback
-/// window, ascending, along with the one that answers the client's question —
-/// the ref contributed by the row at `from_block`, if the chunk holds it.
+/// Read `(preceding block number, its hash)` for the blocks in the window,
+/// ascending, along with the one that answers the client's question — the ref
+/// contributed by the row at `from_block`, if the chunk holds it.
 ///
 /// Each row of the block table carries its own parent's hash, so a row is read
 /// as a statement about the block before it. Where the dataset declares a parent
@@ -131,32 +138,22 @@ fn read_prev_blocks(
             .table_schema(&plan.block_table)
             .is_some_and(|schema| schema.column_with_name(col).is_some())
     });
-    let has_parent_number = parent_number_column.is_some();
-    let number_column = parent_number_column.unwrap_or(table.block_number_column.as_str());
-
-    // With a parent-number column the window is over parent numbers, so it stops
-    // one short of `from_block`; without one it is over block numbers, and the
-    // row *at* `from_block` is the one describing its parent.
-    let upper = if has_parent_number {
-        plan.from_block.saturating_sub(1)
-    } else {
-        plan.from_block
-    };
-
-    // The window is filtered on `number_column`, which is the parent number where
-    // one is declared — so the block number is read separately when it differs.
-    // Without it there is no way to tell the row at `from_block` from any other
-    // row the window caught.
+    // The scan is anchored on the block number and reaches `from_block` itself,
+    // because that row is the one that answers. Filtering on the parent number
+    // instead made the answer depend on how far back the parent lies, so a chain
+    // that skipped more numbers than the window silently lost fork detection —
+    // the failure INV-E5 exists to prevent. The window behind it carries the
+    // recent pairs and nothing more.
     let block_column = table.block_number_column.as_str();
-    let mut columns = vec![number_column, parent_hash_column];
-    if block_column != number_column {
-        columns.push(block_column);
+    let mut columns = vec![block_column, parent_hash_column];
+    if let Some(parent_number) = parent_number_column {
+        columns.push(parent_number);
     }
 
     let mut request = ScanRequest::new(columns);
-    request.from_block = Some(plan.from_block.saturating_sub(LOOKBACK));
-    request.to_block = Some(upper);
-    request.block_number_column = Some(number_column);
+    request.from_block = Some(plan.from_block.saturating_sub(FORK_WINDOW));
+    request.to_block = Some(plan.from_block);
+    request.block_number_column = Some(block_column);
 
     // A chunk that cannot produce the hash cannot clear the client's
     // `parentBlockHash`, and serving the query regardless is the reorg being
@@ -172,8 +169,9 @@ fn read_prev_blocks(
 
     if !carries_parent_hash {
         let reaches_window = batches.iter().any(|b| b.num_rows() > 0);
-        anyhow::ensure!(
+        crate::engine_ensure!(
             !reaches_window,
+            crate::error::ErrorKind::ColumnNotFound,
             "column '{}' is not found in '{}', so 'parentBlockHash' cannot be checked",
             parent_hash_column,
             plan.block_table
@@ -184,42 +182,45 @@ fn read_prev_blocks(
     let mut refs = Vec::new();
     let mut answer = None;
     for batch in &batches {
-        let (Some(numbers), Some(hashes)) = (
-            batch.column_by_name(number_column),
+        let (Some(blocks), Some(hashes)) = (
+            batch.column_by_name(block_column),
             batch.column_by_name(parent_hash_column),
         ) else {
             continue;
         };
-        let blocks = batch.column_by_name(block_column);
+        let parent_numbers = parent_number_column.and_then(|c| batch.column_by_name(c));
         let hashes = hashes
             .as_any()
             .downcast_ref::<arrow::array::StringArray>()
-            .ok_or_else(|| anyhow::anyhow!("'{parent_hash_column}' must be a string column"))?;
+            .ok_or_else(|| {
+                crate::engine_err!(
+                    crate::error::ErrorKind::MalformedChunkData,
+                    "'{parent_hash_column}' must be a string column"
+                )
+            })?;
 
         for row in 0..batch.num_rows() {
-            let Some(filtered) = crate::output::weight::get_block_number(numbers.as_ref(), row)
+            let Some(row_block) = crate::output::weight::get_block_number(blocks.as_ref(), row)
             else {
                 continue;
             };
 
-            // Which block this row is *about*, which is what says whether it
-            // answers the question. Where the parent number is the filtered
-            // column the block number is a separate array; otherwise the two are
-            // the same column and `filtered` already holds it.
-            let row_block = match (&blocks, has_parent_number) {
-                (Some(col), _) => crate::output::weight::get_block_number(col.as_ref(), row),
-                (None, false) => Some(filtered),
-                (None, true) => None,
-            };
-
+            // Which block this row is *about*: the number it states as its
+            // parent's where the chunk carries one, and `n - 1` otherwise.
+            //
             // At block 0 the saturating subtraction labels genesis its own
             // predecessor. The *hash* it reports is still the one block 0 stores,
             // so the comparison is right and only the label is odd; the reference
             // does the same, and a client paging from genesis is not a real case.
-            let number = if has_parent_number {
-                filtered
-            } else {
-                filtered.saturating_sub(1)
+            let number = match parent_numbers {
+                // A null reads as zero through the width-tolerant reader, which
+                // would report block 0 as this block's parent.
+                Some(col) if col.is_null(row) => continue,
+                Some(col) => match crate::output::weight::get_block_number(col.as_ref(), row) {
+                    Some(n) => n,
+                    None => continue,
+                },
+                None => row_block.saturating_sub(1),
             };
             let hash = if hashes.is_null(row) {
                 String::new()
@@ -228,7 +229,7 @@ fn read_prev_blocks(
             };
 
             let block_ref = BlockRef { number, hash };
-            if row_block == Some(plan.from_block) {
+            if row_block == plan.from_block {
                 answer = Some(block_ref.clone());
             }
             refs.push(block_ref);
