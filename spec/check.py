@@ -113,6 +113,22 @@ CHECKS = {
     "gate-no-capability": ("E", "Every merge gate names a harness capability"),
     "gate-unknown-class": ("E", "Every test class named by a merge gate exists"),
     "hc-orphan": ("W", "Every harness capability is needed by some class or gate"),
+    # coverage tags — the matrix read back off the tests it claims
+    # A partial tree is the dangerous case: the checks still run, read half the
+    # tags, and report the other half's invariants as backed by nothing. So this
+    # gates rather than warns — it is the guard on every rule below it.
+    "tag-tree-absent": ("E", "The implementation tree is beside the spec, so tags can be read"),
+    "tag-unknown-id": ("E", "Every invariant a coverage tag names has a matrix row"),
+    "tag-class-mismatch": ("E", "A coverage tag's class is the one the matrix gives that invariant"),
+    "tag-class-misfiled": ("E", "A tagged test under tests/conformance/ctN claims CT-n"),
+    "tag-orphan": ("E", "Every coverage tag sits on a test"),
+    "tag-malformed": ("E", "Every line that reads like a coverage tag parses as one"),
+    "tag-missing": ("E", "Every test the matrix names by hand carries its tag for that invariant"),
+    "tag-status-understated": ("E", "No invariant marked unchecked has a tagged test"),
+    "note-stale": ("E", "Every name a matrix note cites still exists in the tree"),
+    "trace-evidence-stale": ("E", "The stated tag-backed and prose-only counts match the rows"),
+    "tag-unbacked": ("I", "Every covered invariant is backed by a tagged test, not only by prose"),
+    "tag-data-backed-only": ("I", "No covered invariant rests only on tests the portable gate skips"),
     "ct-ungated": ("I", "Every test class is reachable from some merge gate"),
     # decision log
     "adr-bad-status": ("E", "Every ADR carries a parseable Status line"),
@@ -155,14 +171,20 @@ NON_NORMATIVE_LINE = re.compile(r"^\s*[*_]?(Test|Why|Note|Example)[:*_]")
 
 
 class Finding:
-    __slots__ = ("check", "sev", "path", "line", "message")
+    __slots__ = ("check", "sev", "path", "line", "message", "repo_relative")
 
-    def __init__(self, check, path, line, message):
+    def __init__(self, check, path, line, message, repo_relative=False):
         self.check = check
         self.sev = CHECKS[check][0]
         self.path = path
         self.line = line
         self.message = message
+        # A finding against `src/` or `tests/` names a path relative to the
+        # repository, not to the spec directory. Prefixing it with the spec
+        # directory names a file that does not exist, and GitHub silently drops
+        # an annotation whose file it cannot find — so the only two rules that
+        # point at code were the two invisible on the diff.
+        self.repo_relative = repo_relative
 
     def key(self):
         return (SEV_ORDER[self.sev], self.path, self.line, self.check)
@@ -473,6 +495,12 @@ def check_document_map(s: Suite, out: list):
 
 
 def check_traceability(s: Suite, defs, out: list):
+    # `check_test_tags` reads the tests back against these rows. One parse, so
+    # the two cannot drift into disagreeing about what the matrix says — and it
+    # is set before the guard below, because a run that returns early otherwise
+    # buries one true finding under a fabricated one per tag in the tree.
+    s.matrix = {}
+
     start, end = s.section_body(CONFORMANCE_DOC, MATRIX_HEADING)
     if start is None:
         out.append(Finding("trace-missing", CONFORMANCE_DOC, 1,
@@ -525,6 +553,8 @@ def check_traceability(s: Suite, defs, out: list):
                                f"expected C, P or U"))
         else:
             counts[status] += len(ids)
+            for ident in ids:
+                s.matrix[ident] = (i + 1, set(cls), status, cells[3])
         # "Covered" has to name what covers it, or the matrix is an opinion. A
         # note citing a test, a fixture set or a gap counts; empty prose does not.
         note = cells[3]
@@ -541,6 +571,404 @@ def check_traceability(s: Suite, defs, out: list):
 
     check_matrix_totals(s, counts, out)
     return classes
+
+
+# --- coverage tags ----------------------------------------------------------
+#
+# §8.11 is prose, and prose is an opinion. A test carries
+#
+#     /// Covers CT-2 · INV-Q6, INV-Q7
+#
+# and these checks read the two against each other: a tag naming a class the
+# matrix does not give that invariant is a disagreement, and so is a row at U
+# whose invariant something already tests. What neither side can fake is the
+# count of rows backed by nothing but a sentence, which is what HC-8 ratchets.
+
+TAG_RE = re.compile(r"^\s*///\s*Covers\s+(CT-\d+)\s+·\s+(INV-[A-Z]\d+(?:\s*,\s*INV-[A-Z]\d+)*)\s*$")
+# Anything shaped like a tag. The strict pattern drops what it cannot parse, and
+# a dropped tag reads exactly like a test nobody tagged — so an ASCII hyphen for
+# the `·`, a trailing sentence, or `//` for `///` has to be a finding of its own.
+TAG_LOOSE_RE = re.compile(r"^\s*//[/!]?\s*Covers\b")
+FN_RE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+# `paste::paste!` composes a name the source never spells. `paste_tests` expands
+# the one shape the suite uses; this matches the definition so a tag above one is
+# not read as sitting on nothing.
+PASTE_FN_RE = re.compile(
+    r"^\s*(?:pub(?:\([^)]*\))?\s+)?fn\s+"
+    r"\[<\s*([A-Za-z_][A-Za-z0-9_]*)\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*>\]"
+)
+MACRO_DEF_RE = re.compile(r"^\s*macro_rules!\s+([A-Za-z_][A-Za-z0-9_]*)")
+# `name!(arg);` and `name!(arg, "extra");` alike — the name is composed from the
+# first argument, and a second one for the fixture file changes nothing.
+MACRO_CALL_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)!\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*[,)]")
+# `#[test]` and the wrappers that stand in for it. Substring matching read
+# `#[tokio::test]` as *not* a test and reported every async one as an orphan.
+TEST_ATTR_RE = re.compile(r"^\s*#\[\s*(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*test\s*[\]\(]")
+IGNORE_ATTR_RE = re.compile(r"^\s*#\[\s*ignore\s*[\]=\(]")
+SKIP_RE = re.compile(r"^\s*(///|//!|#\[|\)|\]|$)")
+# An attribute is as legal above the doc comment as below it.
+ATTR_OR_DOC_RE = re.compile(r"^\s*(///|#\[)")
+# A name in a matrix note is a test only if it reads like one. `block_number` and
+# `can_skip` are columns and methods, and demanding a tag on those would make the
+# check unsatisfiable.
+NOTE_NAME_RE = re.compile(r"`([a-z_][a-z0-9_]{6,})`")
+WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# `Of the 71 rows at **C** or **P**, 49 are backed by a tagged test and 22 rest
+# on prose alone.` — three numbers derived from the matrix, typed by hand.
+EVIDENCE_RE = re.compile(
+    r"Of the (\d+) rows at \*\*C\*\* or \*\*P\*\*, (\d+) are backed by a tagged test "
+    r"and (\d+) rest on prose alone"
+)
+# `7 of the 49 are backed only by tests marked `#[ignore]`` — the rows a status
+# claims but no job the gate runs would falsify.
+DATA_BACKED_RE = re.compile(r"(\d+) of the (\d+) are backed only by tests marked")
+
+TREE_ROOTS = ("src", "tests")
+CONFORMANCE_DIR = "tests/conformance/"
+
+
+def rust_files(repo: Path):
+    for name in TREE_ROOTS:
+        base = repo / name
+        if not base.is_dir():
+            continue
+        # `followlinks` stays off: `tests/fixtures` is a link to an external tree.
+        for dirpath, dirnames, filenames in os.walk(base):
+            dirnames[:] = [d for d in dirnames if d not in ("target", ".git")]
+            for f in sorted(filenames):
+                if f.endswith(".rs"):
+                    yield Path(dirpath) / f
+
+
+def rust_sources(repo: Path):
+    """[(path relative to the repo, lines)], read once for the whole run.
+
+    Three rules walk this tree, and reading it three times is most of what the
+    checker's own test suite spends its time on.
+    """
+    cached = getattr(rust_sources, "_cache", {})
+    key = str(repo)
+    if key not in cached:
+        cached[key] = [
+            (p.relative_to(repo).as_posix(),
+             p.read_text(encoding="utf-8", errors="replace").split("\n"))
+            for p in rust_files(repo)
+        ]
+        rust_sources._cache = cached
+    return cached[key]
+
+
+def paste_tests(lines):
+    """Test names a `paste::paste!` macro in this file composes.
+
+    One shape, the one the fixture suite uses: a `macro_rules!` whose body is a
+    `#[test] fn [<prefix_ $arg>]()`, invoked as `name!(arg);`. Without this the
+    113 fixture tests are invisible to every rule below, which is the population
+    §8.11's prose-only rows are meant to be moved into.
+    """
+    prefixes, macro = {}, None
+    for line in lines:
+        m = MACRO_DEF_RE.match(line)
+        if m:
+            macro = m.group(1)
+            continue
+        if macro:
+            m = PASTE_FN_RE.match(line)
+            if m:
+                prefixes[macro] = m.group(1)
+                macro = None
+
+    names = set()
+    for line in lines:
+        m = MACRO_CALL_RE.match(line)
+        if m and m.group(1) in prefixes:
+            names.add(prefixes[m.group(1)] + m.group(2))
+    return names
+
+
+def tagged_item(lines, i):
+    """(name, is a test, is ignored) for the item the tag on line `i` sits on.
+
+    Both directions are walked, because an attribute may sit above the doc
+    comment as easily as below it. The forward walk ends at the first line that
+    is not part of the item's header: a fixed line budget silently turned a long
+    doc comment into a tag on nothing.
+    """
+    is_test = ignored = False
+
+    j = i - 1
+    while j >= 0 and ATTR_OR_DOC_RE.match(lines[j]):
+        is_test = is_test or bool(TEST_ATTR_RE.match(lines[j]))
+        ignored = ignored or bool(IGNORE_ATTR_RE.match(lines[j]))
+        j -= 1
+
+    name = None
+    j = i + 1
+    while j < len(lines):
+        is_test = is_test or bool(TEST_ATTR_RE.match(lines[j]))
+        ignored = ignored or bool(IGNORE_ATTR_RE.match(lines[j]))
+
+        fn = FN_RE.match(lines[j])
+        if fn:
+            name = fn.group(1)
+            break
+
+        paste = PASTE_FN_RE.match(lines[j])
+        if paste:
+            # A macro composes the name, so there is none to record — but the
+            # tag does sit on a test, which is what the orphan rule asks.
+            name = f"[<{paste.group(1)} ${paste.group(2)}>]"
+            break
+
+        if not SKIP_RE.match(lines[j]):
+            break
+        j += 1
+
+    return name, is_test, ignored
+
+
+def read_tags(repo: Path, out: list):
+    """{invariant: {(class, site, ignored, line)}}, read off the implementation tree."""
+    tagged = defaultdict(set)
+    for rel, lines in rust_sources(repo):
+        for i, line in enumerate(lines):
+            m = TAG_RE.match(line)
+            if not m:
+                if TAG_LOOSE_RE.match(line):
+                    out.append(Finding("tag-malformed", rel, i + 1,
+                                       f"`{line.strip()}` reads like a coverage tag but does "
+                                       f"not parse as one — a tag is `/// Covers CT-n · "
+                                       f"INV-Xn`, with a middle dot and nothing after the IDs",
+                                       repo_relative=True))
+                continue
+
+            cls, ids = m.group(1), ID_RE.findall(m.group(2))
+            # The tag belongs to the item it sits above, and only to a test: a
+            # tagged helper claims coverage its own assertions do not make.
+            name, is_test, ignored = tagged_item(lines, i)
+            if name is None or not is_test:
+                out.append(Finding("tag-orphan", rel, i + 1,
+                                   f"`Covers {cls}` sits on no test — a tag on anything "
+                                   f"else claims coverage nothing asserts",
+                                   repo_relative=True))
+                continue
+
+            for ident in ids:
+                tagged[ident].add((cls, f"{rel}::{name}", ignored, i + 1))
+    return tagged
+
+
+def test_fns(repo: Path):
+    """Every `#[test]` function name in the tree, memoised for the run."""
+    cached = getattr(test_fns, "_cache", {})
+    key = str(repo)
+    if key in cached:
+        return cached[key]
+    names = set()
+    for _rel, lines in rust_sources(repo):
+        names |= paste_tests(lines)
+        marked = False
+        for line in lines:
+            if TEST_ATTR_RE.match(line):
+                marked = True
+                continue
+            fn = FN_RE.match(line)
+            if fn:
+                if marked:
+                    names.add(fn.group(1))
+                marked = False
+            elif line.strip() and not SKIP_RE.match(line):
+                marked = False
+    cached[key] = names
+    test_fns._cache = cached
+    return names
+
+
+def tree_words(repo: Path):
+    """Every identifier-shaped word in the tree, memoised.
+
+    Deliberately crude, because it answers one question: does this name exist at
+    all? A note may legitimately name a method or a column, so anything the tree
+    spells counts; a name the tree does not spell anywhere has been renamed or
+    deleted out from under the row that cites it.
+    """
+    cached = getattr(tree_words, "_cache", {})
+    key = str(repo)
+    if key in cached:
+        return cached[key]
+    words = set()
+    for _rel, lines in rust_sources(repo):
+        for line in lines:
+            words.update(WORD_RE.findall(line))
+    cached[key] = words
+    tree_words._cache = cached
+    return words
+
+
+def check_test_tags(s: Suite, out: list):
+    repo = s.root.parent
+    absent = [name for name in TREE_ROOTS if not (repo / name).is_dir()]
+    if absent:
+        # Half a tree is worse than none: every rule below still runs, reads the
+        # tags that survive, and reports the rest of the matrix as backed by
+        # nothing. So any missing root stops the whole layer.
+        out.append(Finding("tag-tree-absent", CONFORMANCE_DOC, 1,
+                           f"{', '.join(n + '/' for n in absent)} does not sit beside the "
+                           f"spec, so §{MATRIX_HEADING.split()[0]} would be checked against "
+                           f"a partial tree"))
+        return
+
+    # `read_tags` reports the two rules that need no matrix — a tag on a non-test,
+    # a tag that does not parse — so they run either way.
+    tagged = read_tags(repo, out)
+    matrix = s.matrix
+    if not matrix:
+        # §8.11 did not parse, and `check_traceability` has already said so. Every
+        # rule below compares a tag against a row, so with no rows they would
+        # report one invented finding per tag and bury the real one.
+        return
+
+    for ident, sites in sorted(tagged.items()):
+        row = matrix.get(ident)
+        if row is None:
+            _cls, site, _ignored, lineno = sorted(sites)[0]
+            path, name = site.split("::")
+            out.append(Finding("tag-unknown-id", path, lineno,
+                               f"`{name}` claims to cover {ident}, which has no matrix row",
+                               repo_relative=True))
+            continue
+        lineno, classes, status, _ = row
+        for cls, site, _ignored, _tagline in sorted(sites):
+            if cls not in classes:
+                out.append(Finding("tag-class-mismatch", CONFORMANCE_DOC, lineno,
+                                   f"`{site}` covers {ident} as {cls}; the matrix files "
+                                   f"{ident} under {', '.join(sorted(classes))}"))
+        if status == "U":
+            out.append(Finding("tag-status-understated", CONFORMANCE_DOC, lineno,
+                               f"{ident} is marked unchecked, but {len(sites)} test(s) "
+                               f"claim it — promote the row or drop the tag"))
+
+    check_tag_filing(tagged, out)
+
+    # A note that names a test by hand is a promise the tag has to keep, and the
+    # promise is per invariant: a test tagged for one row does not back another
+    # that happens to cite it.
+    backs = {(ident, site.split("::")[1])
+             for ident, sites in tagged.items() for _c, site, _i, _l in sites}
+    tests, words = test_fns(repo), tree_words(repo)
+
+    for ident, (lineno, _classes, status, note) in sorted(matrix.items()):
+        named = NOTE_NAME_RE.findall(note)
+
+        cited = {n for n in named if n in tests}
+        missing = sorted(n for n in cited if (ident, n) not in backs)
+        if missing:
+            out.append(Finding("tag-missing", CONFORMANCE_DOC, lineno,
+                               f"{ident}'s note names {', '.join('`'+n+'`' for n in missing)}, "
+                               f"which carry no `Covers` tag for {ident}"))
+
+        # A name that is neither a test nor anything else the tree spells has
+        # been renamed or deleted. That is the direction that matters — a row
+        # still claiming evidence that no longer exists — and it passed silently
+        # because the name was dropped before anything compared it.
+        stale = sorted({n for n in named if n not in tests and n not in words})
+        if stale:
+            out.append(Finding("note-stale", CONFORMANCE_DOC, lineno,
+                               f"{ident}'s note names {', '.join('`'+n+'`' for n in stale)}, "
+                               f"which nothing under {' or '.join(n + '/' for n in TREE_ROOTS)} "
+                               f"defines — a row cannot claim a test that is not there"))
+
+        if status not in ("C", "P"):
+            continue
+        if ident not in tagged:
+            out.append(Finding("tag-unbacked", CONFORMANCE_DOC, lineno,
+                               f"{ident} is marked {status} on prose alone — no test claims "
+                               f"it, so nothing recomputes the status"))
+        elif all(skipped for _c, _s, skipped, _l in tagged[ident]):
+            out.append(Finding("tag-data-backed-only", CONFORMANCE_DOC, lineno,
+                               f"{ident} is marked {status}, but every test tagged for it is "
+                               f"`#[ignore]`d — MG-3's portable job would not notice it break"))
+
+    check_evidence_counts(s, matrix, tagged, out)
+
+
+def check_tag_filing(tagged, out: list):
+    """The directory a test sits in against the classes it claims.
+
+    Class is written twice — once in the `ctN_` directory, once in the tag — and
+    two claims nothing reconciles drift. A test may pin several classes and live
+    in any of them; what it may not do is sit in a class it never claims.
+    """
+    claimed, where = defaultdict(set), {}
+    for sites in tagged.values():
+        for cls, site, _ignored, lineno in sites:
+            claimed[site].add(cls)
+            where[site] = min(where.get(site, lineno), lineno)
+
+    for site, classes in sorted(claimed.items()):
+        rel, name = site.split("::")
+        if not rel.startswith(CONFORMANCE_DIR):
+            continue
+        m = re.match(r"ct(\d+)_", rel[len(CONFORMANCE_DIR):].split("/")[0])
+        if not m:
+            continue
+        home = f"CT-{m.group(1)}"
+        if home not in classes:
+            out.append(Finding("tag-class-misfiled", rel, where[site],
+                               f"`{name}` sits under {home}'s directory but claims only "
+                               f"{', '.join(sorted(classes))} — move it to a class it pins, "
+                               f"or tag it for {home}",
+                               repo_relative=True))
+
+
+def check_evidence_counts(s: Suite, matrix, tagged, out: list):
+    """The hand-typed split of §8.11's covered rows into tagged and prose-only.
+
+    The totals line is recomputed; this sentence was not, so the one number that
+    says how much of the matrix is machine-checked was itself an opinion.
+    """
+    covered = [i for i, row in matrix.items() if row[2] in ("C", "P")]
+    if not covered:
+        return
+    backed = sum(1 for i in covered if i in tagged)
+    skipped = sum(1 for i in covered
+                  if i in tagged and all(ig for _c, _s, ig, _l in tagged[i]))
+
+
+    body = re.sub(r"\s+", " ", s.nofence.get(CONFORMANCE_DOC, ""))
+    check_data_backed_count(s, body, backed, skipped, out)
+
+    m = EVIDENCE_RE.search(body)
+    stated = f"{len(covered)} rows at C or P, {backed} backed by a tagged test, " \
+             f"{len(covered) - backed} on prose alone"
+    if not m:
+        out.append(Finding("trace-evidence-stale", CONFORMANCE_DOC,
+                           s.find_line(CONFORMANCE_DOC, "rest on"),
+                           f"no `Of the n rows at **C** or **P**, n are backed by a tagged "
+                           f"test and n rest on prose alone` sentence — the matrix has "
+                           f"{stated}"))
+        return
+    if (int(m.group(1)), int(m.group(2)), int(m.group(3))) != \
+            (len(covered), backed, len(covered) - backed):
+        out.append(Finding("trace-evidence-stale", CONFORMANCE_DOC,
+                           s.find_line(CONFORMANCE_DOC, "rest on"),
+                           f"the stated split is {m.group(1)} rows, {m.group(2)} backed, "
+                           f"{m.group(3)} on prose; the matrix has {stated}"))
+
+
+def check_data_backed_count(s: Suite, body, backed, skipped, out: list):
+    """The count of covered rows whose only evidence a portable job skips."""
+    anchor = s.find_line(CONFORMANCE_DOC, "are backed only by tests marked")
+    m = DATA_BACKED_RE.search(body)
+    if not m:
+        out.append(Finding("trace-evidence-stale", CONFORMANCE_DOC, anchor,
+                           f"no `n of the n are backed only by tests marked` sentence — "
+                           f"{skipped} of the {backed} tagged rows are"))
+        return
+    if (int(m.group(1)), int(m.group(2))) != (skipped, backed):
+        out.append(Finding("trace-evidence-stale", CONFORMANCE_DOC, anchor,
+                           f"the stated count is {m.group(1)} of {m.group(2)}; the matrix "
+                           f"has {skipped} of {backed}"))
 
 
 def check_matrix_totals(s: Suite, counts, out: list):
@@ -659,12 +1087,15 @@ def check_gates(s: Suite, defs, classes, registry, out: list):
                                f"is a wish"))
         # §8.12: "A gate is advisory while the capability it needs is unbuilt."
         # Nothing cross-joined the two tables, so the rule held only by hand.
+        # Anything short of **C** counts: promoting a capability from U to P is
+        # a note about progress, not a machine that runs, and reading only U let
+        # such a promotion silently disarm this rule for every gate citing it.
         if "blocking" in blocking.lower() and "advisory" not in blocking.lower():
-            unbuilt = [c for c in capabilities if hc_status.get(c) == "U"]
+            unbuilt = [c for c in capabilities if hc_status.get(c) != "C"]
             if unbuilt:
                 out.append(Finding("gate-blocking-unbuilt", CONFORMANCE_DOC, i + 1,
                                    f"{gate} is blocking but rests on "
-                                   f"{', '.join(unbuilt)}, unbuilt in "
+                                   f"{', '.join(unbuilt)}, not built in "
                                    f"§{HARNESS_HEADING.split()[0]} — mark it advisory "
                                    f"until the capability exists, or build it"))
         for c in re.findall(r"\bCT-\d+\b", cells[1] + cells[2]):
@@ -1003,6 +1434,7 @@ def main(argv=None) -> int:
     check_links(s, out)
     check_document_map(s, out)
     classes = check_traceability(s, defs, out)
+    check_test_tags(s, out)
     check_gates(s, defs, classes, registry, out)
     check_decisions(s, refs, out)
     check_normative_shape(s, registry, out)
@@ -1027,7 +1459,8 @@ def main(argv=None) -> int:
     elif args.format == "github":
         for f in findings:
             level = {"E": "error", "W": "warning", "I": "notice"}[f.sev]
-            print(f"::{level} file={root}/{f.path},line={f.line},"
+            prefix = "" if f.repo_relative else f"{root}/"
+            print(f"::{level} file={prefix}{f.path},line={f.line},"
                   f"title={f.check}::{f.message}")
     else:
         for f in findings:

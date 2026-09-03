@@ -1193,6 +1193,7 @@ mod tests {
         map
     }
 
+    /// Covers CT-6 · INV-O7
     #[test]
     #[ignore = "requires external chunk data"]
     fn test_arrow_parity_and_projection() {
@@ -1282,6 +1283,7 @@ mod tests {
         );
     }
 
+    /// Covers CT-4 · INV-R3
     #[test]
     #[ignore = "requires external chunk data"]
     fn test_arrow_multisource_dedup() {
@@ -1527,6 +1529,7 @@ mod tests {
         }
     }
 
+    /// Covers CT-4 · INV-R10
     #[test]
     #[ignore = "requires external chunk data"]
     fn test_execute_with_relations() {
@@ -1585,6 +1588,7 @@ mod tests {
         assert!(blocks.is_empty());
     }
 
+    /// Covers CT-6 · INV-O1
     #[test]
     fn test_json_close() {
         let mut buf = vec![b'{', b'"', b'a', b'"', b':', b'1', b','];
@@ -1596,6 +1600,7 @@ mod tests {
         assert_eq!(String::from_utf8(buf).unwrap(), "{}");
     }
 
+    /// Covers CT-6 · INV-O8
     #[test]
     fn test_snake_to_camel_in_output() {
         assert_eq!(snake_to_camel("log_index"), "logIndex");

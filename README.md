@@ -38,9 +38,27 @@ metadata/
   solana.yaml   # Solana dataset description
 benches/        # divan benchmarks
 tests/
-  e2e_fixtures.rs  # 46 fixture-based tests (legacy output comparison)
+  conformance/     # The CT classes of spec/08-conformance.md, one module each
+    harness/       # Shared fixture loader, runners, synthetic chunk writers
+    ct1_catalog.rs ... ct9_fuzz.rs
+  e2e_fixtures.rs  # Fixture comparison against the reference engine
   fixtures/        # Query/result JSON pairs per dataset
 ```
+
+Tests are laid out by conformance class, and each one that pins an invariant
+carries a tag naming it:
+
+```rust
+/// Covers CT-2 · INV-Q10
+#[test]
+fn a_bloom_filter_takes_at_most_ten_values() { ... }
+```
+
+`make spec-check` reads those tags back against the traceability matrix in
+`spec/08-conformance.md`, so a test filed under the wrong class, a tag naming an
+invariant that does not exist, a matrix row claiming a test that carries no tag,
+and a row naming a test that no longer exists are all build failures rather than
+review comments.
 
 ## Usage
 

@@ -888,6 +888,7 @@ mod tests {
         assert_eq!(String::from_utf8(buf).unwrap(), "null");
     }
 
+    /// Covers CT-6 · INV-O10
     #[test]
     fn test_encode_roll() {
         let schema = Arc::new(Schema::new(vec![
@@ -919,6 +920,7 @@ mod tests {
         assert_eq!(String::from_utf8(buf).unwrap(), r#"["bob"]"#);
     }
 
+    /// Covers CT-6 · INV-O10
     #[test]
     fn test_encode_roll_with_list_spread() {
         let schema = Arc::new(Schema::new(vec![
@@ -953,6 +955,7 @@ mod tests {
         assert_eq!(String::from_utf8(buf).unwrap(), r#"["a0_val","b1","b2"]"#);
     }
 
+    /// Covers CT-6 · INV-O8
     #[test]
     fn test_snake_to_camel() {
         assert_eq!(snake_to_camel("transaction_index"), "transactionIndex");
@@ -1112,6 +1115,8 @@ mod tests {
     /// transaction is the sentinel `-1` of the *declared* `int16`, so it renders
     /// `"legacy"` out of whatever width the writer chose — and out of an unsigned
     /// column, which carries the same bits under another name.
+    ///
+    /// Covers CT-6 · INV-D7
     #[test]
     fn test_solana_tx_version_reads_the_sentinel_at_every_physical_width() {
         let legacy: [std::sync::Arc<dyn Array>; 6] = [
@@ -1157,6 +1162,8 @@ mod tests {
     /// Same rule for a bignum: a `uint64` fee whose values all fit in sixteen
     /// bits is *stored* in sixteen bits. Reading only the wide arrays rendered it
     /// `null`, which reads as "this transaction had no fee".
+    ///
+    /// Covers CT-6 · INV-D7
     #[test]
     fn test_bignum_reads_a_narrowed_column() {
         let narrow: [(std::sync::Arc<dyn Array>, &str); 5] = [
@@ -1249,6 +1256,8 @@ mod tests {
     /// also sets `json_encoding: timestamp_millisecond`, which hid this: a
     /// millisecond column that leaves the encoding off was divided by 1000 and
     /// served as seconds.
+    ///
+    /// Covers CT-6 · INV-O9
     #[test]
     fn test_a_timestamp_takes_its_unit_from_the_declared_type() {
         let millis: std::sync::Arc<dyn Array> =
@@ -1289,6 +1298,8 @@ mod tests {
     /// Both of these fell through to the physical encoder, which works only
     /// because every such column is stored as the display string already — a
     /// base58 address stored as bytes came back as `0x…` hex.
+    ///
+    /// Covers CT-6 · INV-O9
     #[test]
     fn test_hex_and_base58_render_a_column_stored_as_bytes() {
         let key = [

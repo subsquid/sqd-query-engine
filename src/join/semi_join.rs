@@ -455,6 +455,7 @@ mod tests {
         assert_eq!(total, 2); // alice and bob
     }
 
+    /// Covers CT-4 · INV-E7
     #[test]
     fn test_semi_join_unsupported_key_type() {
         let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, false)]));
@@ -472,6 +473,8 @@ mod tests {
     }
 
     /// NULL join keys must not collide with real zero values.
+    ///
+    /// Covers CT-4 · INV-R5
     #[test]
     fn test_semi_join_null_key_no_false_match() {
         let schema = Arc::new(Schema::new(vec![
@@ -514,6 +517,8 @@ mod tests {
     }
 
     /// NULL=NULL must NOT match (SQL semantics: NULL is unknown, not equal to anything).
+    ///
+    /// Covers CT-4 · INV-R5
     #[test]
     fn test_semi_join_null_null_no_match() {
         let schema = Arc::new(Schema::new(vec![

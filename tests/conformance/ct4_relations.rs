@@ -1,4 +1,10 @@
-//! Relation invariants on synthetic chunks.
+//! CT-4 — relations.
+//!
+//! Two halves. The synthetic chunks pin what the fixture tree cannot express —
+//! a chunk that disagrees with its catalog about the join key, a relation target
+//! naming its own block column. The fixture-backed half pins what a client sees:
+//! a row is emitted once however many relations reach it, and a null key is not
+//! a key.
 //!
 //! A relation is answered by scanning the target table with the source's join
 //! keys pushed into it. Both halves of that — the pushdown and the weight the
@@ -9,55 +15,14 @@
 use arrow::array::{ArrayRef, BinaryArray, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
-use parquet::arrow::ArrowWriter;
-use sqd_query_engine::metadata::{parse_dataset_description, DatasetDescription};
-use sqd_query_engine::output::execute_chunk;
-use sqd_query_engine::query::{compile, parse_query};
-use sqd_query_engine::scan::ParquetChunkReader;
-use std::fs::File;
-use std::path::Path;
+use sqd_query_engine::metadata::parse_dataset_description;
 use std::sync::Arc;
 use tempfile::TempDir;
 
-fn write_parquet(path: &Path, batch: &RecordBatch) {
-    let file = File::create(path).unwrap();
-    let mut writer = ArrowWriter::try_new(file, batch.schema(), None).unwrap();
-    writer.write(batch).unwrap();
-    writer.close().unwrap();
-}
-
-fn blocks_parquet(dir: &Path, numbers: &[u64]) {
-    let schema = Arc::new(Schema::new(vec![Field::new(
-        "number",
-        DataType::UInt64,
-        false,
-    )]));
-    let batch = RecordBatch::try_new(
-        schema,
-        vec![Arc::new(UInt64Array::from(numbers.to_vec())) as ArrayRef],
-    )
-    .unwrap();
-    write_parquet(&dir.join("blocks.parquet"), &batch);
-}
-
-fn run(
-    meta: &DatasetDescription,
-    chunk: &TempDir,
-    query: &str,
-) -> anyhow::Result<Option<Vec<serde_json::Value>>> {
-    let parsed = parse_query(query.as_bytes(), meta)?;
-    let plan = compile(&parsed, meta)?;
-    let reader = ParquetChunkReader::open(chunk.path())?;
-    let out = execute_chunk(&plan, meta, &reader, false)?;
-
-    Ok(out.map(|o| {
-        String::from_utf8(o.into_json_lines())
-            .unwrap()
-            .lines()
-            .map(|l| serde_json::from_str(l).unwrap())
-            .collect()
-    }))
-}
+use crate::harness::chunk::{blocks_parquet, write_parquet};
+use crate::harness::fixtures::{fixture_tree_is_present, meta, run};
+use crate::harness::json::items_of;
+use crate::harness::synthetic::run_json as run_chunk;
 
 // ---------------------------------------------------------------------------
 // INV-B6 / INV-B10 — a row that is emitted is a row that is weighed
@@ -159,7 +124,7 @@ fn traces_of_one_transaction_are_weighed_separately() {
         "fields":{"trace":{"kind":true,"traceAddress":true,"payload":true}},
         "traces":[{"kind":["call"],"transactionTraces":true}]}"#;
 
-    let blocks = run(&meta, &chunk, query).unwrap().unwrap();
+    let blocks = run_chunk(&meta, &chunk, query).unwrap().unwrap();
 
     let emitted: usize = blocks
         .iter()
@@ -277,7 +242,7 @@ fn a_relation_whose_join_key_is_missing_is_an_error() {
 
     // The same query without the relation is answerable, so the failure below is
     // about the join key and not about the chunk in general.
-    let without = run(
+    let without = run_chunk(
         &meta,
         &chunk,
         r#"{"type":"test","fromBlock":10,"toBlock":11,
@@ -288,7 +253,7 @@ fn a_relation_whose_join_key_is_missing_is_an_error() {
         "the chunk answers a query that avoids the key"
     );
 
-    let err = run(
+    let err = run_chunk(
         &meta,
         &chunk,
         r#"{"type":"test","fromBlock":10,"toBlock":11,
@@ -305,144 +270,211 @@ fn a_relation_whose_join_key_is_missing_is_an_error() {
 }
 
 // ---------------------------------------------------------------------------
-// INV-X1 — a column name the engine knows is a column name the catalog lost
+// A row is emitted once, however many relations reach it
 // ---------------------------------------------------------------------------
 
-/// A chain that calls its block number `height`, with a relation onto a table
-/// that also carries an unrelated column named `block_number` — the archive's
-/// note of which block a receipt *refers to*, not the block it is in.
-const HEIGHT_CHAIN: &str = r#"
-name: test
-tables:
-  blocks:
-    field_name: block
-    block_number_column: height
-    sort_key: [height]
-    filters: []
-    fields: [height]
-    columns:
-      height: { type: uint64 }
-  events:
-    query_name: events
-    field_name: event
-    block_number_column: height
-    item_order_keys: [seq]
-    sort_key: [height, seq]
-    filters: [ kind ]
-    fields: [seq, kind]
-    relations:
-      receipt:
-        table: receipts
-        key: [height, seq]
-    columns:
-      height: { type: uint64 }
-      seq: { type: uint32 }
-      kind: { type: string }
-  receipts:
-    query_name: receipts
-    field_name: receipt
-    block_number_column: height
-    item_order_keys: [seq]
-    sort_key: [height, seq]
-    filters: []
-    # `block_number` here is the block a receipt *cites*, an ordinary data
-    # column of this chain and a selectable field like any other.
-    fields: [seq, block_number, status]
-    columns:
-      height: { type: uint64 }
-      seq: { type: uint32 }
-      block_number: { type: uint64 }
-      status: { type: string }
-"#;
-
-/// One event and one receipt per block. Every receipt cites block 1, which is
-/// not in the chunk at all.
-fn height_chain_chunk(blocks: &[u64]) -> TempDir {
-    let dir = tempfile::tempdir().unwrap();
-
-    let schema = Arc::new(Schema::new(vec![Field::new(
-        "height",
-        DataType::UInt64,
-        false,
-    )]));
-    let batch = RecordBatch::try_new(
-        schema,
-        vec![Arc::new(UInt64Array::from(blocks.to_vec())) as ArrayRef],
-    )
-    .unwrap();
-    write_parquet(&dir.path().join("blocks.parquet"), &batch);
-
-    let events_schema = Arc::new(Schema::new(vec![
-        Field::new("height", DataType::UInt64, false),
-        Field::new("seq", DataType::UInt32, false),
-        Field::new("kind", DataType::Utf8, false),
-    ]));
-    let events = RecordBatch::try_new(
-        events_schema,
-        vec![
-            Arc::new(UInt64Array::from(blocks.to_vec())) as ArrayRef,
-            Arc::new(UInt32Array::from(vec![0u32; blocks.len()])) as ArrayRef,
-            Arc::new(arrow::array::StringArray::from(vec!["call"; blocks.len()])) as ArrayRef,
-        ],
-    )
-    .unwrap();
-    write_parquet(&dir.path().join("events.parquet"), &events);
-
-    let receipts_schema = Arc::new(Schema::new(vec![
-        Field::new("height", DataType::UInt64, false),
-        Field::new("seq", DataType::UInt32, false),
-        Field::new("block_number", DataType::UInt64, false),
-        Field::new("status", DataType::Utf8, false),
-    ]));
-    let receipts = RecordBatch::try_new(
-        receipts_schema,
-        vec![
-            Arc::new(UInt64Array::from(blocks.to_vec())) as ArrayRef,
-            Arc::new(UInt32Array::from(vec![0u32; blocks.len()])) as ArrayRef,
-            Arc::new(UInt64Array::from(vec![1u64; blocks.len()])) as ArrayRef,
-            Arc::new(arrow::array::StringArray::from(vec!["ok"; blocks.len()])) as ArrayRef,
-        ],
-    )
-    .unwrap();
-    write_parquet(&dir.path().join("receipts.parquet"), &receipts);
-
-    dir
-}
-
-/// Block selection read the block number of a relation's rows under the literal
-/// name `block_number`. Every table in every shipped catalog happens to use it,
-/// so the engine worked — until a chain that does not, or a table that uses the
-/// name for something else. Both are catalog edits, and INV-X1 says a catalog
-/// edit is all it takes to serve a new chain.
+/// A relation result carries the rows the source rows point at, and no others.
+/// A null key is not a key: an event that belongs to no call used to serialize
+/// byte-for-byte like an event whose call is the root one (address `[]`), so
+/// asking for `call` returned every inherent's root call on top of the real
+/// answer — extra rows, no filter that could exclude them, and nothing in the
+/// response to say so.
 #[test]
-fn a_relation_target_names_its_own_block_column() {
-    let meta = parse_dataset_description(HEIGHT_CHAIN).unwrap();
-    let chunk = height_chain_chunk(&[10, 11, 12]);
+#[ignore = "requires external fixture data"]
+fn a_null_join_key_matches_nothing() {
+    if !fixture_tree_is_present() {
+        return;
+    }
 
-    let blocks = run(
-        &meta,
-        &chunk,
-        r#"{"type":"test","fromBlock":10,"toBlock":12,
-            "fields":{"block":{"height":true},"event":{"kind":true},
-                      "receipt":{"blockNumber":true,"status":true}},
-            "events":[{"kind":["call"],"receipt":true}]}"#,
+    let substrate = meta("substrate");
+    let body = run(
+        "moonbeam",
+        &substrate,
+        br#"{"type":"substrate","fromBlock":4668500,"toBlock":4668502,
+             "events":[{"call":true}],
+             "fields":{"block":{"number":true},
+                       "event":{"name":true,"callAddress":true,"extrinsicIndex":true},
+                       "call":{"name":true,"address":true,"extrinsicIndex":true}}}"#,
     )
-    .unwrap()
     .unwrap();
 
-    let heights: Vec<u64> = blocks
-        .iter()
-        .map(|b| b["header"]["height"].as_u64().unwrap())
-        .collect();
-    assert_eq!(
-        heights,
-        vec![10, 11, 12],
-        "the response carries the blocks the chunk has, not the ones a receipt cites"
+    let events = items_of(&body, "events");
+    let calls = items_of(&body, "calls");
+    assert!(
+        !events.is_empty() && !calls.is_empty(),
+        "the fixture must carry both"
     );
 
-    let receipts: usize = blocks
+    // What the events actually point at.
+    let pointed_at: std::collections::HashSet<_> = events
         .iter()
-        .map(|b| b["receipts"].as_array().map(|a| a.len()).unwrap_or(0))
-        .sum();
-    assert_eq!(receipts, 3, "one receipt joins each event");
+        .filter(|(_, event)| !event["callAddress"].is_null())
+        .map(|(block, event)| {
+            (
+                *block,
+                event["extrinsicIndex"].clone(),
+                event["callAddress"].clone(),
+            )
+        })
+        .collect();
+
+    let orphans: Vec<_> = calls
+        .iter()
+        .filter(|(block, call)| {
+            !pointed_at.contains(&(
+                *block,
+                call["extrinsicIndex"].clone(),
+                call["address"].clone(),
+            ))
+        })
+        .collect();
+
+    assert!(
+        orphans.is_empty(),
+        "{} of {} calls are in the response with no event pointing at them, first: {:?}",
+        orphans.len(),
+        calls.len(),
+        orphans.first()
+    );
+}
+
+/// The same rule on the hierarchical path: `stack` walks from an event up to the
+/// root call, and an event with no call has no stack. Indexing its null address
+/// as the empty one made every inherent's root call an ancestor of it.
+#[test]
+#[ignore = "requires external fixture data"]
+fn a_null_address_has_no_ancestors() {
+    if !fixture_tree_is_present() {
+        return;
+    }
+
+    let substrate = meta("substrate");
+    let body = run(
+        "moonbeam",
+        &substrate,
+        br#"{"type":"substrate","fromBlock":4668500,"toBlock":4668502,
+             "events":[{"stack":true}],
+             "fields":{"block":{"number":true},
+                       "event":{"name":true,"callAddress":true,"extrinsicIndex":true},
+                       "call":{"name":true,"address":true,"extrinsicIndex":true}}}"#,
+    )
+    .unwrap();
+
+    let events = items_of(&body, "events");
+    let calls = items_of(&body, "calls");
+    assert!(
+        !events.is_empty() && !calls.is_empty(),
+        "the fixture must carry both"
+    );
+
+    let address_of = |item: &serde_json::Value| -> Vec<serde_json::Value> {
+        item["address"]
+            .as_array()
+            .or_else(|| item["callAddress"].as_array())
+            .cloned()
+            .unwrap_or_default()
+    };
+
+    let orphans: Vec<_> = calls
+        .iter()
+        .filter(|(block, call)| {
+            let ancestor = address_of(call);
+            !events.iter().any(|(event_block, event)| {
+                event_block == block
+                    && event["extrinsicIndex"] == call["extrinsicIndex"]
+                    && !event["callAddress"].is_null()
+                    && address_of(event).starts_with(&ancestor)
+            })
+        })
+        .collect();
+
+    assert!(
+        orphans.is_empty(),
+        "{} of {} calls are ancestors of no event in the response, first: {:?}",
+        orphans.len(),
+        calls.len(),
+        orphans.first()
+    );
+}
+
+/// Two relations of the same item can name the same rows — `transactionTraces`
+/// returns every trace of the transaction and so contains `subtraces` whole. The
+/// overlap is the normal case, not a malformed query, and the row belongs in the
+/// response once.
+#[test]
+#[ignore = "requires external fixture data"]
+fn stacked_relations_do_not_duplicate_rows() {
+    if !fixture_tree_is_present() {
+        return;
+    }
+
+    let evm = meta("evm");
+    let body = run(
+        "ethereum",
+        &evm,
+        br#"{"type":"evm","fromBlock":17881391,"toBlock":17881391,
+             "traces":[{"callSighash":["0xe21fd0e9"],
+                        "transactionTraces":true,"subtraces":true}],
+             "fields":{"block":{"number":true},
+                       "trace":{"transactionIndex":true,"traceAddress":true,"type":true}}}"#,
+    )
+    .unwrap();
+
+    let items = items_of(&body, "traces");
+    assert!(!items.is_empty(), "the fixture must match traces");
+
+    let mut seen = std::collections::HashSet::new();
+    let duplicates: Vec<_> = items
+        .iter()
+        .filter(|(block, item)| {
+            !seen.insert((
+                *block,
+                item["transactionIndex"].clone(),
+                item["traceAddress"].clone(),
+            ))
+        })
+        .collect();
+
+    assert!(
+        duplicates.is_empty(),
+        "{} of {} traces came back twice, first: {:?}",
+        duplicates.len(),
+        items.len(),
+        duplicates.first()
+    );
+}
+
+/// The same row reached through one relation or through two must produce the same
+/// response: adding a relation that names rows already present widens nothing.
+#[test]
+#[ignore = "requires external fixture data"]
+fn adding_an_overlapping_relation_changes_nothing() {
+    if !fixture_tree_is_present() {
+        return;
+    }
+
+    let evm = meta("evm");
+    let query = |relations: &str| {
+        format!(
+            r#"{{"type":"evm","fromBlock":17881391,"toBlock":17881391,
+                 "traces":[{{"callSighash":["0xe21fd0e9"],{relations}}}],
+                 "fields":{{"block":{{"number":true}},
+                            "trace":{{"transactionIndex":true,"traceAddress":true,"type":true}}}}}}"#
+        )
+        .into_bytes()
+    };
+
+    let alone = run("ethereum", &evm, &query(r#""transactionTraces":true"#)).unwrap();
+    let with_subtraces = run(
+        "ethereum",
+        &evm,
+        &query(r#""transactionTraces":true,"subtraces":true"#),
+    )
+    .unwrap();
+
+    assert!(!alone.is_empty(), "the fixture must match traces");
+    assert_eq!(
+        alone, with_subtraces,
+        "`subtraces` names a subset of `transactionTraces`, so it adds nothing"
+    );
 }

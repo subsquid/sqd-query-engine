@@ -11,35 +11,14 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use proptest::prelude::*;
+use proptest::test_runner::FileFailurePersistence;
 use sqd_query_engine::scan::{ChunkReader, ParquetChunkReader, ScanRequest};
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use tempfile::TempDir;
 
-fn fixture_chunk(dataset: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures")
-        .join(dataset)
-        .join("chunk")
-}
-
-/// Whether the external fixture tree is available. `make test-data` requires it;
-/// the portable suite does not select tests that call this helper.
-fn fixture_tree_is_present() -> bool {
-    if fixture_chunk("ethereum").is_dir() {
-        return true;
-    }
-
-    assert!(
-        std::env::var_os("SQD_REQUIRE_FIXTURES").is_none(),
-        "SQD_REQUIRE_FIXTURES is set but tests/fixtures is not checked out, so these \
-         tests would report green having compared nothing"
-    );
-
-    false
-}
+use crate::harness::fixtures::{fixture_chunk, fixture_tree_is_present};
 
 /// Block numbers are stored with whatever integer width the writer chose, so
 /// widen every one of them to `u64` before comparing.
@@ -177,7 +156,17 @@ proptest! {
     // Row-group layout is fixed by the fixture, so the interesting axes are where
     // the budget lands and how wide a wave is. Both are engine-chosen numbers a
     // client never sees, and neither may change an answer.
-    #![proptest_config(ProptestConfig { cases: 48, ..ProptestConfig::default() })]
+    // Where the recorded counterexamples live. The default, `SourceParallel`,
+    // resolves against the nearest `lib.rs` or `main.rs` — so merging the suite
+    // into one target silently moved the file out from under the checked-in one,
+    // and proptest treats a missing persistence file as "no regressions".
+    #![proptest_config(ProptestConfig {
+        cases: 48,
+        failure_persistence: Some(Box::new(FileFailurePersistence::WithSource(
+            "proptest-regressions",
+        ))),
+        ..ProptestConfig::default()
+    })]
 
     #[test]
     #[ignore = "requires external fixture data"]

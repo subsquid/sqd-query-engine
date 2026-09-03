@@ -1,4 +1,4 @@
-//! Differential test against the reference implementation.
+//! CT-7 — differential testing against the reference implementation.
 //!
 //! The fixture suite compares against recorded answers, so it only ever asks the
 //! questions someone thought to record. This one builds its questions out of the
@@ -9,15 +9,16 @@
 //! Requires the reference implementation:
 //!
 //! ```text
-//! cargo test --test oracle_diff --features legacy-query -- --nocapture
+//! cargo test --test conformance --features legacy-query ct7_ -- --nocapture
 //! ```
-#![cfg(feature = "legacy-query")]
 
 use sqd_query_engine::metadata::{load_dataset_description, DatasetDescription};
 use sqd_query_engine::output::execute_plan;
 use sqd_query_engine::query::{compile, parse_query};
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+use crate::harness::fixtures::fixture_chunk;
 
 /// (catalog, fixture directory). Only datasets both engines serve.
 const DATASETS: &[(&str, &str)] = &[
@@ -36,13 +37,6 @@ const BLOCK_SPAN: u64 = 40;
 
 /// How many sampled values a generated IN-list carries.
 const VALUES_PER_FILTER: usize = 3;
-
-fn fixture_chunk(dataset: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures")
-        .join(dataset)
-        .join("chunk")
-}
 
 fn snake_to_camel(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
