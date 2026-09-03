@@ -269,7 +269,7 @@ reproduce is a rumour.
 
 ## 8.11 Traceability matrix
 
-Dated **2026-09-02**. Every invariant, the class that checks it, and an honest
+Dated **2026-09-03**. Every invariant, the class that checks it, and an honest
 status:
 
 - **C** — covered. A test would fail if the invariant broke.
@@ -296,7 +296,7 @@ value is *accepted* does not cover an invariant that says which values are
 | [INV-D6](07-invariants.md#inv-d6) | CT-1 | **C** | both sides are checked for `children` and `parents` alike, with a case in `test_validate_rejects_a_relation_that_cannot_join` |
 | [INV-D7](07-invariants.md#inv-d7) | CT-6 | **P** | width tolerance is covered per mechanism — block-range masks, in-lists, semi-joins, range predicates, and on the output side `test_solana_tx_version_reads_the_sentinel_at_every_physical_width` and `test_bignum_reads_a_narrowed_column`. No same-chunk-at-several-widths equality run |
 | [INV-D8](07-invariants.md#inv-d8) | CT-6 | **U** | needs the chunk writer, HC-3 |
-| [INV-D9](07-invariants.md#inv-d9) | CT-1 | **C** | `test_system_columns_excluded_from_weight`, `undeclared_columns_are_not_filterable` |
+| [INV-D9](07-invariants.md#inv-d9) | CT-1 | **C** | `test_system_columns_excluded_from_weight`, `undeclared_columns_are_not_filterable`, `test_validate_rejects_fields_backed_by_system_columns` — direct, virtual-field and field-group exposure |
 | [INV-D10](07-invariants.md#inv-d10) | CT-1 | **C** | `test_validate_rejects_duplicate_names` — two tables on one `queryName`, two on one `fieldName`, an alias on a table's `queryName`, and a table on the name another holds without declaring it |
 | [INV-Q1](07-invariants.md#inv-q1) | CT-2 | **P** | reached through every fixture; no negative case for an unknown `type` |
 | [INV-Q2](07-invariants.md#inv-q2) | CT-2 | **C** | `test_parse_unknown_table_error` |
@@ -304,14 +304,14 @@ value is *accepted* does not cover an invariant that says which values are
 | [INV-Q4](07-invariants.md#inv-q4) | CT-2 | **C** | `test_malformed_block_bounds_error`, `test_block_bounds_defaults_and_null` |
 | [INV-Q5](07-invariants.md#inv-q5) | CT-2 | **C** | `test_parse_item_count_limit` |
 | [INV-Q6](07-invariants.md#inv-q6) | CT-2 | **C** | `test_parse_unknown_filter_error`, `undeclared_columns_are_not_filterable`, `an_alias_has_its_own_filter_surface`, `reference_filters_are_all_accepted` |
-| [INV-Q7](07-invariants.md#inv-q7) | CT-2 | **P** | `unknown_field_names_are_rejected` covers misspellings; the reference-surface test only asserts acceptance — see INV-Q14 |
+| [INV-Q7](07-invariants.md#inv-q7) | CT-2 | **C** | `unknown_field_names_are_rejected` covers misspellings, `a_column_the_catalog_carries_is_not_a_field` the columns that exist and are not fields, and `the_field_surface_is_exactly_the_declared_one` the whole surface both ways |
 | [INV-Q8](07-invariants.md#inv-q8) | CT-2 | **P** | an unknown `fields` key errors; `fields.X` not being an object is untested |
 | [INV-Q9](07-invariants.md#inv-q9) | CT-2 | **P** | block-bound defaults only |
 | [INV-Q10](07-invariants.md#inv-q10) | CT-2 | **C** | `a_bloom_filter_takes_at_most_ten_values`, either side of the cap |
 | [INV-Q11](07-invariants.md#inv-q11) | CT-2 | **C** | `one_discriminator_filter_per_item_request`; the family is read from the catalog, so the check is not Solana-specific |
 | [INV-Q12](07-invariants.md#inv-q12) | CT-2 | **C** | `malformed_hex_in_list_is_an_error`, `test_parse_hex`; the byte cap is enforced where discriminators compile |
-| [INV-Q13](07-invariants.md#inv-q13) | CT-2 | **U** | known-violated — GAP 23 |
-| [INV-Q14](07-invariants.md#inv-q14) | CT-2 | **U** | known-violated — GAP 27 |
+| [INV-Q13](07-invariants.md#inv-q13) | CT-2 | **C** | `a_request_is_bounded_in_bytes` and `an_in_list_is_bounded_in_length`, either side of each cap; the list case is written with short values so the byte cap cannot be what it is measuring |
+| [INV-Q14](07-invariants.md#inv-q14) | CT-2 | **C** | `the_field_surface_is_exactly_the_declared_one` compares every table's declared list against the reference's, as a set, and then parses each name; `a_column_the_catalog_carries_is_not_a_field` covers `blockNumber` and `topic0` |
 | [INV-P1](07-invariants.md#inv-p1) | CT-3 | **P** | `test_compile_empty_item_no_filters`; not asserted as a law over generated queries |
 | [INV-P2](07-invariants.md#inv-p2) | CT-3 | **C** | `test_in_list_predicate_strings`, `test_in_list_predicate_u64`, `test_numeric_in_list_filter` |
 | [INV-P3](07-invariants.md#inv-p3) | CT-3 | **C** | `an_empty_filter_list_matches_nothing` — the discriminator, a discriminator column, an ordinary in-list, and an empty list beside a filter that does match |
@@ -347,7 +347,7 @@ value is *accepted* does not cover an invariant that says which values are
 | [INV-B6](07-invariants.md#inv-b6) | CT-5 | **P** | `multi_table_trim_reports_true_last_block`; the keep-at-least-one rule is untested |
 | [INV-B7](07-invariants.md#inv-b7) | CT-5 | **P** | same test; no end-to-end paging run |
 | [INV-B8](07-invariants.md#inv-b8) | CT-5 | **U** | **partition invariance is not tested.** §8.6 calls it the single most valuable test in the suite, and it transitively exercises five other invariants |
-| [INV-B9](07-invariants.md#inv-b9) | CT-5 | **P** | known-suspect — unchecked weight arithmetic, GAP 22 |
+| [INV-B9](07-invariants.md#inv-b9) | CT-5 | **P** | the arithmetic is checked — `a_negative_size_weighs_nothing`, `block_weight_saturates_rather_than_wrapping`. That it is the *same* function twice over one chunk is not asserted |
 | [INV-B10](07-invariants.md#inv-b10) | CT-5 | **C** | four weight-projection cases |
 | [INV-O1](07-invariants.md#inv-o1) | CT-6 | **C** | `empty_result_is_none`, `iteration_matches_json_lines`, `test_json_close` |
 | [INV-O2](07-invariants.md#inv-o2) | CT-6 | **P** | fixtures only |
@@ -357,7 +357,7 @@ value is *accepted* does not cover an invariant that says which values are
 | [INV-O6](07-invariants.md#inv-o6) | CT-6 | **P** | fixtures compare values, not bytes — see the divergence table in GAPS.md |
 | [INV-O7](07-invariants.md#inv-o7) | CT-6 | **P** | `test_arrow_parity_and_projection`; no empty-`fields` case |
 | [INV-O8](07-invariants.md#inv-o8) | CT-6 | **C** | `test_snake_to_camel`, `test_snake_to_camel_in_output` |
-| [INV-O9](07-invariants.md#inv-o9) | CT-6 | **P** | sixteen encoder cases plus `discriminator_columns_render_as_padded_hex`; known-violated for undeclared millisecond timestamps and for base58 — GAPS 20, 21 |
+| [INV-O9](07-invariants.md#inv-o9) | CT-6 | **P** | sixteen encoder cases plus `discriminator_columns_render_as_padded_hex`, `a_timestamp_takes_its_unit_from_the_declared_type` over all four unit pairings, and `test_hex_and_base58_render_a_column_stored_as_bytes`. The NaN and ±∞ arm is the one the invariant names that nothing asserts |
 | [INV-O10](07-invariants.md#inv-o10) | CT-6 | **C** | `test_encode_roll`, `test_encode_roll_with_list_spread` |
 | [INV-O11](07-invariants.md#inv-o11) | CT-6 | **P** | field groups are exercised; an unknown tag value is not, and that is the case archives outliving catalogs produce |
 | [INV-O12](07-invariants.md#inv-o12) | CT-6 | **U** | byte determinism is never asserted |
@@ -367,14 +367,14 @@ value is *accepted* does not cover an invariant that says which values are
 | [INV-E2](07-invariants.md#inv-e2) | CT-2 | **P** | validation precedes scanning by construction; nothing asserts that no output precedes an error |
 | [INV-E3](07-invariants.md#inv-e3) | CT-8 | **U** | the absent-column test covers filtering, not selection |
 | [INV-E4](07-invariants.md#inv-e4) | CT-8 | **U** | no missing-table case |
-| [INV-E5](07-invariants.md#inv-e5) | CT-2 | **C** | five cases, including a chain that skips block numbers |
-| [INV-E6](07-invariants.md#inv-e6) | CT-2 | **U** | known-violated — GAP 28. Errors carry prose, so CT-2 cannot assert a kind |
+| [INV-E5](07-invariants.md#inv-e5) | CT-2 | **C** | six cases, including a chain that skips block numbers and one whose gap is wider than `P-FORK-WINDOW` |
+| [INV-E6](07-invariants.md#inv-e6) | CT-2 | **C** | `every_validation_error_carries_its_kind` is the §6.2 table, one row per kind; `every_request_bound_carries_its_kind` and `an_unanswerable_reserved_key_carries_its_kind` cover the four that need a request too large to write inline or a catalog of their own |
 | [INV-E7](07-invariants.md#inv-e7) | CT-4 | **C** | `test_semi_join_unsupported_key_type` |
 | [INV-X1](07-invariants.md#inv-x1) | CT-1 | **P** | `a_relation_target_names_its_own_block_column` serves an invented chain from a synthetic chunk with no code change. One chain and one relation shape: a hardcoded name elsewhere would still pass |
 | [INV-X2](07-invariants.md#inv-x2) | CT-8 | **U** | adding a nullable column is never tested |
 | [INV-X3](07-invariants.md#inv-x3) | CT-8 | **C** | `filtering_an_absent_column_is_an_error`, `filtering_a_present_column_still_works` |
 
-**Totals: 35 C, 33 P, 17 U** of 85. Property coverage is therefore 0.41
+**Totals: 39 C, 32 P, 14 U** of 85. Property coverage is therefore 0.46
 (`P-COV-PROPERTY` in [09-parameters.md](09-parameters.md)).
 
 The shape of the U column is worth reading on its own. The unchecked invariants
@@ -408,12 +408,12 @@ and its promotion is tracked in [GAPS.md](GAPS.md).
 |---|---|---|---|---|
 | **MG-1** Property coverage never regresses | `P-COV-PROPERTY`, ratchet only | per-PR | HC-8 | advisory until HC-8 exists |
 | **MG-2** Line coverage on changed lines, and a repository floor | `P-COV-DIFF`, `P-COV-TOTAL` | per-PR | HC-9 | advisory until HC-9 exists |
-| **MG-3** The PR-budget classes pass | CT-1, CT-2, CT-3, CT-4, CT-5, CT-6 green | per-PR | HC-1, HC-2, HC-4, HC-6 | advisory until HC-4 exists and a job runs the classes |
+| **MG-3** The PR-budget classes pass | CT-1, CT-2, CT-3, CT-4, CT-5, CT-6 green | per-PR | HC-1, HC-2, HC-4, HC-6 | **blocking for portable tests**; external-data coverage is advisory |
 | **MG-4** The slow classes pass | CT-7, CT-8, CT-9 green | nightly | HC-3, HC-5, HC-7 | advisory until HC-3 exists |
 | **MG-5** No performance regression outside the noise band | `P-PERF-NOISE-BAND` | nightly | HC-10 | advisory |
 | **MG-6** Spec integrity | the suite's own checker reports no error | per-PR | HC-11 | **blocking** |
 | **MG-7** Flake policy | `P-FLAKE-RETRIES`, then quarantine with an owner and an expiry | per-PR | HC-8 | advisory until HC-8 exists |
-| **MG-8** Static gates | formatter, linter, dependency audit clean | per-PR | HC-12 | advisory until a job runs them |
+| **MG-8** Static gates | formatter and linter clean over `src/` and `tests/` | per-PR | HC-12 | **blocking** |
 
 Two rules that no tool enforces, so they are review checklist items:
 
@@ -422,11 +422,18 @@ Two rules that no tool enforces, so they are review checklist items:
 - **A gap closes with the test that fails without the fix**, named in the gap's
   *first test* line. [GAPS.md](GAPS.md) carries that column for exactly this.
 
-One gate blocks today: MG-6, whose capability is built and whose job runs. The
-rest name capabilities that do not exist yet, or exist with nothing running them,
-so they are advisory — which is the rule above applied rather than an exception
-to it. A gate that says **blocking** while nothing can enforce it teaches people
-to read the column as decoration.
+MG-6, MG-8 and the portable portion of MG-3 block today. The rest name
+capabilities that do not exist yet, so they are advisory — which is the rule
+above applied rather than an exception to it.
+
+Tests that require externally supplied chunks or fixtures are explicitly marked
+ignored in the portable job, so the test summary does not report them as passed.
+`make test-data` selects those tests and requires both inputs; this data-backed
+portion remains advisory until a job supplies them.
+
+MG-8's scope is `src/` and `tests/`. `benches/` and `examples/` are outside it —
+they are not the engine, and bringing them under the formatter is a change of its
+own — and no dependency audit is wired up.
 
 MG-1's ratchet is the gate that matters. Absolute coverage is a number to argue
 about; *the matrix may not get worse* is a rule. Its two inputs — the totals line
@@ -451,7 +458,7 @@ The gates and the CT classes both assume machinery. Listed with build status, or
 | **HC-9** Line-coverage instrumentation | MG-2 | **U** | |
 | **HC-10** Benchmark runner with committed baselines and a noise band | MG-5 | **P** | benchmarks exist and are recorded; nothing gates on them |
 | **HC-11** Spec checker | MG-6 | **C** | reference integrity, dead weight, matrix coverage, normative shape; carries its own mutation tests |
-| **HC-12** Formatter, linter and dependency audit | MG-8 | **P** | the commands exist as `make` targets; no job runs them, so nothing gates on them — GAP 29 |
+| **HC-12** Formatter and linter | MG-8 | **C** | `make fmt` and `make lint` over `src/` and `tests/`, run per-PR by `.github/workflows/rust.yml` alongside `make test`. No dependency audit |
 
 A CT class whose capabilities are all **U** is not "unchecked" — it is
 *unbuildable today*, and belongs in the build order rather than the backlog.
@@ -463,14 +470,12 @@ Each phase ends by updating §8.11 and [GAPS.md](GAPS.md).
 
 1. **The chunk writer** (HC-3). Seven invariants become testable and the whole
    CT-8 class turns on. Nothing else unblocks as much.
-2. **The CI gate** (GAP 29). The suite that pins the closed gaps is worth what
-   CI does with it, and today CI runs the spec checker alone. A workflow file.
-3. **The query generator** (HC-4). Turns §8.4 and §8.5 from tables of prose into
+2. **The query generator** (HC-4). Turns §8.4 and §8.5 from tables of prose into
    generated laws, and closes P5, R2, R4, R11.
-4. **INV-B8, partition invariance.** One test, six invariants, and the property
+3. **INV-B8, partition invariance.** One test, six invariants, and the property
    the distributed architecture rests on.
-5. **INV-P9, the bloom oracle.** Compare the engine's bloom bits against the
+4. **INV-P9, the bloom oracle.** Compare the engine's bloom bits against the
    writer's for known values. The only invariant here whose failure is invisible
    to every other test in the suite.
-6. **Coverage reporting** (HC-8) and line instrumentation (HC-9), which promote
+5. **Coverage reporting** (HC-8) and line instrumentation (HC-9), which promote
    MG-1 and MG-2 from advisory to blocking.

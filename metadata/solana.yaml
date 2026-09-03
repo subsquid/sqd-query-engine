@@ -3,6 +3,7 @@ name: solana
 tables:
   blocks:
     filters: []
+    fields: [ number, hash, parent_number, parent_hash, height, timestamp ]
     parent_hash_column: parent_hash
     parent_number_column: parent_number
     block_number_column: number
@@ -27,6 +28,12 @@ tables:
 
   transactions:
     filters: [ fee_payer ]
+    fields: [
+      transaction_index, version, account_keys, address_table_lookups,
+      num_readonly_signed_accounts, num_readonly_unsigned_accounts, num_required_signatures,
+      recent_blockhash, signatures, err, fee, compute_units_consumed, loaded_addresses,
+      fee_payer, has_dropped_log_messages
+    ]
     query_name: transactions
     field_name: transaction
     item_order_keys: [ transaction_index ]
@@ -121,6 +128,10 @@ tables:
 
   instructions:
     filters: [ program_id, d1, d2, d4, d8, is_committed, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15 ]
+    fields: [
+      transaction_index, instruction_address, program_id, accounts, data, d1, d2, d4, d8,
+      error, compute_units_consumed, is_committed, has_dropped_log_messages
+    ]
     address_column: instruction_address
     query_name: instructions
     field_name: instruction
@@ -369,6 +380,7 @@ tables:
 
   logs:
     filters: [ program_id, kind ]
+    fields: [ transaction_index, log_index, instruction_address, program_id, kind, message ]
     query_name: logs
     field_name: log
     item_order_keys: [ transaction_index, log_index ]
@@ -410,6 +422,7 @@ tables:
 
   balances:
     filters: [ account ]
+    fields: [ transaction_index, account, pre, post ]
     query_name: balances
     field_name: balance
     item_order_keys: [ transaction_index, account ]
@@ -441,6 +454,10 @@ tables:
 
   token_balances:
     filters: [ account, pre_mint, post_mint, pre_program_id, post_program_id, pre_owner, post_owner ]
+    fields: [
+      transaction_index, account, pre_mint, post_mint, pre_decimals, post_decimals,
+      pre_program_id, post_program_id, pre_owner, post_owner, pre_amount, post_amount
+    ]
     query_name: tokenBalances
     field_name: tokenBalance
     item_order_keys: [ transaction_index, account ]
@@ -512,6 +529,7 @@ tables:
 
   rewards:
     filters: [ pubkey ]
+    fields: [ pubkey, lamports, post_balance, reward_type, commission ]
     query_name: rewards
     field_name: reward
     item_order_keys: [ pubkey, reward_type ]

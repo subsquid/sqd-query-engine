@@ -735,9 +735,9 @@ fn composite_key_in_set_mask(
     BooleanArray::new(builder.finish(), None)
 }
 
-/// Determine all columns a scan must read: requested output + predicate columns
-/// + block-number column + any key/hierarchical filter columns, restricted to
-/// those that actually exist in the table.
+/// Determine all columns a scan must read: requested output, predicate columns,
+/// the block-number column and any key or hierarchical filter columns —
+/// restricted to those that actually exist in the table.
 fn collect_read_columns<'a, 'b>(table: &ParquetTable, request: &'b ScanRequest<'a>) -> Vec<&'b str>
 where
     'a: 'b,
@@ -804,7 +804,12 @@ fn ensure_columns_present(table: &ParquetTable, request: &ScanRequest) -> Result
 
     for col in required {
         if table.column_index(col).is_none() {
-            anyhow::bail!("column '{}' is not found in '{}'", col, table.name());
+            crate::engine_bail!(
+                crate::error::ErrorKind::ColumnNotFound,
+                "column '{}' is not found in '{}'",
+                col,
+                table.name()
+            );
         }
     }
 
@@ -1400,10 +1405,8 @@ fn scan_hierarchical_two_pass(
         }
 
         // Apply block range filter if needed
-        let batch = if request.block_number_column.is_some()
-            && (request.from_block.filter(|&b| b > 0).is_some() || request.to_block.is_some())
-        {
-            let bn_col = request.block_number_column.unwrap();
+        let bounded = request.from_block.filter(|&b| b > 0).is_some() || request.to_block.is_some();
+        let batch = if let Some(bn_col) = request.block_number_column.filter(|_| bounded) {
             if let Some(col) = batch.column_by_name(bn_col) {
                 let br_mask = block_range_mask(col, request.from_block, request.to_block);
                 arrow::compute::filter_record_batch(&batch, &br_mask)
@@ -1645,7 +1648,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires external chunk data"]
     fn test_scan_no_predicate() {
+        if !crate::testing::chunks_present() {
+            return;
+        }
+
         let table = ParquetTable::open(&solana_chunk_path().join("blocks.parquet")).unwrap();
         let request = ScanRequest::new(vec!["number", "hash"]);
         let batches = scan(&table, &request).unwrap();
@@ -1656,7 +1664,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires external chunk data"]
     fn test_scan_with_block_range() {
+        if !crate::testing::chunks_present() {
+            return;
+        }
+
         let table = ParquetTable::open(&solana_chunk_path().join("instructions.parquet")).unwrap();
 
         let total_rows = table.num_rows();
@@ -1682,7 +1695,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires external chunk data"]
     fn test_scan_with_predicate() {
+        if !crate::testing::chunks_present() {
+            return;
+        }
+
         let table = ParquetTable::open(&solana_chunk_path().join("instructions.parquet")).unwrap();
 
         let pred = RowPredicate::new(vec![crate::scan::predicate::ColumnPredicate {
@@ -1718,7 +1736,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires external chunk data"]
     fn test_scan_with_predicate_and_block_range() {
+        if !crate::testing::chunks_present() {
+            return;
+        }
+
         let table = ParquetTable::open(&solana_chunk_path().join("instructions.parquet")).unwrap();
 
         let pred = RowPredicate::new(vec![crate::scan::predicate::ColumnPredicate {
@@ -1751,12 +1774,12 @@ mod tests {
             if let Some(arr) = block_num.as_any().downcast_ref::<UInt32Array>() {
                 for i in 0..arr.len() {
                     let bn = arr.value(i) as u64;
-                    assert!(bn >= 406021650 && bn <= 406021670);
+                    assert!((406021650..=406021670).contains(&bn));
                 }
             } else if let Some(arr) = block_num.as_any().downcast_ref::<UInt64Array>() {
                 for i in 0..arr.len() {
                     let bn = arr.value(i);
-                    assert!(bn >= 406021650 && bn <= 406021670);
+                    assert!((406021650..=406021670).contains(&bn));
                 }
             }
 
@@ -1778,7 +1801,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires external chunk data"]
     fn test_scan_predicate_columns_not_in_output() {
+        if !crate::testing::chunks_present() {
+            return;
+        }
+
         // Predicate uses program_id but output only asks for block_number
         let table = ParquetTable::open(&solana_chunk_path().join("instructions.parquet")).unwrap();
 
@@ -1802,9 +1830,17 @@ mod tests {
     }
 
     /// hierarchical_filter and predicates must not be set simultaneously.
+    ///
+    /// Asserted through `catch_unwind` rather than `#[should_panic]` so the test
+    /// can skip when the chunk is absent: a `#[should_panic]` test that returns
+    /// early fails, and one that panics for another reason passes.
     #[test]
-    #[should_panic(expected = "hierarchical_filter and predicates must not be set simultaneously")]
+    #[ignore = "requires external chunk data"]
     fn test_hierarchical_filter_with_predicates_panics() {
+        if !crate::testing::chunks_present() {
+            return;
+        }
+
         let table = ParquetTable::open(&solana_chunk_path().join("instructions.parquet")).unwrap();
 
         let pred = RowPredicate::new(vec![crate::scan::predicate::ColumnPredicate {
@@ -1828,12 +1864,30 @@ mod tests {
         request.predicates = vec![&pred];
         request.hierarchical_filter = Some(&hf);
 
-        // This should panic due to debug_assert
-        let _ = scan(&table, &request);
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = scan(&table, &request);
+        }))
+        .expect_err("setting both must trip the debug assertion");
+
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            message.contains("hierarchical_filter and predicates must not be set simultaneously"),
+            "panicked with: {message}"
+        );
     }
 
     #[test]
+    #[ignore = "requires external chunk data"]
     fn test_scan_row_group_pruning() {
+        if !crate::testing::chunks_present() {
+            return;
+        }
+
         // EVM logs are sorted by topic0, so row group stats on topic0 should be tight.
         // Filtering for a specific topic0 should skip most row groups.
         let table = ParquetTable::open(&evm_chunk_path().join("logs.parquet")).unwrap();

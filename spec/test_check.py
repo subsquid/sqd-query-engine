@@ -180,7 +180,7 @@ def test_flipping_a_status_invalidates_the_stated_totals(s):
 @case
 def test_a_hand_edited_coverage_baseline_is_caught(s):
     """MG-1 ratchets on this number; it may not be loosened by typing."""
-    s.edit("09-parameters.md", "0.41 (35 of 85)", "0.99 (84 of 85)")
+    s.edit("09-parameters.md", "0.46 (39 of 85)", "0.99 (84 of 85)")
     assert "param-observed-stale" in checks_in(run(s.root)[1])
 
 
@@ -213,8 +213,8 @@ def test_a_renamed_bound_heading_is_loud(s):
 def test_a_capability_cited_only_from_the_build_order_is_not_orphaned(s):
     s.edit("08-conformance.md", "| **HC-12**",
            "| **HC-13** Cited from the build order alone | CT-1 | **U** | |\n| **HC-12**")
-    s.edit("08-conformance.md", "6. **Coverage reporting**",
-           "6. HC-13, named only here.\n7. **Coverage reporting**")
+    s.edit("08-conformance.md", "5. **Coverage reporting**",
+           "5. HC-13, named only here.\n6. **Coverage reporting**")
     assert "hc-orphan" not in checks_in(run(s.root)[1])
 
 
@@ -298,7 +298,7 @@ def test_the_matrix_is_stale_when_the_contract_moves_without_it(s):
 
 @case
 def test_a_mutable_document_with_no_date_is_caught(s):
-    s.edit("09-parameters.md", "Observed as of **2026-09-02**.", "")
+    s.edit("09-parameters.md", "Observed as of **2026-09-03**.", "")
     assert "date-inconsistent" in checks_in(run(s.root)[1])
 
 
@@ -332,7 +332,7 @@ def test_a_suppressed_run_never_reads_clean(s):
 @case
 def test_severity_does_not_decide_what_gates(s):
     """`--strict --severity error` counted warnings after hiding them."""
-    s.edit("09-parameters.md", "Observed as of **2026-09-02**.", "")
+    s.edit("09-parameters.md", "Observed as of **2026-09-03**.", "")
     buf = io.StringIO()
     with redirect_stdout(buf):
         code = check.main([str(s.root), "--strict", "--severity", "error"])

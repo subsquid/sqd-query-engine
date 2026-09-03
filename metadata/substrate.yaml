@@ -3,6 +3,10 @@ name: substrate
 tables:
   blocks:
     filters: []
+    fields: [
+      number, hash, parent_hash, state_root, extrinsics_root, digest, spec_name, spec_version,
+      impl_name, impl_version, validator, timestamp
+    ]
     parent_hash_column: parent_hash
     block_number_column: number
     field_name: block
@@ -38,6 +42,7 @@ tables:
 
   extrinsics:
     filters: []
+    fields: [ index, version, success, hash, fee, tip, signature, error ]
     query_name: extrinsics
     field_name: extrinsic
     item_order_keys: [ index ]
@@ -82,6 +87,7 @@ tables:
 
   calls:
     filters: [ name ]
+    fields: [ extrinsic_index, address, name, success, args, origin, error ]
     query_name: calls
     field_name: call
     address_column: address
@@ -146,6 +152,7 @@ tables:
 
   events:
     filters: [ name ]
+    fields: [ index, extrinsic_index, name, phase, call_address, topics, args ]
     query_name: events
     field_name: event
     address_column: call_address

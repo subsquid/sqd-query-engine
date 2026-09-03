@@ -3,6 +3,7 @@ name: hyperliquidFills
 tables:
   blocks:
     filters: []
+    fields: [ number, hash, parent_hash, timestamp ]
     parent_hash_column: parent_hash
     block_number_column: number
     field_name: block
@@ -21,6 +22,10 @@ tables:
 
   fills:
     filters: [ user, coin, dir, cloid, fee_token, builder ]
+    fields: [
+      fill_index, user, coin, px, sz, side, time, start_position, dir, closed_pnl, hash, oid,
+      crossed, fee, builder_fee, tid, cloid, fee_token, builder, twap_id
+    ]
     query_name: fills
     field_name: fill
     item_order_keys: [ fill_index ]

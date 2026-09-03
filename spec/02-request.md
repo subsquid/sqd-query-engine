@@ -67,14 +67,15 @@ when `fromBlock` is the chunk's first block. Where a dataset numbers blocks with
 gaps, the block table also declares a parent-*number* column, and the engine
 matches on that instead of assuming `fromBlock - 1`.
 
-An engine searches a window of `P-FORK-WINDOW` blocks ending at `fromBlock`. The
-window MUST be wide enough to span the largest gap the dataset's numbering
-permits; a
-parent further back than the window is not found, and the check is skipped rather
-than failed.
+The search is anchored at `fromBlock` rather than aimed at where the parent might
+lie, so no window width can make the parent unfindable: a dataset that skips a
+thousand numbers is answered by the same row as one that skips none. An engine
+also returns the `P-FORK-WINDOW` blocks ending at `fromBlock`, which is the
+evidence a client needs to find the fork point — a dataset that skips numbers
+returns fewer pairs, and still answers.
 
 The check is skipped, without error, in exactly one case: the chunk holds no
-block in that window, because `fromBlock` lies outside the chunk. A chunk that
+block in that range, because `fromBlock` lies outside the chunk. A chunk that
 cannot see the block is not evidence of a fork.
 
 If the dataset's block table declares **no parent-hash column at all**, the

@@ -1,3 +1,4 @@
+use crate::error::ErrorKind;
 use crate::metadata::{
     ColumnDescription, ColumnType, DatasetDescription, JsonEncoding,
     RelationKind as MetaRelationKind, SpecialFilter, TableDescription, MAX_DISCRIMINATOR_BYTES,
@@ -7,7 +8,8 @@ use crate::scan::predicate::{
     col_bloom, col_eq, col_in_list, col_list_contains_any_string, col_list_contains_any_u32,
     ColumnPredicate, InListPredicate, RowPredicate, ScalarValue,
 };
-use anyhow::{anyhow, bail, ensure, Result};
+use crate::{engine_bail, engine_ensure, engine_err};
+use anyhow::Result;
 use arrow::array::*;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -94,8 +96,9 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
     // have to return quietly.
     if query.parent_block_hash.is_some() {
         let declared = block_table_desc.is_some_and(|d| d.parent_hash_column.is_some());
-        ensure!(
+        engine_ensure!(
             declared,
+            ErrorKind::UnsupportedRequestField,
             "'parentBlockHash' is not supported for dataset '{}': its '{}' table declares \
              no parent-hash column",
             metadata.name,
@@ -112,9 +115,13 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
     let mut table_plans = Vec::new();
 
     for (table_name, items) in &query.items {
-        let table_desc = metadata
-            .table(table_name)
-            .ok_or_else(|| anyhow!("table '{}' not found in metadata", table_name))?;
+        let table_desc = metadata.table(table_name).ok_or_else(|| {
+            engine_err!(
+                ErrorKind::UnknownTable,
+                "table '{}' not found in metadata",
+                table_name
+            )
+        })?;
 
         // Determine output columns, ordered by metadata column definition order
         let output_columns: Vec<String> = query
@@ -178,7 +185,12 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
                             .and_then(|a| a.relations.get(rel_name))
                     })
                     .ok_or_else(|| {
-                        anyhow!("unknown relation '{}' for table '{}'", rel_name, table_name)
+                        engine_err!(
+                            ErrorKind::UnknownFilter,
+                            "unknown relation '{}' for table '{}'",
+                            rel_name,
+                            table_name
+                        )
                     })?;
 
                 let rel_table_desc = metadata.table(&rel_def.table);
@@ -342,8 +354,9 @@ fn check_item_limits(item: &QueryItem, table: &TableDescription) -> Result<()> {
         .filter(|(key, _)| family.contains(key.as_str()))
         .count();
 
-    ensure!(
+    engine_ensure!(
         discriminators <= MAX_DISCRIMINATOR_FILTERS,
+        ErrorKind::ConflictingFilters,
         "item request carries {} discriminator filters, at most {} allowed: they \
          narrow the same column family and only one of them can hold",
         discriminators,
@@ -360,8 +373,9 @@ fn check_item_limits(item: &QueryItem, table: &TableDescription) -> Result<()> {
         }
 
         let len = value.as_array().map(Vec::len).unwrap_or(0);
-        ensure!(
+        engine_ensure!(
             len <= MAX_BLOOM_VALUES,
+            ErrorKind::TooManyBloomValues,
             "filter '{}' carries {} values, at most {} allowed",
             key,
             len,
@@ -434,9 +448,13 @@ fn compile_item_predicates(item: &QueryItem, table: &TableDescription) -> Result
                     }
                 }
                 SpecialFilter::ColumnAlias { column } => {
-                    let col_desc = table
-                        .column(column)
-                        .ok_or_else(|| anyhow!("alias target column '{}' not found", column))?;
+                    let col_desc = table.column(column).ok_or_else(|| {
+                        engine_err!(
+                            ErrorKind::UnknownFilter,
+                            "alias target column '{}' not found",
+                            column
+                        )
+                    })?;
                     let boolean_filter = value
                         .as_bool()
                         .filter(|_| matches!(col_desc.data_type, ColumnType::Boolean));
@@ -450,7 +468,8 @@ fn compile_item_predicates(item: &QueryItem, table: &TableDescription) -> Result
                         };
                         col_predicates.push(compile_in_list(column, values, col_desc)?);
                     } else {
-                        bail!(
+                        engine_bail!(
+                            ErrorKind::InvalidFilterValue,
                             "invalid filter value for '{}': expected array, boolean, number, or string",
                             key
                         );
@@ -464,13 +483,22 @@ fn compile_item_predicates(item: &QueryItem, table: &TableDescription) -> Result
                     // a strictly wider question than the one asked and says
                     // nothing about it. The reference types the field `bool`.
                     let enabled = value.as_bool().ok_or_else(|| {
-                        anyhow!("filter '{}' must be a boolean, got {}", key, value)
+                        engine_err!(
+                            ErrorKind::InvalidFilterValue,
+                            "filter '{}' must be a boolean, got {}",
+                            key,
+                            value
+                        )
                     })?;
 
                     if enabled {
-                        table
-                            .column(column)
-                            .ok_or_else(|| anyhow!("gte_const column '{}' not found", column))?;
+                        table.column(column).ok_or_else(|| {
+                            engine_err!(
+                                ErrorKind::UnknownFilter,
+                                "gte_const column '{}' not found",
+                                column
+                            )
+                        })?;
                         col_predicates.push(ColumnPredicate {
                             column: column.to_string(),
                             predicate: Arc::new(crate::scan::predicate::RangeGtePredicate::new(
@@ -484,9 +512,13 @@ fn compile_item_predicates(item: &QueryItem, table: &TableDescription) -> Result
         }
 
         // Column filter
-        let col_desc = table
-            .column(key)
-            .ok_or_else(|| anyhow!("column '{}' not found in table", key))?;
+        let col_desc = table.column(key).ok_or_else(|| {
+            engine_err!(
+                ErrorKind::UnknownFilter,
+                "column '{}' not found in table",
+                key
+            )
+        })?;
 
         // A boolean only means anything on a boolean column. Anywhere else it
         // compiles to a comparison that cannot match, and the query comes back
@@ -508,7 +540,8 @@ fn compile_item_predicates(item: &QueryItem, table: &TableDescription) -> Result
             };
             col_predicates.push(compile_in_list(key, values, col_desc)?);
         } else {
-            bail!(
+            engine_bail!(
+                ErrorKind::InvalidFilterValue,
                 "invalid filter value for '{}': expected array, boolean, number, or string",
                 key
             );
@@ -538,8 +571,9 @@ fn ensure_hex_for_column(s: &str, column: &str, col_desc: &ColumnDescription) ->
         return Ok(());
     }
 
-    ensure!(
+    engine_ensure!(
         crate::query::parse::is_hex_literal(s),
+        ErrorKind::InvalidHex,
         "invalid hex value '{}' in filter on '{}': expected a 0x-prefixed, \
          even-length hex string",
         s,
@@ -578,7 +612,8 @@ fn split_binary_in_list(
     for v in values {
         if let Some(s) = v.as_str() {
             let bytes = parse_hex(s).ok_or_else(|| {
-                anyhow!(
+                engine_err!(
+                    ErrorKind::InvalidHex,
                     "invalid hex value '{}' in filter on '{}': expected a 0x-prefixed, \
                      even-length hex string",
                     s,
@@ -589,7 +624,8 @@ fn split_binary_in_list(
         } else if let Some(n) = v.as_u64() {
             numbers.push(n);
         } else {
-            bail!(
+            engine_bail!(
+                ErrorKind::InvalidFilterValue,
                 "invalid value {} in filter on '{}': expected a hex string or an unsigned integer",
                 v,
                 column
@@ -617,7 +653,8 @@ fn compile_in_list(
             let mut vals: Vec<String> = Vec::with_capacity(values.len());
             for v in values {
                 let s = v.as_str().ok_or_else(|| {
-                    anyhow!(
+                    engine_err!(
+                        ErrorKind::InvalidFilterValue,
                         "invalid value {} in filter on '{}': expected a string",
                         v,
                         column
@@ -682,8 +719,9 @@ fn compile_in_list(
         }
         ColumnType::FixedBinary(size) => {
             let (hex, numbers) = split_binary_in_list(column, values)?;
-            ensure!(
+            engine_ensure!(
                 numbers.is_empty(),
+                ErrorKind::InvalidFilterValue,
                 "invalid value in filter on '{}': a fixed_binary_{} column takes hex strings, \
                  not numbers",
                 column,
@@ -705,7 +743,8 @@ fn compile_in_list(
             let mut vals: Vec<u32> = Vec::with_capacity(values.len());
             for v in values {
                 let n = v.as_u64().ok_or_else(|| {
-                    anyhow!(
+                    engine_err!(
+                        ErrorKind::InvalidFilterValue,
                         "invalid value {} in filter on '{}': expected an unsigned integer",
                         v,
                         column
@@ -721,7 +760,8 @@ fn compile_in_list(
             let mut vals: Vec<String> = Vec::with_capacity(values.len());
             for v in values {
                 let s = v.as_str().ok_or_else(|| {
-                    anyhow!(
+                    engine_err!(
+                        ErrorKind::InvalidFilterValue,
                         "invalid value {} in filter on '{}': expected a string",
                         v,
                         column
@@ -732,7 +772,8 @@ fn compile_in_list(
             }
             Ok(col_list_contains_any_string(column, vals))
         }
-        _ => bail!(
+        _ => engine_bail!(
+            ErrorKind::InvalidFilterValue,
             "unsupported column type {:?} for IN-list filter on '{}'",
             col_desc.data_type,
             column
@@ -750,21 +791,30 @@ fn compile_discriminator(
     value: &serde_json::Value,
     columns: &std::collections::BTreeMap<String, String>,
 ) -> Result<Option<Vec<Vec<ColumnPredicate>>>> {
-    let arr = value
-        .as_array()
-        .ok_or_else(|| anyhow!("discriminator values must be an array"))?;
+    let arr = value.as_array().ok_or_else(|| {
+        engine_err!(
+            ErrorKind::InvalidFilterValue,
+            "discriminator values must be an array"
+        )
+    })?;
 
     // Parse hex strings and group by byte length
     let mut by_length: std::collections::BTreeMap<usize, Vec<Vec<u8>>> =
         std::collections::BTreeMap::new();
 
     for v in arr {
-        let s = v
-            .as_str()
-            .ok_or_else(|| anyhow!("discriminator value must be a string"))?;
-        let bytes = parse_hex(s).ok_or_else(|| anyhow!("invalid hex in discriminator: {}", s))?;
-        ensure!(
+        let s = v.as_str().ok_or_else(|| {
+            engine_err!(
+                ErrorKind::InvalidFilterValue,
+                "discriminator value must be a string"
+            )
+        })?;
+        let bytes = parse_hex(s).ok_or_else(|| {
+            engine_err!(ErrorKind::InvalidHex, "invalid hex in discriminator: {}", s)
+        })?;
+        engine_ensure!(
             bytes.len() <= MAX_DISCRIMINATOR_BYTES,
+            ErrorKind::DiscriminatorTooLong,
             "discriminator max {} bytes, got {}",
             MAX_DISCRIMINATOR_BYTES,
             bytes.len()
@@ -778,9 +828,13 @@ fn compile_discriminator(
     let mut groups = Vec::new();
 
     for (len, values) in by_length {
-        let col_name = columns
-            .get(&len.to_string())
-            .ok_or_else(|| anyhow!("no discriminator column for length {}", len))?;
+        let col_name = columns.get(&len.to_string()).ok_or_else(|| {
+            engine_err!(
+                ErrorKind::InvalidFilterValue,
+                "no discriminator column for length {}",
+                len
+            )
+        })?;
 
         let array: Arc<dyn Array> = match len {
             1 => Arc::new(UInt8Array::from_iter_values(
@@ -835,14 +889,18 @@ fn compile_bloom_filter(
     num_bytes: usize,
     num_hashes: usize,
 ) -> Result<ColumnPredicate> {
-    let arr = value
-        .as_array()
-        .ok_or_else(|| anyhow!("bloom filter values must be an array"))?;
+    let arr = value.as_array().ok_or_else(|| {
+        engine_err!(
+            ErrorKind::InvalidFilterValue,
+            "bloom filter values must be an array"
+        )
+    })?;
 
     let mut needles: Vec<Vec<u8>> = Vec::with_capacity(arr.len());
     for v in arr {
         let s = v.as_str().ok_or_else(|| {
-            anyhow!(
+            engine_err!(
+                ErrorKind::InvalidFilterValue,
                 "invalid value {} in filter on '{}': expected a string",
                 v,
                 column
@@ -864,13 +922,20 @@ fn compile_range_gte(
     column: &str,
     table: &TableDescription,
 ) -> Result<Option<ColumnPredicate>> {
-    let col_desc = table
-        .column(column)
-        .ok_or_else(|| anyhow!("range column '{}' not found", column))?;
+    let col_desc = table.column(column).ok_or_else(|| {
+        engine_err!(
+            ErrorKind::UnknownFilter,
+            "range column '{}' not found",
+            column
+        )
+    })?;
 
-    let n = value
-        .as_u64()
-        .ok_or_else(|| anyhow!("range filter value must be a number"))?;
+    let n = value.as_u64().ok_or_else(|| {
+        engine_err!(
+            ErrorKind::InvalidFilterValue,
+            "range filter value must be a number"
+        )
+    })?;
 
     match col_desc.data_type {
         ColumnType::UInt64 => Ok(Some(ColumnPredicate {
@@ -879,7 +944,10 @@ fn compile_range_gte(
                 ScalarValue::UInt64(n),
             )),
         })),
-        _ => bail!("range filter only supports UInt64 columns"),
+        _ => engine_bail!(
+            ErrorKind::InvalidFilterValue,
+            "range filter only supports UInt64 columns"
+        ),
     }
 }
 
@@ -889,13 +957,20 @@ fn compile_range_lte(
     column: &str,
     table: &TableDescription,
 ) -> Result<Option<ColumnPredicate>> {
-    let col_desc = table
-        .column(column)
-        .ok_or_else(|| anyhow!("range column '{}' not found", column))?;
+    let col_desc = table.column(column).ok_or_else(|| {
+        engine_err!(
+            ErrorKind::UnknownFilter,
+            "range column '{}' not found",
+            column
+        )
+    })?;
 
-    let n = value
-        .as_u64()
-        .ok_or_else(|| anyhow!("range filter value must be a number"))?;
+    let n = value.as_u64().ok_or_else(|| {
+        engine_err!(
+            ErrorKind::InvalidFilterValue,
+            "range filter value must be a number"
+        )
+    })?;
 
     match col_desc.data_type {
         ColumnType::UInt64 => Ok(Some(ColumnPredicate {
@@ -904,7 +979,10 @@ fn compile_range_lte(
                 ScalarValue::UInt64(n),
             )),
         })),
-        _ => bail!("range filter only supports UInt64 columns"),
+        _ => engine_bail!(
+            ErrorKind::InvalidFilterValue,
+            "range filter only supports UInt64 columns"
+        ),
     }
 }
 
@@ -1070,13 +1148,18 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires external chunk data"]
     fn test_end_to_end_evm_logs_scan() {
+        if !crate::testing::chunks_present() {
+            return;
+        }
+
         let meta = evm_metadata();
         let json = br#"{
             "type": "evm",
             "fromBlock": 0,
             "fields": {
-                "log": { "address": true, "topic0": true }
+                "log": { "address": true, "topics": true }
             },
             "logs": [{
                 "topic0": ["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"]
@@ -1094,12 +1177,11 @@ mod tests {
         let logs_plan = &plan.table_plans[0];
         let table_desc = meta.table("logs").unwrap();
 
-        // Build a ScanRequest from the plan
-        let output_cols: Vec<&str> = logs_plan
-            .output_columns
-            .iter()
-            .map(|s| s.as_str())
-            .collect();
+        // Build a ScanRequest from the plan. `output_columns` are logical names,
+        // and `topics` is a roll rather than a column of its own.
+        let physical =
+            crate::output::columns::physical_output_columns(&logs_plan.output_columns, table_desc);
+        let output_cols: Vec<&str> = physical.iter().map(|s| s.as_str()).collect();
         let pred_refs: Vec<&crate::scan::predicate::RowPredicate> =
             logs_plan.predicates.iter().collect();
 
@@ -1119,18 +1201,25 @@ mod tests {
             "should not match all rows"
         );
 
-        // Verify output only has the requested columns
+        // Verify output only has the requested columns. `topics` is a roll, so
+        // it projects the four columns it gathers rather than one of its own.
         for batch in &batches {
-            assert_eq!(batch.num_columns(), 2);
-            assert!(batch.schema().field_with_name("address").is_ok());
-            assert!(batch.schema().field_with_name("topic0").is_ok());
+            assert_eq!(batch.num_columns(), 5);
+            for column in ["address", "topic0", "topic1", "topic2", "topic3"] {
+                assert!(batch.schema().field_with_name(column).is_ok());
+            }
         }
     }
 
     /// Regression: numeric scalar filters were always compiled as UInt64,
     /// causing type mismatch on UInt32 columns → zero results.
     #[test]
+    #[ignore = "requires external chunk data"]
     fn test_numeric_filter_on_uint32_column() {
+        if !crate::testing::chunks_present() {
+            return;
+        }
+
         let meta = solana_metadata();
         // d4 is a UInt32 column, and one the catalog declares filterable. The
         // value comes from the chunk so the test does not turn on a guess.
@@ -1184,7 +1273,12 @@ mod tests {
     /// Regression: JSON numeric arrays like [0, 1] were silently compiled to
     /// empty IN-lists because compile_in_list only parsed string values.
     #[test]
+    #[ignore = "requires external chunk data"]
     fn test_numeric_in_list_filter() {
+        if !crate::testing::chunks_present() {
+            return;
+        }
+
         let meta = solana_metadata();
         let d4 = first_d4_value();
         let json = format!(
@@ -1233,7 +1327,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires external chunk data"]
     fn test_end_to_end_solana_instructions_scan() {
+        if !crate::testing::chunks_present() {
+            return;
+        }
+
         let meta = solana_metadata();
         let json = br#"{
             "type": "solana",

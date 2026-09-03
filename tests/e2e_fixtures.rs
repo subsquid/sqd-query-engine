@@ -1,9 +1,8 @@
 //! End-to-end fixture tests: run queries against parquet chunks and compare
 //! output with expected results from the legacy engine.
 //!
-//! Fixture data lives at `tests/fixtures/` (a symlink to the legacy repo's
-//! `crates/query/fixtures/`) and is not in the repository, so a checkout without
-//! it runs no comparison at all — the whole suite says so once and stops.
+//! Fixture data is supplied externally under `tests/fixtures/`. These tests are
+//! ignored by the portable suite and selected by `make test-data`.
 //!
 //! Once the tree *is* there, a declared fixture that is missing from it is a
 //! failure, not a skip: a test that quietly does nothing reads exactly like a
@@ -38,12 +37,8 @@ fn run_fixture_query(
     Ok(serde_json::Value::Array(result))
 }
 
-/// Whether the fixture tree is checked out at all. Absent, there is nothing to
-/// compare against and every test in the file would fail for the same reason.
-///
-/// Skipping the suite is right for a plain checkout and wrong for CI, where a
-/// green run is read as "the conformance suite passed". `SQD_REQUIRE_FIXTURES=1`
-/// says coverage was expected, and makes an absent tree a failure.
+/// Whether the external fixture tree is available. The data-backed target sets
+/// `SQD_REQUIRE_FIXTURES=1`, making an absent tree a failure.
 fn fixture_tree_is_present() -> bool {
     if fixture_dir().join("ethereum").join("chunk").is_dir() {
         return true;
@@ -143,6 +138,7 @@ macro_rules! solana_fixture {
     ($name:ident) => {
         paste::paste! {
             #[test]
+            #[ignore = "requires external fixture data"]
             fn [<solana_ $name>]() {
                 test_fixture("solana", "metadata/solana.yaml", stringify!($name));
             }
@@ -174,6 +170,7 @@ macro_rules! evm_fixture {
     ($name:ident) => {
         paste::paste! {
             #[test]
+            #[ignore = "requires external fixture data"]
             fn [<evm_ $name>]() {
                 test_fixture("ethereum", "metadata/evm.yaml", stringify!($name));
             }
@@ -183,6 +180,7 @@ macro_rules! evm_fixture {
     ($name:ident, $dir:expr) => {
         paste::paste! {
             #[test]
+            #[ignore = "requires external fixture data"]
             fn [<evm_ $name>]() {
                 test_fixture("ethereum", "metadata/evm.yaml", $dir);
             }
@@ -246,6 +244,7 @@ macro_rules! bitcoin_fixture {
     ($name:ident) => {
         paste::paste! {
             #[test]
+            #[ignore = "requires external fixture data"]
             fn [<bitcoin_ $name>]() {
                 test_fixture("bitcoin", "metadata/bitcoin.yaml", stringify!($name));
             }
@@ -270,6 +269,7 @@ macro_rules! optimism_fixture {
     ($name:ident) => {
         paste::paste! {
             #[test]
+            #[ignore = "requires external fixture data"]
             fn [<optimism_ $name>]() {
                 test_fixture("optimism", "metadata/evm.yaml", stringify!($name));
             }
@@ -287,6 +287,7 @@ macro_rules! binance_fixture {
     ($name:ident) => {
         paste::paste! {
             #[test]
+            #[ignore = "requires external fixture data"]
             fn [<binance_ $name>]() {
                 test_fixture("binance", "metadata/evm.yaml", stringify!($name));
             }
@@ -309,6 +310,7 @@ macro_rules! tempo_fixture {
     ($name:ident) => {
         paste::paste! {
             #[test]
+            #[ignore = "requires external fixture data"]
             fn [<tempo_ $name>]() {
                 test_fixture("tempo", "metadata/evm.yaml", stringify!($name));
             }
@@ -328,6 +330,7 @@ macro_rules! kusama_fixture {
     ($name:ident) => {
         paste::paste! {
             #[test]
+            #[ignore = "requires external fixture data"]
             fn [<kusama_ $name>]() {
                 test_fixture("kusama", "metadata/substrate.yaml", stringify!($name));
             }
@@ -351,6 +354,7 @@ macro_rules! moonbeam_fixture {
     ($name:ident) => {
         paste::paste! {
             #[test]
+            #[ignore = "requires external fixture data"]
             fn [<moonbeam_ $name>]() {
                 test_fixture("moonbeam", "metadata/substrate.yaml", stringify!($name));
             }
@@ -383,6 +387,7 @@ macro_rules! hyperliquid_fills_fixture {
     ($name:ident) => {
         paste::paste! {
             #[test]
+            #[ignore = "requires external fixture data"]
             fn [<hyperliquid_ $name>]() {
                 test_fixture("hyperliquid", "metadata/hyperliquid_fills.yaml", stringify!($name));
             }
@@ -402,6 +407,7 @@ macro_rules! hyperliquid_replica_cmds_fixture {
     ($name:ident) => {
         paste::paste! {
             #[test]
+            #[ignore = "requires external fixture data"]
             fn [<hyperliquid_replica_cmds_ $name>]() {
                 test_fixture("hyperliquid_replica_cmds", "metadata/hyperliquid_replica_cmds.yaml", stringify!($name));
             }
@@ -427,6 +433,7 @@ hyperliquid_replica_cmds_fixture!(order_action);
 /// are on disk waiting for the dataset to be supported, and the list is meant to
 /// shrink.
 #[test]
+#[ignore = "requires external fixture data"]
 fn fixture_declarations_match_the_fixture_tree() {
     // Datasets the engine does not serve: `tron` was never ported, `fuel` was
     // dropped. Their fixtures stay in the shared tree for the reference

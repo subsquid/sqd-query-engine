@@ -16,6 +16,7 @@ YAML files live in [`metadata/`](../../metadata/).
    - [System Columns](#system-columns)
 4. [Relations](#relations)
 5. [Filters](#filters)
+   - [Fields](#fields)
 6. [Special Filters](#special-filters)
 7. [Virtual Fields](#virtual-fields)
 8. [Field Groups (Polymorphic Output)](#field-groups-polymorphic-output)
@@ -50,7 +51,7 @@ query_aliases:                   # Optional: virtual query names mapped to exist
 | Property | Type | Required | Description |
 |---|---|---|---|
 | `query_name` | string | no | Name used in the JSON query filter (e.g., `"logs"`, `"stateDiffs"`, `"tokenBalances"`). Defaults to the table key. Used as the JSON array key in output. |
-| `field_name` | string | no | Name used in the JSON query `fields` object (e.g., `"log"`, `"stateDiff"`, `"tokenBalance"`). Defaults to the table key. |
+| `field_name` | string | no | Name used in the JSON query `fields` object (e.g., `"log"`, `"stateDiff"`, `"tokenBalance"`). No default: a table that declares none cannot be named in `fields` at all. |
 
 The distinction matters because queries use plural names for filters (`"logs": [...]`) and singular for field selection (`"fields": { "log": { "address": true } }`).
 
@@ -289,6 +290,34 @@ sends — which is right for `blocks`, and a silent mistake anywhere else, since
 `deny_unknown_fields` catches a misspelled key but not an absent one. Writing
 `filters: []` says it on purpose.
 
+### Fields
+
+The same idea on the way out. Every table declares which fields a client may
+select, and a `fields` key naming anything else is rejected even when a column of
+that name exists.
+
+```yaml
+logs:
+  fields: [ log_index, transaction_index, transaction_hash, address, data, topics ]
+```
+
+Each entry names a non-`system` column, a virtual field, or a field-group request
+key. `topics` above is a virtual field; `block_number` is deliberately absent,
+because it is already in the block header and the column exists to group, join and
+order rather than to be read.
+
+Deriving the list instead — "every non-`system` column" — publishes every column
+the table carries for filtering, grouping, joining or rolling, and makes the
+physical layout the wire contract: a client that pins `topic0` today breaks the
+day the archiver stops writing it, on a field the catalog never promised. Marking
+those columns `system` is not the alternative, because a `system` column
+contributes no weight, and hiding `topic0…3` that way would drop the `topics`
+roll out of the response-budget model.
+
+A table that declares a `field_name` must declare a non-empty list; the validator
+refuses one that does not. A table with no `field_name` cannot be named in
+`fields`, so it needs none.
+
 ---
 
 ## Special Filters
@@ -454,8 +483,10 @@ tables:
   blocks:
     block_number_column: number
     parent_hash_column: parent_hash
+    field_name: block
     sort_key: [number]
     filters: []
+    fields: [number, hash, parent_hash, timestamp]
     columns:
       number:
         type: uint64
@@ -475,6 +506,7 @@ tables:
     item_order_keys: [transaction_index]
     sort_key: [to, block_number, transaction_index]
     filters: [to]
+    fields: [transaction_index, to, value, input]
     columns:
       block_number:
         type: uint64

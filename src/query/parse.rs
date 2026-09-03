@@ -1,5 +1,7 @@
+use crate::error::ErrorKind;
 use crate::metadata::{DatasetDescription, QueryAlias, TableDescription};
-use anyhow::{anyhow, bail, ensure, Result};
+use crate::{engine_bail, engine_ensure, engine_err};
+use anyhow::Result;
 use std::collections::HashMap;
 
 /// A parsed query ready for compilation into an execution plan.
@@ -70,6 +72,21 @@ pub fn parse_hex(s: &str) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// `P-MAX-ITEM-REQUESTS` (spec/09-parameters.md §9.1). Each item request is an
+/// independent scan of its table.
+const MAX_ITEM_REQUESTS: usize = 100;
+
+/// `P-MAX-REQUEST-BYTES` (spec/09-parameters.md §9.1). Checked against the raw
+/// body, before it is parsed: the parse itself is the first thing a large
+/// request makes the engine pay for.
+const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
+
+/// `P-MAX-IN-LIST` (spec/09-parameters.md §9.1). A filter list becomes a hash set
+/// built before a single row is read, and the request cap alone does not bound
+/// it: a hundred item requests each carrying a million addresses is well-formed
+/// under every other rule (INV-Q13).
+const MAX_IN_LIST: usize = 100_000;
+
 const KNOWN_TOP_KEYS: &[&str] = &[
     "type",
     "fromBlock",
@@ -90,26 +107,40 @@ fn parse_block_bound(value: Option<&serde_json::Value>, key: &str) -> Result<Opt
     if value.is_null() {
         return Ok(None);
     }
-    value
-        .as_u64()
-        .map(Some)
-        .ok_or_else(|| anyhow!("'{}' must be an unsigned integer, got {}", key, value))
+    value.as_u64().map(Some).ok_or_else(|| {
+        engine_err!(
+            ErrorKind::InvalidBlockNumber,
+            "'{}' must be an unsigned integer, got {}",
+            key,
+            value
+        )
+    })
 }
 
 /// Parse a JSON query against a dataset description.
 pub fn parse_query(json_bytes: &[u8], metadata: &DatasetDescription) -> Result<Query> {
-    let raw: serde_json::Value = serde_json::from_slice(json_bytes)?;
+    engine_ensure!(
+        json_bytes.len() <= MAX_REQUEST_BYTES,
+        ErrorKind::RequestTooLarge,
+        "request is {} bytes, at most {} allowed",
+        json_bytes.len(),
+        MAX_REQUEST_BYTES
+    );
+
+    let raw: serde_json::Value = serde_json::from_slice(json_bytes)
+        .map_err(|e| engine_err!(ErrorKind::MalformedRequest, "request is not JSON: {}", e))?;
     let obj = raw
         .as_object()
-        .ok_or_else(|| anyhow!("query must be a JSON object"))?;
+        .ok_or_else(|| engine_err!(ErrorKind::MalformedRequest, "query must be a JSON object"))?;
 
     // Validate type
     let dataset_type = obj
         .get("type")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("missing 'type' field"))?;
-    ensure!(
+        .ok_or_else(|| engine_err!(ErrorKind::UnknownDataset, "missing 'type' field"))?;
+    engine_ensure!(
         dataset_type == metadata.name,
+        ErrorKind::UnknownDataset,
         "query type '{}' doesn't match metadata '{}'",
         dataset_type,
         metadata.name
@@ -119,7 +150,11 @@ pub fn parse_query(json_bytes: &[u8], metadata: &DatasetDescription) -> Result<Q
     let from_block = parse_block_bound(obj.get("fromBlock"), "fromBlock")?.unwrap_or(0);
     let to_block = parse_block_bound(obj.get("toBlock"), "toBlock")?;
     if let Some(to) = to_block {
-        ensure!(from_block <= to, "'toBlock' must be >= 'fromBlock'");
+        engine_ensure!(
+            from_block <= to,
+            ErrorKind::InvalidBlockRange,
+            "'toBlock' must be >= 'fromBlock'"
+        );
     }
 
     // A wrong type here silently picks one of two very different answers — every
@@ -127,16 +162,26 @@ pub fn parse_query(json_bytes: &[u8], metadata: &DatasetDescription) -> Result<Q
     // the block bounds next to it.
     let include_all_blocks = match obj.get("includeAllBlocks") {
         None | Some(serde_json::Value::Null) => false,
-        Some(v) => v
-            .as_bool()
-            .ok_or_else(|| anyhow!("'includeAllBlocks' must be a boolean, got {}", v))?,
+        Some(v) => v.as_bool().ok_or_else(|| {
+            engine_err!(
+                ErrorKind::MalformedRequest,
+                "'includeAllBlocks' must be a boolean, got {}",
+                v
+            )
+        })?,
     };
 
     let parent_block_hash = match obj.get("parentBlockHash") {
         None | Some(serde_json::Value::Null) => None,
         Some(v) => Some(
             v.as_str()
-                .ok_or_else(|| anyhow!("'parentBlockHash' must be a string, got {}", v))?
+                .ok_or_else(|| {
+                    engine_err!(
+                        ErrorKind::MalformedRequest,
+                        "'parentBlockHash' must be a string, got {}",
+                        v
+                    )
+                })?
                 .to_string(),
         ),
     };
@@ -181,7 +226,11 @@ pub fn parse_query(json_bytes: &[u8], metadata: &DatasetDescription) -> Result<Q
             // Query alias → resolve to the real table
             (alias.table.as_str(), Some(key.as_str()))
         } else {
-            return Err(anyhow!("unknown table filter '{}' in query", key));
+            engine_bail!(
+                ErrorKind::UnknownTable,
+                "unknown table filter '{}' in query",
+                key
+            );
         };
 
         let table_desc = metadata.table(table_name).unwrap();
@@ -192,9 +241,13 @@ pub fn parse_query(json_bytes: &[u8], metadata: &DatasetDescription) -> Result<Q
                 .or_else(|| metadata.query_aliases.get(&camel_to_snake(an)))
         });
 
-        let arr = value
-            .as_array()
-            .ok_or_else(|| anyhow!("'{}' must be an array of filter items", key))?;
+        let arr = value.as_array().ok_or_else(|| {
+            engine_err!(
+                ErrorKind::MalformedRequest,
+                "'{}' must be an array of filter items",
+                key
+            )
+        })?;
 
         let mut table_items = Vec::new();
         for item_value in arr {
@@ -210,10 +263,12 @@ pub fn parse_query(json_bytes: &[u8], metadata: &DatasetDescription) -> Result<Q
 
     // Validate total item count
     let total_items: usize = items.values().map(|v| v.len()).sum();
-    ensure!(
-        total_items <= 100,
-        "query contains {} item requests, max 100 allowed",
-        total_items
+    engine_ensure!(
+        total_items <= MAX_ITEM_REQUESTS,
+        ErrorKind::TooManyItemRequests,
+        "query contains {} item requests, max {} allowed",
+        total_items,
+        MAX_ITEM_REQUESTS
     );
 
     Ok(Query {
@@ -237,8 +292,9 @@ fn parse_fields(
     // `"fields": []` would otherwise answer 200 with every projection the client
     // asked for missing, which reads as "this dataset has no such columns".
     if let Some(value) = fields_value {
-        ensure!(
+        engine_ensure!(
             value.is_null() || value.is_object(),
+            ErrorKind::MalformedRequest,
             "'fields' must be an object, got {}",
             value
         );
@@ -253,15 +309,29 @@ fn parse_fields(
         let table_name = field_name_to_table
             .get(key.as_str())
             .copied()
-            .ok_or_else(|| anyhow!("unknown field group '{}' in query", key))?;
+            .ok_or_else(|| {
+                engine_err!(
+                    ErrorKind::UnknownFieldGroup,
+                    "unknown field group '{}' in query",
+                    key
+                )
+            })?;
 
-        let field_obj = value
-            .as_object()
-            .ok_or_else(|| anyhow!("fields.{} must be an object", key))?;
+        let field_obj = value.as_object().ok_or_else(|| {
+            engine_err!(
+                ErrorKind::MalformedRequest,
+                "fields.{} must be an object",
+                key
+            )
+        })?;
 
-        let table_desc = metadata
-            .table(table_name)
-            .ok_or_else(|| anyhow!("field group '{}' targets unknown table", key))?;
+        let table_desc = metadata.table(table_name).ok_or_else(|| {
+            engine_err!(
+                ErrorKind::UnknownFieldGroup,
+                "field group '{}' targets unknown table",
+                key
+            )
+        })?;
 
         // Preserve insertion order from JSON for deterministic output key ordering
         let mut columns = Vec::new();
@@ -272,8 +342,9 @@ fn parse_fields(
             // `{"logIndx": false}` is as much a typo as `{"logIndx": true}`, and
             // answering it with a 200 sends the client looking for the bug
             // everywhere except in its own request.
-            ensure!(
+            engine_ensure!(
                 table_desc.is_selectable_field(&column),
+                ErrorKind::UnknownField,
                 "unknown field '{}' in fields.{}",
                 field_key,
                 key
@@ -283,7 +354,8 @@ fn parse_fields(
             // `{"logIndx": true}`, and treating it as "not selected" answers with
             // a 200 that is missing a column the client asked for.
             let selected = selected.as_bool().ok_or_else(|| {
-                anyhow!(
+                engine_err!(
+                    ErrorKind::MalformedRequest,
                     "field '{}' in fields.{} must be a boolean, got {}",
                     field_key,
                     key,
@@ -308,9 +380,12 @@ fn parse_query_item(
     table_name: &str,
     alias: Option<&QueryAlias>,
 ) -> Result<QueryItem> {
-    let obj = value
-        .as_object()
-        .ok_or_else(|| anyhow!("filter item must be a JSON object"))?;
+    let obj = value.as_object().ok_or_else(|| {
+        engine_err!(
+            ErrorKind::MalformedRequest,
+            "filter item must be a JSON object"
+        )
+    })?;
 
     let mut filters = Vec::new();
     let mut relations = Vec::new();
@@ -321,16 +396,38 @@ fn parse_query_item(
     for (key, val) in obj {
         let snake_key = camel_to_snake(key);
 
-        // Check if it's a relation flag (boolean true + known relation)
+        // Every filter kind that takes a list turns it into a set before any
+        // data is read, so the bound is on the list itself rather than on the
+        // kind the key resolves to.
+        if let Some(values) = val.as_array() {
+            engine_ensure!(
+                values.len() <= MAX_IN_LIST,
+                ErrorKind::RequestTooLarge,
+                "filter '{}' carries {} values, at most {} allowed",
+                key,
+                values.len(),
+                MAX_IN_LIST
+            );
+        }
+
+        // A known relation is a boolean flag. Diagnose a malformed value as
+        // such instead of letting it fall through to the unknown-filter path.
         let is_relation = table.relations.contains_key(&snake_key)
             || alias_relations
                 .map(|r| r.contains_key(&snake_key))
                 .unwrap_or(false);
-        if val.as_bool() == Some(true) && is_relation {
-            relations.push(snake_key);
-            continue;
-        }
-        if val.as_bool() == Some(false) && is_relation {
+        if is_relation {
+            let enabled = val.as_bool().ok_or_else(|| {
+                engine_err!(
+                    ErrorKind::InvalidFilterValue,
+                    "relation '{}' of table '{}' must be a boolean",
+                    key,
+                    table_name
+                )
+            })?;
+            if enabled {
+                relations.push(snake_key);
+            }
             continue;
         }
 
@@ -358,8 +455,9 @@ fn parse_query_item(
             None => &table.filters,
         };
         if declared.contains(&snake_key) {
-            ensure!(
+            engine_ensure!(
                 table.columns.contains_key(&snake_key),
+                ErrorKind::UnknownFilter,
                 "filter '{}' of table '{}' names no column",
                 snake_key,
                 table_name
@@ -368,7 +466,8 @@ fn parse_query_item(
             continue;
         }
 
-        bail!(
+        engine_bail!(
+            ErrorKind::UnknownFilter,
             "unknown filter '{}' (resolved: '{}') for table '{}'",
             key,
             snake_key,

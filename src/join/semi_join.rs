@@ -1,9 +1,11 @@
-use anyhow::{anyhow, Result};
+use crate::engine_err;
+use crate::error::ErrorKind;
+use anyhow::Result;
 use arrow::array::*;
 use arrow::compute;
 use arrow::datatypes::SchemaRef;
-use std::borrow::Borrow;
 use rustc_hash::FxHashSet as HashSet;
+use std::borrow::Borrow;
 
 /// A composite key for joining on multiple columns.
 #[derive(Clone, Eq, PartialEq, Hash)]
@@ -20,9 +22,13 @@ fn resolve_key_indices(schema: &SchemaRef, key_columns: &[&str]) -> Result<Vec<u
     key_columns
         .iter()
         .map(|name| {
-            schema
-                .index_of(name)
-                .map_err(|_| anyhow!("key column '{}' not found in schema", name))
+            schema.index_of(name).map_err(|_| {
+                engine_err!(
+                    ErrorKind::ColumnNotFound,
+                    "key column '{}' not found in schema",
+                    name
+                )
+            })
         })
         .collect()
 }
@@ -60,22 +66,36 @@ impl TypedExtractor {
                 | arrow::datatypes::DataType::Int32
                 | arrow::datatypes::DataType::UInt16 => Self::ListInt32(col_idx),
                 child_dt => {
-                    return Err(anyhow!(
+                    return Err(engine_err!(
+                        ErrorKind::UnsupportedKeyType,
                         "unsupported list element type for join key: {:?}",
                         child_dt
                     ))
                 }
             },
-            dt => return Err(anyhow!("unsupported join key column type: {:?}", dt)),
+            dt => {
+                return Err(engine_err!(
+                    ErrorKind::UnsupportedKeyType,
+                    "unsupported join key column type: {:?}",
+                    dt
+                ))
+            }
         })
     }
 
     #[inline]
     fn col_idx(&self) -> usize {
         match self {
-            Self::UInt32(i) | Self::UInt64(i) | Self::Int32(i) | Self::Int64(i)
-            | Self::Utf8(i) | Self::UInt16(i) | Self::UInt8(i) | Self::Boolean(i)
-            | Self::FixedBinary(i) | Self::ListInt32(i) => *i,
+            Self::UInt32(i)
+            | Self::UInt64(i)
+            | Self::Int32(i)
+            | Self::Int64(i)
+            | Self::Utf8(i)
+            | Self::UInt16(i)
+            | Self::UInt8(i)
+            | Self::Boolean(i)
+            | Self::FixedBinary(i)
+            | Self::ListInt32(i) => *i,
         }
     }
 
@@ -127,7 +147,10 @@ impl TypedExtractor {
                 buf.extend_from_slice(a.value(row));
             }
             Self::ListInt32(_) => {
-                let a = col.as_any().downcast_ref::<GenericListArray<i32>>().unwrap();
+                let a = col
+                    .as_any()
+                    .downcast_ref::<GenericListArray<i32>>()
+                    .unwrap();
                 let values = a.value(row);
                 let len = values.len() as u32;
                 buf.extend_from_slice(&len.to_le_bytes());
@@ -152,7 +175,12 @@ impl TypedExtractor {
 
 /// Write a composite key into `buf`. Returns false if any column is null (row skipped).
 #[inline]
-fn write_key(buf: &mut Vec<u8>, batch: &RecordBatch, row: usize, extractors: &[TypedExtractor]) -> bool {
+fn write_key(
+    buf: &mut Vec<u8>,
+    batch: &RecordBatch,
+    row: usize,
+    extractors: &[TypedExtractor],
+) -> bool {
     buf.clear();
     for ext in extractors {
         if !ext.append(buf, batch, row) {
@@ -434,7 +462,8 @@ mod tests {
             RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(vec![1.0, 2.0]))])
                 .unwrap();
 
-        let err = semi_join(&[batch.clone()], &["x"], &[batch], &["x"]);
+        let rows = [batch];
+        let err = semi_join(&rows, &["x"], &rows, &["x"]);
         assert!(err.is_err(), "Float64 key should be rejected");
         assert!(
             err.unwrap_err().to_string().contains("unsupported"),
@@ -579,7 +608,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires external chunk data"]
     fn test_semi_join_with_real_data() {
+        if !crate::testing::chunks_present() {
+            return;
+        }
+
         // Test against real Solana data
         use crate::scan::ParquetTable;
         use std::path::Path;

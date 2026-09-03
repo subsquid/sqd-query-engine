@@ -1,7 +1,7 @@
 mod arrow_out;
 mod assembly;
 mod block_index;
-mod columns;
+pub(crate) mod columns;
 mod encoder;
 mod fork;
 mod row_writer;

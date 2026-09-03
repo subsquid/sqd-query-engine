@@ -26,7 +26,7 @@ use crate::scan::predicate::{evaluate_predicates_on_batch, RowPredicate};
 use crate::scan::{
     ChunkReader, HierarchicalFilter, HierarchicalMode, KeyFilter, ParquetChunkReader, ScanRequest,
 };
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use arrow::record_batch::RecordBatch;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet as HashSet};
@@ -73,14 +73,17 @@ fn accumulate_wave_weight(
         for i in 0..batch.num_rows() {
             if let Some(block) = get_block_number(bn.as_ref(), i) {
                 let mut row_weight = fixed;
-                for wc in &wc_arrays {
-                    if let Some(arr) = wc {
-                        row_weight += get_weight_value(*arr, i);
-                    }
+                for arr in wc_arrays.iter().flatten() {
+                    row_weight = row_weight.saturating_add(get_weight_value(*arr, i));
                 }
-                *cumulative += row_weight;
+                *cumulative = cumulative.saturating_add(row_weight);
                 if seen.insert(block) {
-                    *cumulative += external.get(&block).copied().unwrap_or(0) + header_fixed;
+                    let block_total = external
+                        .get(&block)
+                        .copied()
+                        .unwrap_or(0)
+                        .saturating_add(header_fixed);
+                    *cumulative = cumulative.saturating_add(block_total);
                 }
             }
         }
@@ -245,9 +248,13 @@ fn execute_chunk_fmt(
 
     for &tp_idx in &proc_order {
         let table_plan = &plan.table_plans[tp_idx];
-        let table_desc = metadata
-            .table(&table_plan.table)
-            .ok_or_else(|| anyhow!("table '{}' not found", table_plan.table))?;
+        let table_desc = metadata.table(&table_plan.table).ok_or_else(|| {
+            crate::engine_err!(
+                crate::error::ErrorKind::TableNotFound,
+                "table '{}' not found",
+                table_plan.table
+            )
+        })?;
 
         if !chunk.has_table(&table_plan.table) {
             continue;
@@ -674,9 +681,8 @@ fn execute_chunk_fmt(
     // 2. Read blocks table header
     let t_blocks = timer!();
     let block_table_desc = metadata.table(&plan.block_table);
-    let block_batches = if chunk.has_table(&plan.block_table) && block_table_desc.is_some() {
-        let block_desc = block_table_desc.unwrap();
-
+    let readable_block_table = block_table_desc.filter(|_| chunk.has_table(&plan.block_table));
+    let block_batches = if let Some(block_desc) = readable_block_table {
         // Block number + requested output columns + the weight companions those
         // columns declare (see `block_scan_columns`).
         let bn_col = block_desc.block_number_column.as_str();
@@ -1188,7 +1194,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires external chunk data"]
     fn test_arrow_parity_and_projection() {
+        if !crate::testing::chunks_present() {
+            return;
+        }
+
         let meta = evm_metadata();
         let q = br#"{
             "type": "evm", "fromBlock": 0,
@@ -1237,7 +1248,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires external chunk data"]
     fn test_arrow_weight_trim_parity() {
+        if !crate::testing::chunks_present() {
+            return;
+        }
+
         // Full-scan logs exceed the response budget on this chunk, so the JSON
         // path trims to weight-limited blocks. Flat Arrow must trim identically.
         let meta = evm_metadata();
@@ -1267,7 +1283,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires external chunk data"]
     fn test_arrow_multisource_dedup() {
+        if !crate::testing::chunks_present() {
+            return;
+        }
+
         // `transactions` is pulled by BOTH the traces and stateDiffs relations.
         // JSON merges+dedups into one array; flat Arrow must do the same.
         let meta = evm_metadata();
@@ -1301,7 +1322,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires external chunk data"]
     fn test_arrow_solana_base58_and_list() {
+        if !crate::testing::chunks_present() {
+            return;
+        }
+
         // Solana: base58 columns (not 0x-hex) must stay Utf8 under `binary`, and
         // List<UInt16> instructionAddress must round-trip. Parity with JSON.
         let meta = solana_metadata();
@@ -1332,7 +1358,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires external chunk data"]
     fn test_arrow_binary_columns() {
+        if !crate::testing::chunks_present() {
+            return;
+        }
+
         use arrow::datatypes::DataType;
         let meta = evm_metadata();
         let q = br#"{
@@ -1403,7 +1434,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires external chunk data"]
     fn test_execute_solana_instructions() {
+        if !crate::testing::chunks_present() {
+            return;
+        }
+
         let meta = solana_metadata();
         let json = br#"{
             "type": "solana",
@@ -1447,7 +1483,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires external chunk data"]
     fn test_execute_evm_logs() {
+        if !crate::testing::chunks_present() {
+            return;
+        }
+
         let meta = evm_metadata();
         let json = br#"{
             "type": "evm",
@@ -1487,7 +1528,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires external chunk data"]
     fn test_execute_with_relations() {
+        if !crate::testing::chunks_present() {
+            return;
+        }
+
         let meta = solana_metadata();
         let json = br#"{
             "type": "solana",
@@ -1514,7 +1560,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires external chunk data"]
     fn test_execute_empty_result() {
+        if !crate::testing::chunks_present() {
+            return;
+        }
+
         let meta = solana_metadata();
         let json = br#"{
             "type": "solana",

@@ -278,6 +278,8 @@ They are collected as [INV-D1](07-invariants.md#inv-d1) … [INV-D10](07-invaria
 - Every virtual field: all rolled columns exist; a spread list column, if
   present, is last.
 - Every field group: the tag column exists; every mapped column exists.
+- Every declared output field resolves to a column, virtual field or field-group
+  request key, and none of its physical sources is `system`.
 - Every alias: its target table exists; its implicit-predicate columns exist;
   its filter aliases target real columns; its relations are valid.
 - `queryName` and `fieldName` are unique across tables *and* aliases.

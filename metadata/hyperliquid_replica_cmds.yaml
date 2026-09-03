@@ -3,6 +3,7 @@ name: hyperliquidReplicaCmds
 tables:
   blocks:
     filters: []
+    fields: [ number, hash, parent_hash, round, parent_round, proposer, timestamp, hardfork ]
     parent_hash_column: parent_hash
     block_number_column: number
     field_name: block
@@ -30,6 +31,7 @@ tables:
 
   actions:
     filters: [ action_type, user, vault_address, status ]
+    fields: [ action_index, user, action, signature, nonce, vault_address, status, response ]
     query_name: actions
     field_name: action
     item_order_keys: [ action_index ]

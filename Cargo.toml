@@ -30,6 +30,9 @@ tikv-jemallocator = "0.6"
 default = []
 legacy-query = ["dep:sqd-query"]
 
+# Optional compatibility tooling for benchmarks and fixture generation. Cargo
+# resolves the path before feature selection, so standalone checks provide a
+# minimal manifest at this location.
 [dependencies.sqd-query]
 path = "../data/crates/query"
 optional = true

@@ -34,10 +34,58 @@ pub fn resolve_encoder(
             DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, _)
         )
         .then_some(encode_timestamp_millisecond_raw as EncoderFn),
-        Some(JsonEncoding::Hex) | Some(JsonEncoding::Base58) | None => None,
+        Some(JsonEncoding::Hex) => resolve_hex_bytes_encoder(data_type),
+        Some(JsonEncoding::Base58) => resolve_base58_encoder(data_type),
+        None => None,
     };
 
-    declared.unwrap_or_else(|| resolve_value_encoder(data_type))
+    declared.unwrap_or_else(|| resolve_declared_encoder(data_type, declared_type))
+}
+
+/// `hexBytes` — `0x` and lowercase hex, whatever the column is stored as. A text
+/// column already holds the display string; bytes are rendered into one.
+fn resolve_hex_bytes_encoder(data_type: &DataType) -> Option<EncoderFn> {
+    match data_type {
+        DataType::Utf8 => Some(encode_utf8_value),
+        DataType::Binary => Some(encode_binary_value),
+        DataType::FixedSizeBinary(_) => Some(encode_fixed_binary_value),
+        _ => None,
+    }
+}
+
+/// `base58`, same idea: the encoding names what the value *is*, so a column
+/// stored as bytes is rendered rather than handed to the physical encoder, which
+/// would emit `0x…` hex for an address every client reads as base58.
+fn resolve_base58_encoder(data_type: &DataType) -> Option<EncoderFn> {
+    match data_type {
+        DataType::Utf8 => Some(encode_utf8_value),
+        DataType::Binary => Some(encode_base58_binary),
+        DataType::FixedSizeBinary(_) => Some(encode_base58_fixed_binary),
+        _ => None,
+    }
+}
+
+/// The physical encoder, except that a timestamp's unit is the *declared* one
+/// (INV-O9). Storage picks a resolution per chunk; the catalog says what the
+/// number means, and only the pair of them decides what to emit.
+fn resolve_declared_encoder(data_type: &DataType, declared_type: Option<&ColumnType>) -> EncoderFn {
+    use arrow::datatypes::TimeUnit;
+
+    match (data_type, declared_type) {
+        (DataType::Timestamp(TimeUnit::Millisecond, _), Some(ColumnType::TimestampMillisecond)) => {
+            encode_timestamp_millisecond_raw
+        }
+        (DataType::Timestamp(TimeUnit::Second, _), Some(ColumnType::TimestampMillisecond)) => {
+            encode_timestamp_second_as_millisecond
+        }
+        (DataType::Timestamp(TimeUnit::Millisecond, _), Some(ColumnType::TimestampSecond)) => {
+            encode_timestamp_millisecond
+        }
+        (DataType::Timestamp(TimeUnit::Second, _), Some(ColumnType::TimestampSecond)) => {
+            encode_timestamp_second
+        }
+        _ => resolve_value_encoder(data_type),
+    }
 }
 
 /// A declared integer type bounds the values, not the storage: the writer picks
@@ -217,6 +265,63 @@ fn encode_fixed_binary_value(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
     encode_hex_bytes(a.value(row), buf);
 }
 
+fn encode_base58_binary(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
+    if array.is_null(row) {
+        buf.extend_from_slice(b"null");
+        return;
+    }
+    let a = array.as_any().downcast_ref::<BinaryArray>().unwrap();
+    encode_base58_bytes(a.value(row), buf);
+}
+
+fn encode_base58_fixed_binary(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
+    if array.is_null(row) {
+        buf.extend_from_slice(b"null");
+        return;
+    }
+    let a = array
+        .as_any()
+        .downcast_ref::<FixedSizeBinaryArray>()
+        .unwrap();
+    encode_base58_bytes(a.value(row), buf);
+}
+
+/// The Bitcoin alphabet, which is the one Solana uses. `0`, `O`, `I` and `l` are
+/// absent so no two characters look alike.
+const BASE58_ALPHABET: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+/// Base58 of a byte string, quoted.
+///
+/// Leading zero bytes carry no value through the base conversion, so they are
+/// emitted as `1`s first — that is what makes the encoding injective, and what
+/// keeps a 32-byte key that starts with a zero byte 32 bytes long on the way
+/// back.
+fn encode_base58_bytes(bytes: &[u8], buf: &mut Vec<u8>) {
+    buf.push(b'"');
+
+    let zeros = bytes.iter().take_while(|b| **b == 0).count();
+    buf.resize(buf.len() + zeros, b'1');
+
+    // log(256)/log(58) ≈ 1.366, rounded up: the digit count can never exceed it.
+    let mut digits: Vec<u8> = Vec::with_capacity(bytes.len() * 137 / 100 + 1);
+
+    for &byte in &bytes[zeros..] {
+        let mut carry = byte as u32;
+        for digit in digits.iter_mut() {
+            carry += (*digit as u32) << 8;
+            *digit = (carry % 58) as u8;
+            carry /= 58;
+        }
+        while carry > 0 {
+            digits.push((carry % 58) as u8);
+            carry /= 58;
+        }
+    }
+
+    buf.extend(digits.iter().rev().map(|d| BASE58_ALPHABET[*d as usize]));
+    buf.push(b'"');
+}
+
 fn encode_timestamp_second(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
     if array.is_null(row) {
         buf.extend_from_slice(b"null");
@@ -252,6 +357,21 @@ fn encode_timestamp_millisecond_raw(array: &dyn Array, row: usize, buf: &mut Vec
         .downcast_ref::<TimestampMillisecondArray>()
         .unwrap();
     write_i64(buf, a.value(row));
+}
+
+/// A column declared in milliseconds that a chunk stores in seconds. The unit is
+/// the catalog's, so the second is scaled up rather than emitted as if it were a
+/// millisecond — a value a client would read as 1970.
+fn encode_timestamp_second_as_millisecond(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
+    if array.is_null(row) {
+        buf.extend_from_slice(b"null");
+        return;
+    }
+    let a = array
+        .as_any()
+        .downcast_ref::<TimestampSecondArray>()
+        .unwrap();
+    write_i64(buf, a.value(row).saturating_mul(1000));
 }
 
 fn encode_list_value(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
@@ -1111,6 +1231,116 @@ mod tests {
             rendered_as_hex_number(std::sync::Arc::new(Int64Array::from(vec![-1i64]))),
             "\"0xffffffffffffffff\"",
             "the bytes are the column's, not a re-reading of its sign"
+        );
+    }
+
+    fn rendered_with(
+        array: std::sync::Arc<dyn Array>,
+        encoding: Option<&JsonEncoding>,
+        declared: Option<&ColumnType>,
+    ) -> String {
+        let encoder = resolve_encoder(array.data_type(), encoding, declared);
+        let mut buf = Vec::new();
+        encoder(array.as_ref(), 0, &mut buf);
+        String::from_utf8(buf).unwrap()
+    }
+
+    /// The *declared* type carries the unit (INV-O9). Every catalog entry today
+    /// also sets `json_encoding: timestamp_millisecond`, which hid this: a
+    /// millisecond column that leaves the encoding off was divided by 1000 and
+    /// served as seconds.
+    #[test]
+    fn test_a_timestamp_takes_its_unit_from_the_declared_type() {
+        let millis: std::sync::Arc<dyn Array> =
+            std::sync::Arc::new(TimestampMillisecondArray::from(vec![1_700_000_001_500i64]));
+        let seconds: std::sync::Arc<dyn Array> =
+            std::sync::Arc::new(TimestampSecondArray::from(vec![1_700_000_001i64]));
+
+        assert_eq!(
+            rendered_with(
+                millis.clone(),
+                None,
+                Some(&ColumnType::TimestampMillisecond)
+            ),
+            "1700000001500",
+            "declared in milliseconds, stored in milliseconds"
+        );
+        assert_eq!(
+            rendered_with(millis, None, Some(&ColumnType::TimestampSecond)),
+            "1700000001",
+            "declared in seconds, stored in milliseconds"
+        );
+        assert_eq!(
+            rendered_with(
+                seconds.clone(),
+                None,
+                Some(&ColumnType::TimestampMillisecond)
+            ),
+            "1700000001000",
+            "declared in milliseconds, stored in seconds"
+        );
+        assert_eq!(
+            rendered_with(seconds, None, Some(&ColumnType::TimestampSecond)),
+            "1700000001"
+        );
+    }
+
+    /// An encoding says what the value *is*, so it has to drive the rendering.
+    /// Both of these fell through to the physical encoder, which works only
+    /// because every such column is stored as the display string already — a
+    /// base58 address stored as bytes came back as `0x…` hex.
+    #[test]
+    fn test_hex_and_base58_render_a_column_stored_as_bytes() {
+        let key = [
+            0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31,
+        ];
+
+        let binary: std::sync::Arc<dyn Array> =
+            std::sync::Arc::new(BinaryArray::from(vec![key.as_slice()]));
+        let fixed: std::sync::Arc<dyn Array> = std::sync::Arc::new(
+            FixedSizeBinaryArray::try_from_iter([key].iter().map(|k| k.as_slice())).unwrap(),
+        );
+
+        // Leading zero byte → a leading '1', which is what keeps the encoding
+        // injective over 32-byte keys.
+        let expected = "\"1thX6LZfHDZZKUs92febYZhYRcXddmzfzF2NvTkPNE\"";
+        assert_eq!(
+            rendered_with(binary.clone(), Some(&JsonEncoding::Base58), None),
+            expected
+        );
+        assert_eq!(
+            rendered_with(fixed.clone(), Some(&JsonEncoding::Base58), None),
+            expected
+        );
+
+        assert_eq!(
+            rendered_with(binary, Some(&JsonEncoding::Hex), None),
+            "\"0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\""
+        );
+        assert_eq!(
+            rendered_with(fixed, Some(&JsonEncoding::Hex), None),
+            "\"0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\""
+        );
+    }
+
+    /// The column every chunk today actually carries: the display string itself.
+    /// Rendering it a second time would double-encode it.
+    #[test]
+    fn test_hex_and_base58_pass_a_text_column_through() {
+        let text: std::sync::Arc<dyn Array> =
+            std::sync::Arc::new(StringArray::from(vec!["0xdeadbeef"]));
+        assert_eq!(
+            rendered_with(text.clone(), Some(&JsonEncoding::Hex), None),
+            "\"0xdeadbeef\""
+        );
+
+        let base58: std::sync::Arc<dyn Array> = std::sync::Arc::new(StringArray::from(vec![
+            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+        ]));
+        assert_eq!(
+            rendered_with(base58, Some(&JsonEncoding::Base58), None),
+            "\"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA\""
         );
     }
 }

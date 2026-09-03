@@ -1,4 +1,6 @@
-use anyhow::{anyhow, Result};
+use crate::engine_err;
+use crate::error::ErrorKind;
+use anyhow::Result;
 use arrow::array::*;
 use arrow::compute;
 use arrow::datatypes::SchemaRef;
@@ -56,7 +58,8 @@ fn make_group_key(
             }
             buf.extend_from_slice(&((a.value(row) as u32) as u64).to_le_bytes());
         } else {
-            return Err(anyhow!(
+            return Err(engine_err!(
+                ErrorKind::UnsupportedKeyType,
                 "unsupported group key column type: {:?}",
                 col.data_type()
             ));
@@ -69,9 +72,13 @@ fn resolve_indices(schema: &SchemaRef, columns: &[&str]) -> Result<Vec<usize>> {
     columns
         .iter()
         .map(|name| {
-            schema
-                .index_of(name)
-                .map_err(|_| anyhow!("column '{}' not found in schema", name))
+            schema.index_of(name).map_err(|_| {
+                engine_err!(
+                    ErrorKind::ColumnNotFound,
+                    "column '{}' not found in schema",
+                    name
+                )
+            })
         })
         .collect()
 }
@@ -111,12 +118,24 @@ pub fn find_children(
         let addr_idx = batch
             .schema()
             .index_of(source_address_column)
-            .map_err(|_| anyhow!("column '{}' not found", source_address_column))?;
+            .map_err(|_| {
+                engine_err!(
+                    ErrorKind::ColumnNotFound,
+                    "column '{}' not found",
+                    source_address_column
+                )
+            })?;
         let addr_array = batch
             .column(addr_idx)
             .as_any()
             .downcast_ref::<GenericListArray<i32>>()
-            .ok_or_else(|| anyhow!("'{}' must be a List<UInt32> column", source_address_column))?;
+            .ok_or_else(|| {
+                engine_err!(
+                    ErrorKind::UnsupportedKeyType,
+                    "'{}' must be a List<UInt32> column",
+                    source_address_column
+                )
+            })?;
 
         for row in 0..batch.num_rows() {
             // A null address is not the empty address: a row that belongs to no
@@ -140,12 +159,24 @@ pub fn find_children(
         let addr_idx = batch
             .schema()
             .index_of(target_address_column)
-            .map_err(|_| anyhow!("column '{}' not found", target_address_column))?;
+            .map_err(|_| {
+                engine_err!(
+                    ErrorKind::ColumnNotFound,
+                    "column '{}' not found",
+                    target_address_column
+                )
+            })?;
         let addr_array = batch
             .column(addr_idx)
             .as_any()
             .downcast_ref::<GenericListArray<i32>>()
-            .ok_or_else(|| anyhow!("'{}' must be a List<UInt32> column", target_address_column))?;
+            .ok_or_else(|| {
+                engine_err!(
+                    ErrorKind::UnsupportedKeyType,
+                    "'{}' must be a List<UInt32> column",
+                    target_address_column
+                )
+            })?;
 
         let mut matches = Vec::with_capacity(batch.num_rows());
         for row in 0..batch.num_rows() {
@@ -222,12 +253,24 @@ pub fn find_parents(
         let addr_idx = batch
             .schema()
             .index_of(source_address_column)
-            .map_err(|_| anyhow!("column '{}' not found", source_address_column))?;
+            .map_err(|_| {
+                engine_err!(
+                    ErrorKind::ColumnNotFound,
+                    "column '{}' not found",
+                    source_address_column
+                )
+            })?;
         let addr_array = batch
             .column(addr_idx)
             .as_any()
             .downcast_ref::<GenericListArray<i32>>()
-            .ok_or_else(|| anyhow!("'{}' must be a List<UInt32> column", source_address_column))?;
+            .ok_or_else(|| {
+                engine_err!(
+                    ErrorKind::UnsupportedKeyType,
+                    "'{}' must be a List<UInt32> column",
+                    source_address_column
+                )
+            })?;
 
         for row in 0..batch.num_rows() {
             // A null address is not the empty address: a row that belongs to no
@@ -251,12 +294,24 @@ pub fn find_parents(
         let addr_idx = batch
             .schema()
             .index_of(target_address_column)
-            .map_err(|_| anyhow!("column '{}' not found", target_address_column))?;
+            .map_err(|_| {
+                engine_err!(
+                    ErrorKind::ColumnNotFound,
+                    "column '{}' not found",
+                    target_address_column
+                )
+            })?;
         let addr_array = batch
             .column(addr_idx)
             .as_any()
             .downcast_ref::<GenericListArray<i32>>()
-            .ok_or_else(|| anyhow!("'{}' must be a List<UInt32> column", target_address_column))?;
+            .ok_or_else(|| {
+                engine_err!(
+                    ErrorKind::UnsupportedKeyType,
+                    "'{}' must be a List<UInt32> column",
+                    target_address_column
+                )
+            })?;
 
         let mut matches = Vec::with_capacity(batch.num_rows());
         for row in 0..batch.num_rows() {
@@ -627,7 +682,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires external chunk data"]
     fn test_hierarchical_with_real_data() {
+        if !crate::testing::chunks_present() {
+            return;
+        }
+
         use crate::scan::ParquetTable;
         use std::path::Path;
 
