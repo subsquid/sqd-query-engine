@@ -1663,6 +1663,7 @@ mod tests {
         assert_eq!(batches[0].num_columns(), 2);
     }
 
+    /// Covers CT-5 · INV-B1
     #[test]
     #[ignore = "requires external chunk data"]
     fn test_scan_with_block_range() {
@@ -1735,6 +1736,7 @@ mod tests {
         );
     }
 
+    /// Covers CT-5 · INV-B1
     #[test]
     #[ignore = "requires external chunk data"]
     fn test_scan_with_predicate_and_block_range() {

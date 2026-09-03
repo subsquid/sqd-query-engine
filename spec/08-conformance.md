@@ -269,7 +269,7 @@ reproduce is a rumour.
 
 ## 8.11 Traceability matrix
 
-Dated **2026-09-03**. Every invariant, the class that checks it, and an honest
+Dated **2026-09-04**. Every invariant, the class that checks it, and an honest
 status:
 
 - **C** — covered. A test would fail if the invariant broke.
@@ -285,6 +285,24 @@ A row marked *known-violated* names the gap: the invariant is false today and
 Statuses come from the test inventory, not from intent. A test that asserts a
 value is *accepted* does not cover an invariant that says which values are
 *rejected* — that is the mistake that let GAP 27 stand.
+
+A status is also a claim about code, and a claim about code that only a person
+checks drifts. So a test that pins an invariant says so where it lives:
+
+```rust
+/// Covers CT-2 · INV-Q10
+#[test]
+fn a_bloom_filter_takes_at_most_ten_values() { ... }
+```
+
+The checker reads those tags back against this table. A tag naming an invariant
+with no row, a tag filing a test under a class the row does not give it, a row at
+**U** that something already tests, and a note naming a test that carries no tag
+are errors. Nothing has to be tagged; what is tagged has to agree.
+
+The tags live with the tests rather than in a list here, because a list of test
+names in a document is one rename away from being fiction, and a test cannot be
+renamed out from under a comment inside it.
 
 | Invariant | Class | Status | Note |
 |---|---|---|---|
@@ -323,7 +341,7 @@ value is *accepted* does not cover an invariant that says which values are
 | [INV-P9](07-invariants.md#inv-p9) | CT-3 | **U** | **nothing checks the engine's bloom bits against the writer's.** A construction mismatch produces false *negatives*, which no client can detect |
 | [INV-P10](07-invariants.md#inv-p10) | CT-3 | **C** | four range cases across physical widths |
 | [INV-P11](07-invariants.md#inv-p11) | CT-3 | **U** | `gteConst` lexicographic comparison has no test |
-| [INV-P12](07-invariants.md#inv-p12) | CT-3 | **C** | three `list_contains_any` cases including the unknown-type one |
+| [INV-P12](07-invariants.md#inv-p12) | CT-3 | **C** | three `ListContainsAnyPredicate` cases including the unknown-type one |
 | [INV-P13](07-invariants.md#inv-p13) | CT-3 | **C** | `test_compile_discriminator_mixed_lengths`, `discriminator_hex_is_a_prefix_chain`, and the Kleene cases in the predicate unit tests |
 | [INV-P14](07-invariants.md#inv-p14) | CT-3 | **C** | `unmatchable_values_are_not_errors` and `a_hex_value_too_wide_for_the_column_matches_nothing` for values wider than the column, `a_signed_column_takes_negative_filter_values` for one below its floor, and `a_block_bound_past_the_stored_width_matches_nothing` for the half the invariant states about the block bounds — where wrapping would truncate into a block the chunk holds |
 | [INV-P15](07-invariants.md#inv-p15) | CT-3 | **C** | `undeclared_columns_are_not_filterable`, `an_alias_has_its_own_filter_surface`, `an_alias_has_its_own_relation_surface` |
@@ -357,13 +375,13 @@ value is *accepted* does not cover an invariant that says which values are
 | [INV-O6](07-invariants.md#inv-o6) | CT-6 | **P** | fixtures compare values, not bytes — see the divergence table in GAPS.md |
 | [INV-O7](07-invariants.md#inv-o7) | CT-6 | **P** | `test_arrow_parity_and_projection`; no empty-`fields` case |
 | [INV-O8](07-invariants.md#inv-o8) | CT-6 | **C** | `test_snake_to_camel`, `test_snake_to_camel_in_output` |
-| [INV-O9](07-invariants.md#inv-o9) | CT-6 | **P** | sixteen encoder cases plus `discriminator_columns_render_as_padded_hex`, `a_timestamp_takes_its_unit_from_the_declared_type` over all four unit pairings, and `test_hex_and_base58_render_a_column_stored_as_bytes`. The NaN and ±∞ arm is the one the invariant names that nothing asserts |
+| [INV-O9](07-invariants.md#inv-o9) | CT-6 | **P** | sixteen encoder cases plus `discriminator_columns_render_as_padded_hex`, `test_a_timestamp_takes_its_unit_from_the_declared_type` over all four unit pairings, and `test_hex_and_base58_render_a_column_stored_as_bytes`. The NaN and ±∞ arm is the one the invariant names that nothing asserts |
 | [INV-O10](07-invariants.md#inv-o10) | CT-6 | **C** | `test_encode_roll`, `test_encode_roll_with_list_spread` |
 | [INV-O11](07-invariants.md#inv-o11) | CT-6 | **P** | field groups are exercised; an unknown tag value is not, and that is the case archives outliving catalogs produce |
 | [INV-O12](07-invariants.md#inv-o12) | CT-6 | **U** | byte determinism is never asserted |
 | [INV-O13](07-invariants.md#inv-o13) | CT-6 | **U** | no thread-count sweep |
 | [INV-O14](07-invariants.md#inv-o14) | CT-6 | **C** | six Arrow-parity cases |
-| [INV-E1](07-invariants.md#inv-e1) | CT-9 | **P** | the request half is fuzzed (`request_props`), and `a_chunk_that_disagrees_with_the_catalog_does_not_panic` pins the encoders against a chunk written to disagree. The chunk-type *sweep* the invariant asks for needs HC-3, and two existing tests still assert a panic rather than forbid one |
+| [INV-E1](07-invariants.md#inv-e1) | CT-9 | **P** | the request half is fuzzed under CT-9, and `a_chunk_that_disagrees_with_the_catalog_does_not_panic` pins the encoders against a chunk written to disagree. The chunk-type *sweep* the invariant asks for needs HC-3, and two existing tests still assert a panic rather than forbid one |
 | [INV-E2](07-invariants.md#inv-e2) | CT-2 | **P** | validation precedes scanning by construction; nothing asserts that no output precedes an error |
 | [INV-E3](07-invariants.md#inv-e3) | CT-8 | **U** | the absent-column test covers filtering, not selection |
 | [INV-E4](07-invariants.md#inv-e4) | CT-8 | **U** | no missing-table case |
@@ -376,6 +394,19 @@ value is *accepted* does not cover an invariant that says which values are
 
 **Totals: 40 C, 31 P, 14 U** of 85. Property coverage is therefore 0.47
 (`P-COV-PROPERTY` in [09-parameters.md](09-parameters.md)).
+
+Of the 71 rows at **C** or **P**, 49 are backed by a tagged test and 22 rest on
+prose alone. The 22 are the rows whose note says "fixtures only" or describes a
+group of cases without naming one, and they are the ones nothing recomputes: the
+status is what somebody believed on the day they typed it. Shrinking that number
+is what turns MG-1's ratchet from an intention into an arithmetic fact, so the
+checker recomputes all three numbers in this paragraph rather than trusting them.
+
+A tag is not the same as a gate. 7 of the 49 are backed only by tests marked
+`#[ignore]`, which MG-3's portable job does not run: the test would fail if the
+invariant broke, but only on a machine that has the chunks. The checker reports
+those rows on every run too, because a status that no job can falsify is a status
+worth seeing.
 
 The shape of the U column is worth reading on its own. The unchecked invariants
 cluster in three places, and none of them is an accident:
@@ -406,13 +437,13 @@ and its promotion is tracked in [GAPS.md](GAPS.md).
 
 | Gate | Threshold | When | Enforced by | Blocking? |
 |---|---|---|---|---|
-| **MG-1** Property coverage never regresses | `P-COV-PROPERTY`, ratchet only | per-PR | HC-8 | advisory until HC-8 exists |
+| **MG-1** Property coverage never regresses | `P-COV-PROPERTY`, ratchet only | per-PR | HC-8 | advisory until HC-8 ratchets |
 | **MG-2** Line coverage on changed lines, and a repository floor | `P-COV-DIFF`, `P-COV-TOTAL` | per-PR | HC-9 | advisory until HC-9 exists |
 | **MG-3** The PR-budget classes pass | CT-1, CT-2, CT-3, CT-4, CT-5, CT-6 green | per-PR | HC-1, HC-2, HC-4, HC-6 | **blocking for portable tests**; external-data coverage is advisory |
-| **MG-4** The slow classes pass | CT-7, CT-8, CT-9 green | nightly | HC-3, HC-5, HC-7 | advisory until HC-3 exists |
+| **MG-4** The capability-blocked classes pass | CT-7, CT-8, CT-9 green | nightly | HC-3, HC-5, HC-7 | advisory until HC-3 exists |
 | **MG-5** No performance regression outside the noise band | `P-PERF-NOISE-BAND` | nightly | HC-10 | advisory |
 | **MG-6** Spec integrity | the suite's own checker reports no error | per-PR | HC-11 | **blocking** |
-| **MG-7** Flake policy | `P-FLAKE-RETRIES`, then quarantine with an owner and an expiry | per-PR | HC-8 | advisory until HC-8 exists |
+| **MG-7** Flake policy | `P-FLAKE-RETRIES`, then quarantine with an owner and an expiry | per-PR | HC-8 | advisory until HC-8 ratchets |
 | **MG-8** Static gates | formatter and linter clean over `src/` and `tests/` | per-PR | HC-12 | **blocking** |
 
 Two rules that no tool enforces, so they are review checklist items:
@@ -423,8 +454,11 @@ Two rules that no tool enforces, so they are review checklist items:
   *first test* line. [GAPS.md](GAPS.md) carries that column for exactly this.
 
 MG-6, MG-8 and the portable portion of MG-3 block today. The rest name
-capabilities that do not exist yet, so they are advisory — which is the rule
-above applied rather than an exception to it.
+capabilities that are not built yet, so they are advisory — which is the rule
+above applied rather than an exception to it. The checker cross-joins the two
+tables and reads *built* as **C**: a capability at **P** is a note about
+progress, not a machine that runs, and promoting one must not quietly let a gate
+that rests on it become blocking.
 
 Tests that require externally supplied chunks or fixtures are explicitly marked
 ignored in the portable job, so the test summary does not report them as passed.
@@ -440,6 +474,13 @@ about; *the matrix may not get worse* is a rule. Its two inputs — the totals l
 under §8.11 and `P-COV-PROPERTY`'s observed cell — are recomputed from the matrix
 rows by the checker, so the baseline cannot be loosened by editing a number.
 
+What the checker does not yet do is compare the count against the previous
+commit, which is the difference between reporting coverage and ratcheting it.
+Until it does, a row may still be talked down in the same change that breaks it —
+so the tags are the half that holds today: a row cannot claim a test that is not
+there, a test cannot claim a class the row does not give it, and a test cannot
+sit in a class directory it never claims.
+
 ## 8.13 Harness capability register
 
 The gates and the CT classes both assume machinery. Listed with build status, or
@@ -454,7 +495,7 @@ The gates and the CT classes both assume machinery. Listed with build status, or
 | **HC-5** Reference-implementation runner and value-level comparator, with skip counting and a per-dataset floor | CT-7 | **P** | fixtures compare against recorded reference output; nothing runs the reference live |
 | **HC-6** Injectable `P-WEIGHT-BUDGET` | CT-5 | **C** | the budget suite already drives it |
 | **HC-7** Deterministic fuzzer with a recorded seed | CT-9 | **U** | |
-| **HC-8** Matrix parser and coverage reporter | MG-1, MG-7 | **U** | reads §8.11, counts C/P/U, compares against the previous commit |
+| **HC-8** Matrix parser and coverage reporter | MG-1, MG-7 | **P** | the parser exists: the checker reads §8.11, counts C/P/U against the stated totals, and reads the `Covers` tags in `src/` and `tests/` back against the rows. What is missing is the comparison against the previous commit, which is what makes MG-1 a ratchet rather than a snapshot |
 | **HC-9** Line-coverage instrumentation | MG-2 | **U** | |
 | **HC-10** Benchmark runner with committed baselines and a noise band | MG-5 | **P** | benchmarks exist and are recorded; nothing gates on them |
 | **HC-11** Spec checker | MG-6 | **C** | reference integrity, dead weight, matrix coverage, normative shape; carries its own mutation tests |

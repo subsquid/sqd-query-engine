@@ -1170,6 +1170,7 @@ mod tests {
         assert!(rel_names.contains(&"instructions"));
     }
 
+    /// Covers CT-3 · INV-P13
     #[test]
     fn test_compile_discriminator_mixed_lengths() {
         let meta = solana_metadata();
@@ -1197,6 +1198,7 @@ mod tests {
         assert_eq!(instr_plan.predicates[1].columns.len(), 2);
     }
 
+    /// Covers CT-3 · INV-P1
     #[test]
     fn test_compile_empty_item_no_filters() {
         let meta = evm_metadata();
@@ -1341,6 +1343,8 @@ mod tests {
 
     /// Regression: JSON numeric arrays like [0, 1] were silently compiled to
     /// empty IN-lists because compile_in_list only parsed string values.
+    ///
+    /// Covers CT-3 · INV-P2
     #[test]
     #[ignore = "requires external chunk data"]
     fn test_numeric_in_list_filter() {
@@ -1461,6 +1465,8 @@ mod tests {
     }
 
     /// Alias-relation must propagate source_predicates when not all items request it.
+    ///
+    /// Covers CT-4 · INV-R1
     #[test]
     fn test_alias_relation_source_predicates() {
         use crate::metadata::parse_dataset_description;

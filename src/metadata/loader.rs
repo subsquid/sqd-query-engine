@@ -753,6 +753,7 @@ tables:
         assert_eq!(number.json_encoding, None);
     }
 
+    /// Covers CT-1 · INV-D1
     #[test]
     fn test_validation_bad_block_number_column() {
         let yaml = r#"
@@ -852,6 +853,8 @@ tables:
     /// A typo in the filter surface does not fail a query — it removes a filter,
     /// and the query it was meant to narrow comes back wrong instead. It has to
     /// fail at load.
+    ///
+    /// Covers CT-1 · INV-D1
     #[test]
     fn test_validate_rejects_unknown_filter_column() {
         let yaml = r#"
@@ -893,6 +896,7 @@ tables:
         }
     }
 
+    /// Covers CT-1 · INV-D1, INV-D2
     #[test]
     fn test_validate_rejects_broken_alias_references() {
         let bad_table = r#"
@@ -1086,6 +1090,8 @@ tables:
     /// Existence is not enough: the *shape* of a relation key decides whether the
     /// join means anything, and each shape below fails somewhere the response
     /// cannot show.
+    ///
+    /// Covers CT-1 · INV-D5, INV-D6
     #[test]
     fn test_validate_rejects_a_relation_that_cannot_join() {
         let catalog = |relation: &str| {
@@ -1202,6 +1208,8 @@ tables:
     }
 
     /// A special filter reaches a column the same way a declared filter does.
+    ///
+    /// Covers CT-1 · INV-D1
     #[test]
     fn test_validate_rejects_a_special_filter_on_a_missing_column() {
         let yaml = r#"
@@ -1251,6 +1259,8 @@ tables:
     /// A catalog reference that resolves to nothing does not fail a query. It
     /// shortens an array, drops a variant's fields, or hides a discriminator
     /// column — on every row, quietly (INV-D1).
+    ///
+    /// Covers CT-1 · INV-D1
     #[test]
     fn test_validate_rejects_unresolvable_references() {
         const HEAD: &str = r#"
@@ -1372,6 +1382,8 @@ tables:
     /// Renaming or rolling a column does not make a system value public. The
     /// declared field surface must validate the physical source as well as the
     /// request key.
+    ///
+    /// Covers CT-1 · INV-D9
     #[test]
     fn test_validate_rejects_fields_backed_by_system_columns() {
         let catalog = |fields: &str| {
@@ -1423,6 +1435,8 @@ tables:
     ///
     /// The shape is the item key, not the sort key: what a block is cannot depend
     /// on how the chunk was written (INV-D8).
+    ///
+    /// Covers CT-1 · INV-D3
     #[test]
     fn test_validate_requires_exactly_one_block_table() {
         let catalog = |tables: &str| format!("name: test\ntables:\n{tables}");
@@ -1462,6 +1476,8 @@ tables:
 
     /// A duplicate name makes a client's request ambiguous, and iteration order
     /// — not the catalog — decides which table answers it (INV-D10).
+    ///
+    /// Covers CT-1 · INV-D10
     #[test]
     fn test_validate_rejects_duplicate_names() {
         let catalog = |second: &str| {

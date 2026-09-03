@@ -62,6 +62,16 @@ class Suite:
             (self.root / junk).unlink(missing_ok=True)
         repo = self.root.parent
         shutil.copy(SPEC.parent / "Cargo.toml", repo / "Cargo.toml")
+        # The coverage-tag checks read the implementation tree, so the throwaway
+        # copy carries one — but only the parts they open. `tests/fixtures` is an
+        # externally supplied tree of some gigabytes whose form is per-machine:
+        # here it happens to be a symlink, and a checkout that materialises it
+        # would copy it once per case, before the gate has run at all.
+        skip = shutil.ignore_patterns("fixtures")
+        for tree in ("src", "tests"):
+            source = SPEC.parent / tree
+            if source.is_dir():
+                shutil.copytree(source, repo / tree, symlinks=True, ignore=skip)
         env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
         for argv in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "spec"]):
@@ -81,6 +91,18 @@ class Suite:
 
     def append(self, name, text):
         self.write(name, self.read(name) + text)
+
+    # The coverage-tag checks read Rust, which lives beside the spec rather than
+    # inside it, so those mutations need their own pair.
+    def rust_edit(self, name, old, new, count=1):
+        path = self.root.parent / name
+        body = path.read_text(encoding="utf-8")
+        assert body.count(old) >= count, f"{name}: nothing to replace: {old[:60]!r}"
+        path.write_text(body.replace(old, new, count), encoding="utf-8")
+
+    def rust_append(self, name, text):
+        path = self.root.parent / name
+        path.write_text(path.read_text(encoding="utf-8") + text, encoding="utf-8")
 
 
 # --- the suite as committed -------------------------------------------------
@@ -227,10 +249,10 @@ def test_a_capability_nothing_cites_is_orphaned(s):
 
 @case
 def test_a_blocking_gate_on_an_unbuilt_capability_is_caught(s):
-    s.edit("08-conformance.md", "| **MG-7** Flake policy", "| **MG-7** Flake policy")
+    """HC-9 is at U, so MG-2 may not claim to block on it."""
     s.edit("08-conformance.md",
-           "| per-PR | HC-8 | advisory until HC-8 exists |",
-           "| per-PR | HC-8 | **blocking** |")
+           "| per-PR | HC-9 | advisory until HC-9 exists |",
+           "| per-PR | HC-9 | **blocking** |")
     assert "gate-blocking-unbuilt" in checks_in(run(s.root)[1])
 
 
@@ -354,6 +376,167 @@ def test_only_an_info_check_does_not_announce_clean(s):
     with redirect_stdout(buf):
         check.main([str(s.root), "--only", "inv-missing-check"])
     assert "clean" not in buf.getvalue(), buf.getvalue()
+
+
+# --- coverage tags ----------------------------------------------------------
+
+@case
+def test_a_tag_naming_an_unknown_invariant_is_caught(s):
+    s.rust_edit("tests/conformance/ct2_request/bounds.rs",
+                "/// Covers CT-2 · INV-Q10", "/// Covers CT-2 · INV-Q99")
+    assert "tag-unknown-id" in checks_in(run(s.root)[1])
+
+
+@case
+def test_a_tag_filed_under_the_wrong_class_is_caught(s):
+    """The matrix files INV-Q10 under CT-2; a test may not disagree quietly."""
+    s.rust_edit("tests/conformance/ct2_request/bounds.rs",
+                "/// Covers CT-2 · INV-Q10", "/// Covers CT-5 · INV-Q10")
+    assert "tag-class-mismatch" in checks_in(run(s.root)[1])
+
+
+@case
+def test_a_tag_on_something_that_is_not_a_test_is_caught(s):
+    """A tagged helper claims coverage its own body never asserts."""
+    s.rust_append("tests/conformance/ct1_catalog.rs",
+                  "\n/// Covers CT-1 · INV-D1\nfn not_a_test() {}\n")
+    assert "tag-orphan" in checks_in(run(s.root)[1])
+
+
+@case
+def test_a_test_the_matrix_names_but_nothing_tags_is_caught(s):
+    s.rust_edit("src/metadata/loader.rs", "    /// Covers CT-1 · INV-D10\n", "")
+    assert "tag-missing" in checks_in(run(s.root)[1])
+
+
+@case
+def test_a_tagged_test_under_an_unchecked_row_is_caught(s):
+    """INV-R11 is at U. A tag saying otherwise means the matrix understates it."""
+    s.rust_append("tests/conformance/ct4_relations.rs",
+                  "\n/// Covers CT-4 · INV-R11\n#[test]\nfn idempotence() {}\n")
+    assert "tag-status-understated" in checks_in(run(s.root)[1])
+
+
+@case
+def test_a_missing_implementation_tree_is_not_silence(s):
+    """A check that reads nothing and says nothing is the failure it looks for."""
+    shutil.rmtree(s.root.parent / "src")
+    shutil.rmtree(s.root.parent / "tests")
+    code, findings = run(s.root)
+    assert "tag-tree-absent" in checks_in(findings)
+    # And it has to *gate*. Registered at warning, it reported the failure and
+    # exited 0, which is what a spec-only checkout would have seen.
+    assert code == 1, "a tag layer reading nothing must fail the gate CI runs"
+
+
+@case
+def test_half_an_implementation_tree_is_not_silence(s):
+    """The dangerous shape: the rules still run, over half the tags."""
+    shutil.rmtree(s.root.parent / "src")
+    code, findings = run(s.root)
+    assert "tag-tree-absent" in checks_in(findings)
+    assert code == 1
+    # Nothing may be reported *about* the tags that survive: with src/ gone,
+    # every invariant tagged only there reads as backed by prose alone.
+    assert "tag-unbacked" not in checks_in(findings)
+
+
+@case
+def test_a_near_miss_tag_is_not_dropped(s):
+    """`·` is not on a keyboard. A tag typed with a hyphen must not vanish."""
+    s.rust_edit("tests/conformance/ct2_request/fork.rs",
+                "/// Covers CT-2 · INV-E5", "/// Covers CT-2 - INV-E5")
+    assert "tag-malformed" in checks_in(run(s.root)[1])
+
+
+@case
+def test_a_tag_on_an_async_test_is_not_an_orphan(s):
+    """`"#[test]" in "#[tokio::test]"` is False, so every async test was one."""
+    s.rust_append("tests/conformance/ct4_relations.rs",
+                  "\n/// Covers CT-4 · INV-R1\n#[tokio::test]\n"
+                  "async fn an_async_test() {}\n")
+    assert "tag-orphan" not in checks_in(run(s.root)[1])
+
+
+@case
+def test_an_attribute_above_the_doc_comment_is_still_a_test(s):
+    """Attributes are as legal above a doc comment as below it."""
+    s.rust_append("tests/conformance/ct4_relations.rs",
+                  "\n#[test]\n/// Covers CT-4 · INV-R1\nfn attribute_first() {}\n")
+    assert "tag-orphan" not in checks_in(run(s.root)[1])
+
+
+@case
+def test_a_matrix_note_naming_a_deleted_test_is_caught(s):
+    """The direction that mattered: a row still claiming evidence that is gone."""
+    s.rust_edit("src/metadata/loader.rs",
+                "fn test_validate_rejects_duplicate_names(", "fn renamed_away(")
+    assert "note-stale" in checks_in(run(s.root)[1])
+
+
+@case
+def test_a_tag_retargeted_at_another_invariant_is_caught(s):
+    """A tag proves coverage of the invariant it names, not of any invariant."""
+    s.rust_edit("src/metadata/loader.rs",
+                "/// Covers CT-1 · INV-D10", "/// Covers CT-1 · INV-D2")
+    assert "tag-missing" in checks_in(run(s.root)[1])
+
+
+@case
+def test_a_test_filed_under_a_class_it_does_not_claim_is_caught(s):
+    s.rust_append("tests/conformance/ct4_relations.rs",
+                  "\n/// Covers CT-1 · INV-D1\n#[test]\nfn misfiled() {}\n")
+    assert "tag-class-misfiled" in checks_in(run(s.root)[1])
+
+
+@case
+def test_a_tag_on_a_macro_generated_test_is_not_an_orphan(s):
+    """113 fixture tests are composed by `paste!` and spelled nowhere."""
+    assert "tag-orphan" not in checks_in(run(s.root)[1])
+    names = check.test_fns(s.root.parent)
+    assert "solana_include_all_blocks" in names, "paste-generated tests are invisible"
+
+
+@case
+def test_a_stale_evidence_count_is_caught(s):
+    s.edit("08-conformance.md", "are backed by a tagged test", "are backed by no tagged test")
+    assert "trace-evidence-stale" in checks_in(run(s.root)[1])
+
+
+@case
+def test_a_stale_portable_gate_count_is_caught(s):
+    s.edit("08-conformance.md", "are backed only by tests marked",
+           "of them are backed only by tests marked")
+    assert "trace-evidence-stale" in checks_in(run(s.root)[1])
+
+
+@case
+def test_a_matrix_heading_rename_does_not_fabricate_tag_findings(s):
+    """`s.matrix` was assigned after the early return, so every tag went unknown."""
+    s.edit("08-conformance.md", "## 8.11 Traceability matrix", "## 8.11 traceability matrix")
+    checks = checks_in(run(s.root)[1])
+    assert "trace-missing" in checks
+    assert "tag-unknown-id" not in checks, "one real finding under 48 invented ones"
+
+
+@case
+def test_a_covered_row_backed_only_by_prose_is_reported(s):
+    """Not an error — the count is what MG-1 ratchets — but never invisible.
+
+    Asserted on a row this test makes prose-only, rather than on the tree as it
+    stands: written the second way it goes red on the day §8.11 reaches the goal
+    it sets, which is the one outcome a self-test must not punish.
+    """
+    s.rust_edit("src/metadata/loader.rs", "    /// Covers CT-1 · INV-D3\n", "")
+    found = [f for f in run(s.root)[1] if f["check"] == "tag-unbacked"]
+    assert any("INV-D3" in f["message"] for f in found), found
+
+
+@case
+def test_a_row_backed_only_by_ignored_tests_is_reported(s):
+    """A status no job the gate runs could falsify is a status worth seeing."""
+    found = [f for f in run(s.root)[1] if f["check"] == "tag-data-backed-only"]
+    assert found, "no row rests on ignored tests alone; drop the check or the claim"
 
 
 def main() -> int:

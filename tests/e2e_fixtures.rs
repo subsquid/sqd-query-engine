@@ -11,11 +11,15 @@
 use sqd_query_engine::metadata::load_dataset_description;
 use sqd_query_engine::output::execute_plan;
 use sqd_query_engine::query::{compile, parse_query};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-fn fixture_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
-}
+// The conformance suite's guard, not a second one. `fixture_chunk` is unused
+// here; the alternative is a copy of the other two, which is what this replaces.
+#[path = "conformance/harness/guard.rs"]
+mod guard;
+
+#[allow(unused_imports)]
+use guard::{fixture_chunk, fixture_dir, fixture_tree_is_present};
 
 fn run_fixture_query(
     meta_path: &str,
@@ -35,22 +39,6 @@ fn run_fixture_query(
         }
     }
     Ok(serde_json::Value::Array(result))
-}
-
-/// Whether the external fixture tree is available. The data-backed target sets
-/// `SQD_REQUIRE_FIXTURES=1`, making an absent tree a failure.
-fn fixture_tree_is_present() -> bool {
-    if fixture_dir().join("ethereum").join("chunk").is_dir() {
-        return true;
-    }
-
-    assert!(
-        std::env::var_os("SQD_REQUIRE_FIXTURES").is_none(),
-        "SQD_REQUIRE_FIXTURES is set but tests/fixtures is not checked out, so the \
-         fixture suite would report green having compared nothing"
-    );
-
-    false
 }
 
 fn test_fixture(dataset: &str, meta_path: &str, query_name: &str) {

@@ -519,6 +519,7 @@ mod tests {
         assert_eq!(camel_to_snake("feePayer"), "fee_payer");
     }
 
+    /// Covers CT-2 · INV-Q12
     #[test]
     fn test_parse_hex() {
         assert_eq!(parse_hex("0xab"), Some(vec![0xab]));
@@ -643,6 +644,7 @@ mod tests {
         assert!(disc_filter.1.is_array());
     }
 
+    /// Covers CT-2 · INV-Q2
     #[test]
     fn test_parse_unknown_table_error() {
         let meta = evm_metadata();
@@ -654,6 +656,7 @@ mod tests {
         assert!(parse_query(json, &meta).is_err());
     }
 
+    /// Covers CT-2 · INV-Q6
     #[test]
     fn test_parse_unknown_filter_error() {
         let meta = evm_metadata();
@@ -665,6 +668,7 @@ mod tests {
         assert!(parse_query(json, &meta).is_err());
     }
 
+    /// Covers CT-2 · INV-Q5
     #[test]
     fn test_parse_item_count_limit() {
         let meta = evm_metadata();
@@ -683,6 +687,7 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("100"));
     }
 
+    /// Covers CT-2 · INV-Q3
     #[test]
     fn test_parse_block_range_validation() {
         let meta = evm_metadata();
@@ -712,6 +717,8 @@ mod tests {
     /// INV-Q4: a present-but-malformed block bound is an error, never
     /// coerced. `{"fromBlock": "18000000"}` is a common client bug; silently
     /// scanning from genesis hides it.
+    ///
+    /// Covers CT-2 · INV-Q4
     #[test]
     fn test_malformed_block_bounds_error() {
         let meta = evm_metadata();
@@ -736,6 +743,8 @@ mod tests {
 
     /// The defaults survive: absent means genesis / unbounded (INV-Q9), and an
     /// explicit `null` is treated as absent rather than as a malformed value.
+    ///
+    /// Covers CT-2 · INV-Q4
     #[test]
     fn test_block_bounds_defaults_and_null() {
         let meta = evm_metadata();

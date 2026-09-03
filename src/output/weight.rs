@@ -675,6 +675,7 @@ mod tests {
     // Tests: compute_weight_params — documents what columns contribute to weight
     // -----------------------------------------------------------------------
 
+    /// Covers CT-1 · INV-D9
     #[test]
     fn test_system_columns_excluded_from_weight() {
         let meta = solana_meta();
@@ -969,6 +970,7 @@ mod tests {
         assert!(resolved.contains(&"program_id".to_string()));
     }
 
+    /// Covers CT-4 · INV-R1
     #[test]
     fn test_resolve_includes_source_predicate_columns() {
         let meta = solana_meta();
@@ -1033,6 +1035,8 @@ mod tests {
     /// A size column is unsigned by the catalog, so a negative one is a corrupt
     /// chunk. Read as a `u64` it was ~`u64::MAX`: the block outweighs the whole
     /// budget and is dropped from every response it appears in.
+    ///
+    /// Covers CT-5 · INV-B9
     #[test]
     fn a_negative_size_weighs_nothing() {
         let negative: [std::sync::Arc<dyn Array>; 2] = [
@@ -1062,6 +1066,8 @@ mod tests {
     /// Weight is a model, and a model that wraps stops bounding anything: the
     /// sum comes back small and the budget lets the whole chunk through
     /// (INV-B9).
+    ///
+    /// Covers CT-5 · INV-B9
     #[test]
     fn block_weight_saturates_rather_than_wrapping() {
         use arrow::datatypes::{DataType, Field, Schema};

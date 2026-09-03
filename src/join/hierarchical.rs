@@ -501,6 +501,7 @@ mod tests {
         }
     }
 
+    /// Covers CT-4 · INV-R6
     #[test]
     fn test_find_children_basic() {
         // Source: top-level instruction at [0]
@@ -541,6 +542,7 @@ mod tests {
         assert_eq!(values, vec!["child1", "child2", "grandchild"]);
     }
 
+    /// Covers CT-4 · INV-R7
     #[test]
     fn test_find_parents_basic() {
         // Source: deep instruction at [0, 1, 2]

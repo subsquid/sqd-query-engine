@@ -1062,6 +1062,7 @@ mod tests {
         assert_eq!(result, BooleanArray::from(vec![false, true, true, false]));
     }
 
+    /// Covers CT-3 · INV-P2
     #[test]
     fn test_in_list_predicate_strings() {
         let pred = InListPredicate::from_strings(&["alice", "bob"]);
@@ -1070,6 +1071,7 @@ mod tests {
         assert_eq!(result, BooleanArray::from(vec![true, false, true, false]));
     }
 
+    /// Covers CT-3 · INV-P2
     #[test]
     fn test_in_list_predicate_u64() {
         let pred = InListPredicate::from_u64s(&[10, 30]);
@@ -1104,6 +1106,7 @@ mod tests {
         }
     }
 
+    /// Covers CT-3 · INV-P4
     #[test]
     fn test_row_predicate_and() {
         let schema = Arc::new(Schema::new(vec![
