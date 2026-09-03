@@ -1,5 +1,6 @@
-use crate::metadata::DatasetDescription;
+use crate::metadata::{DatasetDescription, MAX_DISCRIMINATOR_BYTES};
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::path::Path;
 
 /// Load a dataset description from a YAML file.
@@ -127,6 +128,98 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
                     column
                 );
             }
+
+            // A discriminator dispatches on the byte length of the value it is
+            // given. A key that is not a length in range never matches one, so
+            // the column behind it is unreachable and every request carrying a
+            // value of that length is refused as having no column.
+            if let crate::metadata::SpecialFilter::Discriminator { columns } = special {
+                for length in columns.keys() {
+                    let parsed = length.parse::<usize>().ok().filter(|n| *n > 0);
+                    anyhow::ensure!(
+                        parsed.is_some_and(|n| n <= MAX_DISCRIMINATOR_BYTES),
+                        "table '{}': special filter '{}' maps length '{}', which is not a \
+                         byte count between 1 and {}",
+                        table_name,
+                        filter_name,
+                        length,
+                        MAX_DISCRIMINATOR_BYTES
+                    );
+                }
+            }
+        }
+
+        // A hierarchical address is what `children` and `parents` walk, and the
+        // scan reads it by this name.
+        if let Some(column) = &table.address_column {
+            anyhow::ensure!(
+                table.columns.contains_key(column),
+                "table '{}': address_column '{}' not found in columns",
+                table_name,
+                column
+            );
+        }
+
+        for key in &table.parent_key {
+            anyhow::ensure!(
+                table.columns.contains_key(key),
+                "table '{}': parent_key column '{}' not found in columns",
+                table_name,
+                key
+            );
+        }
+
+        // A roll gathers several columns into one array and stops at the first
+        // null. A name that resolves to nothing is not an error at query time —
+        // it shortens the array, on every row, quietly.
+        for (field_name, virtual_field) in &table.virtual_fields {
+            let crate::metadata::VirtualField::Roll { columns } = virtual_field;
+            for column in columns {
+                anyhow::ensure!(
+                    table.columns.contains_key(column),
+                    "table '{}': virtual field '{}' rolls column '{}', which is not there",
+                    table_name,
+                    field_name,
+                    column
+                );
+            }
+        }
+
+        // A field group is dispatched on its tag column's value. A typo in the
+        // tag drops every variant field from every row; a typo in a mapping
+        // drops one field from one variant.
+        if let Some(groups) = &table.field_groups {
+            anyhow::ensure!(
+                table.columns.contains_key(&groups.tag_column),
+                "table '{}': field group tag column '{}' not found in columns",
+                table_name,
+                groups.tag_column
+            );
+
+            for column in &groups.base_fields {
+                anyhow::ensure!(
+                    table.columns.contains_key(column),
+                    "table '{}': field group base field '{}' not found in columns",
+                    table_name,
+                    column
+                );
+            }
+
+            for (variant, variant_groups) in &groups.variants {
+                for (group, mappings) in variant_groups {
+                    for mapping in mappings {
+                        anyhow::ensure!(
+                            table.columns.contains_key(&mapping.column),
+                            "table '{}': field group '{}.{}' maps column '{}', which is \
+                             not there",
+                            table_name,
+                            variant,
+                            group,
+                            mapping.column
+                        );
+                    }
+                }
+            }
         }
 
         // A relation naming a table that is not there does not fail: the scan
@@ -215,6 +308,101 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
                 desc,
             )?;
         }
+    }
+
+    check_block_table(desc)?;
+    check_names_are_unique(desc)?;
+
+    Ok(())
+}
+
+/// A response is a sequence of blocks, so there has to be exactly one thing a
+/// block is (INV-D3).
+///
+/// The engine finds it by its shape — sorted on its own block number, with no
+/// order within a block — and takes the first match. A second table of that
+/// shape would make which one it is depend on catalog order; none at all leaves
+/// the engine looking for a table called `blocks` that is not there, and every
+/// header in the response empty.
+fn check_block_table(desc: &DatasetDescription) -> Result<()> {
+    let block_tables: Vec<&str> = desc
+        .tables
+        .iter()
+        .filter(|(_, table)| {
+            table.sort_key.first() == Some(&table.block_number_column)
+                && table.item_order_keys.is_empty()
+        })
+        .map(|(name, _)| name.as_str())
+        .collect();
+
+    anyhow::ensure!(
+        block_tables.len() == 1,
+        "dataset '{}': {} tables are sorted on their own block number with no order \
+         within a block ({:?}); exactly one is the block table",
+        desc.name,
+        block_tables.len(),
+        block_tables
+    );
+
+    let first = desc.tables.keys().next().map(String::as_str);
+    anyhow::ensure!(
+        first == Some(block_tables[0]),
+        "dataset '{}': the block table is '{}' but '{}' is declared first; the block \
+         table leads the catalog",
+        desc.name,
+        block_tables[0],
+        first.unwrap_or("")
+    );
+
+    Ok(())
+}
+
+/// `query_name` is unique across tables and aliases, `field_name` across tables
+/// (INV-D10). A duplicate makes a client's request ambiguous, and iteration
+/// order — not the catalog — decides which table answers it.
+fn check_names_are_unique(desc: &DatasetDescription) -> Result<()> {
+    let mut query_names: HashMap<&str, &str> = HashMap::new();
+    let mut field_names: HashMap<&str, &str> = HashMap::new();
+
+    for (table_name, table) in &desc.tables {
+        if let Some(name) = &table.query_name {
+            claim(&desc.name, "queryName", name, table_name, &mut query_names)?;
+        }
+        if let Some(name) = &table.field_name {
+            claim(&desc.name, "fieldName", name, table_name, &mut field_names)?;
+        }
+    }
+
+    for alias_name in desc.query_aliases.keys() {
+        claim(
+            &desc.name,
+            "queryName",
+            alias_name,
+            alias_name,
+            &mut query_names,
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Record `owner` as the holder of `name`, refusing a name already held.
+fn claim<'a>(
+    dataset: &str,
+    kind: &str,
+    name: &'a str,
+    owner: &'a str,
+    seen: &mut HashMap<&'a str, &'a str>,
+) -> Result<()> {
+    if let Some(held_by) = seen.insert(name, owner) {
+        anyhow::bail!(
+            "dataset '{}': {} '{}' is claimed by both '{}' and '{}'",
+            dataset,
+            kind,
+            name,
+            held_by,
+            owner
+        );
     }
 
     Ok(())
@@ -330,20 +518,29 @@ fn check_relation(
         );
     }
 
-    // `children` and `parents` walk the target's hierarchical address. Without one
-    // there is no hierarchy to walk, and the relation resolves to nothing.
+    // `children` and `parents` walk a hierarchical address on both sides: the
+    // source row's address is the prefix the target's is matched against.
+    // Without one there is no hierarchy to walk, and the relation resolves to
+    // nothing.
     if matches!(
         relation.kind,
         crate::metadata::RelationKind::Children | crate::metadata::RelationKind::Parents
     ) {
-        anyhow::ensure!(
-            target.address_column.is_some(),
-            "{}: relation '{}' is {:?}, but '{}' declares no address column to walk",
-            owner,
-            relation_name,
-            relation.kind,
-            relation.table
-        );
+        for (side, table_name, table) in [
+            ("source", source_name, source),
+            ("target", relation.table.as_str(), target),
+        ] {
+            anyhow::ensure!(
+                table.address_column.is_some(),
+                "{}: relation '{}' is {:?}, but its {} '{}' declares no address column \
+                 to walk",
+                owner,
+                relation_name,
+                relation.kind,
+                side,
+                table_name
+            );
+        }
     }
 
     Ok(())
@@ -385,6 +582,7 @@ name: test
 tables:
   transactions:
     filters: []
+    sort_key: [block_number]
     columns:
       block_number: { type: uint64 }
 "#;
@@ -400,6 +598,7 @@ name: test
 tables:
   blocks:
     block_number_column: number
+    sort_key: [number]
     filters: []
     columns:
       number: { type: uint64 }
@@ -641,6 +840,7 @@ name: test
 tables:
   blocks:
     block_number_column: number
+    sort_key: [number]
     filters: []
     columns:
       number: {{ type: uint64 }}
@@ -709,6 +909,7 @@ name: test
 tables:
   blocks:
     block_number_column: number
+    sort_key: [number]
     filters: []
     columns:
       number: {{ type: uint64 }}
@@ -763,6 +964,7 @@ name: test
 tables:
   blocks:
     block_number_column: number
+    sort_key: [number]
     filters: []
     columns:
       number: {{ type: uint64 }}
@@ -911,6 +1113,212 @@ tables:
 "#;
         let err = parse_dataset_description(yaml).unwrap_err().to_string();
         assert!(err.contains("hex_number"), "got: {err}");
+    }
+
+    /// A catalog reference that resolves to nothing does not fail a query. It
+    /// shortens an array, drops a variant's fields, or hides a discriminator
+    /// column — on every row, quietly (INV-D1).
+    #[test]
+    fn test_validate_rejects_unresolvable_references() {
+        const HEAD: &str = r#"
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    sort_key: [number]
+    filters: []
+    columns:
+      number: { type: uint64 }
+  items:
+    filters: []
+"#;
+        const TAIL: &str = r#"
+    columns:
+      block_number: { type: uint64 }
+      seq: { type: uint32 }
+      a0: { type: string }
+      d1: { type: uint8 }
+      kind: { type: string }
+      payload: { type: string }
+"#;
+        let catalog = |stanza: &str| format!("{HEAD}{stanza}{TAIL}");
+
+        const GOOD: &str = r#"
+    address_column: seq
+    parent_key: [ block_number ]
+    virtual_fields:
+      accounts: { type: roll, columns: [ a0 ] }
+    special_filters:
+      discriminator: { type: discriminator, columns: { "1": d1 } }
+    field_groups:
+      tag_column: kind
+      base_fields: [ seq ]
+      variants:
+        call:
+          action: [ { column: payload, field: payload } ]
+"#;
+        parse_dataset_description(&catalog(GOOD))
+            .expect("a catalog whose every reference resolves must load");
+
+        let rejected: &[(&str, &str)] = &[
+            (
+                "an address column that is not there",
+                "    address_column: nope\n",
+            ),
+            (
+                "a parent key column that is not there",
+                "    parent_key: [ nope ]\n",
+            ),
+            (
+                "a sort key column that is not there",
+                "    sort_key: [ block_number, nope ]\n",
+            ),
+            (
+                "an item order key that is not there",
+                "    item_order_keys: [ nope ]\n",
+            ),
+            (
+                "a roll over a column that is not there",
+                "    virtual_fields:\n      accounts: { type: roll, columns: [ a0, nope ] }\n",
+            ),
+            (
+                "a discriminator length that is not a byte count",
+                "    special_filters:\n      \
+                 discriminator: { type: discriminator, columns: { d1: d1 } }\n",
+            ),
+            (
+                "a discriminator length beyond the value cap",
+                "    special_filters:\n      \
+                 discriminator: { type: discriminator, columns: { \"17\": d1 } }\n",
+            ),
+            (
+                "a field group tag column that is not there",
+                "    field_groups:\n      tag_column: nope\n      variants: {}\n",
+            ),
+            (
+                "a field group base field that is not there",
+                "    field_groups:\n      tag_column: kind\n      \
+                 base_fields: [ nope ]\n      variants: {}\n",
+            ),
+            (
+                "a field group mapping a column that is not there",
+                "    field_groups:\n      tag_column: kind\n      variants:\n        \
+                 call:\n          action: [ { column: nope, field: nope } ]\n",
+            ),
+        ];
+
+        for (what, stanza) in rejected {
+            assert!(
+                parse_dataset_description(&catalog(stanza)).is_err(),
+                "{what} must be refused"
+            );
+        }
+
+        // A weight source is declared on the column it charges, so it cannot be
+        // spliced in above `columns:` like the rest.
+        let weighed = catalog("").replace(
+            "      payload: { type: string }",
+            "      payload: { type: string, weight: nope }",
+        );
+        assert!(
+            parse_dataset_description(&weighed).is_err(),
+            "a weight column that is not there must be refused"
+        );
+    }
+
+    /// A response is a sequence of blocks, so there has to be exactly one thing a
+    /// block is. The engine picks the first table of that shape; a second makes
+    /// the choice depend on catalog order, and none leaves every header empty
+    /// (INV-D3).
+    #[test]
+    fn test_validate_requires_exactly_one_block_table() {
+        let catalog = |tables: &str| format!("name: test\ntables:\n{tables}");
+
+        let blocks = "  blocks:\n                           block_number_column: number\n                           sort_key: [number]\n                           filters: []\n                           columns:\n                             number: { type: uint64 }\n";
+        let items = "  items:\n                          block_number_column: block_number\n                          sort_key: [block_number, seq]\n                          item_order_keys: [seq]\n                          filters: []\n                          columns:\n                            block_number: { type: uint64 }\n                            seq: { type: uint32 }\n";
+
+        parse_dataset_description(&catalog(&format!("{blocks}{items}")))
+            .expect("one block table followed by an item table must load");
+
+        assert!(
+            parse_dataset_description(&catalog(items)).is_err(),
+            "a dataset with no block table must be refused"
+        );
+
+        let second_block_table = "  epochs:\n                                       block_number_column: number\n                                       sort_key: [number]\n                                       filters: []\n                                       columns:\n                                         number: { type: uint64 }\n";
+        assert!(
+            parse_dataset_description(&catalog(&format!("{blocks}{second_block_table}"))).is_err(),
+            "two tables of block shape must be refused"
+        );
+
+        assert!(
+            parse_dataset_description(&catalog(&format!("{items}{blocks}"))).is_err(),
+            "a block table that does not lead the catalog must be refused"
+        );
+    }
+
+    /// A duplicate name makes a client's request ambiguous, and iteration order
+    /// — not the catalog — decides which table answers it (INV-D10).
+    #[test]
+    fn test_validate_rejects_duplicate_names() {
+        let catalog = |second: &str| {
+            format!(
+                r#"
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    sort_key: [number]
+    filters: []
+    columns:
+      number: {{ type: uint64 }}
+  items:
+    query_name: items
+    field_name: item
+    sort_key: [block_number, seq]
+    item_order_keys: [seq]
+    filters: []
+    columns:
+      block_number: {{ type: uint64 }}
+      seq: {{ type: uint32 }}
+  others:
+{second}
+    sort_key: [block_number, seq]
+    item_order_keys: [seq]
+    filters: []
+    columns:
+      block_number: {{ type: uint64 }}
+      seq: {{ type: uint32 }}
+query_aliases:
+  aliased:
+    table: items
+    filters: []
+"#
+            )
+        };
+
+        parse_dataset_description(&catalog("    query_name: others\n    field_name: other"))
+            .expect("distinct names must load");
+
+        for (what, second) in [
+            (
+                "two tables claiming one queryName",
+                "    query_name: items\n    field_name: other",
+            ),
+            (
+                "two tables claiming one fieldName",
+                "    query_name: others\n    field_name: item",
+            ),
+            (
+                "an alias claiming a table's queryName",
+                "    query_name: aliased\n    field_name: other",
+            ),
+        ] {
+            assert!(
+                parse_dataset_description(&catalog(second)).is_err(),
+                "{what} must be refused"
+            );
+        }
     }
 
     /// Every catalog shipped with the engine must load.
