@@ -236,6 +236,19 @@ pub enum ColumnType {
     FixedBinary(usize),
 }
 
+impl ColumnType {
+    /// A list column contributes its elements to a roll rather than one value.
+    pub fn is_list(&self) -> bool {
+        matches!(
+            self,
+            ColumnType::ListUInt8
+                | ColumnType::ListUInt32
+                | ColumnType::ListString
+                | ColumnType::ListStruct
+        )
+    }
+}
+
 impl Serialize for ColumnType {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let s = match self {
@@ -489,6 +502,17 @@ impl DatasetDescription {
 }
 
 impl TableDescription {
+    /// Whether a block number alone identifies a row of this table, which is what
+    /// makes it the dataset's block table (INV-D3). The item key is
+    /// `block_number_column ++ item_order_keys ++ address_column?`, so an empty
+    /// tail is the whole test.
+    ///
+    /// The sort key says nothing about it: that is storage layout, and no answer
+    /// may depend on it (INV-D8).
+    pub fn is_block_table(&self) -> bool {
+        self.item_order_keys.is_empty() && self.address_column.is_none()
+    }
+
     /// Get a column description by name.
     pub fn column(&self, name: &str) -> Option<&ColumnDescription> {
         self.columns.get(name)

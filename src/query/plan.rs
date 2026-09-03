@@ -72,17 +72,13 @@ pub enum RelationKind {
 
 /// Compile a parsed query into an execution plan.
 pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
-    // Find the blocks table
+    // The block table is the one a block number alone identifies. Validation has
+    // already established there is exactly one (INV-D3); the fallback is for a
+    // catalog that never went through it.
     let block_table = metadata
         .tables
         .iter()
-        .find(|(_, desc)| {
-            desc.sort_key
-                .first()
-                .map(|s| s == &desc.block_number_column)
-                .unwrap_or(false)
-                && desc.item_order_keys.is_empty()
-        })
+        .find(|(_, desc)| desc.is_block_table())
         .map(|(name, _)| name.clone())
         .unwrap_or_else(|| "blocks".to_string());
 

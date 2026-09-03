@@ -263,7 +263,9 @@ otherwise. A catalog that fails validation MUST NOT be used to answer queries.
 Every check below is a static property of the catalog alone, requiring no chunk.
 They are collected as [INV-D1](07-invariants.md#inv-d1) … [INV-D10](07-invariants.md#inv-d10).
 
-- Exactly one block table; its `itemOrderKeys` is empty.
+- Exactly one block table: a block number alone identifies its rows, which is
+  to say `itemOrderKeys` is empty and there is no `addressColumn`. Storage order
+  says nothing about it.
 - `blockNumberColumn`, `addressColumn`, every `itemOrderKeys` entry, every
   `sortKey` entry: exists in `columns`.
 - Every `weight` that names a size column: that column exists.

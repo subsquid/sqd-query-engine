@@ -130,16 +130,22 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
             }
 
             // A discriminator dispatches on the byte length of the value it is
-            // given. A key that is not a length in range never matches one, so
-            // the column behind it is unreachable and every request carrying a
-            // value of that length is refused as having no column.
+            // given, looking the column up by that length's decimal form. A key
+            // that is not such a form — out of range, or `"01"`, which parses and
+            // then never matches the `"1"` the lookup asks for — leaves its column
+            // unreachable, and every request carrying a value of that length is
+            // refused as having no column.
             if let crate::metadata::SpecialFilter::Discriminator { columns } = special {
                 for length in columns.keys() {
-                    let parsed = length.parse::<usize>().ok().filter(|n| *n > 0);
+                    let byte_count = length
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|n| (1..=MAX_DISCRIMINATOR_BYTES).contains(n));
+
                     anyhow::ensure!(
-                        parsed.is_some_and(|n| n <= MAX_DISCRIMINATOR_BYTES),
+                        byte_count.is_some_and(|n| n.to_string() == *length),
                         "table '{}': special filter '{}' maps length '{}', which is not a \
-                         byte count between 1 and {}",
+                         byte count between 1 and {} written as the lookup asks for it",
                         table_name,
                         filter_name,
                         length,
@@ -178,6 +184,26 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
                 anyhow::ensure!(
                     table.columns.contains_key(column),
                     "table '{}': virtual field '{}' rolls column '{}', which is not there",
+                    table_name,
+                    field_name,
+                    column
+                );
+            }
+
+            // Only a trailing list is spread into the array; anywhere earlier it
+            // nests instead, and the field comes back a different shape than the
+            // one it exists to present.
+            let leading = columns.split_last().map_or(&[][..], |(_, rest)| rest);
+            for column in leading {
+                let is_list = table
+                    .columns
+                    .get(column)
+                    .is_some_and(|c| c.data_type.is_list());
+
+                anyhow::ensure!(
+                    !is_list,
+                    "table '{}': virtual field '{}' rolls list column '{}' before the last \
+                     position; only a trailing list is spread",
                     table_name,
                     field_name,
                     column
@@ -319,26 +345,26 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
 /// A response is a sequence of blocks, so there has to be exactly one thing a
 /// block is (INV-D3).
 ///
-/// The engine finds it by its shape — sorted on its own block number, with no
-/// order within a block — and takes the first match. A second table of that
-/// shape would make which one it is depend on catalog order; none at all leaves
-/// the engine looking for a table called `blocks` that is not there, and every
-/// header in the response empty.
+/// The engine finds it by its item key: a block is the row a block number alone
+/// identifies. A second table of that shape would make which one it is depend on
+/// catalog order; none at all leaves the engine looking for a table called
+/// `blocks` that is not there, and every header in the response empty.
+///
+/// Identity is not read off the sort key. That is storage layout, which no
+/// answer may depend on (INV-D8) — a block table rewritten under a different
+/// sort key is the same block table.
 fn check_block_table(desc: &DatasetDescription) -> Result<()> {
     let block_tables: Vec<&str> = desc
         .tables
         .iter()
-        .filter(|(_, table)| {
-            table.sort_key.first() == Some(&table.block_number_column)
-                && table.item_order_keys.is_empty()
-        })
+        .filter(|(_, table)| table.is_block_table())
         .map(|(name, _)| name.as_str())
         .collect();
 
     anyhow::ensure!(
         block_tables.len() == 1,
-        "dataset '{}': {} tables are sorted on their own block number with no order \
-         within a block ({:?}); exactly one is the block table",
+        "dataset '{}': {} tables are identified by a block number alone ({:?}); \
+         exactly one is the block table",
         desc.name,
         block_tables.len(),
         block_tables
@@ -360,14 +386,27 @@ fn check_block_table(desc: &DatasetDescription) -> Result<()> {
 /// `query_name` is unique across tables and aliases, `field_name` across tables
 /// (INV-D10). A duplicate makes a client's request ambiguous, and iteration
 /// order — not the catalog — decides which table answers it.
+///
+/// A table with no `query_name` still holds one: a request may address a table
+/// by its own name, so an undeclared name is claimed as surely as a declared
+/// one, and another table declaring it shadows the first out of the request
+/// surface entirely. `field_name` has no such default — a table that declares
+/// none is simply not addressable in `fields` — so only declared ones are
+/// claimed there.
 fn check_names_are_unique(desc: &DatasetDescription) -> Result<()> {
     let mut query_names: HashMap<&str, &str> = HashMap::new();
     let mut field_names: HashMap<&str, &str> = HashMap::new();
 
     for (table_name, table) in &desc.tables {
-        if let Some(name) = &table.query_name {
-            claim(&desc.name, "queryName", name, table_name, &mut query_names)?;
-        }
+        let query_name = table.query_name.as_deref().unwrap_or(table_name);
+        claim(
+            &desc.name,
+            "queryName",
+            query_name,
+            table_name,
+            &mut query_names,
+        )?;
+
         if let Some(name) = &table.field_name {
             claim(&desc.name, "fieldName", name, table_name, &mut field_names)?;
         }
@@ -914,6 +953,7 @@ tables:
     columns:
       number: {{ type: uint64 }}
   items:
+    item_order_keys: [ index ]
     filters: []
     relations:
       kids:
@@ -924,6 +964,7 @@ tables:
       block_number: {{ type: uint64 }}
       index: {{ type: uint32 }}
   children:
+    item_order_keys: [ parent_index ]
     filters: []
     columns:
       block_number: {{ type: uint64 }}
@@ -969,6 +1010,7 @@ tables:
     columns:
       number: {{ type: uint64 }}
   items:
+    item_order_keys: [ index ]
     filters: []
     relations:
       kids:
@@ -977,6 +1019,7 @@ tables:
       block_number: {{ type: uint64 }}
       index: {{ type: uint32 }}
   children:
+    item_order_keys: [ parent_index ]
     filters: []
     columns:
       block_number: {{ type: uint64 }}
@@ -1137,6 +1180,7 @@ tables:
       block_number: { type: uint64 }
       seq: { type: uint32 }
       a0: { type: string }
+      rest: { type: list_string }
       d1: { type: uint8 }
       kind: { type: string }
       payload: { type: string }
@@ -1147,7 +1191,7 @@ tables:
     address_column: seq
     parent_key: [ block_number ]
     virtual_fields:
-      accounts: { type: roll, columns: [ a0 ] }
+      accounts: { type: roll, columns: [ a0, rest ] }
     special_filters:
       discriminator: { type: discriminator, columns: { "1": d1 } }
     field_groups:
@@ -1182,9 +1226,18 @@ tables:
                 "    virtual_fields:\n      accounts: { type: roll, columns: [ a0, nope ] }\n",
             ),
             (
+                "a roll whose spread list is not its last column",
+                "    virtual_fields:\n      accounts: { type: roll, columns: [ rest, a0 ] }\n",
+            ),
+            (
                 "a discriminator length that is not a byte count",
                 "    special_filters:\n      \
                  discriminator: { type: discriminator, columns: { d1: d1 } }\n",
+            ),
+            (
+                "a discriminator length the lookup will never ask for",
+                "    special_filters:\n      \
+                 discriminator: { type: discriminator, columns: { \"01\": d1 } }\n",
             ),
             (
                 "a discriminator length beyond the value cap",
@@ -1230,6 +1283,9 @@ tables:
     /// block is. The engine picks the first table of that shape; a second makes
     /// the choice depend on catalog order, and none leaves every header empty
     /// (INV-D3).
+    ///
+    /// The shape is the item key, not the sort key: what a block is cannot depend
+    /// on how the chunk was written (INV-D8).
     #[test]
     fn test_validate_requires_exactly_one_block_table() {
         let catalog = |tables: &str| format!("name: test\ntables:\n{tables}");
@@ -1255,6 +1311,16 @@ tables:
             parse_dataset_description(&catalog(&format!("{items}{blocks}"))).is_err(),
             "a block table that does not lead the catalog must be refused"
         );
+
+        let unsorted_blocks = "  blocks:\n                                    block_number_column: number\n                                    sort_key: [hash, number]\n                                    filters: []\n                                    columns:\n                                      number: { type: uint64 }\n                                      hash: { type: string }\n";
+        parse_dataset_description(&catalog(&format!("{unsorted_blocks}{items}")))
+            .expect("storage order does not decide what a block is");
+
+        // Its item key is `number ++ address`, so a block number alone does not
+        // identify one of its rows and it is not a second block table.
+        let addressed = "  traces:\n                             block_number_column: number\n                             address_column: address\n                             sort_key: [number]\n                             filters: []\n                             columns:\n                               number: { type: uint64 }\n                               address: { type: list_uint32 }\n";
+        parse_dataset_description(&catalog(&format!("{blocks}{addressed}")))
+            .expect("an addressed table with no order keys is not a block table");
     }
 
     /// A duplicate name makes a client's request ambiguous, and iteration order
@@ -1312,6 +1378,13 @@ query_aliases:
             (
                 "an alias claiming a table's queryName",
                 "    query_name: aliased\n    field_name: other",
+            ),
+            (
+                // `blocks` declares no `query_name`, so it holds its own name —
+                // and a table declaring that name takes it, leaving the block
+                // table unaddressable.
+                "a table claiming another's undeclared queryName",
+                "    query_name: blocks\n    field_name: other",
             ),
         ] {
             assert!(
