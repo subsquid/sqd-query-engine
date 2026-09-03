@@ -76,6 +76,7 @@ columns:
 | `stats` | bool | no | Whether parquet row group statistics (min/max) are available. Enables predicate pushdown for row group pruning. |
 | `dictionary` | bool | no | Whether dictionary encoding is used. Informational — may enable dictionary-level filtering in the future. |
 | `encoding` | string | no | String encoding format: `hex` (EVM addresses, hashes), `base58` (Solana keys), `json` (embedded JSON strings). Controls how raw bytes are displayed in output. |
+| `fold_case` | bool | no | Compare filter values case-insensitively. A `hex` column folds already; this is for one holding hex the chain writes *without* the `0x` prefix — Tron's addresses, topics and sighashes render verbatim, so the encoding cannot say it. |
 
 ### Column Types
 
@@ -86,6 +87,7 @@ columns:
 | `uint32` | UInt32 | |
 | `uint64` | UInt64 | |
 | `int16` | Int16 | |
+| `int32` | Int32 | |
 | `int64` | Int64 | |
 | `float64` | Float64 | |
 | `boolean` | Boolean | |

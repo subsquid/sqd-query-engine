@@ -77,14 +77,15 @@ every `L` including the empty list. There is no filter syntax that selects nulls
 
 ### 4.2.4 Case folding
 
-Values of columns declared `hexBytes` compare **case-insensitively**
-([INV-P8](07-invariants.md#inv-p8)). Everything else compares byte-exactly.
+Values of columns the catalog marks case-insensitive compare
+**case-insensitively** ([INV-P8](07-invariants.md#inv-p8)). Every `hexBytes`
+column is marked this way, as are bare-hex Tron columns. Everything else
+compares byte-exactly.
 
-The folding is one-sided. A `hexBytes` column's stored values are lowercase by
-the encoding's definition (§1.5), so an engine folds the *filter* values and
-compares against the stored bytes as they are. An upper-case digit in a stored
-`hexBytes` value is a malformed chunk, not a value the engine is obliged to
-match.
+The folding is one-sided. A case-insensitive column's stored values are lowercase
+by the catalog contract, so an engine folds the *filter* values and compares
+against the stored bytes as they are. An upper-case digit in a stored value is a
+malformed chunk, not a value the engine is obliged to match.
 
 This is a property of the *column*, not of the filter. `evm.statediffs.key` holds
 hex-looking strings but is not declared `hexBytes`, so `key` filters are

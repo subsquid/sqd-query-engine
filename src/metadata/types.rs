@@ -215,6 +215,23 @@ pub struct ColumnDescription {
     /// System column — not included in user output (e.g., size columns, bloom filters).
     #[serde(default)]
     pub system: bool,
+
+    /// Compare filter values case-insensitively (INV-P8).
+    ///
+    /// A `hex` column folds already — its values are `0x…` lowercase by §1.5.
+    /// This is for a column that holds hex *without* the prefix, which Tron's
+    /// addresses and topics do: they render verbatim, so the encoding cannot
+    /// say it, and a client sending an upper-case address would otherwise get an
+    /// empty response rather than its rows.
+    #[serde(default)]
+    pub fold_case: bool,
+}
+
+impl ColumnDescription {
+    /// Whether filter values on this column compare case-insensitively.
+    pub fn folds_case(&self) -> bool {
+        self.fold_case || self.json_encoding == Some(JsonEncoding::Hex)
+    }
 }
 
 /// Supported column data types (maps to Arrow types).
@@ -227,6 +244,7 @@ pub enum ColumnType {
     UInt32,
     UInt64,
     Int16,
+    Int32,
     Int64,
     Float64,
     Boolean,
@@ -264,6 +282,7 @@ impl Serialize for ColumnType {
             ColumnType::UInt32 => "uint32".to_string(),
             ColumnType::UInt64 => "uint64".to_string(),
             ColumnType::Int16 => "int16".to_string(),
+            ColumnType::Int32 => "int32".to_string(),
             ColumnType::Int64 => "int64".to_string(),
             ColumnType::Float64 => "float64".to_string(),
             ColumnType::Boolean => "boolean".to_string(),
@@ -291,6 +310,7 @@ impl<'de> Deserialize<'de> for ColumnType {
             "uint32" => Ok(ColumnType::UInt32),
             "uint64" => Ok(ColumnType::UInt64),
             "int16" => Ok(ColumnType::Int16),
+            "int32" => Ok(ColumnType::Int32),
             "int64" => Ok(ColumnType::Int64),
             "float64" => Ok(ColumnType::Float64),
             "boolean" => Ok(ColumnType::Boolean),

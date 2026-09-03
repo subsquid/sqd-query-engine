@@ -390,8 +390,15 @@ fn parse_query_item(
     let mut filters = Vec::new();
     let mut relations = Vec::new();
 
-    // Alias-defined relations
-    let alias_relations = alias.map(|a| &a.relations);
+    // An alias is a narrower view of its table, and that holds for relations as
+    // it does for filters (INV-Q6): the alias's own list is the surface, not the
+    // union with its table's. `ethereumTransactions` is over `calls`, and a
+    // `subcalls` of an `Ethereum.transact` call is not a thing the reference
+    // will answer.
+    let declared_relations = match alias {
+        Some(alias_def) => &alias_def.relations,
+        None => &table.relations,
+    };
 
     for (key, val) in obj {
         let snake_key = camel_to_snake(key);
@@ -412,10 +419,7 @@ fn parse_query_item(
 
         // A known relation is a boolean flag. Diagnose a malformed value as
         // such instead of letting it fall through to the unknown-filter path.
-        let is_relation = table.relations.contains_key(&snake_key)
-            || alias_relations
-                .map(|r| r.contains_key(&snake_key))
-                .unwrap_or(false);
+        let is_relation = declared_relations.contains_key(&snake_key);
         if is_relation {
             let enabled = val.as_bool().ok_or_else(|| {
                 engine_err!(

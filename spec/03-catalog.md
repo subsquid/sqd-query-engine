@@ -383,7 +383,10 @@ Tables: `blocks`, `transactions`, `logs`, `internal_transactions`.
 `energyUsageTotal`, `netUsage`, `netFee`, `originEnergyUsage`,
 `energyPenaltyTotal`: `decimalString`.
 
-Tron sighashes are 8 hex digits with **no** `0x` prefix.
+Tron writes hex with **no** `0x` prefix — sighashes are 8 bare digits, addresses
+40 or 42. Those columns are `utf8` by §1.5 and render verbatim; the "hex,
+case-folded" filters above fold on a rule the catalog declares per column
+([INV-P8](07-invariants.md#inv-p8)).
 
 ### Selectable fields
 

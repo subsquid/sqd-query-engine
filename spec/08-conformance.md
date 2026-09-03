@@ -109,7 +109,7 @@ a few that do not. Then assert the laws, over randomly composed queries:
 | `Q([s₁]) ∪ Q([s₂])` = `Q([s₁, s₂])` | [INV-P5](07-invariants.md#inv-p5) |
 | `Q([s, s])` = `Q([s])` | idempotence |
 | `Q([s₁, s₂])` = `Q([s₂, s₁])` | request order irrelevant |
-| `Q(c: [upper(a)])` = `Q(c: [a])` iff `c` is `hexBytes` | [INV-P8](07-invariants.md#inv-p8) |
+| `Q(c: [upper(a)])` = `Q(c: [a])` iff the catalog marks `c` case-insensitive | [INV-P8](07-invariants.md#inv-p8) |
 | `Q(c: [huge])` = ∅, no error | [INV-P14](07-invariants.md#inv-p14) |
 | `Q` with pruning disabled = `Q` | [INV-P16](07-invariants.md#inv-p16) |
 
@@ -303,7 +303,7 @@ value is *accepted* does not cover an invariant that says which values are
 | [INV-Q3](07-invariants.md#inv-q3) | CT-2 | **C** | `test_parse_block_range_validation` |
 | [INV-Q4](07-invariants.md#inv-q4) | CT-2 | **C** | `test_malformed_block_bounds_error`, `test_block_bounds_defaults_and_null` |
 | [INV-Q5](07-invariants.md#inv-q5) | CT-2 | **C** | `test_parse_item_count_limit` |
-| [INV-Q6](07-invariants.md#inv-q6) | CT-2 | **C** | `test_parse_unknown_filter_error`, `undeclared_columns_are_not_filterable`, `an_alias_has_its_own_filter_surface`, `reference_filters_are_all_accepted` |
+| [INV-Q6](07-invariants.md#inv-q6) | CT-2 | **C** | `test_parse_unknown_filter_error`, `undeclared_columns_are_not_filterable`, `an_alias_has_its_own_filter_surface`, `an_alias_has_its_own_relation_surface`, `reference_filters_are_all_accepted`, `reference_aliases_are_all_served` — both halves of the key surface, filters and relations, and on an alias as well as a table |
 | [INV-Q7](07-invariants.md#inv-q7) | CT-2 | **C** | `unknown_field_names_are_rejected` covers misspellings, `a_column_the_catalog_carries_is_not_a_field` the columns that exist and are not fields, and `the_field_surface_is_exactly_the_declared_one` the whole surface both ways |
 | [INV-Q8](07-invariants.md#inv-q8) | CT-2 | **P** | an unknown `fields` key errors; `fields.X` not being an object is untested |
 | [INV-Q9](07-invariants.md#inv-q9) | CT-2 | **P** | block-bound defaults only |
@@ -319,14 +319,14 @@ value is *accepted* does not cover an invariant that says which values are
 | [INV-P5](07-invariants.md#inv-p5) | CT-3 | **U** | nothing asserts `Q([s₁]) ∪ Q([s₂]) = Q([s₁, s₂])` |
 | [INV-P6](07-invariants.md#inv-p6) | CT-3 | **P** | compile-side only |
 | [INV-P7](07-invariants.md#inv-p7) | CT-3 | **P** | the disjunction cases cover null propagation; no per-filter-kind null sweep |
-| [INV-P8](07-invariants.md#inv-p8) | CT-3 | **C** | `hex_filters_fold_case_in_both_shapes`, `non_hex_columns_are_not_folded` |
+| [INV-P8](07-invariants.md#inv-p8) | CT-3 | **C** | `hex_filters_fold_case_in_both_shapes`, `an_alias_folds_case_on_the_column_it_resolves_to`, `bare_hex_columns_fold_case_too` — a `hexBytes` column, an alias reaching one, and Tron's unprefixed hex, which folds without the encoding to say so; `non_hex_columns_are_not_folded` the other direction |
 | [INV-P9](07-invariants.md#inv-p9) | CT-3 | **U** | **nothing checks the engine's bloom bits against the writer's.** A construction mismatch produces false *negatives*, which no client can detect |
 | [INV-P10](07-invariants.md#inv-p10) | CT-3 | **C** | four range cases across physical widths |
 | [INV-P11](07-invariants.md#inv-p11) | CT-3 | **U** | `gteConst` lexicographic comparison has no test |
 | [INV-P12](07-invariants.md#inv-p12) | CT-3 | **C** | three `list_contains_any` cases including the unknown-type one |
 | [INV-P13](07-invariants.md#inv-p13) | CT-3 | **C** | `test_compile_discriminator_mixed_lengths`, `discriminator_hex_is_a_prefix_chain`, and the Kleene cases in the predicate unit tests |
-| [INV-P14](07-invariants.md#inv-p14) | CT-3 | **P** | `unmatchable_values_are_not_errors` plus the overflow cases; known-violated for negative values on signed columns — GAP 14 |
-| [INV-P15](07-invariants.md#inv-p15) | CT-3 | **C** | `undeclared_columns_are_not_filterable`, `an_alias_has_its_own_filter_surface` |
+| [INV-P14](07-invariants.md#inv-p14) | CT-3 | **C** | `unmatchable_values_are_not_errors` and `a_hex_value_too_wide_for_the_column_matches_nothing` for values wider than the column, `a_signed_column_takes_negative_filter_values` for one below its floor, and `a_block_bound_past_the_stored_width_matches_nothing` for the half the invariant states about the block bounds — where wrapping would truncate into a block the chunk holds |
+| [INV-P15](07-invariants.md#inv-p15) | CT-3 | **C** | `undeclared_columns_are_not_filterable`, `an_alias_has_its_own_filter_surface`, `an_alias_has_its_own_relation_surface` |
 | [INV-P16](07-invariants.md#inv-p16) | CT-3 | **P** | row-group pruning and the `can_skip` cases; no pruning-disabled equality run |
 | [INV-R1](07-invariants.md#inv-r1) | CT-4 | **P** | `test_alias_relation_source_predicates`, `test_resolve_includes_source_predicate_columns`; the two-item-request construction of §8.5 is not written |
 | [INV-R2](07-invariants.md#inv-r2) | CT-4 | **U** | nothing asserts relations stop at one hop |
@@ -372,9 +372,9 @@ value is *accepted* does not cover an invariant that says which values are
 | [INV-E7](07-invariants.md#inv-e7) | CT-4 | **C** | `test_semi_join_unsupported_key_type` |
 | [INV-X1](07-invariants.md#inv-x1) | CT-1 | **P** | `a_relation_target_names_its_own_block_column` serves an invented chain from a synthetic chunk with no code change. One chain and one relation shape: a hardcoded name elsewhere would still pass |
 | [INV-X2](07-invariants.md#inv-x2) | CT-8 | **U** | adding a nullable column is never tested |
-| [INV-X3](07-invariants.md#inv-x3) | CT-8 | **C** | `filtering_an_absent_column_is_an_error`, `filtering_a_present_column_still_works` |
+| [INV-X3](07-invariants.md#inv-x3) | CT-8 | **C** | `filtering_an_absent_column_is_an_error` on both scan entry points, `filtering_a_present_column_still_works` for the other direction, `one_unanswerable_item_rejects_the_whole_request` for a filter one item request of several carries, and `an_alias_filter_on_a_column_the_chunk_lacks_is_an_error` for one reached through an alias's extraction column |
 
-**Totals: 39 C, 32 P, 14 U** of 85. Property coverage is therefore 0.46
+**Totals: 40 C, 31 P, 14 U** of 85. Property coverage is therefore 0.47
 (`P-COV-PROPERTY` in [09-parameters.md](09-parameters.md)).
 
 The shape of the U column is worth reading on its own. The unchecked invariants

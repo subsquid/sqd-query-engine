@@ -149,6 +149,65 @@ fn an_alias_folds_case_on_the_column_it_resolves_to() {
     assert!(lower == upper, "the two responses must be identical");
 }
 
+/// Tron writes hex without the `0x` prefix, so its addresses are `utf8` on the
+/// way out and the encoding cannot carry the folding rule. The catalog says it
+/// separately, on the columns and through the alias extractions — otherwise a
+/// checksummed address gets a 200 with no rows.
+#[test]
+#[ignore = "requires external fixture data"]
+fn bare_hex_columns_fold_case_too() {
+    if !fixture_tree_is_present() {
+        return;
+    }
+
+    let tron = meta("tron");
+    const ADDR: &str = "a614f803b6fd780986a42c78ec9c7f77e6ded13c";
+    const CONTRACT: &str = "41a614f803b6fd780986a42c78ec9c7f77e6ded13c";
+
+    let logs = |addr: &str| {
+        format!(
+            r#"{{"type":"tron","fromBlock":82644089,"toBlock":82644090,
+                "fields":{{"log":{{"address":true,"logIndex":true}}}},
+                "logs":[{{"address":["{addr}"]}}]}}"#
+        )
+        .into_bytes()
+    };
+
+    let lower = run("tron", &tron, &logs(ADDR)).unwrap();
+    let upper = run("tron", &tron, &logs(&ADDR.to_ascii_uppercase())).unwrap();
+
+    let found = count_items(&lower, "logs");
+    assert!(found > 0, "the fixture must carry logs for this contract");
+    assert_eq!(
+        found,
+        count_items(&upper, "logs"),
+        "a bare-hex column must fold case"
+    );
+    assert!(lower == upper, "the two responses must be identical");
+
+    // The same through an alias, which reaches a system extraction column.
+    let calls = |contract: &str| {
+        format!(
+            r#"{{"type":"tron","fromBlock":82644089,"toBlock":82644089,
+                "fields":{{"transaction":{{"hash":true}}}},
+                "triggerSmartContractTransactions":[{{"contract":["{contract}"]}}]}}"#
+        )
+        .into_bytes()
+    };
+
+    let lower = run("tron", &tron, &calls(CONTRACT)).unwrap();
+    let upper = run("tron", &tron, &calls(&CONTRACT.to_ascii_uppercase())).unwrap();
+
+    let found = count_items(&lower, "transactions");
+    assert!(found > 0, "the fixture must carry calls into this contract");
+    assert_eq!(
+        found,
+        count_items(&upper, "transactions"),
+        "an alias over a bare-hex column folds too"
+    );
+    assert!(lower == upper, "the two responses must be identical");
+}
+
 /// The rule is the column's encoding, not "lowercase everything": a non-hex
 /// column still compares byte-exactly.
 #[test]
@@ -645,6 +704,46 @@ fn filtering_an_absent_column_is_an_error_on_a_block_sorted_table() {
     );
 }
 
+/// The rule reaches a filter that resolves through an alias, which is where a
+/// chunk older than the catalog actually shows up: `reviveContractEmitted` reads
+/// extraction columns no chunk in the fixture tree carries. Answering that with
+/// every `Revive.ContractEmitted` event in range would be the widest possible
+/// answer to the narrowest possible filter, and no client could tell.
+#[test]
+#[ignore = "requires external fixture data"]
+fn an_alias_filter_on_a_column_the_chunk_lacks_is_an_error() {
+    if !fixture_tree_is_present() {
+        return;
+    }
+
+    let substrate = meta("substrate");
+
+    // Without the filter the alias reads only `name`, which every chunk has.
+    run(
+        "moonbeam",
+        &substrate,
+        br#"{"type":"substrate","fromBlock":0,
+             "fields":{"event":{"name":true}},
+             "reviveContractEmitted":[{}]}"#,
+    )
+    .expect("an alias whose implicit predicate the chunk can answer is answerable");
+
+    let err = run(
+        "moonbeam",
+        &substrate,
+        br#"{"type":"substrate","fromBlock":0,
+             "fields":{"event":{"name":true}},
+             "reviveContractEmitted":[{"contract":["0xdead"]}]}"#,
+    )
+    .expect_err("filtering on a column the chunk lacks must error");
+
+    assert!(
+        err.root_cause().to_string().contains("_revive_contract"),
+        "the error must name the missing column, got: {}",
+        err.root_cause()
+    );
+}
+
 /// Query items are alternatives, but the reference implementation still refuses
 /// the whole request when any one of them names a column the chunk lacks —
 /// verified against it directly. Pinned because "make the unanswerable item match
@@ -936,6 +1035,41 @@ fn a_hex_value_too_wide_for_the_column_matches_nothing() {
             parse_query(query.as_bytes(), &solana).and_then(|parsed| compile(&parsed, &solana));
         assert!(compiled.is_err(), "d1 = {shape} must be refused");
     }
+}
+
+/// INV-P14 covers the block bounds in the same breath as filter values, and the
+/// bounds are the case where wrapping would be invisible: a chunk stores its
+/// block numbers in 32 bits, so a `fromBlock` 2³² above one it holds truncates
+/// to a block it does hold — and the client asked about neither.
+#[test]
+#[ignore = "requires external fixture data"]
+fn a_block_bound_past_the_stored_width_matches_nothing() {
+    if !fixture_tree_is_present() {
+        return;
+    }
+
+    let evm = meta("evm");
+    let query = |from: u64, to: u64| {
+        format!(
+            r#"{{"type":"evm","fromBlock":{from},"toBlock":{to},"includeAllBlocks":true,
+                "fields":{{"block":{{"number":true}}}}}}"#
+        )
+        .into_bytes()
+    };
+
+    const FIRST: u64 = 17881390;
+    const LAST: u64 = 17881391;
+    const WIDTH: u64 = 1 << 32;
+
+    let present = run("ethereum", &evm, &query(FIRST, LAST)).unwrap();
+    assert!(!present.is_empty(), "the fixture must carry these blocks");
+
+    let wrapped = run("ethereum", &evm, &query(FIRST + WIDTH, LAST + WIDTH))
+        .expect("a bound past the stored width is not an error");
+    assert!(
+        wrapped.is_empty(),
+        "a block bound must not wrap into a block the chunk holds"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1814,6 +1948,153 @@ fn an_alias_has_its_own_filter_surface() {
     .expect("the underlying table keeps its own filters");
 }
 
+/// The same holds for relations, which used to be read as the union of the
+/// alias's and its table's. An `Ethereum.transact` call has no `subcalls` in the
+/// reference, and an alias that inherits one is not the narrower view it claims
+/// to be.
+#[test]
+fn an_alias_has_its_own_relation_surface() {
+    let substrate = meta("substrate");
+
+    for declared in [
+        r#"{"type":"substrate","fromBlock":0,"ethereumTransactions":[{"stack":true}]}"#,
+        r#"{"type":"substrate","fromBlock":0,"ethereumTransactions":[{"events":true}]}"#,
+        r#"{"type":"substrate","fromBlock":0,"ethereumTransactions":[{"extrinsic":true}]}"#,
+    ] {
+        parse_query(declared.as_bytes(), &substrate)
+            .expect("an alias must accept the relations it declares");
+    }
+
+    let err = parse_query(
+        br#"{"type":"substrate","fromBlock":0,"ethereumTransactions":[{"subcalls":true}]}"#,
+        &substrate,
+    )
+    .expect_err("an alias must not inherit its table's whole relation surface");
+    assert_eq!(error_kind(&err), Some(ErrorKind::UnknownFilter));
+
+    // The table itself still has it.
+    parse_query(
+        br#"{"type":"substrate","fromBlock":0,"calls":[{"subcalls":true}]}"#,
+        &substrate,
+    )
+    .expect("the underlying table keeps its own relations");
+}
+
+/// Every alias the reference serves: the implicit predicate that makes it a
+/// narrower view, and the filters and relations it exposes. Eight of these were
+/// missing from the catalog outright — five Substrate aliases and all three
+/// Tron ones — which left their extraction columns in the chunks and
+/// unreachable from any query.
+#[allow(clippy::type_complexity)]
+const REFERENCE_ALIASES: &[(&str, &str, (&str, &str), &[&str], &[&str])] = &[
+    (
+        "substrate",
+        "evmLogs",
+        ("name", "EVM.Log"),
+        &["address", "topic0", "topic1", "topic2", "topic3"],
+        &["extrinsic", "call", "stack"],
+    ),
+    (
+        "substrate",
+        "ethereumTransactions",
+        ("name", "Ethereum.transact"),
+        &["to", "sighash"],
+        &["extrinsic", "stack", "events"],
+    ),
+    (
+        "substrate",
+        "contractsEvents",
+        ("name", "Contracts.ContractEmitted"),
+        &["contractAddress"],
+        &["extrinsic", "call", "stack"],
+    ),
+    (
+        "substrate",
+        "gearMessagesEnqueued",
+        ("name", "Gear.UserMessageEnqueued"),
+        &["programId"],
+        &["extrinsic", "call", "stack"],
+    ),
+    (
+        "substrate",
+        "gearUserMessagesSent",
+        ("name", "Gear.UserMessageSent"),
+        &["programId"],
+        &["extrinsic", "call", "stack"],
+    ),
+    (
+        "substrate",
+        "reviveContractEmitted",
+        ("name", "Revive.ContractEmitted"),
+        &["contract", "topic0", "topic1", "topic2", "topic3"],
+        &["extrinsic", "call", "stack"],
+    ),
+    (
+        "tron",
+        "transferTransactions",
+        ("type", "TransferContract"),
+        &["owner", "to"],
+        &["logs", "internalTransactions"],
+    ),
+    (
+        "tron",
+        "transferAssetTransactions",
+        ("type", "TransferAssetContract"),
+        &["owner", "to", "asset"],
+        &["logs", "internalTransactions"],
+    ),
+    (
+        "tron",
+        "triggerSmartContractTransactions",
+        ("type", "TriggerSmartContract"),
+        &["owner", "contract", "sighash"],
+        &["logs", "internalTransactions"],
+    ),
+];
+
+#[test]
+fn reference_aliases_are_all_served() {
+    for (dataset, alias, _, filters, relations) in REFERENCE_ALIASES {
+        let metadata = meta(dataset);
+        let name = &metadata.name;
+
+        for filter in *filters {
+            let json =
+                format!(r#"{{"type":"{name}","fromBlock":0,"{alias}":[{{"{filter}":[]}}]}}"#);
+            parse_query(json.as_bytes(), &metadata)
+                .unwrap_or_else(|e| panic!("{alias}.{filter} must be filterable: {e}"));
+        }
+
+        for relation in *relations {
+            let json =
+                format!(r#"{{"type":"{name}","fromBlock":0,"{alias}":[{{"{relation}":true}}]}}"#);
+            let parsed = parse_query(json.as_bytes(), &metadata)
+                .unwrap_or_else(|e| panic!("{alias}.{relation} must be requestable: {e}"));
+            compile(&parsed, &metadata)
+                .unwrap_or_else(|e| panic!("{alias}.{relation} must resolve: {e}"));
+        }
+    }
+}
+
+/// An alias narrows its table by a predicate the client cannot see or override.
+/// A catalog that pins the wrong one answers a different question at 200.
+#[test]
+fn each_alias_pins_the_predicate_the_reference_pins() {
+    for (dataset, alias, (column, value), _, _) in REFERENCE_ALIASES {
+        let metadata = meta(dataset);
+        let def = metadata
+            .query_aliases
+            .get(*alias)
+            .unwrap_or_else(|| panic!("{dataset} must serve '{alias}'"));
+
+        assert_eq!(
+            def.implicit_predicates.get(*column).map(Vec::as_slice),
+            Some([value.to_string()].as_slice()),
+            "{dataset}.{alias} must pin {column} = {value}"
+        );
+    }
+}
+
 /// Closing the surface must not close it on anything real. Every filter the
 /// reference implementation accepts is exercised here, so a catalog that drifts
 /// away from it fails rather than silently rejecting a working query.
@@ -1898,6 +2179,20 @@ fn reference_filters_are_all_accepted() {
         ("substrate", "events", &["name"]),
         ("substrate", "calls", &["name"]),
         (
+            "substrate",
+            "evmLogs",
+            &["address", "topic0", "topic1", "topic2", "topic3"],
+        ),
+        ("substrate", "ethereumTransactions", &["to", "sighash"]),
+        ("substrate", "contractsEvents", &["contractAddress"]),
+        ("substrate", "gearMessagesEnqueued", &["programId"]),
+        ("substrate", "gearUserMessagesSent", &["programId"]),
+        (
+            "substrate",
+            "reviveContractEmitted",
+            &["contract", "topic0", "topic1", "topic2", "topic3"],
+        ),
+        (
             "bitcoin",
             "outputs",
             &["scriptPubKeyAddress", "scriptPubKeyType"],
@@ -1912,6 +2207,13 @@ fn reference_filters_are_all_accepted() {
                 "prevoutGenerated",
             ],
         ),
+        ("tron", "transactions", &["type"]),
+        (
+            "tron",
+            "logs",
+            &["address", "topic0", "topic1", "topic2", "topic3"],
+        ),
+        ("tron", "internalTransactions", &["caller", "transferTo"]),
     ];
 
     for (dataset, request_key, filters) in cases {
@@ -2055,6 +2357,157 @@ fn a_hex_value_of_the_wrong_width_matches_nothing_without_erroring() {
 
     // Not hex at all, which is.
     assert!(run("solana", &solana, &query("zz")).is_err());
+}
+
+/// A signed column is filterable, negatives included.
+///
+/// The scalar path read `as_u64` and nothing else, and `compile_in_list` had no
+/// signed arm, so `-1` on Solana's `transactions.version` — the sentinel every
+/// legacy transaction carries — came back as "expected array, boolean, number,
+/// or string" for a value that was a number. No bundled catalog declares such a
+/// filter, so the surface is exercised here on a catalog that does.
+#[test]
+fn a_signed_column_takes_negative_filter_values() {
+    let (catalog, chunk) = signed_dataset();
+
+    let matched = |filter: &str| -> Vec<i64> {
+        let query = format!(
+            r#"{{"type":"signed","fromBlock":10,"toBlock":12,
+                "fields":{{"item":{{"seq":true}}}},
+                "items":[{{{filter}}}]}}"#
+        );
+        seqs(&catalog, chunk.path(), &query)
+    };
+
+    // The sentinel, as a list and as the bare value it abbreviates.
+    assert_eq!(matched(r#""version":[-1]"#), vec![0]);
+    assert_eq!(matched(r#""version":-1"#), vec![0]);
+
+    // A wider signed column, and a list mixing both signs.
+    assert_eq!(matched(r#""lamports":[-4200]"#), vec![1]);
+    assert_eq!(matched(r#""lamports":[-4200,7]"#), vec![1, 2]);
+
+    // A value the declared width cannot hold matches nothing, and says so by
+    // returning no rows rather than an error (INV-P14).
+    assert_eq!(matched(r#""version":[-40000]"#), Vec::<i64>::new());
+
+    // Hex on a signed column is a category error, not a value that fails to
+    // match: dropping it would silently widen the list to its other elements.
+    let hex = r#"{"type":"signed","fromBlock":10,"toBlock":12,"items":[{"version":["0xffff"]}]}"#;
+    let err = plan_error(&catalog, hex);
+    assert_eq!(error_kind(&err), Some(ErrorKind::InvalidFilterValue));
+}
+
+/// A three-row chunk whose two logically signed filterable columns use unsigned
+/// physical storage, with a negative value in each.
+fn signed_dataset() -> (DatasetDescription, tempfile::TempDir) {
+    use arrow::array::{ArrayRef, UInt16Array, UInt32Array, UInt64Array};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use sqd_query_engine::metadata::parse_dataset_description;
+    use std::sync::Arc;
+
+    let catalog = parse_dataset_description(
+        r#"
+name: signed
+tables:
+  blocks:
+    field_name: block
+    block_number_column: number
+    sort_key: [number]
+    filters: []
+    fields: [number]
+    columns:
+      number: { type: uint64 }
+  items:
+    query_name: items
+    field_name: item
+    block_number_column: block_number
+    item_order_keys: [seq]
+    sort_key: [block_number, seq]
+    filters: [version, lamports]
+    fields: [seq, version, lamports]
+    columns:
+      block_number: { type: uint64 }
+      seq: { type: uint32 }
+      version: { type: int16 }
+      lamports: { type: int64 }
+"#,
+    )
+    .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+
+    let items_schema = Arc::new(Schema::new(vec![
+        Field::new("block_number", DataType::UInt64, false),
+        Field::new("seq", DataType::UInt32, false),
+        Field::new("version", DataType::UInt16, false),
+        Field::new("lamports", DataType::UInt64, false),
+    ]));
+    let items = RecordBatch::try_new(
+        items_schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(vec![10u64, 11, 12])) as ArrayRef,
+            Arc::new(UInt32Array::from(vec![0u32, 1, 2])) as ArrayRef,
+            Arc::new(UInt16Array::from(vec![u16::MAX, 0, 1])) as ArrayRef,
+            Arc::new(UInt64Array::from(vec![0, u64::MAX - 4_199, 7])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+
+    let blocks_schema = Arc::new(Schema::new(vec![Field::new(
+        "number",
+        DataType::UInt64,
+        false,
+    )]));
+    let blocks = RecordBatch::try_new(
+        blocks_schema.clone(),
+        vec![Arc::new(UInt64Array::from(vec![10u64, 11, 12])) as ArrayRef],
+    )
+    .unwrap();
+
+    for (name, schema, batch) in [
+        ("items", items_schema, items),
+        ("blocks", blocks_schema, blocks),
+    ] {
+        let file = std::fs::File::create(dir.path().join(format!("{name}.parquet"))).unwrap();
+        let mut writer = parquet::arrow::ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
+    (catalog, dir)
+}
+
+/// The `seq` of every item a query returns, in response order.
+fn seqs(catalog: &DatasetDescription, chunk: &Path, query: &str) -> Vec<i64> {
+    let body = run_against(catalog, chunk, query).expect("query must be answerable");
+
+    body.split(|b| *b == b'\n')
+        .filter(|line| !line.is_empty())
+        .flat_map(|line| {
+            let block: serde_json::Value = serde_json::from_slice(line).unwrap();
+            block
+                .get("items")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default()
+        })
+        .map(|item| item["seq"].as_i64().unwrap())
+        .collect()
+}
+
+fn run_against(catalog: &DatasetDescription, chunk: &Path, query: &str) -> anyhow::Result<Vec<u8>> {
+    let parsed = parse_query(query.as_bytes(), catalog)?;
+    let plan = compile(&parsed, catalog)?;
+    Ok(execute_plan(&plan, catalog, chunk)?
+        .map(|out| out.into_json_lines())
+        .unwrap_or_default())
+}
+
+fn plan_error(catalog: &DatasetDescription, query: &str) -> anyhow::Error {
+    let parsed = parse_query(query.as_bytes(), catalog).expect("the filter surface accepts it");
+    compile(&parsed, catalog).expect_err("the value does not")
 }
 
 // ---------------------------------------------------------------------------
@@ -2832,6 +3285,79 @@ const REFERENCE_FIELD_SURFACE: &[(&str, &str, &str, &[&str])] = &[
             "vaultAddress",
             "status",
             "response",
+        ],
+    ),
+    (
+        "tron",
+        "blocks",
+        "block",
+        &[
+            "number",
+            "hash",
+            "parentHash",
+            "txTrieRoot",
+            "version",
+            "timestamp",
+            "witnessAddress",
+            "witnessSignature",
+        ],
+    ),
+    (
+        "tron",
+        "transactions",
+        "transaction",
+        &[
+            "transactionIndex",
+            "hash",
+            "ret",
+            "signature",
+            "type",
+            "parameter",
+            "permissionId",
+            "refBlockBytes",
+            "refBlockHash",
+            "feeLimit",
+            "expiration",
+            "timestamp",
+            "rawDataHex",
+            "fee",
+            "contractResult",
+            "contractAddress",
+            "resMessage",
+            "withdrawAmount",
+            "unfreezeAmount",
+            "withdrawExpireAmount",
+            "cancelUnfreezeV2Amount",
+            "result",
+            "energyFee",
+            "energyUsage",
+            "energyUsageTotal",
+            "netUsage",
+            "netFee",
+            "originEnergyUsage",
+            "energyPenaltyTotal",
+        ],
+    ),
+    (
+        "tron",
+        "logs",
+        "log",
+        &["transactionIndex", "logIndex", "address", "data", "topics"],
+    ),
+    (
+        "tron",
+        "internal_transactions",
+        "internalTransaction",
+        &[
+            "transactionIndex",
+            "internalTransactionIndex",
+            "hash",
+            "callerAddress",
+            "transferToAddress",
+            "callValueInfo",
+            "note",
+            "rejected",
+            "extra",
         ],
     ),
 ];

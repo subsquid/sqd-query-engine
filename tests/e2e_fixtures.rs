@@ -380,6 +380,33 @@ moonbeam_fixture!(simple_call_query);
 moonbeam_fixture!(simple_event_query);
 
 // ---------------------------------------------------------------------------
+// Tron fixtures
+// ---------------------------------------------------------------------------
+
+macro_rules! tron_fixture {
+    ($name:ident) => {
+        paste::paste! {
+            #[test]
+            #[ignore = "requires external fixture data"]
+            fn [<tron_ $name>]() {
+                test_fixture("tron", "metadata/tron.yaml", stringify!($name));
+            }
+        }
+    };
+}
+
+tron_fixture!(all_fields);
+tron_fixture!(include_all_blocks);
+tron_fixture!(internal_transactions);
+tron_fixture!(logs_with_transaction);
+tron_fixture!(topics_filtering);
+tron_fixture!(transactions_by_type);
+tron_fixture!(transfer_asset_transactions);
+tron_fixture!(transfer_transactions);
+tron_fixture!(trigger_smart_contract);
+tron_fixture!(trigger_smart_contract_with_relations);
+
+// ---------------------------------------------------------------------------
 // Hyperliquid Fills fixtures
 // ---------------------------------------------------------------------------
 
@@ -435,10 +462,9 @@ hyperliquid_replica_cmds_fixture!(order_action);
 #[test]
 #[ignore = "requires external fixture data"]
 fn fixture_declarations_match_the_fixture_tree() {
-    // Datasets the engine does not serve: `tron` was never ported, `fuel` was
-    // dropped. Their fixtures stay in the shared tree for the reference
-    // implementation and are nothing this suite should account for.
-    const UNSUPPORTED_DATASETS: &[&str] = &["tron", "fuel"];
+    // `fuel` is out of scope (ADR-10). Its fixtures stay in the shared tree for
+    // the reference implementation and are nothing this suite should account for.
+    const UNSUPPORTED_DATASETS: &[&str] = &["fuel"];
 
     if !fixture_tree_is_present() {
         return;

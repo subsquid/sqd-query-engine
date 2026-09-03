@@ -158,6 +158,11 @@ per column.
 A float that is NaN or infinite renders as `null`
 ([INV-O9](07-invariants.md#inv-o9)).
 
+Not every hex value is `hexBytes`. Tron writes hex without the `0x` prefix, so
+its addresses, topics and sighashes render verbatim and are `utf8` here. They
+still compare case-insensitively, which the catalog declares on the column rather
+than through the encoding ([INV-P8](07-invariants.md#inv-p8)).
+
 `jsonVerbatim` splices bytes that the engine did not produce into a document it
 did. An engine MUST either validate those bytes or guarantee by construction
 that the archive writer only ever stored valid JSON there. A malformed value

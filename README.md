@@ -132,6 +132,7 @@ cargo bench --bench profile    --features legacy-query -- rpc/getLogs --compare
 - **EVM** (Ethereum, Optimism, Binance) — `metadata/evm.yaml`
 - **Solana** — `metadata/solana.yaml`
 - **Substrate** (Kusama, Moonbeam) — `metadata/substrate.yaml`
+- **Tron** — `metadata/tron.yaml`
 - **Bitcoin** — `metadata/bitcoin.yaml`
 - **Hyperliquid Fills** — `metadata/hyperliquid_fills.yaml`
 - **Hyperliquid Replica Commands** — `metadata/hyperliquid_replica_cmds.yaml`

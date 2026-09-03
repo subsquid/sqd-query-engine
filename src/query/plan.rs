@@ -461,7 +461,7 @@ fn compile_item_predicates(item: &QueryItem, table: &TableDescription) -> Result
 
                     if let Some(bool_val) = boolean_filter {
                         col_predicates.push(col_eq(column, ScalarValue::Boolean(bool_val)));
-                    } else if value.is_string() || value.is_u64() || value.is_array() {
+                    } else if is_filter_scalar(value) || value.is_array() {
                         let values = match value.as_array() {
                             Some(arr) => arr,
                             None => std::slice::from_ref(value),
@@ -529,7 +529,7 @@ fn compile_item_predicates(item: &QueryItem, table: &TableDescription) -> Result
 
         if let Some(bool_val) = boolean_filter {
             col_predicates.push(col_eq(key, ScalarValue::Boolean(bool_val)));
-        } else if value.is_string() || value.is_u64() || value.is_array() {
+        } else if is_filter_scalar(value) || value.is_array() {
             // A bare value is a one-element list and compiles as one, so the two
             // forms cannot drift: the scalar branch used to compare a `Utf8`
             // against whatever the column was, which worked on a string column
@@ -583,11 +583,19 @@ fn ensure_hex_for_column(s: &str, column: &str, col_desc: &ColumnDescription) ->
     Ok(())
 }
 
-/// Case folding follows the column, not the filter: a hex-encoded column
-/// compares case-insensitively whether the value arrives as a scalar or inside
-/// an IN-list (INV-P8). Clients send checksummed addresses.
+/// Whether a bare value is one a filter can carry: a string, or an integer of
+/// either sign. `is_u64` alone leaves out every negative, which is how a
+/// `{"version": -1}` on a signed column used to come back as "expected array,
+/// boolean, number, or string" for a value that was all four.
+fn is_filter_scalar(value: &serde_json::Value) -> bool {
+    value.is_string() || value.is_u64() || value.is_i64()
+}
+
+/// Case folding follows the column, not the filter: a column the catalog marks
+/// case-insensitive compares that way whether the value arrives as a scalar or
+/// inside an IN-list (INV-P8). Clients send checksummed addresses.
 fn fold_for_column(s: &str, col_desc: &ColumnDescription) -> String {
-    if col_desc.json_encoding == Some(JsonEncoding::Hex) {
+    if col_desc.folds_case() {
         s.to_ascii_lowercase()
     } else {
         s.to_string()
@@ -598,14 +606,16 @@ fn fold_for_column(s: &str, col_desc: &ColumnDescription) -> String {
 /// integers.
 ///
 /// A string element must be well-formed hex — `0x`/`0X` prefix, even digit
-/// count (INV-Q12); anything that is neither a string nor an unsigned integer
-/// is an error. Whether a parsed value *fits* the column is left to the caller:
-/// one that does not fit matches nothing (INV-P14), and a never-matching
-/// disjunct is a no-op inside an IN-list.
+/// count (INV-Q12); anything that is neither a string nor an integer is an
+/// error. Numbers are widened to `i128`, which is the one type that holds both a
+/// `uint64` above `i64::MAX` and a negative value, so the caller narrows once
+/// rather than each branch guessing a signedness. Whether a parsed value *fits*
+/// the column is left to the caller: one that does not fit matches nothing
+/// (INV-P14), and a never-matching disjunct is a no-op inside an IN-list.
 fn split_binary_in_list(
     column: &str,
     values: &[serde_json::Value],
-) -> Result<(Vec<Vec<u8>>, Vec<u64>)> {
+) -> Result<(Vec<Vec<u8>>, Vec<i128>)> {
     let mut hex = Vec::new();
     let mut numbers = Vec::new();
 
@@ -622,11 +632,13 @@ fn split_binary_in_list(
             })?;
             hex.push(bytes);
         } else if let Some(n) = v.as_u64() {
-            numbers.push(n);
+            numbers.push(i128::from(n));
+        } else if let Some(n) = v.as_i64() {
+            numbers.push(i128::from(n));
         } else {
             engine_bail!(
                 ErrorKind::InvalidFilterValue,
-                "invalid value {} in filter on '{}': expected a hex string or an unsigned integer",
+                "invalid value {} in filter on '{}': expected a hex string or an integer",
                 v,
                 column
             );
@@ -634,6 +646,45 @@ fn split_binary_in_list(
     }
 
     Ok((hex, numbers))
+}
+
+/// Compile an IN-list over a signed integer column.
+///
+/// Signed columns hold counts and sentinels — Solana's `-1` for a legacy
+/// transaction version, a negative reward — never addresses, so a hex value on
+/// one is a category error rather than a value that happens not to match. A
+/// number outside the declared range is dropped instead: it matches nothing
+/// (INV-P14).
+///
+/// The list is built at `int64` whatever the declared width, because the width
+/// the chunk was written at is its own choice (INV-D7); the range is what the
+/// declared type decides.
+fn compile_signed_in_list(
+    column: &str,
+    values: &[serde_json::Value],
+    range: std::ops::RangeInclusive<i128>,
+    declared: &str,
+) -> Result<ColumnPredicate> {
+    let (hex, numbers) = split_binary_in_list(column, values)?;
+
+    engine_ensure!(
+        hex.is_empty(),
+        ErrorKind::InvalidFilterValue,
+        "invalid value in filter on '{}': a signed {} column takes numbers, not hex strings",
+        column,
+        declared
+    );
+
+    let vals: Vec<i64> = numbers
+        .into_iter()
+        .filter(|n| range.contains(n))
+        .map(|n| n as i64)
+        .collect();
+
+    Ok(col_in_list(
+        column,
+        Arc::new(Int64Array::from(vals)) as Arc<dyn Array>,
+    ))
 }
 
 /// Compile an IN-list filter for a column based on its type.
@@ -711,12 +762,30 @@ fn compile_in_list(
                 .filter(|b| b.len() == 8)
                 .map(|b| u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
                 .collect();
-            vals.extend(numbers.iter().copied());
+            vals.extend(numbers.iter().filter_map(|&n| u64::try_from(n).ok()));
             Ok(col_in_list(
                 column,
                 Arc::new(UInt64Array::from(vals)) as Arc<dyn Array>,
             ))
         }
+        ColumnType::Int16 => compile_signed_in_list(
+            column,
+            values,
+            i128::from(i16::MIN)..=i128::from(i16::MAX),
+            "int16",
+        ),
+        ColumnType::Int32 => compile_signed_in_list(
+            column,
+            values,
+            i128::from(i32::MIN)..=i128::from(i32::MAX),
+            "int32",
+        ),
+        ColumnType::Int64 => compile_signed_in_list(
+            column,
+            values,
+            i128::from(i64::MIN)..=i128::from(i64::MAX),
+            "int64",
+        ),
         ColumnType::FixedBinary(size) => {
             let (hex, numbers) = split_binary_in_list(column, values)?;
             engine_ensure!(
