@@ -100,15 +100,15 @@ pub(crate) struct ResolvedFieldWriter {
     json_key_prefix: Vec<u8>,
     /// Resolved column index for Regular, or resolved indices for Roll.
     indices: ResolvedIndices,
-    /// Pre-resolved encoder function for Regular fields (eliminates per-row DataType dispatch).
-    encoder: Option<EncoderFn>,
     /// Pre-resolved roll encoder (eliminates per-row DataType dispatch for Roll fields).
     roll_encoder: Option<ResolvedRollEncoder>,
 }
 
 pub(crate) enum ResolvedIndices {
-    /// Single column index for Regular fields.
-    Single(Option<usize>),
+    /// A Regular field's column index and its encoder, resolved together: the
+    /// encoder is chosen from the array at that index, so neither exists without
+    /// the other.
+    Single(Option<(usize, EncoderFn)>),
     /// Multiple column indices for Roll fields.
     Multi(Vec<usize>),
 }
@@ -150,7 +150,6 @@ pub(crate) fn resolve_writers(
                 ResolvedFieldWriter {
                     json_key_prefix: json_key_prefix.clone(),
                     indices: ResolvedIndices::Multi(idxs),
-                    encoder: None,
                     roll_encoder: Some(roll_encoder),
                 }
             }
@@ -160,18 +159,17 @@ pub(crate) fn resolve_writers(
                 encoding,
                 declared_type,
             } => {
-                let idx = batch.schema().index_of(column_name).ok();
-                let encoder = idx.map(|i| {
-                    resolve_encoder(
+                let resolved = batch.schema().index_of(column_name).ok().map(|i| {
+                    let encoder = resolve_encoder(
                         batch.column(i).data_type(),
                         encoding.as_ref(),
                         declared_type.as_ref(),
-                    )
+                    );
+                    (i, encoder)
                 });
                 ResolvedFieldWriter {
                     json_key_prefix: json_key_prefix.clone(),
-                    indices: ResolvedIndices::Single(idx),
-                    encoder,
+                    indices: ResolvedIndices::Single(resolved),
                     roll_encoder: None,
                 }
             }
@@ -374,10 +372,10 @@ fn write_row_fields_resolved(
                     buf.push(b',');
                 }
             }
-            ResolvedIndices::Single(Some(idx)) => {
+            ResolvedIndices::Single(Some((idx, encoder))) => {
                 let col = batch.column(*idx);
                 buf.extend_from_slice(&rw.json_key_prefix);
-                (rw.encoder.unwrap())(col.as_ref(), row, buf);
+                encoder(col.as_ref(), row, buf);
                 buf.push(b',');
             }
             ResolvedIndices::Single(None) => {}

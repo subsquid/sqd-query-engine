@@ -300,3 +300,141 @@ fn a_relation_whose_join_key_is_missing_is_an_error() {
         "the error must name the column the chunk lacks, got: {err}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// INV-X1 — a column name the engine knows is a column name the catalog lost
+// ---------------------------------------------------------------------------
+
+/// A chain that calls its block number `height`, with a relation onto a table
+/// that also carries an unrelated column named `block_number` — the archive's
+/// note of which block a receipt *refers to*, not the block it is in.
+const HEIGHT_CHAIN: &str = r#"
+name: test
+tables:
+  blocks:
+    field_name: block
+    block_number_column: height
+    sort_key: [height]
+    filters: []
+    columns:
+      height: { type: uint64 }
+  events:
+    query_name: events
+    field_name: event
+    block_number_column: height
+    item_order_keys: [seq]
+    sort_key: [height, seq]
+    filters: [ kind ]
+    relations:
+      receipt:
+        table: receipts
+        key: [height, seq]
+    columns:
+      height: { type: uint64 }
+      seq: { type: uint32 }
+      kind: { type: string }
+  receipts:
+    query_name: receipts
+    field_name: receipt
+    block_number_column: height
+    item_order_keys: [seq]
+    sort_key: [height, seq]
+    filters: []
+    columns:
+      height: { type: uint64 }
+      seq: { type: uint32 }
+      block_number: { type: uint64 }
+      status: { type: string }
+"#;
+
+/// One event and one receipt per block. Every receipt cites block 1, which is
+/// not in the chunk at all.
+fn height_chain_chunk(blocks: &[u64]) -> TempDir {
+    let dir = tempfile::tempdir().unwrap();
+
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "height",
+        DataType::UInt64,
+        false,
+    )]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![Arc::new(UInt64Array::from(blocks.to_vec())) as ArrayRef],
+    )
+    .unwrap();
+    write_parquet(&dir.path().join("blocks.parquet"), &batch);
+
+    let events_schema = Arc::new(Schema::new(vec![
+        Field::new("height", DataType::UInt64, false),
+        Field::new("seq", DataType::UInt32, false),
+        Field::new("kind", DataType::Utf8, false),
+    ]));
+    let events = RecordBatch::try_new(
+        events_schema,
+        vec![
+            Arc::new(UInt64Array::from(blocks.to_vec())) as ArrayRef,
+            Arc::new(UInt32Array::from(vec![0u32; blocks.len()])) as ArrayRef,
+            Arc::new(arrow::array::StringArray::from(vec!["call"; blocks.len()])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    write_parquet(&dir.path().join("events.parquet"), &events);
+
+    let receipts_schema = Arc::new(Schema::new(vec![
+        Field::new("height", DataType::UInt64, false),
+        Field::new("seq", DataType::UInt32, false),
+        Field::new("block_number", DataType::UInt64, false),
+        Field::new("status", DataType::Utf8, false),
+    ]));
+    let receipts = RecordBatch::try_new(
+        receipts_schema,
+        vec![
+            Arc::new(UInt64Array::from(blocks.to_vec())) as ArrayRef,
+            Arc::new(UInt32Array::from(vec![0u32; blocks.len()])) as ArrayRef,
+            Arc::new(UInt64Array::from(vec![1u64; blocks.len()])) as ArrayRef,
+            Arc::new(arrow::array::StringArray::from(vec!["ok"; blocks.len()])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    write_parquet(&dir.path().join("receipts.parquet"), &receipts);
+
+    dir
+}
+
+/// Block selection read the block number of a relation's rows under the literal
+/// name `block_number`. Every table in every shipped catalog happens to use it,
+/// so the engine worked — until a chain that does not, or a table that uses the
+/// name for something else. Both are catalog edits, and INV-X1 says a catalog
+/// edit is all it takes to serve a new chain.
+#[test]
+fn a_relation_target_names_its_own_block_column() {
+    let meta = parse_dataset_description(HEIGHT_CHAIN).unwrap();
+    let chunk = height_chain_chunk(&[10, 11, 12]);
+
+    let blocks = run(
+        &meta,
+        &chunk,
+        r#"{"type":"test","fromBlock":10,"toBlock":12,
+            "fields":{"block":{"height":true},"event":{"kind":true},
+                      "receipt":{"blockNumber":true,"status":true}},
+            "events":[{"kind":["call"],"receipt":true}]}"#,
+    )
+    .unwrap()
+    .unwrap();
+
+    let heights: Vec<u64> = blocks
+        .iter()
+        .map(|b| b["header"]["height"].as_u64().unwrap())
+        .collect();
+    assert_eq!(
+        heights,
+        vec![10, 11, 12],
+        "the response carries the blocks the chunk has, not the ones a receipt cites"
+    );
+
+    let receipts: usize = blocks
+        .iter()
+        .map(|b| b["receipts"].as_array().map(|a| a.len()).unwrap_or(0))
+        .sum();
+    assert_eq!(receipts, 3, "one receipt joins each event");
+}

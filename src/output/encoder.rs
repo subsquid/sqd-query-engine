@@ -8,21 +8,36 @@ pub type EncoderFn = fn(&dyn Array, usize, &mut Vec<u8>);
 
 /// Resolve an encoder function once per column based on DataType and encoding.
 /// Eliminates per-row DataType match + downcast dispatch in the hot loop.
+///
+/// An encoding names the *declared* type; the chunk decides the physical one,
+/// and the two drift — an archive outlives the catalog that described it. Where
+/// an encoder's array type is not the one in front of it, the column falls back
+/// to its physical encoder here, once, rather than downcasting per row and
+/// taking the thread down mid-response (INV-E1).
 pub fn resolve_encoder(
     data_type: &DataType,
     encoding: Option<&JsonEncoding>,
     declared_type: Option<&ColumnType>,
 ) -> EncoderFn {
-    match encoding {
-        Some(JsonEncoding::String) => encode_bignum,
-        Some(JsonEncoding::Json) => encode_json_passthrough,
-        Some(JsonEncoding::HexNumber) => resolve_hex_number_encoder(data_type, declared_type),
-        Some(JsonEncoding::SolanaTxVersion) => encode_solana_tx_version,
-        Some(JsonEncoding::TimestampMillisecond) => encode_timestamp_millisecond_raw,
-        Some(JsonEncoding::Hex) | Some(JsonEncoding::Base58) | None => {
-            resolve_value_encoder(data_type)
+    let declared: Option<EncoderFn> = match encoding {
+        // Reads its own type and emits null for anything else.
+        Some(JsonEncoding::String) => Some(encode_bignum),
+        Some(JsonEncoding::HexNumber) => Some(resolve_hex_number_encoder(data_type, declared_type)),
+        Some(JsonEncoding::Json) => {
+            matches!(data_type, DataType::Utf8).then_some(encode_json_passthrough as EncoderFn)
         }
-    }
+        Some(JsonEncoding::SolanaTxVersion) => {
+            matches!(data_type, DataType::Int16).then_some(encode_solana_tx_version as EncoderFn)
+        }
+        Some(JsonEncoding::TimestampMillisecond) => matches!(
+            data_type,
+            DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, _)
+        )
+        .then_some(encode_timestamp_millisecond_raw as EncoderFn),
+        Some(JsonEncoding::Hex) | Some(JsonEncoding::Base58) | None => None,
+    };
+
+    declared.unwrap_or_else(|| resolve_value_encoder(data_type))
 }
 
 fn resolve_value_encoder(data_type: &DataType) -> EncoderFn {
@@ -919,6 +934,35 @@ mod tests {
             ),
             "\"0x0000000000012345\""
         );
+    }
+
+    /// An encoding names the type the *catalog* believes a column has. The chunk
+    /// decides the real one, and an archive outlives the catalog that described
+    /// it — so every encoding must survive being pointed at the wrong array.
+    /// Downcasting on the catalog's word took the worker thread down mid-response
+    /// (INV-E1).
+    #[test]
+    fn test_an_encoding_survives_the_wrong_physical_type() {
+        let wrong: std::sync::Arc<dyn Array> = std::sync::Arc::new(UInt32Array::from(vec![7u32]));
+
+        for encoding in [
+            JsonEncoding::Json,
+            JsonEncoding::SolanaTxVersion,
+            JsonEncoding::TimestampMillisecond,
+            JsonEncoding::String,
+            JsonEncoding::Hex,
+            JsonEncoding::Base58,
+        ] {
+            let encoder = resolve_encoder(wrong.data_type(), Some(&encoding), None);
+            let mut buf = Vec::new();
+            encoder(wrong.as_ref(), 0, &mut buf);
+
+            let rendered = String::from_utf8(buf).unwrap();
+            assert!(
+                serde_json::from_str::<serde_json::Value>(&rendered).is_ok(),
+                "{encoding:?} on a UInt32 column rendered {rendered}, which is not JSON"
+            );
+        }
     }
 
     /// Physical and declared types disagree routinely in these chunks. A signed

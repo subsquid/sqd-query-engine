@@ -107,7 +107,7 @@ pub enum OutputFormat {
 /// Project a batch to `names` (by name, in the given order). Names absent from
 /// the batch are skipped — every batch of a table shares a schema, so the result
 /// schema is stable across a stream.
-pub fn project_columns(batch: &RecordBatch, names: &[String]) -> RecordBatch {
+pub fn project_columns(batch: &RecordBatch, names: &[String]) -> Result<RecordBatch> {
     let schema = batch.schema();
     let mut fields: Vec<Field> = Vec::with_capacity(names.len());
     let mut cols: Vec<ArrayRef> = Vec::with_capacity(names.len());
@@ -117,44 +117,51 @@ pub fn project_columns(batch: &RecordBatch, names: &[String]) -> RecordBatch {
             cols.push(batch.column(i).clone());
         }
     }
-    RecordBatch::try_new(Arc::new(Schema::new(fields)), cols)
-        .expect("projected columns share the source row count")
+    Ok(RecordBatch::try_new(Arc::new(Schema::new(fields)), cols)?)
 }
 
 /// Keep only rows whose `bn_col` block number satisfies `keep` (the weight-limit
 /// row trim, matching the JSON path's `selected_blocks`).
-pub fn filter_to_blocks(batch: &RecordBatch, bn_col: &str, keep: impl Fn(u64) -> bool) -> RecordBatch {
+pub fn filter_to_blocks(
+    batch: &RecordBatch,
+    bn_col: &str,
+    keep: impl Fn(u64) -> bool,
+) -> Result<RecordBatch> {
     let Some(col) = batch.column_by_name(bn_col) else {
-        return batch.clone();
+        return Ok(batch.clone());
     };
     let mask: BooleanArray = (0..batch.num_rows())
         .map(|i| Some(get_block_number(col.as_ref(), i).map(&keep).unwrap_or(false)))
         .collect();
-    filter_record_batch(batch, &mask).expect("mask length matches row count")
+    Ok(filter_record_batch(batch, &mask)?)
 }
 
 /// Keep the first row for each distinct `key_cols` tuple (drops cross-source
 /// duplicates after a multi-source union). Key columns absent from the batch are
 /// ignored. Uses Arrow's row format so it is type-general.
-pub fn dedup_first(batch: &RecordBatch, key_cols: &[String]) -> RecordBatch {
+///
+/// A key column Arrow cannot put in row format is an error rather than a skipped
+/// dedup: skipping it emits the duplicates the caller unioned two sources to
+/// remove, and nothing in the response says so.
+pub fn dedup_first(batch: &RecordBatch, key_cols: &[String]) -> Result<RecordBatch> {
     let arrays: Vec<ArrayRef> = key_cols
         .iter()
         .filter_map(|n| batch.column_by_name(n).cloned())
         .collect();
     if arrays.is_empty() {
-        return batch.clone();
+        return Ok(batch.clone());
     }
     let fields: Vec<SortField> = arrays
         .iter()
         .map(|a| SortField::new(a.data_type().clone()))
         .collect();
-    let converter = RowConverter::new(fields).expect("supported key column types");
-    let rows = converter.convert_columns(&arrays).expect("convertible key columns");
+    let converter = RowConverter::new(fields)?;
+    let rows = converter.convert_columns(&arrays)?;
     let mut seen: HashSet<OwnedRow> = HashSet::with_capacity(batch.num_rows());
     let mask: BooleanArray = (0..batch.num_rows())
         .map(|i| Some(seen.insert(rows.row(i).owned())))
         .collect();
-    filter_record_batch(batch, &mask).expect("mask length matches row count")
+    Ok(filter_record_batch(batch, &mask)?)
 }
 
 /// Decode the table's hex `Utf8` columns from `0x…` text to raw `Binary`.
@@ -165,9 +172,12 @@ pub fn dedup_first(batch: &RecordBatch, key_cols: &[String]) -> RecordBatch {
 /// still `Binary`, and base58/other `Utf8` columns are left as `Utf8`. Always
 /// variable `Binary` (never `FixedSizeBinary`): the type then never depends on
 /// the values seen, and the post-zstd size is equivalent.
-pub fn hexify_group(batches: Vec<RecordBatch>, table_desc: &TableDescription) -> Vec<RecordBatch> {
+pub fn hexify_group(
+    batches: Vec<RecordBatch>,
+    table_desc: &TableDescription,
+) -> Result<Vec<RecordBatch>> {
     let Some(first) = batches.first() else {
-        return batches;
+        return Ok(batches);
     };
     let hex_idxs: HashSet<usize> = first
         .schema()
@@ -187,7 +197,7 @@ pub fn hexify_group(batches: Vec<RecordBatch>, table_desc: &TableDescription) ->
         .map(|(i, _)| i)
         .collect();
     if hex_idxs.is_empty() {
-        return batches;
+        return Ok(batches);
     }
     batches.iter().map(|b| hexify_batch(b, &hex_idxs)).collect()
 }
@@ -195,19 +205,27 @@ pub fn hexify_group(batches: Vec<RecordBatch>, table_desc: &TableDescription) ->
 /// Decode the `hex_idxs` columns of one batch from `0x…` hex `Utf8` to `Binary`.
 /// A value that fails to decode (malformed/odd-length hex — a corrupt source)
 /// becomes null rather than silently-zeroed bytes.
-fn hexify_batch(batch: &RecordBatch, hex_idxs: &HashSet<usize>) -> RecordBatch {
+fn hexify_batch(batch: &RecordBatch, hex_idxs: &HashSet<usize>) -> Result<RecordBatch> {
     let schema = batch.schema();
     let mut fields: Vec<Field> = Vec::with_capacity(schema.fields().len());
     let mut cols: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
 
     for (i, field) in schema.fields().iter().enumerate() {
         let col = batch.column(i);
-        if !hex_idxs.contains(&i) {
+        // `hex_idxs` is read off the first batch of the group. A later batch
+        // holding something else at that index is passed through rather than
+        // downcast blindly; the write then fails on the schema mismatch, which
+        // is a message rather than a dead worker thread.
+        let decodable = hex_idxs
+            .contains(&i)
+            .then(|| col.as_any().downcast_ref::<StringArray>())
+            .flatten();
+
+        let Some(sa) = decodable else {
             fields.push(field.as_ref().clone());
             cols.push(col.clone());
             continue;
-        }
-        let sa = col.as_any().downcast_ref::<StringArray>().unwrap();
+        };
         let mut b = BinaryBuilder::new();
         for r in 0..sa.len() {
             if sa.is_null(r) {
@@ -225,8 +243,7 @@ fn hexify_batch(batch: &RecordBatch, hex_idxs: &HashSet<usize>) -> RecordBatch {
         fields.push(Field::new(field.name(), DataType::Binary, field.is_nullable()));
         cols.push(Arc::new(b.finish()));
     }
-    RecordBatch::try_new(Arc::new(Schema::new(fields)), cols)
-        .expect("hexified columns share the source row count")
+    Ok(RecordBatch::try_new(Arc::new(Schema::new(fields)), cols)?)
 }
 
 /// Serialize `(table_name, batches)` groups as framed Arrow IPC streams. Empty

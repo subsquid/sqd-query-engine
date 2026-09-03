@@ -704,9 +704,27 @@ fn execute_chunk_fmt(
         let table_desc = metadata.table(table_name).unwrap();
         let bn_col = table_desc.block_number_column.as_str();
         collect_block_numbers(&output.batches, bn_col, &mut block_numbers);
-        for rel_batches in output.relation_batches.values() {
-            // Relations may be from different tables with different bn columns
-            collect_block_numbers(rel_batches, "block_number", &mut block_numbers);
+
+        // A relation's target is a different table, and it names its own block
+        // number column. Reading one literal name here would drop every row of
+        // a table that calls it something else — out of block selection and out
+        // of the weight model both (INV-X1).
+        let plan_relations = plan
+            .table_plans
+            .iter()
+            .find(|p| &p.table == table_name)
+            .map(|p| p.relations.as_slice())
+            .unwrap_or_default();
+
+        for (rel_idx, rel_batches) in &output.relation_batches {
+            let Some(rel) = plan_relations.get(*rel_idx) else {
+                continue;
+            };
+            let rel_bn_col = metadata
+                .table(&rel.target_table)
+                .map(|d| d.block_number_column.as_str())
+                .unwrap_or(bn_col);
+            collect_block_numbers(rel_batches, rel_bn_col, &mut block_numbers);
         }
     }
 
@@ -828,13 +846,15 @@ fn execute_chunk_fmt(
             let name = block_table_desc
                 .and_then(|d| d.query_name.clone())
                 .unwrap_or_else(|| "blocks".to_string());
-            let batches: Vec<RecordBatch> = block_batches
-                .iter()
-                .map(|b| filter_to_blocks(&project_columns(b, &wanted), &bn, keep))
-                .filter(|b| b.num_rows() > 0)
-                .collect();
+            let mut batches: Vec<RecordBatch> = Vec::with_capacity(block_batches.len());
+            for b in &block_batches {
+                let trimmed = filter_to_blocks(&project_columns(b, &wanted)?, &bn, keep)?;
+                if trimmed.num_rows() > 0 {
+                    batches.push(trimmed);
+                }
+            }
             let batches = match (binary, block_table_desc) {
-                (true, Some(bd)) => hexify_group(batches, bd),
+                (true, Some(bd)) => hexify_group(batches, bd)?,
                 _ => batches,
             };
             groups.push((name, batches));
@@ -867,7 +887,7 @@ fn execute_chunk_fmt(
             let mut projected: Vec<RecordBatch> = Vec::new();
             for &si in idxs {
                 for b in srcs[si].batches {
-                    let f = filter_to_blocks(&project_columns(b, &proc_cols), &bn, keep);
+                    let f = filter_to_blocks(&project_columns(b, &proc_cols)?, &bn, keep)?;
                     if f.num_rows() > 0 {
                         projected.push(f);
                     }
@@ -886,7 +906,7 @@ fn execute_chunk_fmt(
                         key.push(c.clone());
                     }
                 }
-                vec![project_columns(&dedup_first(&merged, &key), &emit_cols)]
+                vec![project_columns(&dedup_first(&merged, &key)?, &emit_cols)?]
             } else {
                 projected
             };
@@ -894,7 +914,7 @@ fn execute_chunk_fmt(
             groups.push((
                 qn.clone(),
                 if binary {
-                    hexify_group(batches, td)
+                    hexify_group(batches, td)?
                 } else {
                     batches
                 },
