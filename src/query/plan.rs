@@ -1,6 +1,6 @@
 use crate::metadata::{
     ColumnDescription, ColumnType, DatasetDescription, JsonEncoding,
-    RelationKind as MetaRelationKind, SpecialFilter, TableDescription,
+    RelationKind as MetaRelationKind, SpecialFilter, TableDescription, MAX_DISCRIMINATOR_BYTES,
 };
 use crate::query::parse::{parse_hex, Query, QueryItem};
 use crate::scan::predicate::{
@@ -11,6 +11,14 @@ use anyhow::{anyhow, bail, ensure, Result};
 use arrow::array::*;
 use std::collections::HashSet;
 use std::sync::Arc;
+
+/// `P-MAX-BLOOM-VALUES` (spec/09-parameters.md §9.1). Each value is a separate
+/// hash-and-probe over every row, so the list is a cost multiplier the client
+/// picks.
+const MAX_BLOOM_VALUES: usize = 10;
+
+/// `P-MAX-DISCRIMINATOR-FILTERS` (spec/09-parameters.md §9.1).
+const MAX_DISCRIMINATOR_FILTERS: usize = 1;
 
 /// An execution plan compiled from a query.
 #[derive(Debug)]
@@ -128,10 +136,17 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
             std::collections::HashMap::new();
         let mut rel_item_count: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
-        let total_items = items.len();
+        // Unsatisfiable items are not counted: they contribute no rows, so a
+        // relation every *remaining* item asks for still applies to every row
+        // the scan produces.
+        let mut total_items = 0usize;
 
         for item in items {
-            let item_predicates = compile_item_predicates(item, table_desc)?;
+            let item_predicates = match compile_item_predicates(item, table_desc)? {
+                CompiledItem::Unsatisfiable => continue,
+                CompiledItem::Predicates(preds) => preds,
+            };
+            total_items += 1;
             let item_has_predicates = !item_predicates.is_empty();
             all_predicates.extend(item_predicates.clone());
 
@@ -231,6 +246,12 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
             }
         }
 
+        // Every item matched nothing, so the table has nothing to contribute.
+        // Planning it anyway would scan it to produce an empty result.
+        if total_items == 0 {
+            continue;
+        }
+
         table_plans.push(TablePlan {
             table: table_name.clone(),
             output_columns,
@@ -287,17 +308,104 @@ fn order_columns_by_metadata(
     result
 }
 
+/// What one item request compiles to.
+enum CompiledItem {
+    /// No row can match, whatever the chunk holds (INV-P3).
+    Unsatisfiable,
+    /// One predicate per discriminator length group, OR'd together. A single
+    /// predicate with no columns matches every row.
+    Predicates(Vec<RowPredicate>),
+}
+
+/// Filter keys that address one discriminator: the special filter itself and
+/// every column it dispatches to (`d1`, `d2`, …).
+///
+/// Read from the catalog rather than named here, so a dataset with a different
+/// discriminator is bounded by the same rule without code (INV-X1).
+fn discriminator_family(table: &TableDescription) -> HashSet<&str> {
+    let mut family: HashSet<&str> = HashSet::new();
+
+    for (name, special) in &table.special_filters {
+        if let SpecialFilter::Discriminator { columns } = special {
+            family.insert(name.as_str());
+            family.extend(columns.values().map(String::as_str));
+        }
+    }
+
+    family
+}
+
+/// The request-shape bounds that cost, rather than correctness, motivates
+/// (INV-Q10, INV-Q11). Checked before anything compiles, so which filter the
+/// engine happens to read first cannot decide the outcome.
+fn check_item_limits(item: &QueryItem, table: &TableDescription) -> Result<()> {
+    let family = discriminator_family(table);
+    let discriminators = item
+        .filters
+        .iter()
+        .filter(|(key, _)| family.contains(key.as_str()))
+        .count();
+
+    ensure!(
+        discriminators <= MAX_DISCRIMINATOR_FILTERS,
+        "item request carries {} discriminator filters, at most {} allowed: they \
+         narrow the same column family and only one of them can hold",
+        discriminators,
+        MAX_DISCRIMINATOR_FILTERS
+    );
+
+    for (key, value) in &item.filters {
+        let is_bloom = matches!(
+            table.special_filters.get(key),
+            Some(SpecialFilter::BloomFilter { .. })
+        );
+        if !is_bloom {
+            continue;
+        }
+
+        let len = value.as_array().map(Vec::len).unwrap_or(0);
+        ensure!(
+            len <= MAX_BLOOM_VALUES,
+            "filter '{}' carries {} values, at most {} allowed",
+            key,
+            len,
+            MAX_BLOOM_VALUES
+        );
+    }
+
+    Ok(())
+}
+
 /// Compile a single query item's filters into one or more RowPredicates.
 /// Returns multiple predicates when discriminator dispatches to multiple column lengths
 /// (each length group becomes its own predicate, OR'd with others).
-fn compile_item_predicates(
-    item: &QueryItem,
-    table: &TableDescription,
-) -> Result<Vec<RowPredicate>> {
+fn compile_item_predicates(item: &QueryItem, table: &TableDescription) -> Result<CompiledItem> {
+    check_item_limits(item, table)?;
+
     let mut col_predicates: Vec<ColumnPredicate> = Vec::new();
     let mut discriminator_groups: Option<Vec<Vec<ColumnPredicate>>> = None;
 
     for (key, value) in &item.filters {
+        // `"c": []` is a filter no row passes, not an absent filter, and it
+        // sinks the whole item whatever its other filters say (INV-P3). Reading
+        // it as "unconstrained" would turn "none of these addresses" into
+        // "every row in the chunk".
+        //
+        // Only where a list is a value at all: a flag or a range bound takes a
+        // scalar, so `[]` there is the wrong type and stays an error.
+        let takes_value_list = !matches!(
+            table.special_filters.get(key),
+            Some(
+                SpecialFilter::RangeGte { .. }
+                    | SpecialFilter::RangeLte { .. }
+                    | SpecialFilter::GteConst { .. }
+            )
+        );
+
+        if takes_value_list && value.as_array().is_some_and(|values| values.is_empty()) {
+            return Ok(CompiledItem::Unsatisfiable);
+        }
+
         // Special filters
         if let Some(special) = table.special_filters.get(key) {
             match special {
@@ -419,9 +527,11 @@ fn compile_item_predicates(
             preds.extend(group);
             result.push(RowPredicate::new(preds));
         }
-        Ok(result)
+        Ok(CompiledItem::Predicates(result))
     } else {
-        Ok(vec![RowPredicate::new(col_predicates)])
+        Ok(CompiledItem::Predicates(vec![RowPredicate::new(
+            col_predicates,
+        )]))
     }
 }
 
@@ -637,6 +747,9 @@ fn compile_in_list(
 /// Compile a discriminator filter: dispatch hex prefixes to d1-d16 by length.
 /// Returns None if an empty prefix is found (matches everything).
 /// Returns groups of ColumnPredicates, one group per byte length.
+///
+/// An empty *list* never reaches here: the caller has already read it as an
+/// item that matches nothing (INV-P3).
 fn compile_discriminator(
     value: &serde_json::Value,
     columns: &std::collections::BTreeMap<String, String>,
@@ -655,8 +768,9 @@ fn compile_discriminator(
             .ok_or_else(|| anyhow!("discriminator value must be a string"))?;
         let bytes = parse_hex(s).ok_or_else(|| anyhow!("invalid hex in discriminator: {}", s))?;
         ensure!(
-            bytes.len() <= 16,
-            "discriminator max 16 bytes, got {}",
+            bytes.len() <= MAX_DISCRIMINATOR_BYTES,
+            "discriminator max {} bytes, got {}",
+            MAX_DISCRIMINATOR_BYTES,
             bytes.len()
         );
         if bytes.is_empty() {
@@ -664,8 +778,6 @@ fn compile_discriminator(
         }
         by_length.entry(bytes.len()).or_default().push(bytes);
     }
-
-    ensure!(!by_length.is_empty(), "discriminator list is empty");
 
     let mut groups = Vec::new();
 

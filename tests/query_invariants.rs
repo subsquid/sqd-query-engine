@@ -1989,3 +1989,150 @@ fn a_field_group_request_key_weighs_what_its_column_weighs() {
         by_request_key.len()
     );
 }
+
+// ---------------------------------------------------------------------------
+// INV-P3 — an empty list matches nothing
+// ---------------------------------------------------------------------------
+
+/// `"c": []` is `r[c] ∈ ∅`, which is false for every row. Reading it as "no
+/// constraint" turns "match none of these" into "match every row in the chunk" —
+/// the single most destructive misreading available. The discriminator was the
+/// one filter that refused it outright instead, so a client asking for nothing
+/// got a 400 where the rest of the surface answered emptily.
+#[test]
+fn an_empty_filter_list_matches_nothing() {
+    if !fixture_tree_is_present() {
+        return;
+    }
+    let solana = meta("solana");
+    let evm = meta("evm");
+
+    let instructions = |filter: &str| {
+        format!(
+            r#"{{"type":"solana","fromBlock":0,
+                "fields":{{"instruction":{{"programId":true}}}},
+                "instructions":[{{{filter}}}]}}"#
+        )
+        .into_bytes()
+    };
+
+    let some = run("solana", &solana, &instructions(r#""isCommitted":true"#)).unwrap();
+    assert!(
+        count_items(&some, "instructions") > 0,
+        "the fixture must carry instructions for the empty-list case to mean anything"
+    );
+
+    for filter in [
+        r#""discriminator":[]"#,
+        r#""discriminator":[],"isCommitted":true"#,
+        r#""d8":[]"#,
+        r#""programId":[]"#,
+    ] {
+        let out = run("solana", &solana, &instructions(filter))
+            .unwrap_or_else(|e| panic!("{filter} must be answered, not refused: {e}"));
+        assert_eq!(
+            count_items(&out, "instructions"),
+            0,
+            "{filter} must match nothing"
+        );
+    }
+
+    // An empty list next to a filter that does match: the empty one still sinks
+    // the item, rather than being conjoined away.
+    let logs = |filter: &str| {
+        format!(
+            r#"{{"type":"evm","fromBlock":17881390,"toBlock":17881391,
+                "fields":{{"log":{{"address":true}}}},
+                "logs":[{{{filter}}}]}}"#
+        )
+        .into_bytes()
+    };
+
+    let topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+    let matching = run("ethereum", &evm, &logs(&format!(r#""topic0":["{topic}"]"#))).unwrap();
+    assert!(
+        count_items(&matching, "logs") > 0,
+        "the fixture must carry transfer logs"
+    );
+
+    let sunk = run(
+        "ethereum",
+        &evm,
+        &logs(&format!(r#""address":[],"topic0":["{topic}"]"#)),
+    )
+    .expect("an empty list is not an error");
+    assert_eq!(
+        count_items(&sunk, "logs"),
+        0,
+        "an empty list sinks the item whatever its other filters say"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// INV-Q10 / INV-Q11 — the request bounds that cost, not correctness, motivates
+// ---------------------------------------------------------------------------
+
+/// Each bloom value is a separate hash-and-probe over every row, so the length
+/// of the list is a cost multiplier the client picks. `P-MAX-BLOOM-VALUES` caps
+/// it at ten.
+#[test]
+fn a_bloom_filter_takes_at_most_ten_values() {
+    let solana = meta("solana");
+
+    let query = |count: usize| {
+        let values: Vec<String> = (0..count).map(|i| format!("\"account{i}\"")).collect();
+        format!(
+            r#"{{"type":"solana","fromBlock":0,
+                "transactions":[{{"mentionsAccount":[{}]}}]}}"#,
+            values.join(",")
+        )
+        .into_bytes()
+    };
+
+    let compiles = |json: &[u8]| {
+        let parsed = parse_query(json, &solana)?;
+        compile(&parsed, &solana).map(|_| ())
+    };
+
+    compiles(&query(10)).expect("ten values must be accepted");
+    let err = compiles(&query(11))
+        .expect_err("eleven values must be refused")
+        .to_string();
+    assert!(err.contains("mentions_account"), "got: {err}");
+}
+
+/// `discriminator`, `d1` and `d8` narrow one column family. Two of them in one
+/// item request ask two different questions of it, and which one holds was
+/// decided by the order the filters happened to be read in.
+#[test]
+fn one_discriminator_filter_per_item_request() {
+    let solana = meta("solana");
+
+    let query = |filters: &str| {
+        format!(r#"{{"type":"solana","fromBlock":0,"instructions":[{{{filters}}}]}}"#).into_bytes()
+    };
+
+    let compiles = |json: &[u8]| {
+        let parsed = parse_query(json, &solana)?;
+        compile(&parsed, &solana).map(|_| ())
+    };
+
+    for accepted in [
+        r#""d8":["0xf8c69e91e17587c8"]"#,
+        r#""discriminator":["0xf8c69e91e17587c8"]"#,
+        r#""d1":["0xf8"],"programId":["whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc"]"#,
+    ] {
+        compiles(&query(accepted))
+            .unwrap_or_else(|e| panic!("{accepted} is one discriminator filter: {e}"));
+    }
+
+    for refused in [
+        r#""d1":["0xf8"],"d8":["0xf8c69e91e17587c8"]"#,
+        r#""discriminator":["0xf8"],"d8":["0xf8c69e91e17587c8"]"#,
+    ] {
+        assert!(
+            compiles(&query(refused)).is_err(),
+            "{refused} narrows one column family twice and must be refused"
+        );
+    }
+}
