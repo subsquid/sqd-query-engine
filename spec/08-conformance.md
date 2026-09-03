@@ -288,16 +288,16 @@ value is *accepted* does not cover an invariant that says which values are
 
 | Invariant | Class | Status | Note |
 |---|---|---|---|
-| [INV-D1](07-invariants.md#inv-d1) | CT-1 | **C** | every reference the invariant lists has a negative case: `test_validate_rejects_unresolvable_references` covers the address, parent-key, sort-key, item-order, weight, roll, discriminator-length and field-group ones; `test_validate_rejects_broken_alias_references`, `test_validate_rejects_unknown_filter_column`, `test_validate_rejects_a_special_filter_on_a_missing_column` and `test_validation_bad_block_number_column` the rest |
+| [INV-D1](07-invariants.md#inv-d1) | CT-1 | **C** | every reference the invariant lists has a negative case: `test_validate_rejects_unresolvable_references` covers the address, parent-key, sort-key, item-order, weight, roll, discriminator-length and field-group ones, and with them the two shape rules §1.10 carries alongside — a roll's spread list is last, and a discriminator length is written the way the lookup asks for it; `test_validate_rejects_broken_alias_references`, `test_validate_rejects_unknown_filter_column`, `test_validate_rejects_a_special_filter_on_a_missing_column` and `test_validation_bad_block_number_column` the rest |
 | [INV-D2](07-invariants.md#inv-d2) | CT-1 | **C** | `test_validate_rejects_broken_alias_references` |
-| [INV-D3](07-invariants.md#inv-d3) | CT-1 | **C** | `test_validate_requires_exactly_one_block_table` — none, two, and one that does not lead the catalog |
+| [INV-D3](07-invariants.md#inv-d3) | CT-1 | **C** | `test_validate_requires_exactly_one_block_table` — none, two, and one that does not lead the catalog; identity is the item key, so a block table stored under another sort key is still one and an addressed table with no order keys is not |
 | [INV-D4](07-invariants.md#inv-d4) | CT-1 | **U** | no chunk-level key-uniqueness check on any fixture |
 | [INV-D5](07-invariants.md#inv-d5) | CT-1 | **P** | the static half is checked on both sides — key non-empty, equal length, block number first — one case per shape in `test_validate_rejects_a_relation_that_cannot_join`. The chunk-level half its *Test:* line asks for, that no matched pair spans two blocks, is not run |
 | [INV-D6](07-invariants.md#inv-d6) | CT-1 | **C** | both sides are checked for `children` and `parents` alike, with a case in `test_validate_rejects_a_relation_that_cannot_join` |
-| [INV-D7](07-invariants.md#inv-d7) | CT-6 | **P** | width tolerance is covered per mechanism — block-range masks, in-lists, semi-joins, range predicates. No same-chunk-at-several-widths equality run |
+| [INV-D7](07-invariants.md#inv-d7) | CT-6 | **P** | width tolerance is covered per mechanism — block-range masks, in-lists, semi-joins, range predicates, and on the output side `test_solana_tx_version_reads_the_sentinel_at_every_physical_width` and `test_bignum_reads_a_narrowed_column`. No same-chunk-at-several-widths equality run |
 | [INV-D8](07-invariants.md#inv-d8) | CT-6 | **U** | needs the chunk writer, HC-3 |
 | [INV-D9](07-invariants.md#inv-d9) | CT-1 | **C** | `test_system_columns_excluded_from_weight`, `undeclared_columns_are_not_filterable` |
-| [INV-D10](07-invariants.md#inv-d10) | CT-1 | **C** | `test_validate_rejects_duplicate_names` — two tables on one `queryName`, two on one `fieldName`, an alias on a table's `queryName` |
+| [INV-D10](07-invariants.md#inv-d10) | CT-1 | **C** | `test_validate_rejects_duplicate_names` — two tables on one `queryName`, two on one `fieldName`, an alias on a table's `queryName`, and a table on the name another holds without declaring it |
 | [INV-Q1](07-invariants.md#inv-q1) | CT-2 | **P** | reached through every fixture; no negative case for an unknown `type` |
 | [INV-Q2](07-invariants.md#inv-q2) | CT-2 | **C** | `test_parse_unknown_table_error` |
 | [INV-Q3](07-invariants.md#inv-q3) | CT-2 | **C** | `test_parse_block_range_validation` |

@@ -27,7 +27,7 @@ pub fn resolve_encoder(
             matches!(data_type, DataType::Utf8).then_some(encode_json_passthrough as EncoderFn)
         }
         Some(JsonEncoding::SolanaTxVersion) => {
-            matches!(data_type, DataType::Int16).then_some(encode_solana_tx_version as EncoderFn)
+            is_integer(data_type).then_some(encode_solana_tx_version as EncoderFn)
         }
         Some(JsonEncoding::TimestampMillisecond) => matches!(
             data_type,
@@ -38,6 +38,24 @@ pub fn resolve_encoder(
     };
 
     declared.unwrap_or_else(|| resolve_value_encoder(data_type))
+}
+
+/// A declared integer type bounds the values, not the storage: the writer picks
+/// a width per chunk, so the same logical column arrives as `int16` in one and
+/// `int32` in the next. An encoding that reads an integer has to accept every
+/// width, or the same row renders two ways (INV-D7).
+fn is_integer(data_type: &DataType) -> bool {
+    matches!(
+        data_type,
+        DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+    )
 }
 
 fn resolve_value_encoder(data_type: &DataType) -> EncoderFn {
@@ -264,29 +282,35 @@ pub fn encode_value(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
 }
 
 /// Encode a value as a bignum (quoted string number).
+///
+/// Every integer width is read, not just the wide ones: a `uint64` fee whose
+/// values all fit in sixteen bits is stored in sixteen bits, and falling through
+/// to the null arm would drop it from the response (INV-D7).
 pub fn encode_bignum(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
     if array.is_null(row) {
         buf.extend_from_slice(b"null");
         return;
     }
+
+    // Signedness is the array's own: an unsigned column above `i64::MAX` read as
+    // signed would come back negative.
+    macro_rules! widened {
+        ($array:ty, $write:ident, $wide:ty) => {{
+            let a = array.as_any().downcast_ref::<$array>().unwrap();
+            $write(buf, a.value(row) as $wide);
+        }};
+    }
+
     buf.push(b'"');
     match array.data_type() {
-        DataType::UInt64 => {
-            let a = array.as_any().downcast_ref::<UInt64Array>().unwrap();
-            write_u64(buf, a.value(row));
-        }
-        DataType::Int64 => {
-            let a = array.as_any().downcast_ref::<Int64Array>().unwrap();
-            write_i64(buf, a.value(row));
-        }
-        DataType::UInt32 => {
-            let a = array.as_any().downcast_ref::<UInt32Array>().unwrap();
-            write_u64(buf, a.value(row) as u64);
-        }
-        DataType::Int32 => {
-            let a = array.as_any().downcast_ref::<Int32Array>().unwrap();
-            write_i64(buf, a.value(row) as i64);
-        }
+        DataType::UInt8 => widened!(UInt8Array, write_u64, u64),
+        DataType::UInt16 => widened!(UInt16Array, write_u64, u64),
+        DataType::UInt32 => widened!(UInt32Array, write_u64, u64),
+        DataType::UInt64 => widened!(UInt64Array, write_u64, u64),
+        DataType::Int8 => widened!(Int8Array, write_i64, i64),
+        DataType::Int16 => widened!(Int16Array, write_i64, i64),
+        DataType::Int32 => widened!(Int32Array, write_i64, i64),
+        DataType::Int64 => widened!(Int64Array, write_i64, i64),
         DataType::Decimal128(_, scale) => {
             let a = array.as_any().downcast_ref::<Decimal128Array>().unwrap();
             let v = a.value(row);
@@ -321,17 +345,21 @@ pub fn encode_json_passthrough(array: &dyn Array, row: usize, buf: &mut Vec<u8>)
 }
 
 /// Encode Solana transaction version: -1 → "legacy", else number.
+///
+/// The sentinel is a value of the *declared* type, so it is read at the declared
+/// signedness whatever width the chunk used. Reading the array's own type instead
+/// turns a legacy transaction stored in an `int32` into a bare `-1`, which is a
+/// version number no client has ever seen.
 pub fn encode_solana_tx_version(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
     if array.is_null(row) {
         buf.extend_from_slice(b"null");
         return;
     }
-    let a = array.as_any().downcast_ref::<Int16Array>().unwrap();
-    let v = a.value(row);
-    if v == -1 {
-        buf.extend_from_slice(b"\"legacy\"");
-    } else {
-        write_i64(buf, v as i64);
+
+    match signed_at(array, row) {
+        Some(-1) => buf.extend_from_slice(b"\"legacy\""),
+        Some(v) => write_i64(buf, v),
+        None => buf.extend_from_slice(b"null"),
     }
 }
 
@@ -525,6 +553,30 @@ fn unsigned_at(array: &dyn Array, row: usize) -> Option<u64> {
     read!(Int16Array, u16);
     read!(Int32Array, u32);
     read!(Int64Array, u64);
+
+    None
+}
+
+/// The stored value of an integer column read at the *declared* signedness,
+/// whatever width the writer chose. A signed value and its unsigned twin carry
+/// the same bits, so a `-1` written into a `uint16` still reads back as `-1`.
+fn signed_at(array: &dyn Array, row: usize) -> Option<i64> {
+    macro_rules! read {
+        ($array:ty, $signed:ty) => {
+            if let Some(a) = array.as_any().downcast_ref::<$array>() {
+                return Some((a.value(row) as $signed) as i64);
+            }
+        };
+    }
+
+    read!(Int8Array, i8);
+    read!(Int16Array, i16);
+    read!(Int32Array, i32);
+    read!(Int64Array, i64);
+    read!(UInt8Array, i8);
+    read!(UInt16Array, i16);
+    read!(UInt32Array, i32);
+    read!(UInt64Array, i64);
 
     None
 }
@@ -934,6 +986,86 @@ mod tests {
             ),
             "\"0x0000000000012345\""
         );
+    }
+
+    /// A declared width bounds the values, not the storage (INV-D7). A legacy
+    /// transaction is the sentinel `-1` of the *declared* `int16`, so it renders
+    /// `"legacy"` out of whatever width the writer chose — and out of an unsigned
+    /// column, which carries the same bits under another name.
+    #[test]
+    fn test_solana_tx_version_reads_the_sentinel_at_every_physical_width() {
+        let legacy: [std::sync::Arc<dyn Array>; 6] = [
+            std::sync::Arc::new(Int16Array::from(vec![-1i16])),
+            std::sync::Arc::new(Int32Array::from(vec![-1i32])),
+            std::sync::Arc::new(Int64Array::from(vec![-1i64])),
+            std::sync::Arc::new(Int8Array::from(vec![-1i8])),
+            std::sync::Arc::new(UInt16Array::from(vec![u16::MAX])),
+            std::sync::Arc::new(UInt32Array::from(vec![u32::MAX])),
+        ];
+
+        for array in legacy {
+            assert_eq!(
+                rendered_as_version(&array),
+                "\"legacy\"",
+                "-1 in a {:?} column is a legacy transaction",
+                array.data_type()
+            );
+        }
+
+        let versioned: [std::sync::Arc<dyn Array>; 3] = [
+            std::sync::Arc::new(Int16Array::from(vec![0i16])),
+            std::sync::Arc::new(UInt8Array::from(vec![0u8])),
+            std::sync::Arc::new(Int64Array::from(vec![0i64])),
+        ];
+
+        for array in versioned {
+            assert_eq!(rendered_as_version(&array), "0");
+        }
+    }
+
+    fn rendered_as_version(array: &std::sync::Arc<dyn Array>) -> String {
+        let encoder = resolve_encoder(
+            array.data_type(),
+            Some(&JsonEncoding::SolanaTxVersion),
+            Some(&ColumnType::Int16),
+        );
+        let mut buf = Vec::new();
+        encoder(array.as_ref(), 0, &mut buf);
+        String::from_utf8(buf).unwrap()
+    }
+
+    /// Same rule for a bignum: a `uint64` fee whose values all fit in sixteen
+    /// bits is *stored* in sixteen bits. Reading only the wide arrays rendered it
+    /// `null`, which reads as "this transaction had no fee".
+    #[test]
+    fn test_bignum_reads_a_narrowed_column() {
+        let narrow: [(std::sync::Arc<dyn Array>, &str); 5] = [
+            (std::sync::Arc::new(UInt8Array::from(vec![7u8])), "\"7\""),
+            (
+                std::sync::Arc::new(UInt16Array::from(vec![5000u16])),
+                "\"5000\"",
+            ),
+            (std::sync::Arc::new(Int8Array::from(vec![-7i8])), "\"-7\""),
+            (
+                std::sync::Arc::new(Int16Array::from(vec![-5000i16])),
+                "\"-5000\"",
+            ),
+            (
+                std::sync::Arc::new(UInt64Array::from(vec![u64::MAX])),
+                "\"18446744073709551615\"",
+            ),
+        ];
+
+        for (array, expected) in narrow {
+            let mut buf = Vec::new();
+            encode_bignum(array.as_ref(), 0, &mut buf);
+            assert_eq!(
+                String::from_utf8(buf).unwrap(),
+                expected,
+                "a {:?} column",
+                array.data_type()
+            );
+        }
     }
 
     /// An encoding names the type the *catalog* believes a column has. The chunk
