@@ -297,9 +297,10 @@ tables:
         type: string
       rejected:
         type: boolean
+      # Written by the same builder as `call_value_info`, but appended raw: the
+      # model types it `Option<HexBytes>`, so it is a bare hex string, not JSON.
       extra:
         type: string
-        json_encoding: json
 
 query_aliases:
   transferTransactions:

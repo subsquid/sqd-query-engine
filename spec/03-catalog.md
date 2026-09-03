@@ -377,7 +377,7 @@ Tables: `blocks`, `transactions`, `logs`, `internal_transactions`.
 
 `blocks.timestamp`, `transactions.expiration`, `transactions.timestamp`:
 `timestampMillisecond`. `transactions.ret`, `parameter`,
-`cancelUnfreezeV2Amount`, `internal_transactions.callValueInfo`, `extra`:
+`cancelUnfreezeV2Amount`, `internal_transactions.callValueInfo`:
 `jsonVerbatim`. `transactions.feeLimit`, `fee`, `withdrawAmount`,
 `unfreezeAmount`, `withdrawExpireAmount`, `energyFee`, `energyUsage`,
 `energyUsageTotal`, `netUsage`, `netFee`, `originEnergyUsage`,
@@ -387,6 +387,11 @@ Tron writes hex with **no** `0x` prefix — sighashes are 8 bare digits, address
 40 or 42. Those columns are `utf8` by §1.5 and render verbatim; the "hex,
 case-folded" filters above fold on a rule the catalog declares per column
 ([INV-P8](07-invariants.md#inv-p8)).
+
+`internal_transactions.extra` is one of them: `utf8`, not `jsonVerbatim`. The
+archive writes it through the same builder as `callValueInfo`, which makes it
+look like JSON, but it stores hex bytes verbatim. Declaring it `jsonVerbatim`
+splices a bare `a1b2c3d4` into the response and the whole line stops parsing.
 
 ### Selectable fields
 

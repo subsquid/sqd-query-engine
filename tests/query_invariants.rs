@@ -399,6 +399,118 @@ fn discriminator_hex_is_a_prefix_chain() {
 }
 
 // ---------------------------------------------------------------------------
+// §1.5 — `jsonVerbatim` belongs only on a column that stores JSON
+// ---------------------------------------------------------------------------
+
+/// Copy a fixture chunk into a temp dir, filling one `utf8` column of one table
+/// with the same value in every row — the shape of a chunk whose column is
+/// populated where the bundled fixture happens to leave it null.
+fn chunk_with_column_filled(
+    dataset: &str,
+    table: &str,
+    column: &str,
+    value: &str,
+) -> tempfile::TempDir {
+    use arrow::array::{ArrayRef, StringArray};
+    use arrow::record_batch::RecordBatch;
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use parquet::arrow::ArrowWriter;
+    use std::sync::Arc;
+
+    let src = fixture_chunk(dataset);
+    let dir = tempfile::TempDir::new().unwrap();
+
+    for entry in std::fs::read_dir(&src).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let dst = dir.path().join(&name);
+
+        if name != format!("{table}.parquet") {
+            std::fs::copy(&path, &dst).unwrap();
+            continue;
+        }
+
+        let reader = ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(&path).unwrap())
+            .unwrap()
+            .build()
+            .unwrap();
+        let batches: Vec<RecordBatch> = reader.map(|b| b.unwrap()).collect();
+        let schema = batches[0].schema();
+        let index = schema
+            .index_of(column)
+            .unwrap_or_else(|_| panic!("'{column}' must be present in {table} to fill it"));
+
+        let mut writer =
+            ArrowWriter::try_new(std::fs::File::create(&dst).unwrap(), schema.clone(), None)
+                .unwrap();
+        for batch in &batches {
+            let filled = Arc::new(StringArray::from(vec![value; batch.num_rows()])) as ArrayRef;
+            let mut columns = batch.columns().to_vec();
+            columns[index] = filled;
+            writer
+                .write(&RecordBatch::try_new(schema.clone(), columns).unwrap())
+                .unwrap();
+        }
+        writer.close().unwrap();
+    }
+
+    dir
+}
+
+/// `jsonVerbatim` splices stored bytes into a document the engine wrote, so a
+/// column declared with it and holding anything else does not corrupt one field
+/// — it ends the response, mid-object, for every client at once.
+///
+/// Tron's `internal_transactions.extra` is the trap: the archive writes it with
+/// the same builder as `call_value_info`, so it reads as JSON in the chunk
+/// schema, but the model types it `Option<HexBytes>` and appends it raw. The
+/// bundled fixture leaves it null in all 9813 rows, which is why the ten Tron
+/// fixture tests pass either way.
+#[test]
+#[ignore = "requires external fixture data"]
+fn tron_internal_transaction_extra_renders_as_a_string() {
+    if !fixture_tree_is_present() {
+        return;
+    }
+
+    const EXTRA: &str = "a1b2c3d4";
+
+    let tron = meta("tron");
+    let chunk = chunk_with_column_filled("tron", "internal_transactions", "extra", EXTRA);
+    let query = br#"{"type":"tron","fromBlock":82644089,"toBlock":82644089,
+                     "fields":{"internalTransaction":{"extra":true}},
+                     "internalTransactions":[{}]}"#;
+
+    let parsed = parse_query(query, &tron).unwrap();
+    let plan = compile(&parsed, &tron).unwrap();
+    let body = execute_plan(&plan, &tron, chunk.path())
+        .unwrap()
+        .map(|out| out.into_json_lines())
+        .unwrap_or_default();
+
+    let mut seen = 0;
+    for line in body.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
+        let block: serde_json::Value = serde_json::from_slice(line).unwrap_or_else(|e| {
+            panic!(
+                "response line is not JSON ({e}): {}",
+                String::from_utf8_lossy(&line[..line.len().min(200)])
+            )
+        });
+        for item in block
+            .get("internalTransactions")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
+            assert_eq!(item["extra"].as_str(), Some(EXTRA));
+            seen += 1;
+        }
+    }
+
+    assert!(seen > 0, "fixture must contain internal transactions");
+}
+
+// ---------------------------------------------------------------------------
 // INV-Q7 — a `fields` key that names nothing selectable is an error
 // ---------------------------------------------------------------------------
 
