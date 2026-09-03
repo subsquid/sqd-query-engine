@@ -367,6 +367,11 @@ pub enum RelationKind {
     Parents,
 }
 
+/// `P-MAX-DISCRIMINATOR-BYTES` (spec/09-parameters.md §9.1): the longest prefix
+/// a discriminator can dispatch on, and so the largest length a catalog may map
+/// to a column.
+pub const MAX_DISCRIMINATOR_BYTES: usize = 16;
+
 /// Special filter that doesn't map directly to a single column.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
