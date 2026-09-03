@@ -269,7 +269,7 @@ reproduce is a rumour.
 
 ## 8.11 Traceability matrix
 
-Dated **2026-08-31**. Every invariant, the class that checks it, and an honest
+Dated **2026-09-02**. Every invariant, the class that checks it, and an honest
 status:
 
 - **C** — covered. A test would fail if the invariant broke.
@@ -288,16 +288,16 @@ value is *accepted* does not cover an invariant that says which values are
 
 | Invariant | Class | Status | Note |
 |---|---|---|---|
-| [INV-D1](07-invariants.md#inv-d1) | CT-1 | **P** | loader checks the block-number, item-order, sort-key, weight, `hexNumber`, `children`, filter, special-filter, relation-key and parent columns and every alias reference; field-group tag and mapping columns, virtual-field roll members, `gteConst` targets and discriminator length mappings are unchecked — GAP 19 |
+| [INV-D1](07-invariants.md#inv-d1) | CT-1 | **C** | every reference the invariant lists has a negative case: `test_validate_rejects_unresolvable_references` covers the address, parent-key, sort-key, item-order, weight, roll, discriminator-length and field-group ones; `test_validate_rejects_broken_alias_references`, `test_validate_rejects_unknown_filter_column`, `test_validate_rejects_a_special_filter_on_a_missing_column` and `test_validation_bad_block_number_column` the rest |
 | [INV-D2](07-invariants.md#inv-d2) | CT-1 | **C** | `test_validate_rejects_broken_alias_references` |
-| [INV-D3](07-invariants.md#inv-d3) | CT-1 | **U** | the block table is found by heuristic, not by declaration — GAP 19 |
+| [INV-D3](07-invariants.md#inv-d3) | CT-1 | **C** | `test_validate_requires_exactly_one_block_table` — none, two, and one that does not lead the catalog |
 | [INV-D4](07-invariants.md#inv-d4) | CT-1 | **U** | no chunk-level key-uniqueness check on any fixture |
 | [INV-D5](07-invariants.md#inv-d5) | CT-1 | **P** | the static half is checked on both sides — key non-empty, equal length, block number first — one case per shape in `test_validate_rejects_a_relation_that_cannot_join`. The chunk-level half its *Test:* line asks for, that no matched pair spans two blocks, is not run |
-| [INV-D6](07-invariants.md#inv-d6) | CT-1 | **P** | the target's address column is checked for `children` and `parents` alike, with a case in `test_validate_rejects_a_relation_that_cannot_join`; the source's is not |
+| [INV-D6](07-invariants.md#inv-d6) | CT-1 | **C** | both sides are checked for `children` and `parents` alike, with a case in `test_validate_rejects_a_relation_that_cannot_join` |
 | [INV-D7](07-invariants.md#inv-d7) | CT-6 | **P** | width tolerance is covered per mechanism — block-range masks, in-lists, semi-joins, range predicates. No same-chunk-at-several-widths equality run |
 | [INV-D8](07-invariants.md#inv-d8) | CT-6 | **U** | needs the chunk writer, HC-3 |
 | [INV-D9](07-invariants.md#inv-d9) | CT-1 | **C** | `test_system_columns_excluded_from_weight`, `undeclared_columns_are_not_filterable` |
-| [INV-D10](07-invariants.md#inv-d10) | CT-1 | **U** | `queryName` / `fieldName` uniqueness is unchecked — GAP 19 |
+| [INV-D10](07-invariants.md#inv-d10) | CT-1 | **C** | `test_validate_rejects_duplicate_names` — two tables on one `queryName`, two on one `fieldName`, an alias on a table's `queryName` |
 | [INV-Q1](07-invariants.md#inv-q1) | CT-2 | **P** | reached through every fixture; no negative case for an unknown `type` |
 | [INV-Q2](07-invariants.md#inv-q2) | CT-2 | **C** | `test_parse_unknown_table_error` |
 | [INV-Q3](07-invariants.md#inv-q3) | CT-2 | **C** | `test_parse_block_range_validation` |
@@ -307,14 +307,14 @@ value is *accepted* does not cover an invariant that says which values are
 | [INV-Q7](07-invariants.md#inv-q7) | CT-2 | **P** | `unknown_field_names_are_rejected` covers misspellings; the reference-surface test only asserts acceptance — see INV-Q14 |
 | [INV-Q8](07-invariants.md#inv-q8) | CT-2 | **P** | an unknown `fields` key errors; `fields.X` not being an object is untested |
 | [INV-Q9](07-invariants.md#inv-q9) | CT-2 | **P** | block-bound defaults only |
-| [INV-Q10](07-invariants.md#inv-q10) | CT-2 | **U** | known-violated — GAP 16 |
-| [INV-Q11](07-invariants.md#inv-q11) | CT-2 | **U** | known-violated — GAP 16 |
+| [INV-Q10](07-invariants.md#inv-q10) | CT-2 | **C** | `a_bloom_filter_takes_at_most_ten_values`, either side of the cap |
+| [INV-Q11](07-invariants.md#inv-q11) | CT-2 | **C** | `one_discriminator_filter_per_item_request`; the family is read from the catalog, so the check is not Solana-specific |
 | [INV-Q12](07-invariants.md#inv-q12) | CT-2 | **C** | `malformed_hex_in_list_is_an_error`, `test_parse_hex`; the byte cap is enforced where discriminators compile |
 | [INV-Q13](07-invariants.md#inv-q13) | CT-2 | **U** | known-violated — GAP 23 |
 | [INV-Q14](07-invariants.md#inv-q14) | CT-2 | **U** | known-violated — GAP 27 |
 | [INV-P1](07-invariants.md#inv-p1) | CT-3 | **P** | `test_compile_empty_item_no_filters`; not asserted as a law over generated queries |
 | [INV-P2](07-invariants.md#inv-p2) | CT-3 | **C** | `test_in_list_predicate_strings`, `test_in_list_predicate_u64`, `test_numeric_in_list_filter` |
-| [INV-P3](07-invariants.md#inv-p3) | CT-3 | **P** | known-violated for `discriminator` — GAP 15. The ordinary-list case has no test at all, and §8.4 calls it one of the two catastrophic misreadings |
+| [INV-P3](07-invariants.md#inv-p3) | CT-3 | **C** | `an_empty_filter_list_matches_nothing` — the discriminator, a discriminator column, an ordinary in-list, and an empty list beside a filter that does match |
 | [INV-P4](07-invariants.md#inv-p4) | CT-3 | **C** | `test_row_predicate_and` |
 | [INV-P5](07-invariants.md#inv-p5) | CT-3 | **U** | nothing asserts `Q([s₁]) ∪ Q([s₂]) = Q([s₁, s₂])` |
 | [INV-P6](07-invariants.md#inv-p6) | CT-3 | **P** | compile-side only |
@@ -363,18 +363,18 @@ value is *accepted* does not cover an invariant that says which values are
 | [INV-O12](07-invariants.md#inv-o12) | CT-6 | **U** | byte determinism is never asserted |
 | [INV-O13](07-invariants.md#inv-o13) | CT-6 | **U** | no thread-count sweep |
 | [INV-O14](07-invariants.md#inv-o14) | CT-6 | **C** | six Arrow-parity cases |
-| [INV-E1](07-invariants.md#inv-e1) | CT-9 | **U** | known-violated — GAP 18. Two existing tests assert a panic rather than forbid one |
+| [INV-E1](07-invariants.md#inv-e1) | CT-9 | **P** | the request half is fuzzed (`request_props`), and `a_chunk_that_disagrees_with_the_catalog_does_not_panic` pins the encoders against a chunk written to disagree. The chunk-type *sweep* the invariant asks for needs HC-3, and two existing tests still assert a panic rather than forbid one |
 | [INV-E2](07-invariants.md#inv-e2) | CT-2 | **P** | validation precedes scanning by construction; nothing asserts that no output precedes an error |
 | [INV-E3](07-invariants.md#inv-e3) | CT-8 | **U** | the absent-column test covers filtering, not selection |
 | [INV-E4](07-invariants.md#inv-e4) | CT-8 | **U** | no missing-table case |
 | [INV-E5](07-invariants.md#inv-e5) | CT-2 | **C** | five cases, including a chain that skips block numbers |
 | [INV-E6](07-invariants.md#inv-e6) | CT-2 | **U** | known-violated — GAP 28. Errors carry prose, so CT-2 cannot assert a kind |
 | [INV-E7](07-invariants.md#inv-e7) | CT-4 | **C** | `test_semi_join_unsupported_key_type` |
-| [INV-X1](07-invariants.md#inv-x1) | CT-1 | **P** | known-violated — GAP 17 hardcodes `block_number`. No synthetic-chain test |
+| [INV-X1](07-invariants.md#inv-x1) | CT-1 | **P** | `a_relation_target_names_its_own_block_column` serves an invented chain from a synthetic chunk with no code change. One chain and one relation shape: a hardcoded name elsewhere would still pass |
 | [INV-X2](07-invariants.md#inv-x2) | CT-8 | **U** | adding a nullable column is never tested |
 | [INV-X3](07-invariants.md#inv-x3) | CT-8 | **C** | `filtering_an_absent_column_is_an_error`, `filtering_a_present_column_still_works` |
 
-**Totals: 28 C, 35 P, 22 U** of 85. Property coverage is therefore 0.33
+**Totals: 35 C, 33 P, 17 U** of 85. Property coverage is therefore 0.41
 (`P-COV-PROPERTY` in [09-parameters.md](09-parameters.md)).
 
 The shape of the U column is worth reading on its own. The unchecked invariants
@@ -386,8 +386,9 @@ cluster in three places, and none of them is an accident:
   the single highest-leverage thing missing.
 - **Everything needing generated queries** — P5, R2, R4, R11, B8. Each is a law
   over pairs of queries, and a suite of hand-written cases cannot express one.
-- **The catalog validator's own blind spots** — D3, D4, D5, D10. These are cheap,
-  static, and blocked on nothing except GAP 19.
+- **The catalog validator's remaining blind spot** — D4, and the chunk-level half
+  of D5. Both need a chunk to look at rather than a catalog, so both wait on
+  HC-3 with the first group.
 
 INV-P9 belongs to none of those groups and is the most dangerous single row in
 the table: a bloom construction that disagrees with the archive writer's returns
@@ -462,8 +463,8 @@ Each phase ends by updating §8.11 and [GAPS.md](GAPS.md).
 
 1. **The chunk writer** (HC-3). Seven invariants become testable and the whole
    CT-8 class turns on. Nothing else unblocks as much.
-2. **The cheap statics.** Finish the catalog validator (GAP 19) and close D3, D4,
-   D5, D10 with it. No new machinery.
+2. **The CI gate** (GAP 29). The suite that pins the closed gaps is worth what
+   CI does with it, and today CI runs the spec checker alone. A workflow file.
 3. **The query generator** (HC-4). Turns §8.4 and §8.5 from tables of prose into
    generated laws, and closes P5, R2, R4, R11.
 4. **INV-B8, partition invariance.** One test, six invariants, and the property

@@ -9,7 +9,7 @@ Delete an entry when the gap closes. If the spec turns out to be wrong and the
 implementation right, fix the spec and delete the entry. The document should tend
 toward empty.
 
-Compared against the reference implementation, as of 2026-08-31.
+Compared against the reference implementation, as of 2026-09-02.
 
 ---
 
@@ -29,11 +29,6 @@ Compared against the reference implementation, as of 2026-08-31.
 | 9 | `tron` dataset is entirely absent | [03-catalog.md §3.4](03-catalog.md) | **S2** |
 | 10 | Five of six Substrate aliases are missing | [03-catalog.md §3.3](03-catalog.md) | **S2** |
 | 14 | Negative values cannot filter signed columns | [INV-P14](07-invariants.md#inv-p14) | **S2** |
-| 15 | `discriminator: []` errors instead of matching nothing | [INV-P3](07-invariants.md#inv-p3) | **S3** |
-| 16 | Bloom ≤ 10 and discriminator-exclusivity validations are absent | [INV-Q10](07-invariants.md#inv-q10), [INV-Q11](07-invariants.md#inv-q11) | **S3** |
-| 17 | Relation block-number collection hardcodes the name `block_number` | [INV-X1](07-invariants.md#inv-x1) | **S3** |
-| 18 | Arrow output and typed encoders panic on unexpected input | [INV-E1](07-invariants.md#inv-e1) | **S3** |
-| 19 | Catalog validation covers a subset of the required checks | [INV-D1](07-invariants.md#inv-d1)–[INV-D10](07-invariants.md#inv-d10) | **S3** |
 | 20 | A `timestampMillisecond` column with no declared encoding is divided by 1000 | [INV-O9](07-invariants.md#inv-o9) | **S4** |
 | 21 | `base58` encoding is a no-op; a physically-`Binary` column would emit hex | [INV-O9](07-invariants.md#inv-o9) | **S4** |
 | 22 | Weight accumulation is unchecked; a negative size column yields ~`u64::MAX` | [INV-B9](07-invariants.md#inv-b9) | **S4** |
@@ -43,8 +38,19 @@ Compared against the reference implementation, as of 2026-08-31.
 | 29 | No job runs the test, lint or format gates | [08-conformance.md §8.12](08-conformance.md#812-merge-gates) | **S4** |
 | 30 | The fork window is inherited, not derived | [INV-E5](07-invariants.md#inv-e5) | **S4** |
 
-There are no open S1 entries. Every silent-wrong-answer gap recorded here has
-been closed, with a test pinning the invariant behind it.
+There are no open S1 or S3 entries. Every silent-wrong-answer gap and every
+crash-where-a-result-was-due recorded here has been closed, with a test pinning
+the invariant behind it.
+
+Closing the S3 set moved four invariants to **C** in the traceability matrix
+([INV-D3](07-invariants.md#inv-d3), [INV-D10](07-invariants.md#inv-d10),
+[INV-Q10](07-invariants.md#inv-q10), [INV-Q11](07-invariants.md#inv-q11)) and
+raised [INV-D1](07-invariants.md#inv-d1), [INV-D6](07-invariants.md#inv-d6) and
+[INV-P3](07-invariants.md#inv-p3) to **C** from partial. It did not close
+[INV-E1](07-invariants.md#inv-e1): the panics gap 18 named are gone and a chunk
+that disagrees with its catalog is now a test, but the fuzz sweep the invariant
+asks for still needs a chunk writer
+([HC-3](08-conformance.md#813-harness-capability-register)).
 
 `fuel` is out of scope ([03-catalog.md §3.6](03-catalog.md)); the one gap this
 document carried against it is gone with it, and its catalog file with it, so the
@@ -93,73 +99,6 @@ Solana `transactions.version` is `int16` and holds `-1` for legacy transactions.
 the reference implementation either, so no client depends on it — but the
 catalog permits it (gap 5), and once the filter surface is closed this becomes a
 deliberate choice rather than an accident.
-
----
-
-## S3 — Loud failures
-
-### 15. `discriminator: []` errors
-
-`compile_discriminator` raises `"discriminator list is empty"`. Per
-[INV-P3](07-invariants.md#inv-p3) an empty list matches nothing, uniformly, for
-every filter kind. The reference implementation treats it as unsatisfiable and
-drops the item request.
-
-### 16. Missing request validations
-
-- Bloom filters accept any number of values. The reference caps at 10
-  ([INV-Q10](07-invariants.md#inv-q10)); each value is a separate hash-and-probe
-  over every row.
-- An item request may carry `d1` and `d8` simultaneously. The reference rejects
-  it ([INV-Q11](07-invariants.md#inv-q11)); the engine silently lets the last one
-  win, or ANDs them, depending on iteration order.
-
-### 17. Relation block numbers are looked up by hardcoded name
-
-`src/output/weight.rs` collects block numbers from relation batches under the
-literal column name `"block_number"`. Every current item table happens to use
-that name, and the blocks table (`number`) is handled separately — so it works
-today by coincidence.
-
-A catalog with a differently-named block column on an item table drops those rows
-from the weight model and from block selection. This is a direct violation of
-[INV-X1](07-invariants.md#inv-x1): the engine knows a column name it should have
-read from the catalog.
-
-### 18. Panics on unexpected input
-
-- `src/output/arrow_out.rs` — 6 `.expect()` calls on the prototype path.
-- The `solana_tx_version` and timestamp encoders `.unwrap()` their downcast: a
-  physical type drift turns into a panic in a worker serving many queries.
-- `src/metadata/bundled.rs` panics on a catalog parse failure. Acceptable at
-  startup, but only if the catalog is validated at build time (gap 19).
-
-[INV-E1](07-invariants.md#inv-e1) admits no exceptions.
-
-### 19. Catalog validation is partial
-
-`loader::validate` checks `block_number_column`, `item_order_keys`, `sort_key`,
-`weight` sources, `hex_number` columns, `children`, the declared `filters`, the
-special-filter columns, the parent-hash and parent-number columns, every alias
-reference, and relations — target table, key columns on both sides, equal key
-lengths, block number first, and an address column on the target of a `children`
-or `parents` relation. It does not check: field-group tag and mapped columns,
-virtual-field roll columns, `gteConst` targets, discriminator length mappings,
-the *source* side's `address_column`, `parent_key`, or
-`query_name` / `field_name` uniqueness.
-
-Each unchecked item is a deploy-time landmine. A typo in a `tag_column` silently
-drops every variant field. A typo in a roll column silently shortens every array.
-
-[INV-D1](07-invariants.md#inv-d1), [INV-D2](07-invariants.md#inv-d2),
-[INV-D5](07-invariants.md#inv-d5), [INV-D6](07-invariants.md#inv-d6),
-[INV-D10](07-invariants.md#inv-d10) enumerate the full check list. §8.2 describes
-how to test the validator itself.
-
-Related: the block table is found by the heuristic *"first table whose
-`sort_key[0]` equals its `block_number_column` and whose `item_order_keys` is
-empty, else the table named `blocks`"*. [INV-D3](07-invariants.md#inv-d3) makes it
-a declared property.
 
 ---
 
@@ -320,17 +259,13 @@ Permitted; must not change the meaning of anything above.
 
 ## Suggested order of work
 
-1. **Gap 19** (catalog validation). The catalog now carries the filter surface
-   and the fork-detection columns, so more of what the engine does is declared —
-   and more of it fails quietly when misspelled. Finishing the validator makes
-   everything in [03-catalog.md](03-catalog.md) checkable at load.
-2. **Gaps 15, 16** (request validation). Small, and each is a loud failure where
-   the spec asks for a quiet one, or the reverse.
-3. **Gaps 17, 18** (hardcoded names, panics). Robustness against a catalog or a
-   chunk the engine has not seen before.
-4. **Gaps 9, 10** (missing surface). Mechanical catalog work.
-5. **Gap 27** (open field surface). Mechanical once the per-dataset lists in
+1. **Gaps 9, 10** (missing surface). Mechanical catalog work, and the validator
+   now checks everything a new catalog entry can get wrong.
+2. **Gap 27** (open field surface). Mechanical once the per-dataset lists in
    [03-catalog.md](03-catalog.md) are in the catalog: 16 tables, one declared
    list each, and [INV-Q14](07-invariants.md#inv-q14) becomes checkable in a loop.
-6. **Gaps 20–23** (latent). None is reachable from a well-formed request against
-   a well-formed chunk today.
+3. **Gap 29** (no test, lint or format gate). The suite that pins the closed gaps
+   is only worth what CI does with it, and today CI runs the spec checker alone.
+4. **Gap 14** (negative filter values), then **gaps 20–23, 28, 30** (latent).
+   None is reachable from a well-formed request against a well-formed chunk
+   today.
