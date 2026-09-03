@@ -24,11 +24,16 @@ Checked before any chunk data is read ([INV-E2](07-invariants.md#inv-e2)).
 | Parameter | Role | Observed | Target |
 |---|---|---|---|
 | `P-MAX-ITEM-REQUESTS` | Item requests summed across every table and alias ([INV-Q5](07-invariants.md#inv-q5)) | 100 | 100 |
-| `P-MAX-BLOOM-VALUES` | Values in one bloom filter ([INV-Q10](07-invariants.md#inv-q10)) | violated: unbounded ([GAP 16](GAPS.md)) | 10 |
-| `P-MAX-DISCRIMINATOR-FILTERS` | Discriminator-family filters in one item request ([INV-Q11](07-invariants.md#inv-q11)) | violated: unbounded ([GAP 16](GAPS.md)) | 1 |
+| `P-MAX-BLOOM-VALUES` | Values in one bloom filter ([INV-Q10](07-invariants.md#inv-q10)) | 10 | 10 |
+| `P-MAX-DISCRIMINATOR-FILTERS` | Discriminator-family filters in one item request ([INV-Q11](07-invariants.md#inv-q11)) | 1 | 1 |
 | `P-MAX-DISCRIMINATOR-BYTES` | Bytes in one discriminator value ([INV-Q12](07-invariants.md#inv-q12)) | 16 | 16 |
 | `P-MAX-REQUEST-BYTES` | Whole-request size bound ([INV-Q13](07-invariants.md#inv-q13)) | violated: no bound ([GAP 23](GAPS.md)) | ⚠ 1 MiB |
 | `P-MAX-IN-LIST` | Values in one `inList` ([INV-Q13](07-invariants.md#inv-q13)) | violated: no bound ([GAP 23](GAPS.md)) | ⚠ 10 000 |
+
+The discriminator family is read from the catalog, not named in code: it is the
+`discriminator` special filter plus every column it dispatches to. A dataset with
+a differently-named discriminator is bounded by the same rule with no code change
+([INV-X1](07-invariants.md#inv-x1)).
 
 `P-MAX-REQUEST-BYTES` and `P-MAX-IN-LIST` are the two the reference
 implementation never had. The pair of them is what stands between the engine and
@@ -68,7 +73,7 @@ upward only: a change may raise them, never lower them.
 
 | Parameter | Role | Observed | Target |
 |---|---|---|---|
-| `P-COV-PROPERTY` | Fraction of invariants at status **C** in the traceability matrix ([MG-1](08-conformance.md#812-merge-gates)) | 0.33 (28 of 85) | ⚠ 0.60, then ratchet |
+| `P-COV-PROPERTY` | Fraction of invariants at status **C** in the traceability matrix ([MG-1](08-conformance.md#812-merge-gates)) | 0.41 (35 of 85) | ⚠ 0.60, then ratchet |
 | `P-COV-DIFF` | Line coverage of lines a change touches ([MG-2](08-conformance.md#812-merge-gates)) | unmeasured | ⚠ 0.80 |
 | `P-COV-TOTAL` | Whole-repository line coverage floor ([MG-2](08-conformance.md#812-merge-gates)) | unmeasured | ⚠ 0.70 |
 | `P-FLAKE-RETRIES` | Retries a test gets before it is quarantined ([MG-7](08-conformance.md#812-merge-gates)) | none | ⚠ 1 |
