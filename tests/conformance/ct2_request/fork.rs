@@ -190,9 +190,8 @@ fn a_chunk_that_cannot_answer_the_fork_check_is_an_error() {
     );
 }
 
-/// A chunk with no block table at all cannot answer the check either, and the
-/// scan of a table a chunk does not have returns no rows rather than an error —
-/// which reads here as "no evidence of a fork" and serves the query.
+/// A chunk with no block table at all cannot answer the check either. The query
+/// must fail rather than read the missing table as "no evidence of a fork".
 ///
 /// Covers CT-2 · INV-E5
 #[test]
@@ -255,10 +254,6 @@ tables:
         execute_chunk(&plan, &catalog, &reader, false)
     };
 
-    assert!(
-        answer(r#"{"type":"test","fromBlock":10,"toBlock":11,"logs":[{}]}"#).is_ok(),
-        "without the field the chunk answers as before"
-    );
     assert!(
         answer(
             r#"{"type":"test","fromBlock":10,"toBlock":11,

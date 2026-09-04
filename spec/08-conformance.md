@@ -383,26 +383,26 @@ renamed out from under a comment inside it.
 | [INV-O14](07-invariants.md#inv-o14) | CT-6 | **C** | six Arrow-parity cases |
 | [INV-E1](07-invariants.md#inv-e1) | CT-9 | **P** | the request half is fuzzed under CT-9, and `a_chunk_that_disagrees_with_the_catalog_does_not_panic` pins the encoders against a chunk written to disagree. The chunk-type *sweep* the invariant asks for needs HC-3, and two existing tests still assert a panic rather than forbid one |
 | [INV-E2](07-invariants.md#inv-e2) | CT-2 | **P** | validation precedes scanning by construction; nothing asserts that no output precedes an error |
-| [INV-E3](07-invariants.md#inv-e3) | CT-8 | **U** | the absent-column test covers filtering, not selection |
-| [INV-E4](07-invariants.md#inv-e4) | CT-8 | **U** | no missing-table case |
+| [INV-E3](07-invariants.md#inv-e3) | CT-8 | **C** | `selecting_an_absent_column_is_an_error` |
+| [INV-E4](07-invariants.md#inv-e4) | CT-8 | **C** | `a_missing_table_is_an_error`, `a_missing_relation_table_is_an_error`, and `a_missing_block_table_is_an_error` cover every way a plan names a table |
 | [INV-E5](07-invariants.md#inv-e5) | CT-2 | **C** | six cases, including a chain that skips block numbers and one whose gap is wider than `P-FORK-WINDOW` |
 | [INV-E6](07-invariants.md#inv-e6) | CT-2 | **C** | `every_validation_error_carries_its_kind` is the §6.2 table, one row per kind; `every_request_bound_carries_its_kind` and `an_unanswerable_reserved_key_carries_its_kind` cover the four that need a request too large to write inline or a catalog of their own |
 | [INV-E7](07-invariants.md#inv-e7) | CT-4 | **C** | `test_semi_join_unsupported_key_type` |
 | [INV-X1](07-invariants.md#inv-x1) | CT-1 | **P** | `a_relation_target_names_its_own_block_column` serves an invented chain from a synthetic chunk with no code change. One chain and one relation shape: a hardcoded name elsewhere would still pass |
-| [INV-X2](07-invariants.md#inv-x2) | CT-8 | **U** | adding a nullable column is never tested |
+| [INV-X2](07-invariants.md#inv-x2) | CT-8 | **C** | `an_ignored_nullable_column_does_not_change_output` |
 | [INV-X3](07-invariants.md#inv-x3) | CT-8 | **C** | `filtering_an_absent_column_is_an_error` on both scan entry points, `filtering_a_present_column_still_works` for the other direction, `one_unanswerable_item_rejects_the_whole_request` for a filter one item request of several carries, and `an_alias_filter_on_a_column_the_chunk_lacks_is_an_error` for one reached through an alias's extraction column |
 
-**Totals: 40 C, 31 P, 14 U** of 85. Property coverage is therefore 0.47
+**Totals: 43 C, 31 P, 11 U** of 85. Property coverage is therefore 0.51
 (`P-COV-PROPERTY` in [09-parameters.md](09-parameters.md)).
 
-Of the 71 rows at **C** or **P**, 49 are backed by a tagged test and 22 rest on
+Of the 74 rows at **C** or **P**, 52 are backed by a tagged test and 22 rest on
 prose alone. The 22 are the rows whose note says "fixtures only" or describes a
 group of cases without naming one, and they are the ones nothing recomputes: the
 status is what somebody believed on the day they typed it. Shrinking that number
 is what turns MG-1's ratchet from an intention into an arithmetic fact, so the
 checker recomputes all three numbers in this paragraph rather than trusting them.
 
-A tag is not the same as a gate. 7 of the 49 are backed only by tests marked
+A tag is not the same as a gate. 7 of the 52 are backed only by tests marked
 `#[ignore]`, which MG-3's portable job does not run: the test would fail if the
 invariant broke, but only on a machine that has the chunks. The checker reports
 those rows on every run too, because a status that no job can falsify is a status
@@ -411,10 +411,10 @@ worth seeing.
 The shape of the U column is worth reading on its own. The unchecked invariants
 cluster in three places, and none of them is an accident:
 
-- **Everything needing a chunk writer** — D8, O12, O13, X2, E3, E4, and half of
-  D7. These are the invariants about data written by a version of the archiver
-  that no longer exists, and they cannot be tested by reading fixtures. HC-3 is
-  the single highest-leverage thing missing.
+- **The remaining chunk-writer axes** — D8, O12, O13, and half of D7. Adding and
+  dropping columns and tables is portable now; physical widths, sort keys,
+  row-group sizes and compression still cannot be varied. Finishing HC-3 remains
+  the single highest-leverage piece of work.
 - **Everything needing generated queries** — P5, R2, R4, R11, B8. Each is a law
   over pairs of queries, and a suite of hand-written cases cannot express one.
 - **The catalog validator's remaining blind spot** — D4, and the chunk-level half
@@ -440,7 +440,7 @@ and its promotion is tracked in [GAPS.md](GAPS.md).
 | **MG-1** Property coverage never regresses | `P-COV-PROPERTY`, ratchet only | per-PR | HC-8 | advisory until HC-8 ratchets |
 | **MG-2** Line coverage on changed lines, and a repository floor | `P-COV-DIFF`, `P-COV-TOTAL` | per-PR | HC-9 | advisory until HC-9 exists |
 | **MG-3** The PR-budget classes pass | CT-1, CT-2, CT-3, CT-4, CT-5, CT-6 green | per-PR | HC-1, HC-2, HC-4, HC-6 | **blocking for portable tests**; external-data coverage is advisory |
-| **MG-4** The capability-blocked classes pass | CT-7, CT-8, CT-9 green | nightly | HC-3, HC-5, HC-7 | advisory until HC-3 exists |
+| **MG-4** The capability-blocked classes pass | CT-7, CT-8, CT-9 green | nightly | HC-3, HC-5, HC-7 | advisory until HC-3 is complete |
 | **MG-5** No performance regression outside the noise band | `P-PERF-NOISE-BAND` | nightly | HC-10 | advisory |
 | **MG-6** Spec integrity | the suite's own checker reports no error | per-PR | HC-11 | **blocking** |
 | **MG-7** Flake policy | `P-FLAKE-RETRIES`, then quarantine with an owner and an expiry | per-PR | HC-8 | advisory until HC-8 ratchets |
@@ -490,7 +490,7 @@ The gates and the CT classes both assume machinery. Listed with build status, or
 |---|---|---|---|
 | **HC-1** Fixture chunk loader and query runner | CT-2 – CT-6 | **C** | exists |
 | **HC-2** Catalog builder for deliberately invalid catalogs | CT-1 | **P** | a few negative cases exist; no systematic "one violation per check" sweep |
-| **HC-3** Chunk *writer* — rewrite a fixture at a chosen physical type, sort key, row-group size, with a column dropped or added | CT-6, CT-8 | **U** | the single highest-leverage missing piece; without it, D7, D8, O12, O13, X2, E3, E4 cannot be tested at all |
+| **HC-3** Chunk *writer* — rewrite a fixture at a chosen physical type, sort key, row-group size, with a column dropped or added | CT-6, CT-8 | **P** | portable mutations can add or drop a column and drop a table, closing X2, E3 and E4; physical type, sort key, row-group size and compression remain |
 | **HC-4** Query generator walking the catalog — pick a table, a filter, values from the chunk's actual contents, a relation subset, a projection | CT-3, CT-4, CT-7 | **U** | what turns the algebraic laws from prose into tests |
 | **HC-5** Reference-implementation runner and value-level comparator, with skip counting and a per-dataset floor | CT-7 | **P** | fixtures compare against recorded reference output; nothing runs the reference live |
 | **HC-6** Injectable `P-WEIGHT-BUDGET` | CT-5 | **C** | the budget suite already drives it |
@@ -503,14 +503,15 @@ The gates and the CT classes both assume machinery. Listed with build status, or
 
 A CT class whose capabilities are all **U** is not "unchecked" — it is
 *unbuildable today*, and belongs in the build order rather than the backlog.
-CT-8 and CT-9 are in that state.
+CT-9 is in that state.
 
 ## 8.14 Build order
 
 Each phase ends by updating §8.11 and [GAPS.md](GAPS.md).
 
-1. **The chunk writer** (HC-3). Seven invariants become testable and the whole
-   CT-8 class turns on. Nothing else unblocks as much.
+1. **Finish the chunk writer** (HC-3). Add physical-type, sort-key, row-group and
+   compression control. The add/drop slice has closed X2, E3 and E4; nothing
+   else unblocks as much of what remains.
 2. **The query generator** (HC-4). Turns §8.4 and §8.5 from tables of prose into
    generated laws, and closes P5, R2, R4, R11.
 3. **INV-B8, partition invariance.** One test, six invariants, and the property

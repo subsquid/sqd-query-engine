@@ -5,16 +5,123 @@
 //! not carry must be an error, because the alternative is a filter that matches
 //! every row and a client that cannot tell.
 //!
-//! Only the dropped-column shape is reachable today; retyping, reordering and
-//! adding a column need HC-3.
+//! Dropping and adding columns or tables are now portable synthetic cases.
+//! Retyping, reordering and row-group control are the remaining HC-3 axes.
 
+use arrow::datatypes::DataType;
 use sqd_query_engine::error::{error_kind, ErrorKind};
 use sqd_query_engine::output::execute_plan;
 use sqd_query_engine::query::{compile, parse_query};
 
-use crate::harness::chunk::chunk_without_column;
-use crate::harness::fixtures::{fixture_tree_is_present, meta, run};
+use crate::harness::chunk::{
+    chunk_with_nullable_column, chunk_without_column, chunk_without_column_at, chunk_without_table,
+};
+use crate::harness::fixtures::{fixture_tree_is_present, meta, run, run_against};
 use crate::harness::json::count_items;
+use crate::harness::synthetic::{catalog, logs_query, uniform, weighted_chunk, BLOCKS};
+
+/// Covers CT-8 · INV-E3
+#[test]
+fn selecting_an_absent_column_is_an_error() {
+    let metadata = catalog();
+    let source = weighted_chunk(BLOCKS, &uniform(BLOCKS, 0), &[]);
+    let chunk = chunk_without_column_at(source.path(), "logs", "data");
+    let query = logs_query().to_string();
+
+    let err = run_against(&metadata, chunk.path(), &query)
+        .expect_err("a selected column absent from the chunk must error");
+
+    assert_eq!(error_kind(&err), Some(ErrorKind::ColumnNotFound));
+    assert!(
+        err.root_cause().to_string().contains("data"),
+        "the error must name the missing column, got: {}",
+        err.root_cause()
+    );
+}
+
+/// Covers CT-8 · INV-E4
+#[test]
+fn a_missing_table_is_an_error() {
+    let metadata = catalog();
+    let source = weighted_chunk(BLOCKS, &uniform(BLOCKS, 0), &[]);
+    let chunk = chunk_without_table(source.path(), "logs");
+    let query = logs_query().to_string();
+
+    let err = run_against(&metadata, chunk.path(), &query)
+        .expect_err("a table absent from the chunk must error");
+
+    assert_eq!(error_kind(&err), Some(ErrorKind::TableNotFound));
+    assert!(
+        err.root_cause().to_string().contains("logs"),
+        "the error must name the missing table, got: {}",
+        err.root_cause()
+    );
+}
+
+/// A relation target is part of the query even though it has no item request of
+/// its own. Its absence must not turn a requested relation into an empty result.
+///
+/// Covers CT-8 · INV-E4
+#[test]
+fn a_missing_relation_table_is_an_error() {
+    let metadata = catalog();
+    let source = weighted_chunk(BLOCKS, &uniform(BLOCKS, 0), &uniform(BLOCKS, 0));
+    let chunk = chunk_without_table(source.path(), "transactions");
+    let query = serde_json::json!({
+        "type": "test",
+        "fromBlock": 10,
+        "toBlock": 14,
+        "logs": [{"transaction": true}],
+        "fields": {"transaction": {"input": true}}
+    })
+    .to_string();
+
+    let err = run_against(&metadata, chunk.path(), &query)
+        .expect_err("a relation table absent from the chunk must error");
+
+    assert_eq!(error_kind(&err), Some(ErrorKind::TableNotFound));
+    assert!(
+        err.root_cause().to_string().contains("transactions"),
+        "the error must name the missing relation table, got: {}",
+        err.root_cause()
+    );
+}
+
+/// The block table supplies response framing and is required by every query.
+///
+/// Covers CT-8 · INV-E4
+#[test]
+fn a_missing_block_table_is_an_error() {
+    let metadata = catalog();
+    let source = weighted_chunk(BLOCKS, &uniform(BLOCKS, 0), &[]);
+    let chunk = chunk_without_table(source.path(), "blocks");
+    let query = logs_query().to_string();
+
+    let err = run_against(&metadata, chunk.path(), &query)
+        .expect_err("a block table absent from the chunk must error");
+
+    assert_eq!(error_kind(&err), Some(ErrorKind::TableNotFound));
+    assert!(
+        err.root_cause().to_string().contains("blocks"),
+        "the error must name the missing block table, got: {}",
+        err.root_cause()
+    );
+}
+
+/// Covers CT-8 · INV-X2
+#[test]
+fn an_ignored_nullable_column_does_not_change_output() {
+    let metadata = catalog();
+    let source = weighted_chunk(BLOCKS, &uniform(BLOCKS, 0), &[]);
+    let extended =
+        chunk_with_nullable_column(source.path(), "logs", "archiver_note", DataType::Utf8);
+    let query = logs_query().to_string();
+
+    let expected = run_against(&metadata, source.path(), &query).unwrap();
+    let actual = run_against(&metadata, extended.path(), &query).unwrap();
+
+    assert_eq!(actual, expected);
+}
 
 /// The single most dangerous silent failure available: a filter the engine
 /// cannot evaluate stops narrowing the scan and starts matching everything, so

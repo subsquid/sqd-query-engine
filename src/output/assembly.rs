@@ -168,6 +168,28 @@ enum FmtOutput {
     Arrow(Option<ArrowOutput>),
 }
 
+fn ensure_required_tables_present(plan: &Plan, chunk: &dyn ChunkReader) -> Result<()> {
+    let ensure_present = |table: &str| {
+        crate::engine_ensure!(
+            chunk.has_table(table),
+            crate::error::ErrorKind::TableNotFound,
+            "table '{}' is not found in the chunk",
+            table
+        );
+        Ok(())
+    };
+
+    ensure_present(&plan.block_table)?;
+    for table_plan in &plan.table_plans {
+        ensure_present(&table_plan.table)?;
+        for relation in &table_plan.relations {
+            ensure_present(&relation.target_table)?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Core execution: scan → block selection → output assembly. The `format`
 /// selects the back half: nested JSON block encoding or flat Arrow IPC streams.
 /// The expensive front half (scan, joins, weight limit) is shared.
@@ -200,11 +222,16 @@ fn execute_chunk_fmt(
 
     let t_total = timer!();
 
-    // 0. A reorg between two pages must be reported, not paved over with data
+    // 0. A missing table is an incompatible chunk, not an empty table. Check
+    //    every table the plan names before a zero-row primary scan can hide a
+    //    missing relation target (INV-E4).
+    ensure_required_tables_present(plan, chunk)?;
+
+    // 1. A reorg between two pages must be reported, not paved over with data
     //    from the branch the client did not ask about.
     crate::output::fork::check_parent_block(plan, metadata, chunk)?;
 
-    // 1. Scan all tables specified in the plan
+    // 2. Scan all tables specified in the plan
     let mut table_outputs: HashMap<String, TableOutput> = HashMap::new();
 
     // Process block-sorted tables LAST so the budget early-stop scan can weigh
@@ -255,10 +282,6 @@ fn execute_chunk_fmt(
                 table_plan.table
             )
         })?;
-
-        if !chunk.has_table(&table_plan.table) {
-            continue;
-        }
 
         // Determine all columns needed for output (including virtual field sources)
         let output_cols = resolve_output_columns(table_plan, table_desc);
@@ -521,9 +544,6 @@ fn execute_chunk_fmt(
                     let kf_opt = &key_filters[rel_idx];
                     let hf_opt = &hierarchical_filters[rel_idx];
 
-                    if !chunk.has_table(&rel.target_table) {
-                        return None;
-                    }
                     let rel_table_desc = metadata.table(&rel.target_table);
 
                     let rel_output_cols =
@@ -678,7 +698,7 @@ fn execute_chunk_fmt(
         );
     }
 
-    // 2. Read blocks table header
+    // 3. Read blocks table header
     let t_blocks = timer!();
     let block_table_desc = metadata.table(&plan.block_table);
     let readable_block_table = block_table_desc.filter(|_| chunk.has_table(&plan.block_table));
@@ -702,7 +722,7 @@ fn execute_chunk_fmt(
         Vec::new()
     };
 
-    // 3. Collect all block numbers that have data
+    // 4. Collect all block numbers that have data
     let mut block_numbers: HashSet<u64> = HashSet::default();
 
     // From table outputs
@@ -746,7 +766,7 @@ fn execute_chunk_fmt(
         }
     }
 
-    // 4. Sort block numbers and apply weight-based limit
+    // 5. Sort block numbers and apply weight-based limit
     let mut sorted_blocks: Vec<u64> = block_numbers.into_iter().collect();
     sorted_blocks.sort_unstable();
 
@@ -935,7 +955,7 @@ fn execute_chunk_fmt(
         ))));
     }
 
-    // 5. Pre-build block→rows indexes for each batch set
+    // 6. Pre-build block→rows indexes for each batch set
     let block_index = build_block_index(
         &block_batches,
         block_table_desc

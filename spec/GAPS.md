@@ -57,7 +57,7 @@ the signed floor and the block-bound half of it both have tests now — and left
 
 The next work is not in this document. It is the capability gaps in
 [§8.13](08-conformance.md#813-harness-capability-register) — a chunk writer and a
-query generator — which are what stand between the suite and the fourteen
+query generator — which are what stand between the suite and the eleven
 invariants nothing would notice breaking, [INV-P9](07-invariants.md#inv-p9)
 first among them.
 
