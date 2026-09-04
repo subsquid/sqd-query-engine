@@ -5,12 +5,11 @@
 //! column dropped, a sort key the catalog does not expect — so those tests write
 //! their own parquet.
 //!
-//! This is not HC-3, but the two fixture rewriters below are where HC-3 starts:
-//! they copy a chunk with one column dropped or one column overwritten. HC-3
-//! adds the other axes — physical type, sort key, row-group size — and with them
-//! the invariants CT-6 and CT-8 cannot reach today.
+//! This is the portable core of HC-3: it copies a chunk with a table or column
+//! dropped, a nullable column added, or a column overwritten. Physical type,
+//! sort key and row-group size are the remaining axes.
 
-use arrow::array::{ArrayRef, StringArray, UInt64Array};
+use arrow::array::{new_null_array, ArrayRef, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -50,50 +49,74 @@ pub fn blocks_parquet_named(dir: &Path, column: &str, numbers: &[u64]) {
     );
 }
 
-/// Copy a fixture chunk into a temp dir, rewriting one table through `rewrite`.
+/// Copy a chunk into a temp dir, letting `visit` replace or omit an entry.
 ///
-/// Every table but one is copied byte for byte; the named one is read, passed
-/// through, and written back. Both rewriters below are this walk plus four
-/// lines, and they were two copies of it.
-fn rewrite_chunk(
-    dataset: &str,
-    table: &str,
-    rewrite: impl Fn(SchemaRef, &[RecordBatch]) -> (SchemaRef, Vec<RecordBatch>),
-) -> tempfile::TempDir {
-    let src = fixture_chunk(dataset);
+/// Returning `true` means the visitor handled the entry. Everything else is
+/// copied byte for byte.
+fn copy_chunk(src: &Path, mut visit: impl FnMut(&str, &Path, &Path) -> bool) -> tempfile::TempDir {
     let dir = tempfile::TempDir::new().unwrap();
 
-    for entry in std::fs::read_dir(&src).unwrap() {
+    for entry in std::fs::read_dir(src).unwrap() {
         let path = entry.unwrap().path();
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         let dst = dir.path().join(&name);
 
-        if name != format!("{table}.parquet") {
+        if !visit(&name, &path, &dst) {
             std::fs::copy(&path, &dst).unwrap();
-            continue;
+        }
+    }
+
+    dir
+}
+
+/// Copy a chunk into a temp dir, rewriting one table through `rewrite`.
+///
+/// Every table but one is copied byte for byte; the named one is read, passed
+/// through, and written back.
+fn rewrite_table(
+    src: &Path,
+    table: &str,
+    rewrite: impl Fn(SchemaRef, &[RecordBatch]) -> (SchemaRef, Vec<RecordBatch>),
+) -> tempfile::TempDir {
+    let table_file = format!("{table}.parquet");
+    let mut rewritten = false;
+    let dir = copy_chunk(src, |name, path, dst| {
+        if name != table_file {
+            return false;
         }
 
-        let reader = ParquetRecordBatchReaderBuilder::try_new(File::open(&path).unwrap())
+        rewritten = true;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(File::open(path).unwrap())
             .unwrap()
             .build()
             .unwrap();
         let batches: Vec<RecordBatch> = reader.map(|b| b.unwrap()).collect();
         let (schema, rewritten) = rewrite(batches[0].schema(), &batches);
 
-        let mut writer = ArrowWriter::try_new(File::create(&dst).unwrap(), schema, None).unwrap();
+        let mut writer = ArrowWriter::try_new(File::create(dst).unwrap(), schema, None).unwrap();
         for batch in &rewritten {
             writer.write(batch).unwrap();
         }
         writer.close().unwrap();
-    }
+        true
+    });
 
+    assert!(
+        rewritten,
+        "'{table_file}' must be present in the source chunk"
+    );
     dir
 }
 
 /// Copy a fixture chunk into a temp dir, dropping one column from one table —
 /// the shape of a chunk written before that column existed.
 pub fn chunk_without_column(dataset: &str, table: &str, drop_column: &str) -> tempfile::TempDir {
-    rewrite_chunk(dataset, table, |full, batches| {
+    chunk_without_column_at(&fixture_chunk(dataset), table, drop_column)
+}
+
+/// Copy any chunk while dropping one column from one table.
+pub fn chunk_without_column_at(src: &Path, table: &str, drop_column: &str) -> tempfile::TempDir {
+    rewrite_table(src, table, |full, batches| {
         let keep: Vec<usize> = (0..full.fields().len())
             .filter(|&i| full.field(i).name() != drop_column)
             .collect();
@@ -110,6 +133,59 @@ pub fn chunk_without_column(dataset: &str, table: &str, drop_column: &str) -> te
     })
 }
 
+/// Copy a chunk while omitting one table entirely.
+pub fn chunk_without_table(src: &Path, table: &str) -> tempfile::TempDir {
+    let table_file = format!("{table}.parquet");
+    let mut removed = false;
+    let dir = copy_chunk(src, |name, _, _| {
+        if name == table_file {
+            removed = true;
+            true
+        } else {
+            false
+        }
+    });
+
+    assert!(
+        removed,
+        "'{table_file}' must be present in the source chunk"
+    );
+    dir
+}
+
+/// Copy a chunk while adding an all-null column to one table.
+pub fn chunk_with_nullable_column(
+    src: &Path,
+    table: &str,
+    column: &str,
+    data_type: DataType,
+) -> tempfile::TempDir {
+    rewrite_table(src, table, |schema, batches| {
+        assert!(
+            schema.index_of(column).is_err(),
+            "'{column}' must be absent from {table} before it is added"
+        );
+
+        let mut fields: Vec<Field> = schema
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone())
+            .collect();
+        fields.push(Field::new(column, data_type.clone(), true));
+        let extended = Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()));
+        let rewritten = batches
+            .iter()
+            .map(|batch| {
+                let mut columns = batch.columns().to_vec();
+                columns.push(new_null_array(&data_type, batch.num_rows()));
+                RecordBatch::try_new(extended.clone(), columns).unwrap()
+            })
+            .collect();
+
+        (extended, rewritten)
+    })
+}
+
 /// Copy a fixture chunk into a temp dir, filling one `utf8` column of one table
 /// with the same value in every row — the shape of a chunk whose column is
 /// populated where the bundled fixture happens to leave it null.
@@ -119,7 +195,7 @@ pub fn chunk_with_column_filled(
     column: &str,
     value: &str,
 ) -> tempfile::TempDir {
-    rewrite_chunk(dataset, table, |schema, batches| {
+    rewrite_table(&fixture_chunk(dataset), table, |schema, batches| {
         let index = schema
             .index_of(column)
             .unwrap_or_else(|_| panic!("'{column}' must be present in {table} to fill it"));

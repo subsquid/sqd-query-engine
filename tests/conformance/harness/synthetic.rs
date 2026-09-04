@@ -38,6 +38,11 @@ tables:
     sort_key: [block_number, log_index]
     filters: []
     fields: [log_index, data]
+    relations:
+      transaction:
+        table: transactions
+        left_key: [block_number, log_index]
+        right_key: [block_number, transaction_index]
     columns:
       block_number:
         type: uint64
