@@ -513,6 +513,12 @@ is never an error or a crash.**
 
 ### INV-O12
 **Byte determinism.** The same chunk and query produce byte-identical output.
+Field order is part of those bytes ([INV-O6](#inv-o6)), so a comparison that
+parses both sides before comparing them does not test this.
+
+*Test:* run one query twice and assert byte equality; then transpose two columns
+in the catalog and assert the bytes change. Without the second half the first can
+pass while comparing nothing.
 
 ### INV-O13
 **Execution independence.** Output does not depend on thread count, completion

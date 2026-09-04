@@ -372,7 +372,7 @@ renamed out from under a comment inside it.
 | [INV-O3](07-invariants.md#inv-o3) | CT-6 | **P** | fixtures only |
 | [INV-O4](07-invariants.md#inv-o4) | CT-6 | **P** | fixtures only |
 | [INV-O5](07-invariants.md#inv-o5) | CT-6 | **P** | fixtures plus the typed sort-column case |
-| [INV-O6](07-invariants.md#inv-o6) | CT-6 | **P** | fixtures compare values, not bytes — see the divergence table in GAPS.md |
+| [INV-O6](07-invariants.md#inv-o6) | CT-6 | **U** | the fixtures compare parsed values, which carry no field order, so nothing here can see the thing the invariant is about ([gap 32](GAPS.md)) |
 | [INV-O7](07-invariants.md#inv-o7) | CT-6 | **P** | `test_arrow_parity_and_projection`; no empty-`fields` case |
 | [INV-O8](07-invariants.md#inv-o8) | CT-6 | **C** | `test_snake_to_camel`, `test_snake_to_camel_in_output` |
 | [INV-O9](07-invariants.md#inv-o9) | CT-6 | **P** | sixteen encoder cases plus `discriminator_columns_render_as_padded_hex`, `test_a_timestamp_takes_its_unit_from_the_declared_type` over all four unit pairings, and `test_hex_and_base58_render_a_column_stored_as_bytes`. The NaN and ±∞ arm is the one the invariant names that nothing asserts |
@@ -392,11 +392,11 @@ renamed out from under a comment inside it.
 | [INV-X2](07-invariants.md#inv-x2) | CT-8 | **C** | `an_ignored_nullable_column_does_not_change_output` |
 | [INV-X3](07-invariants.md#inv-x3) | CT-8 | **C** | `filtering_an_absent_column_is_an_error` on both scan entry points, `filtering_a_present_column_still_works` for the other direction, `one_unanswerable_item_rejects_the_whole_request` for a filter one item request of several carries, and `an_alias_filter_on_a_column_the_chunk_lacks_is_an_error` for one reached through an alias's extraction column |
 
-**Totals: 43 C, 31 P, 11 U** of 85. Property coverage is therefore 0.51
+**Totals: 43 C, 30 P, 12 U** of 85. Property coverage is therefore 0.51
 (`P-COV-PROPERTY` in [09-parameters.md](09-parameters.md)).
 
-Of the 74 rows at **C** or **P**, 52 are backed by a tagged test and 22 rest on
-prose alone. The 22 are the rows whose note says "fixtures only" or describes a
+Of the 73 rows at **C** or **P**, 52 are backed by a tagged test and 21 rest on
+prose alone. The 21 are the rows whose note says "fixtures only" or describes a
 group of cases without naming one, and they are the ones nothing recomputes: the
 status is what somebody believed on the day they typed it. Shrinking that number
 is what turns MG-1's ratchet from an intention into an arithmetic fact, so the
@@ -409,12 +409,17 @@ those rows on every run too, because a status that no job can falsify is a statu
 worth seeing.
 
 The shape of the U column is worth reading on its own. The unchecked invariants
-cluster in three places, and none of them is an accident:
+cluster in four places, and none of them is an accident:
 
-- **The remaining chunk-writer axes** — D8, O12, O13, and half of D7. Adding and
-  dropping columns and tables is portable now; physical widths, sort keys,
-  row-group sizes and compression still cannot be varied. Finishing HC-3 remains
-  the single highest-leverage piece of work.
+- **The remaining chunk-writer axes** — D8, half of D7, and the storage-shape
+  half of O13. Adding and dropping columns and tables is portable now; physical
+  widths, sort keys, row-group sizes and compression still cannot be varied.
+  Finishing HC-3 remains the single highest-leverage piece of work.
+- **What a value comparison cannot see** — O6, O12, and the thread-count half of
+  O13. Every fixture suite, here and in the reference, parses both sides before
+  comparing, and a parsed value carries no field order and no framing. These
+  three need no chunk writer at all: an order-preserving reader, one query run
+  twice, and a thread sweep close them ([gap 32](GAPS.md)).
 - **Everything needing generated queries** — P5, R2, R4, R11, B8. Each is a law
   over pairs of queries, and a suite of hand-written cases cannot express one.
 - **The catalog validator's remaining blind spot** — D4, and the chunk-level half
