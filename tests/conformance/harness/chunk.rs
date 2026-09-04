@@ -453,6 +453,27 @@ fn permute(schema: &SchemaRef, batches: &[RecordBatch], order: RowOrder) -> Reco
     RecordBatch::try_new(schema.clone(), columns).unwrap()
 }
 
+/// The column names one table of a chunk carries, or `None` when it has no such
+/// table. A catalog names every column a dataset can have; a chunk carries the
+/// ones its archiver version wrote.
+pub fn column_names(chunk: &Path, table: &str) -> Option<Vec<String>> {
+    let path = chunk.join(format!("{table}.parquet"));
+    if !path.is_file() {
+        return None;
+    }
+
+    let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(&path).unwrap()).unwrap();
+
+    Some(
+        builder
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect(),
+    )
+}
+
 /// Read named columns of one table of a chunk, leaving the rest on disk.
 ///
 /// Returns `None` when the chunk has no such table: a catalog names every table

@@ -5,10 +5,11 @@
 //! catastrophic misreadings: an empty list that matches everything, and a filter
 //! that silently no-ops on a column the chunk does not carry.
 //!
-//! The generated half needs HC-4, the catalog-walking query generator, which
-//! does not exist yet.
+//! The generated half is `laws`: §8.4's table over queries HC-4 composed out of
+//! the catalog and the chunk's own contents.
 
 mod case_folding;
+mod laws;
 mod pruning;
 mod surface;
 mod values;

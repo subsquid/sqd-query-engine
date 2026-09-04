@@ -51,6 +51,42 @@ def checks_in(findings):
     return {f["check"] for f in findings}
 
 
+def _matrix_rows():
+    """`{ident: (classes, status)}` from §8.11, parsed the way the checker does."""
+    rows = {}
+    text = (SPEC / "08-conformance.md").read_text().splitlines()
+    for line in text:
+        if not line.startswith("| [INV-"):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        ident = check.ID_RE.findall(cells[0])[0]
+        rows[ident] = (check.ID_RE.findall(cells[1]), re.sub(r"[*\s]", "", cells[2]))
+    return rows
+
+
+def a_covered_and_tagged_row():
+    """An invariant the matrix marks **C** and some test carries a tag for.
+
+    The mutation below needs a row at **U** that a tag claims. Waiting for one to
+    exist makes the self-test fail exactly when the suite succeeds in closing the
+    last of them, so it makes one instead: take a row that is covered and talk it
+    down. That is also the shape of the mistake the rule is there to catch.
+    """
+    tagged = check.read_tags(SPEC.parent, [])
+    for ident, (_classes, status) in _matrix_rows().items():
+        if status == "C" and ident in tagged:
+            return ident
+    raise AssertionError("no invariant is both covered and tagged")
+
+
+def coverage_cell():
+    """`P-COV-PROPERTY`'s observed cell, as it currently reads."""
+    for line in (SPEC / "09-parameters.md").read_text().splitlines():
+        if "`P-COV-PROPERTY`" in line:
+            return [c.strip() for c in line.strip("|").split("|")][2]
+    raise AssertionError("09-parameters.md has no P-COV-PROPERTY row")
+
+
 class Suite:
     """A throwaway copy of the spec, with git history, that tests may mutate."""
 
@@ -202,7 +238,7 @@ def test_flipping_a_status_invalidates_the_stated_totals(s):
 @case
 def test_a_hand_edited_coverage_baseline_is_caught(s):
     """MG-1 ratchets on this number; it may not be loosened by typing."""
-    s.edit("09-parameters.md", "0.58 (49 of 85)", "0.99 (84 of 85)")
+    s.edit("09-parameters.md", coverage_cell(), "0.99 (84 of 85)")
     assert "param-observed-stale" in checks_in(run(s.root)[1])
 
 
@@ -235,8 +271,10 @@ def test_a_renamed_bound_heading_is_loud(s):
 def test_a_capability_cited_only_from_the_build_order_is_not_orphaned(s):
     s.edit("08-conformance.md", "| **HC-12**",
            "| **HC-13** Cited from the build order alone | CT-1 | **U** | |\n| **HC-12**")
-    s.edit("08-conformance.md", "3. **Coverage reporting**",
-           "3. HC-13, named only here.\n4. **Coverage reporting**")
+    # Anchored on §8.14's preamble rather than on one of its numbered items:
+    # the order gets renumbered every time a phase finishes.
+    s.edit("08-conformance.md", "Each phase ends by updating §8.11",
+           "HC-13 is named only here.\n\nEach phase ends by updating §8.11")
     assert "hc-orphan" not in checks_in(run(s.root)[1])
 
 
@@ -411,9 +449,16 @@ def test_a_test_the_matrix_names_but_nothing_tags_is_caught(s):
 
 @case
 def test_a_tagged_test_under_an_unchecked_row_is_caught(s):
-    """INV-R11 is at U. A tag saying otherwise means the matrix understates it."""
-    s.rust_append("tests/conformance/ct4_relations.rs",
-                  "\n/// Covers CT-4 · INV-R11\n#[test]\nfn idempotence() {}\n")
+    """A row at U that a tag claims means the matrix understates it.
+
+    Which row is read out of §8.11 rather than typed here. Naming one cost a
+    broken self-test twice: once when the row named was closed, once when the
+    file it appended to was renamed.
+    """
+    ident = a_covered_and_tagged_row()
+    row = next(line for line in (SPEC / "08-conformance.md").read_text().splitlines()
+               if line.startswith(f"| [{ident}]"))
+    s.edit("08-conformance.md", row, row.replace("| **C** |", "| **U** |", 1))
     assert "tag-status-understated" in checks_in(run(s.root)[1])
 
 
@@ -452,7 +497,7 @@ def test_a_near_miss_tag_is_not_dropped(s):
 @case
 def test_a_tag_on_an_async_test_is_not_an_orphan(s):
     """`"#[test]" in "#[tokio::test]"` is False, so every async test was one."""
-    s.rust_append("tests/conformance/ct4_relations.rs",
+    s.rust_append("tests/conformance/ct4_relations/laws.rs",
                   "\n/// Covers CT-4 · INV-R1\n#[tokio::test]\n"
                   "async fn an_async_test() {}\n")
     assert "tag-orphan" not in checks_in(run(s.root)[1])
@@ -461,7 +506,7 @@ def test_a_tag_on_an_async_test_is_not_an_orphan(s):
 @case
 def test_an_attribute_above_the_doc_comment_is_still_a_test(s):
     """Attributes are as legal above a doc comment as below it."""
-    s.rust_append("tests/conformance/ct4_relations.rs",
+    s.rust_append("tests/conformance/ct4_relations/laws.rs",
                   "\n#[test]\n/// Covers CT-4 · INV-R1\nfn attribute_first() {}\n")
     assert "tag-orphan" not in checks_in(run(s.root)[1])
 
@@ -484,7 +529,7 @@ def test_a_tag_retargeted_at_another_invariant_is_caught(s):
 
 @case
 def test_a_test_filed_under_a_class_it_does_not_claim_is_caught(s):
-    s.rust_append("tests/conformance/ct4_relations.rs",
+    s.rust_append("tests/conformance/ct4_relations/laws.rs",
                   "\n/// Covers CT-1 · INV-D1\n#[test]\nfn misfiled() {}\n")
     assert "tag-class-misfiled" in checks_in(run(s.root)[1])
 

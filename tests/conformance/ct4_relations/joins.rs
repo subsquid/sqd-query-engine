@@ -1,16 +1,15 @@
-//! CT-4 — relations.
+//! Joins written by hand, against chunks written to disagree with their catalog.
 //!
-//! Two halves. The synthetic chunks pin what the fixture tree cannot express —
-//! a chunk that disagrees with its catalog about the join key, a relation target
-//! naming its own block column. The fixture-backed half pins what a client sees:
-//! a row is emitted once however many relations reach it, and a null key is not
-//! a key.
+//! The synthetic chunks here pin what the fixture tree cannot express — a chunk
+//! that disagrees with its catalog about the join key, a relation target naming
+//! its own block column. The fixture-backed cases pin what a client sees: a row
+//! is emitted once however many relations reach it, and a null key is not a key.
 //!
 //! A relation is answered by scanning the target table with the source's join
 //! keys pushed into it. Both halves of that — the pushdown and the weight the
 //! result is charged — go wrong quietly when the chunk does not match the
 //! catalog, so both are pinned here against chunks written to disagree on
-//! purpose. The fixture tree cannot express either shape.
+//! purpose.
 
 use arrow::array::{ArrayRef, BinaryArray, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};

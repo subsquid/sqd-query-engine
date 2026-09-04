@@ -8,6 +8,7 @@
 pub mod chunk;
 pub mod evm_like;
 pub mod fixtures;
+pub mod generator;
 pub mod guard;
 pub mod json;
 pub mod synthetic;
