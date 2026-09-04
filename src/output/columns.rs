@@ -3,9 +3,9 @@ use crate::query::TablePlan;
 use std::collections::HashSet;
 
 /// Map a table's *requested output fields* (logical names, possibly virtual or
-/// field-group requests) to the physical parquet columns that back them, in
-/// request order. Unlike [`resolve_output_columns`], this does NOT add scan
-/// helpers (join keys, weight columns, sort keys, tag column) — it is exactly
+/// variant fields) to the physical parquet columns that back them, in request
+/// order. Unlike [`resolve_output_columns`], this does NOT add scan helpers
+/// (join keys, weight columns, sort keys, variant column) — it is exactly
 /// the columns a user asked to see, expanded to physical form. Used to project
 /// flat Arrow output.
 pub(crate) fn physical_output_columns(
@@ -19,17 +19,13 @@ pub(crate) fn physical_output_columns(
         }
     };
     for col in out_cols {
-        if let Some(VirtualField::Roll { columns }) = table_desc.virtual_fields.get(col.as_str()) {
+        if let Some(VirtualField::Roll { columns }) =
+            table_desc.output.virtual_fields.get(col.as_str())
+        {
             for c in columns {
                 push(c.clone(), &mut cols);
             }
-        } else if table_desc.columns.contains_key(col.as_str()) {
-            push(col.clone(), &mut cols);
-        } else if let Some(phys) = table_desc
-            .field_groups
-            .as_ref()
-            .and_then(|fg| fg.physical_column_for_request(col.as_str()))
-        {
+        } else if let Some(phys) = table_desc.physical_output_column(col) {
             push(phys.to_string(), &mut cols);
         }
     }
@@ -54,15 +50,15 @@ pub(crate) fn resolve_output_columns(
         cols.insert(ac.clone());
     }
 
-    // Tag column for field groups (needed for variant dispatch)
-    if let Some(fg) = &table_desc.field_groups {
-        cols.insert(fg.tag_column.clone());
+    // Variant column (needed for variant dispatch)
+    if let Some(by) = &table_desc.output.variant_column {
+        cols.insert(by.clone());
     }
 
     // Requested output columns
     for col in &table_plan.output_columns {
         // Check if this is a virtual field
-        if let Some(vf) = table_desc.virtual_fields.get(col.as_str()) {
+        if let Some(vf) = table_desc.output.virtual_fields.get(col.as_str()) {
             match vf {
                 VirtualField::Roll { columns } => {
                     for c in columns {
@@ -70,15 +66,9 @@ pub(crate) fn resolve_output_columns(
                     }
                 }
             }
-        } else if table_desc.columns.contains_key(col.as_str()) {
-            cols.insert(col.clone());
-        } else if let Some(phys) = table_desc
-            .field_groups
-            .as_ref()
-            .and_then(|fg| fg.physical_column_for_request(col.as_str()))
-        {
-            // Request key that maps to a differently-named physical column
-            // (e.g. trace `call_call_type` → `call_type`).
+        } else if let Some(phys) = table_desc.physical_output_column(col) {
+            // A column, or a variant field that maps to a differently-named
+            // physical column (e.g. trace `call_call_type` → `call_type`).
             cols.insert(phys.to_string());
         }
     }
@@ -127,15 +117,15 @@ pub(crate) fn resolve_relation_output_columns(
         if let Some(ac) = &desc.address_column {
             cols.insert(ac.clone());
         }
-        // Tag column for field groups
-        if let Some(fg) = &desc.field_groups {
-            cols.insert(fg.tag_column.clone());
+        // Variant column
+        if let Some(by) = &desc.output.variant_column {
+            cols.insert(by.clone());
         }
     }
 
     for col in output_columns {
         if let Some(desc) = table_desc {
-            if let Some(vf) = desc.virtual_fields.get(col.as_str()) {
+            if let Some(vf) = desc.output.virtual_fields.get(col.as_str()) {
                 match vf {
                     VirtualField::Roll { columns } => {
                         for c in columns {
@@ -143,12 +133,7 @@ pub(crate) fn resolve_relation_output_columns(
                         }
                     }
                 }
-            } else if let Some(phys) = desc
-                .field_groups
-                .as_ref()
-                .filter(|_| !desc.columns.contains_key(col.as_str()))
-                .and_then(|fg| fg.physical_column_for_request(col.as_str()))
-            {
+            } else if let Some(phys) = desc.physical_output_column(col) {
                 cols.insert(phys.to_string());
             } else {
                 cols.insert(col.clone());
@@ -184,10 +169,10 @@ pub(crate) fn required_output_columns(
     let mut cols = Vec::new();
     for col in output_columns {
         // Virtual fields roll several optional sources — don't hard-require them.
-        if table_desc.virtual_fields.contains_key(col.as_str()) {
+        if table_desc.output.virtual_fields.contains_key(col.as_str()) {
             continue;
         }
-        // Resolve field-group request keys (e.g. `call_call_type` → `call_type`).
+        // Resolve variant fields (e.g. `call_call_type` → `call_type`).
         let Some(phys) = table_desc.physical_output_column(col) else {
             continue;
         };

@@ -165,11 +165,11 @@ fn an_unanswerable_reserved_key_carries_its_kind() {
     let silent = parse_dataset_description(
         r#"
 name: test
+
 tables:
   blocks:
     block_number_column: number
     sort_key: [number]
-    filters: []
     columns:
       number: { type: uint64 }
       hash: { type: string }

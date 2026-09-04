@@ -7,19 +7,18 @@ name: tron
 
 tables:
   blocks:
-    filters: []
-    fields: [
-      number, hash, parent_hash, tx_trie_root, version, timestamp, witness_address,
-      witness_signature
-    ]
+    output:
+      name: block
+      fields: [
+        number, hash, parent_hash, tx_trie_root, version, timestamp, witness_address,
+        witness_signature
+      ]
     parent_hash_column: parent_hash
     block_number_column: number
-    field_name: block
     sort_key: [ number ]
     columns:
       number:
         type: uint64
-        stats: true
       hash:
         type: string
       parent_hash:
@@ -30,23 +29,32 @@ tables:
         type: int32
       timestamp:
         type: timestamp_millisecond
-        json_encoding: timestamp_millisecond
+        encoding: timestamp_millisecond
       witness_address:
         type: string
       witness_signature:
         type: string
 
   transactions:
-    filters: [ type ]
-    fields: [
-      transaction_index, hash, ret, signature, type, parameter, permission_id, ref_block_bytes,
-      ref_block_hash, fee_limit, expiration, timestamp, raw_data_hex, fee, contract_result,
-      contract_address, res_message, withdraw_amount, unfreeze_amount, withdraw_expire_amount,
-      cancel_unfreeze_v2_amount, result, energy_fee, energy_usage, energy_usage_total, net_usage,
-      net_fee, origin_energy_usage, energy_penalty_total
-    ]
-    query_name: transactions
-    field_name: transaction
+    request:
+      name: transactions
+      filters: [ type ]
+      relations:
+        logs:
+          table: logs
+          key: [ block_number, transaction_index ]
+        internal_transactions:
+          table: internal_transactions
+          key: [ block_number, transaction_index ]
+    output:
+      name: transaction
+      fields: [
+        transaction_index, hash, ret, signature, type, parameter, permission_id, ref_block_bytes,
+        ref_block_hash, fee_limit, expiration, timestamp, raw_data_hex, fee, contract_result,
+        contract_address, res_message, withdraw_amount, unfreeze_amount, withdraw_expire_amount,
+        cancel_unfreeze_v2_amount, result, energy_fee, energy_usage, energy_usage_total, net_usage,
+        net_fee, origin_energy_usage, energy_penalty_total
+      ]
     item_order_keys: [ transaction_index ]
     sort_key: [
       type, _trigger_smart_contract_sighash, _trigger_smart_contract_contract,
@@ -54,37 +62,23 @@ tables:
       _transfer_asset_contract_owner, _transfer_asset_contract_to,
       _transfer_asset_contract_asset, block_number, transaction_index
     ]
-    children: [ logs, internal_transactions ]
-    parent_key: [ block_number, transaction_index ]
-    relations:
-      logs:
-        table: logs
-        key: [ block_number, transaction_index ]
-      internal_transactions:
-        table: internal_transactions
-        key: [ block_number, transaction_index ]
     columns:
       block_number:
         type: uint64
-        stats: true
       transaction_index:
         type: uint32
-        stats: true
       hash:
         type: string
       ret:
         type: string
-        json_encoding: json
-        dictionary: true
+        encoding: json_verbatim
       signature:
         type: list_string
       type:
         type: string
-        stats: true
-        dictionary: true
       parameter:
         type: string
-        json_encoding: json
+        encoding: json_verbatim
       permission_id:
         type: int32
       ref_block_bytes:
@@ -93,19 +87,19 @@ tables:
         type: string
       fee_limit:
         type: int64
-        json_encoding: string
+        encoding: decimal_string
       expiration:
         type: timestamp_millisecond
-        json_encoding: timestamp_millisecond
+        encoding: timestamp_millisecond
       timestamp:
         type: timestamp_millisecond
-        json_encoding: timestamp_millisecond
+        encoding: timestamp_millisecond
       raw_data_hex:
         type: string
         weight: raw_data_hex_size
       fee:
         type: int64
-        json_encoding: string
+        encoding: decimal_string
       contract_result:
         type: string
       contract_address:
@@ -114,79 +108,71 @@ tables:
         type: string
       withdraw_amount:
         type: int64
-        json_encoding: string
+        encoding: decimal_string
       unfreeze_amount:
         type: int64
-        json_encoding: string
+        encoding: decimal_string
       withdraw_expire_amount:
         type: int64
-        json_encoding: string
+        encoding: decimal_string
       cancel_unfreeze_v2_amount:
         type: string
-        json_encoding: json
+        encoding: json_verbatim
       result:
         type: string
       energy_fee:
         type: int64
-        json_encoding: string
+        encoding: decimal_string
       energy_usage:
         type: int64
-        json_encoding: string
+        encoding: decimal_string
       energy_usage_total:
         type: int64
-        json_encoding: string
+        encoding: decimal_string
       net_usage:
         type: int64
-        json_encoding: string
+        encoding: decimal_string
       net_fee:
         type: int64
-        json_encoding: string
+        encoding: decimal_string
       origin_energy_usage:
         type: int64
-        json_encoding: string
+        encoding: decimal_string
       energy_penalty_total:
         type: int64
-        json_encoding: string
+        encoding: decimal_string
       # Per-contract extractions, reachable only through the three aliases.
       _transfer_contract_owner:
         type: string
         fold_case: true
-        stats: true
         system: true
       _transfer_contract_to:
         type: string
         fold_case: true
-        stats: true
         system: true
       _transfer_asset_contract_owner:
         type: string
         fold_case: true
-        stats: true
         system: true
       _transfer_asset_contract_to:
         type: string
         fold_case: true
-        stats: true
         system: true
       # An asset name, not an address: the reference compares it byte-exactly.
       _transfer_asset_contract_asset:
         type: string
-        stats: true
         system: true
       _trigger_smart_contract_owner:
         type: string
         fold_case: true
-        stats: true
         system: true
       _trigger_smart_contract_contract:
         type: string
         fold_case: true
-        stats: true
         system: true
       _trigger_smart_contract_sighash:
         type: string
         fold_case: true
-        stats: true
         system: true
       # system
       raw_data_hex_size:
@@ -194,39 +180,38 @@ tables:
         system: true
 
   logs:
-    filters: [ address, topic0, topic1, topic2, topic3 ]
-    fields: [ transaction_index, log_index, address, data, topics ]
-    query_name: logs
-    field_name: log
+    request:
+      name: logs
+      filters: [ address, topic0, topic1, topic2, topic3 ]
+      relations:
+        transaction:
+          table: transactions
+          key: [ block_number, transaction_index ]
+    output:
+      name: log
+      fields: [ transaction_index, log_index, address, data, topics ]
+      virtual_fields:
+        topics:
+          kind: roll
+          columns: [ topic0, topic1, topic2, topic3 ]
     item_order_keys: [ transaction_index, log_index ]
     sort_key: [ topic0, address, block_number, transaction_index, log_index ]
-    relations:
-      transaction:
-        table: transactions
-        key: [ block_number, transaction_index ]
     columns:
       block_number:
         type: uint64
-        stats: true
       log_index:
         type: uint32
-        stats: true
       transaction_index:
         type: uint32
-        stats: true
       address:
         type: string
         fold_case: true
-        stats: true
-        dictionary: true
       data:
         type: string
         weight: data_size
       topic0:
         type: string
         fold_case: true
-        stats: true
-        dictionary: true
       topic1:
         type: string
         fold_case: true
@@ -240,59 +225,52 @@ tables:
       data_size:
         type: uint64
         system: true
-    virtual_fields:
-      topics:
-        type: roll
-        columns: [ topic0, topic1, topic2, topic3 ]
 
   internal_transactions:
-    filters: [ caller, transfer_to ]
-    fields: [
-      transaction_index, internal_transaction_index, hash, caller_address, transfer_to_address,
-      call_value_info, note, rejected, extra
-    ]
-    query_name: internalTransactions
-    field_name: internalTransaction
+    request:
+      name: internalTransactions
+      filters: [ caller, transfer_to ]
+      special_filters:
+        # Both filters are named for the party, the columns for the address.
+        caller:
+          kind: column_alias
+          column: caller_address
+        transfer_to:
+          kind: column_alias
+          column: transfer_to_address
+      relations:
+        transaction:
+          table: transactions
+          key: [ block_number, transaction_index ]
+    output:
+      name: internalTransaction
+      fields: [
+        transaction_index, internal_transaction_index, hash, caller_address, transfer_to_address,
+        call_value_info, note, rejected, extra
+      ]
     item_order_keys: [ transaction_index, internal_transaction_index ]
     sort_key: [
       transfer_to_address, caller_address, block_number, transaction_index,
       internal_transaction_index
     ]
-    special_filters:
-      # Both filters are named for the party, the columns for the address.
-      caller:
-        type: column_alias
-        column: caller_address
-      transfer_to:
-        type: column_alias
-        column: transfer_to_address
-    relations:
-      transaction:
-        table: transactions
-        key: [ block_number, transaction_index ]
     columns:
       block_number:
         type: uint64
-        stats: true
       transaction_index:
         type: uint32
-        stats: true
       internal_transaction_index:
         type: uint32
-        stats: true
       hash:
         type: string
       caller_address:
         type: string
         fold_case: true
-        stats: true
       transfer_to_address:
         type: string
         fold_case: true
-        stats: true
       call_value_info:
         type: string
-        json_encoding: json
+        encoding: json_verbatim
       note:
         type: string
       rejected:
@@ -302,15 +280,15 @@ tables:
       extra:
         type: string
 
-query_aliases:
+aliases:
   transferTransactions:
-    filters: [ owner, to ]
     table: transactions
-    implicit_predicates:
+    implicit_filters:
       type: [ "TransferContract" ]
-    filter_aliases:
-      owner: _transfer_contract_owner
-      to: _transfer_contract_to
+    filters: [ owner, to ]
+    special_filters:
+      owner: { kind: column_alias, column: _transfer_contract_owner }
+      to: { kind: column_alias, column: _transfer_contract_to }
     relations:
       logs:
         table: logs
@@ -318,15 +296,16 @@ query_aliases:
       internal_transactions:
         table: internal_transactions
         key: [ block_number, transaction_index ]
+
   transferAssetTransactions:
-    filters: [ owner, to, asset ]
     table: transactions
-    implicit_predicates:
+    implicit_filters:
       type: [ "TransferAssetContract" ]
-    filter_aliases:
-      owner: _transfer_asset_contract_owner
-      to: _transfer_asset_contract_to
-      asset: _transfer_asset_contract_asset
+    filters: [ owner, to, asset ]
+    special_filters:
+      owner: { kind: column_alias, column: _transfer_asset_contract_owner }
+      to: { kind: column_alias, column: _transfer_asset_contract_to }
+      asset: { kind: column_alias, column: _transfer_asset_contract_asset }
     relations:
       logs:
         table: logs
@@ -334,15 +313,16 @@ query_aliases:
       internal_transactions:
         table: internal_transactions
         key: [ block_number, transaction_index ]
+
   triggerSmartContractTransactions:
-    filters: [ owner, contract, sighash ]
     table: transactions
-    implicit_predicates:
+    implicit_filters:
       type: [ "TriggerSmartContract" ]
-    filter_aliases:
-      owner: _trigger_smart_contract_owner
-      contract: _trigger_smart_contract_contract
-      sighash: _trigger_smart_contract_sighash
+    filters: [ owner, contract, sighash ]
+    special_filters:
+      owner: { kind: column_alias, column: _trigger_smart_contract_owner }
+      contract: { kind: column_alias, column: _trigger_smart_contract_contract }
+      sighash: { kind: column_alias, column: _trigger_smart_contract_sighash }
     relations:
       logs:
         table: logs

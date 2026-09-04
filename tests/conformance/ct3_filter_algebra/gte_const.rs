@@ -20,36 +20,40 @@ use crate::harness::json::{items_in, parse_response};
 /// not about the one constant the bundled catalogs happen to carry.
 const CATALOG: &str = r#"
 name: gte
+
 tables:
   blocks:
-    field_name: block
+    output:
+      name: block
+      fields: [number]
     block_number_column: number
     sort_key: [number]
-    filters: []
-    fields: [number]
     columns:
       number: { type: uint64 }
+
   traces:
-    query_name: traces
-    field_name: trace
+    request:
+      name: traces
+      filters: [call_value_non_zero, call_value_at_least_nine]
+      special_filters:
+        call_value_non_zero:
+          kind: gte_const
+          column: call_value
+          value: "0x1"
+        call_value_at_least_nine:
+          kind: gte_const
+          column: call_value
+          value: "0x9"
+    output:
+      name: trace
+      fields: [trace_index, call_value]
     block_number_column: block_number
     item_order_keys: [trace_index]
     sort_key: [block_number, trace_index]
-    filters: [call_value_non_zero, call_value_at_least_nine]
-    fields: [trace_index, call_value]
-    special_filters:
-      call_value_non_zero:
-        type: gte_const
-        column: call_value
-        value: "0x1"
-      call_value_at_least_nine:
-        type: gte_const
-        column: call_value
-        value: "0x9"
     columns:
       block_number: { type: uint64 }
       trace_index: { type: uint32 }
-      call_value: { type: string, json_encoding: hex }
+      call_value: { type: string, encoding: hex_bytes }
 "#;
 
 /// A 256-bit quantity: wider than any integer the engine has, and a value an

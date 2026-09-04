@@ -488,23 +488,27 @@ fn signed_dataset() -> (DatasetDescription, tempfile::TempDir) {
     let catalog = parse_dataset_description(
         r#"
 name: signed
+
 tables:
   blocks:
-    field_name: block
+    output:
+      name: block
+      fields: [number]
     block_number_column: number
     sort_key: [number]
-    filters: []
-    fields: [number]
     columns:
       number: { type: uint64 }
+
   items:
-    query_name: items
-    field_name: item
+    request:
+      name: items
+      filters: [version, lamports]
+    output:
+      name: item
+      fields: [seq, version, lamports]
     block_number_column: block_number
     item_order_keys: [seq]
     sort_key: [block_number, seq]
-    filters: [version, lamports]
-    fields: [seq, version, lamports]
     columns:
       block_number: { type: uint64 }
       seq: { type: uint32 }

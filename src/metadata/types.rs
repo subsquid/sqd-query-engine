@@ -11,40 +11,60 @@ pub struct DatasetDescription {
     /// Table definitions keyed by table name.
     /// Uses IndexMap to preserve YAML insertion order (determines output table ordering in blocks).
     pub tables: indexmap::IndexMap<String, TableDescription>,
-    /// Query aliases: maps alternative query names to existing tables with implicit predicates.
-    /// E.g., "evmLogs" → events table with implicit name="EVM.Log" filter.
+    /// Further request surfaces over the tables above, each a narrower view of
+    /// one table under a name of its own (`evmLogs` over substrate `events`).
     #[serde(default)]
-    pub query_aliases: BTreeMap<String, QueryAlias>,
+    pub aliases: BTreeMap<String, Alias>,
 }
 
-/// A query alias that maps to an existing table with implicit predicates and filter aliases.
+/// A request surface over an existing table: the same shape as a table's own
+/// [`RequestSurface`], plus the filters that make it a narrower view.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct QueryAlias {
-    /// The actual table name this alias refers to.
+pub struct Alias {
+    /// The table the alias reads.
     pub table: String,
-    /// Implicit predicates: always-applied filters (column → list of allowed values).
+    /// Filters always applied, which the client cannot see or override
+    /// (column → allowed values). `name: ["EVM.Log"]` is what makes `evmLogs`
+    /// a view of `events` rather than a second name for it.
     #[serde(default)]
-    pub implicit_predicates: BTreeMap<String, Vec<String>>,
-    /// Filter column aliases: maps query filter keys to actual column names.
-    #[serde(default)]
-    pub filter_aliases: BTreeMap<String, String>,
-    /// Relations available (same format as table relations).
-    #[serde(default)]
-    pub relations: BTreeMap<String, RelationDef>,
-    /// Column filters this alias accepts, in place of the table's own list. An
-    /// alias is a narrower view of its table and usually exposes fewer filters.
+    pub implicit_filters: BTreeMap<String, Vec<String>>,
+    /// Filters this alias accepts, in place of the table's own list. An alias
+    /// is a narrower view of its table and usually exposes fewer filters.
     ///
     /// Required, with no default: an alias that omits the key would silently
     /// accept no filters at all, and every client filter on it would 400.
     /// Declaring `filters: []` says that on purpose.
     pub filters: Vec<String>,
+    /// Filters of the alias's own, under names the table does not have. Only
+    /// `column_alias` is admitted here (the loader checks): an item request
+    /// carries the resolved column, and the plan looks every other kind up on
+    /// the table.
+    #[serde(default)]
+    pub special_filters: BTreeMap<String, SpecialFilter>,
+    /// Relations available through this alias, in place of the table's own.
+    #[serde(default)]
+    pub relations: BTreeMap<String, RelationDef>,
 }
 
 /// Description of a single parquet table within a dataset.
+///
+/// Three things are described, and each has a block of its own: what a client
+/// may send for the table (`request`), what it may ask to see (`output`), and
+/// what the parquet actually holds (the rest).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TableDescription {
+    /// What an item request on this table may say. Absent when nothing is
+    /// requested of the table beyond its existence: the block table has no
+    /// filters and no relations, and is still addressed by its own name.
+    #[serde(default)]
+    pub request: RequestSurface,
+
+    /// What a client may ask to see of this table's rows.
+    #[serde(default)]
+    pub output: OutputSurface,
+
     /// Column that holds the block number for block range filtering.
     /// Defaults to "block_number". The blocks table typically overrides this to "number".
     #[serde(default = "default_block_number_column")]
@@ -80,75 +100,98 @@ pub struct TableDescription {
     /// Column definitions keyed by column name.
     /// Uses IndexMap to preserve YAML definition order (determines output field ordering).
     pub columns: IndexMap<String, ColumnDescription>,
+}
 
-    /// Tables that are children of this table (joined via same key prefix).
-    /// E.g., transactions has children [logs, balances, token_balances]
+/// The request side of a table: how a client addresses it and what an item
+/// request on it may contain.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestSurface {
+    /// The key of this table's item requests in a query (`logs: [ ... ]`), and
+    /// of its array in every response block. Defaults to the table's own name;
+    /// [`TableDescription::request_name`] applies the default.
     #[serde(default)]
-    pub children: Vec<String>,
+    pub name: Option<String>,
 
-    /// The parent table key columns for child relationship.
-    /// E.g., for logs as child of transactions: ["block_number", "transaction_index"]
-    #[serde(default)]
-    pub parent_key: Vec<String>,
+    /// Filters this table accepts: columns of the same name, and the
+    /// `special_filters` declared below. Declaring them is what keeps the filter
+    /// surface closed: without a list, every column — blooms, size counters,
+    /// denormalised extractions — would be filterable, and the column list would
+    /// become the public API.
+    ///
+    /// Required, with no default, once a `request` block is present, for the
+    /// reason [`Alias::filters`] is: an omitted key would accept no filters at
+    /// all and 400 every client filter on the table, and `deny_unknown_fields`
+    /// does not catch an absent key the way it catches a misspelled one.
+    /// `filters: []` says it on purpose.
+    pub filters: Vec<String>,
 
-    /// Name used in query JSON filter arrays (e.g., "logs", "stateDiffs").
-    #[serde(default)]
-    pub query_name: Option<String>,
-
-    /// Name used in query fields object (e.g., "log", "stateDiff").
-    #[serde(default)]
-    pub field_name: Option<String>,
-
-    /// Relations available for query items on this table.
-    #[serde(default)]
-    pub relations: BTreeMap<String, RelationDef>,
-
-    /// Special filters not directly mapped to a single column.
+    /// Filters that are not a column of the same name: a dispatch, a bloom
+    /// probe, a bound, a rename. Reachable only when listed in `filters`.
     #[serde(default)]
     pub special_filters: BTreeMap<String, SpecialFilter>,
 
-    /// Column filters this table accepts, each naming a column of the same name.
-    /// Declaring them is what keeps the filter surface closed: without a list,
-    /// every column — blooms, size counters, denormalised extractions — would be
-    /// filterable, and the column list would become the public API.
-    /// `special_filters` and `relations` are accepted in addition.
-    ///
-    /// Required, with no default, for the same reason [`QueryAlias::filters`] is:
-    /// omitting the key would accept no filters at all and 400 every client
-    /// filter on the table, and `deny_unknown_fields` does not catch an absent
-    /// key the way it catches a misspelled one. `filters: []` says it on purpose.
-    pub filters: Vec<String>,
+    /// Relations an item request may switch on.
+    #[serde(default)]
+    pub relations: BTreeMap<String, RelationDef>,
+}
 
-    /// Output fields this table can emit, each naming a non-system column, a
-    /// virtual field, or a field-group request key.
+/// The output side of a table: how a client selects its fields and what each
+/// field renders as.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutputSurface {
+    /// The key of this table's selection under a query's `fields`
+    /// (`fields: { log: { ... } }`). No default: a table that declares none is
+    /// not selectable, and a selection naming it is refused.
+    #[serde(default)]
+    pub name: Option<String>,
+
+    /// Fields a client may select, each naming a non-system column, a virtual
+    /// field, or a variant mapping's `field`.
     ///
-    /// Declaring them is what keeps the *output* surface closed, for the reason
-    /// [`TableDescription::filters`] closes the input one: derived from the
-    /// column list instead, every column the catalog carries for filtering,
-    /// grouping, joining or rolling becomes a field a client may pin on, and the
-    /// physical layout becomes the wire contract (INV-Q14).
+    /// Declaring them is what keeps the output surface closed, for the reason
+    /// [`RequestSurface::filters`] closes the input one: derived from the column
+    /// list instead, every column the catalog carries for filtering, grouping,
+    /// joining or rolling becomes a field a client may pin on, and the physical
+    /// layout becomes the wire contract (INV-Q14).
     ///
     /// Empty is "nothing is selectable", which is only meaningful for a table no
-    /// `fields` key can name. The validator requires a list from every table that
-    /// declares a `field_name`.
+    /// selection can name. The loader requires a list from every table that
+    /// declares a `name`.
     #[serde(default)]
     pub fields: Vec<String>,
 
-    /// Virtual fields that combine multiple columns into one output field.
+    /// Fields assembled from several columns.
     /// E.g., "accounts" → roll(a0..a15, rest_accounts), "topics" → roll(topic0..topic3)
     #[serde(default)]
     pub virtual_fields: BTreeMap<String, VirtualField>,
 
-    /// Polymorphic field grouping: columns with certain prefixes are grouped into
-    /// nested JSON objects based on a tag column value.
-    /// E.g., EVM traces: `create_from` → `action.from` when type=create.
+    /// For a table whose rows come in several shapes, the column whose value
+    /// says which shape a row has (EVM traces: `type`). Each `variants` entry
+    /// is keyed by one of its values.
     #[serde(default)]
-    pub field_groups: Option<FieldGrouping>,
+    pub variant_column: Option<String>,
+
+    /// Per-variant nesting of output fields: variant → JSON group → the fields
+    /// the group holds. A group named `_` is written flat. Fields no variant
+    /// claims are written flat for every row.
+    ///
+    /// EVM traces: `create` → `action.{from,value,gas,init}`, `result.{...}`;
+    /// `call` → `action.{from,to,...}`, `result.{gasUsed,output}`; and so on.
+    #[serde(default)]
+    pub variants: BTreeMap<String, BTreeMap<String, Vec<FieldMapping>>>,
 }
 
 impl TableDescription {
+    /// The name a request addresses this table by, `key` being the table's
+    /// own name in the catalog.
+    pub fn request_name<'a>(&'a self, key: &'a str) -> &'a str {
+        self.request.name.as_deref().unwrap_or(key)
+    }
+
     /// The physical parquet column an output key reads, when the catalog
-    /// declares one: an ordinary column, or a field-group request key that
+    /// declares one: an ordinary column, or a variant mapping's `field` that
     /// renames it (`call_call_type` → `call_type`).
     ///
     /// A virtual field resolves to nothing — it rolls several columns, and the
@@ -160,9 +203,19 @@ impl TableDescription {
             return Some(name.as_str());
         }
 
-        self.field_groups
-            .as_ref()
-            .and_then(|fg| fg.physical_column_for_request(key))
+        self.variant_source(key)
+    }
+
+    /// The physical column a variant mapping reads for `field`, if any mapping
+    /// is selected by that name.
+    pub fn variant_source(&self, field: &str) -> Option<&str> {
+        self.output
+            .variants
+            .values()
+            .flat_map(|groups| groups.values())
+            .flatten()
+            .find(|mapping| mapping.field() == field)
+            .map(|mapping| mapping.column.as_str())
     }
 
     /// Whether a `fields` key names something this table can emit. The declared
@@ -170,7 +223,7 @@ impl TableDescription {
     /// for whatever the engine needs it for, and only the catalog says which of
     /// them a client may ask for (INV-Q14).
     pub fn is_selectable_field(&self, name: &str) -> bool {
-        self.fields.iter().any(|f| f == name)
+        self.output.fields.iter().any(|f| f == name)
     }
 }
 
@@ -194,18 +247,11 @@ pub struct ColumnDescription {
     #[serde(rename = "type")]
     pub data_type: ColumnType,
 
-    /// JSON output encoding override. When set, controls how this column is serialized in JSON.
-    /// E.g., `hex` for "0x..."-prefixed hex strings, `string` for number-as-quoted-string.
+    /// How the value renders in a response, when not as the type's natural
+    /// JSON. E.g. `hex_bytes` for `0x…` strings, `decimal_string` for an
+    /// integer quoted so it survives a JavaScript client.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub json_encoding: Option<JsonEncoding>,
-
-    /// Whether parquet statistics (min/max) are written for this column
-    #[serde(default)]
-    pub stats: bool,
-
-    /// Whether dictionary encoding is used
-    #[serde(default)]
-    pub dictionary: bool,
+    pub encoding: Option<JsonEncoding>,
 
     /// Weight source for response size limiting.
     /// References a size column (e.g., "input_size") or a fixed weight (e.g., 0).
@@ -218,11 +264,11 @@ pub struct ColumnDescription {
 
     /// Compare filter values case-insensitively (INV-P8).
     ///
-    /// A `hex` column folds already — its values are `0x…` lowercase by §1.5.
-    /// This is for a column that holds hex *without* the prefix, which Tron's
-    /// addresses and topics do: they render verbatim, so the encoding cannot
-    /// say it, and a client sending an upper-case address would otherwise get an
-    /// empty response rather than its rows.
+    /// A `hex_bytes` column folds already — its values are `0x…` lowercase by
+    /// §1.5. This is for a column that holds hex *without* the prefix, which
+    /// Tron's addresses and topics do: they render verbatim, so the encoding
+    /// cannot say it, and a client sending an upper-case address would
+    /// otherwise get an empty response rather than its rows.
     #[serde(default)]
     pub fold_case: bool,
 }
@@ -230,7 +276,7 @@ pub struct ColumnDescription {
 impl ColumnDescription {
     /// Whether filter values on this column compare case-insensitively.
     pub fn folds_case(&self) -> bool {
-        self.fold_case || self.json_encoding == Some(JsonEncoding::Hex)
+        self.fold_case || self.encoding == Some(JsonEncoding::HexBytes)
     }
 }
 
@@ -337,19 +383,20 @@ impl<'de> Deserialize<'de> for ColumnType {
     }
 }
 
-/// JSON output encoding for a column.
-/// Controls how the column value is serialized in JSON output.
+/// How a column's value renders in a JSON response (spec §1.5). The names are
+/// the spec's, in snake case.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum JsonEncoding {
     /// Hex-encoded string with "0x" prefix (e.g., addresses, hashes)
-    Hex,
+    HexBytes,
     /// Base58-encoded string (Solana addresses)
     Base58,
-    /// Number as quoted string (for large integers that exceed JS safe range)
-    String,
-    /// Raw JSON pass-through — string column containing JSON, embedded without quoting
-    Json,
+    /// Integer as a quoted decimal string, for values beyond the range a
+    /// JavaScript number holds exactly.
+    DecimalString,
+    /// The stored bytes spliced in as they are: the column already holds JSON.
+    JsonVerbatim,
     /// Unsigned integer as a quoted hex string, zero-padded to the column's
     /// physical width (`uint16` 1600 → `"0x0640"`). The padding is load-bearing:
     /// `"0x0640"` and `"0x640"` are different discriminators. A `uint64` above
@@ -412,112 +459,69 @@ pub enum RelationKind {
 /// to a column.
 pub const MAX_DISCRIMINATOR_BYTES: usize = 16;
 
-/// Special filter that doesn't map directly to a single column.
+/// A filter that is not a column of the same name.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SpecialFilter {
-    /// Dispatch hex prefix to d1-d16 columns by byte length.
-    #[serde(rename = "discriminator")]
+    /// Dispatch a hex prefix to a column by its byte length.
     Discriminator {
-        /// Maps stringified byte length → column name (e.g., "1" → "d1").
-        columns: BTreeMap<String, String>,
+        /// Byte length, in decimal → column holding prefixes of that length
+        /// (e.g., "1" → "d1").
+        by_length: BTreeMap<String, String>,
     },
-    /// Bloom filter membership test.
-    #[serde(rename = "bloom_filter")]
-    BloomFilter {
+    /// Probabilistic membership test against a bloom column.
+    Bloom {
         column: String,
-        num_bytes: usize,
-        num_hashes: usize,
+        /// The bloom's size in bytes.
+        bytes: usize,
+        /// How many hash functions the archive writer set per value.
+        hashes: usize,
     },
     /// Range filter: column >= value.
-    #[serde(rename = "range_gte")]
     RangeGte { column: String },
     /// Range filter: column <= value.
-    #[serde(rename = "range_lte")]
     RangeLte { column: String },
-    /// Alias: query key maps to a different physical column name.
-    #[serde(rename = "column_alias")]
+    /// The filter key reads a column of another name.
     ColumnAlias { column: String },
     /// Boolean flag filter: when `true`, emits `column >= value` against a fixed
     /// metadata-defined constant. Used for EVM trace `*NonZero` filters, e.g.
     /// `callValueNonZero: true` → `call_value >= "0x1"` (minimal-form hex, so this
     /// keeps every non-zero value and drops the zero representation "0x").
-    #[serde(rename = "gte_const")]
     GteConst { column: String, value: String },
 }
 
-/// Polymorphic field grouping for tables whose output structure depends on a tag column.
-///
-/// Physical columns with certain prefixes are grouped into nested JSON sub-objects.
-/// The tag column determines which variant is active for a given row, controlling
-/// which prefix group's columns appear in the output.
-///
-/// Example: EVM traces have `type` as tag column with variants:
-/// - `create` → `action.{from,value,gas,init}`, `result.{gasUsed,code,address}`
-/// - `call` → `action.{from,to,value,gas,input,sighash,type}`, `result.{gasUsed,output}`
-/// - `suicide` → `action.{address,refundAddress,balance}`
-/// - `reward` → `action.{author,value,type}`
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FieldGrouping {
-    /// Column that determines the variant (e.g., "type").
-    pub tag_column: String,
-    /// Columns that appear at the top level for all variants (e.g., transaction_index, trace_address).
-    #[serde(default)]
-    pub base_fields: Vec<String>,
-    /// Per-variant definitions mapping tag value → groups.
-    pub variants: BTreeMap<String, BTreeMap<String, Vec<FieldMapping>>>,
-}
-
-impl FieldGrouping {
-    /// Resolve a requested output field key to the physical parquet column it
-    /// reads, if any mapping declares it. Handles request keys that differ from
-    /// the column name (e.g. `call_call_type` → `call_type`).
-    pub fn physical_column_for_request(&self, request_key: &str) -> Option<&str> {
-        for groups in self.variants.values() {
-            for mappings in groups.values() {
-                for m in mappings {
-                    if m.request_key() == request_key {
-                        return Some(m.column.as_str());
-                    }
-                }
-            }
-        }
-        None
-    }
-}
-
-/// Maps a physical column to a JSON field name within a group.
+/// One field of a variant group: the column it reads, the name a selection
+/// picks it by, and the name it renders under.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldMapping {
     /// Physical column name in parquet.
     pub column: String,
-    /// JSON field name in output (camelCase).
-    pub field: String,
-    /// Optional request key (snake_case) that selects this mapping, when it
-    /// differs from `column`. Lets one physical column back several output
-    /// fields — e.g. EVM `call_type` powers both `action.type` (request `type`)
-    /// and `action.callType` (request `call_call_type`).
+    /// The `fields` key that selects this mapping, when it differs from
+    /// `column`. Lets one physical column back several output fields — EVM
+    /// `call_type` renders as both `action.type` (field `call_type`) and
+    /// `action.callType` (field `call_call_type`).
     #[serde(default)]
-    pub request: Option<String>,
+    pub field: Option<String>,
+    /// JSON key inside the group (camelCase).
+    #[serde(rename = "as")]
+    pub json_name: String,
 }
 
 impl FieldMapping {
-    /// The query-field key that selects this mapping (defaults to `column`).
-    pub fn request_key(&self) -> &str {
-        self.request.as_deref().unwrap_or(&self.column)
+    /// The `fields` key that selects this mapping (defaults to `column`).
+    pub fn field(&self) -> &str {
+        self.field.as_deref().unwrap_or(&self.column)
     }
 }
 
 /// A virtual field that combines multiple physical columns into one output value.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum VirtualField {
     /// Roll multiple columns into a single JSON array.
     /// Non-nullable columns come first, then nullable (stops at first null),
     /// then an optional trailing list column (spread into array).
-    #[serde(rename = "roll")]
     Roll { columns: Vec<String> },
 }
 
@@ -543,23 +547,5 @@ impl TableDescription {
     /// Get a column description by name.
     pub fn column(&self, name: &str) -> Option<&ColumnDescription> {
         self.columns.get(name)
-    }
-
-    /// Returns the names of all columns that have statistics enabled.
-    pub fn stats_columns(&self) -> Vec<&str> {
-        self.columns
-            .iter()
-            .filter(|(_, col)| col.stats)
-            .map(|(name, _)| name.as_str())
-            .collect()
-    }
-
-    /// Returns the names of all columns that use dictionary encoding.
-    pub fn dictionary_columns(&self) -> Vec<&str> {
-        self.columns
-            .iter()
-            .filter(|(_, col)| col.dictionary)
-            .map(|(name, _)| name.as_str())
-            .collect()
     }
 }

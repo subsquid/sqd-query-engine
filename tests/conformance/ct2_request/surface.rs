@@ -112,12 +112,12 @@ fn each_alias_pins_the_predicate_the_reference_pins() {
     for (dataset, alias, (column, value), _, _) in REFERENCE_ALIASES {
         let metadata = meta(dataset);
         let def = metadata
-            .query_aliases
+            .aliases
             .get(*alias)
             .unwrap_or_else(|| panic!("{dataset} must serve '{alias}'"));
 
         assert_eq!(
-            def.implicit_predicates.get(*column).map(Vec::as_slice),
+            def.implicit_filters.get(*column).map(Vec::as_slice),
             Some([value.to_string()].as_slice()),
             "{dataset}.{alias} must pin {column} = {value}"
         );

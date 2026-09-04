@@ -2,66 +2,57 @@ name: hyperliquidFills
 
 tables:
   blocks:
-    filters: []
-    fields: [ number, hash, parent_hash, timestamp ]
+    output:
+      name: block
+      fields: [ number, hash, parent_hash, timestamp ]
     parent_hash_column: parent_hash
     block_number_column: number
-    field_name: block
     sort_key: [ number ]
     columns:
       number:
         type: uint64
-        stats: true
       hash:
         type: string
       parent_hash:
         type: string
       timestamp:
         type: timestamp_millisecond
-        json_encoding: timestamp_millisecond
+        encoding: timestamp_millisecond
 
   fills:
-    filters: [ user, coin, dir, cloid, fee_token, builder ]
-    fields: [
-      fill_index, user, coin, px, sz, side, time, start_position, dir, closed_pnl, hash, oid,
-      crossed, fee, builder_fee, tid, cloid, fee_token, builder, twap_id
-    ]
-    query_name: fills
-    field_name: fill
+    request:
+      name: fills
+      filters: [ user, coin, dir, cloid, fee_token, builder ]
+    output:
+      name: fill
+      fields: [
+        fill_index, user, coin, px, sz, side, time, start_position, dir, closed_pnl, hash, oid,
+        crossed, fee, builder_fee, tid, cloid, fee_token, builder, twap_id
+      ]
     item_order_keys: [ fill_index ]
     sort_key: [ user, coin, block_number, fill_index ]
     columns:
       block_number:
         type: uint64
-        stats: true
       fill_index:
         type: uint32
-        stats: true
       user:
         type: string
-        stats: true
-        dictionary: true
       coin:
         type: string
-        stats: true
-        dictionary: true
       px:
         type: float64
       sz:
         type: float64
       side:
         type: string
-        stats: true
-        dictionary: true
       time:
         type: timestamp_millisecond
-        json_encoding: timestamp_millisecond
+        encoding: timestamp_millisecond
       start_position:
         type: float64
       dir:
         type: string
-        stats: true
-        dictionary: true
       closed_pnl:
         type: float64
       hash:
@@ -78,14 +69,9 @@ tables:
         type: uint64
       cloid:
         type: string
-        stats: true
       fee_token:
         type: string
-        stats: true
-        dictionary: true
       builder:
         type: string
-        stats: true
-        dictionary: true
       twap_id:
         type: uint64

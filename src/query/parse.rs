@@ -1,5 +1,5 @@
 use crate::error::ErrorKind;
-use crate::metadata::{DatasetDescription, QueryAlias, TableDescription};
+use crate::metadata::{Alias, DatasetDescription, SpecialFilter, TableDescription};
 use crate::{engine_bail, engine_ensure, engine_err};
 use anyhow::Result;
 use std::collections::HashMap;
@@ -186,21 +186,21 @@ pub fn parse_query(json_bytes: &[u8], metadata: &DatasetDescription) -> Result<Q
         ),
     };
 
-    // Build lookup maps: query_name → table_name, field_name → table_name
-    let query_name_to_table: HashMap<&str, &str> = metadata
+    // Build lookup maps: request name → table_name, output name → table_name
+    let request_name_to_table: HashMap<&str, &str> = metadata
         .tables
         .iter()
-        .filter_map(|(name, desc)| desc.query_name.as_deref().map(|qn| (qn, name.as_str())))
+        .filter_map(|(name, desc)| desc.request.name.as_deref().map(|rn| (rn, name.as_str())))
         .collect();
 
-    let field_name_to_table: HashMap<&str, &str> = metadata
+    let output_name_to_table: HashMap<&str, &str> = metadata
         .tables
         .iter()
-        .filter_map(|(name, desc)| desc.field_name.as_deref().map(|fn_| (fn_, name.as_str())))
+        .filter_map(|(name, desc)| desc.output.name.as_deref().map(|on| (on, name.as_str())))
         .collect();
 
     // Parse fields
-    let fields = parse_fields(obj.get("fields"), metadata, &field_name_to_table)?;
+    let fields = parse_fields(obj.get("fields"), metadata, &output_name_to_table)?;
 
     // Parse table filter arrays
     let mut items: HashMap<String, Vec<QueryItem>> = HashMap::new();
@@ -210,8 +210,8 @@ pub fn parse_query(json_bytes: &[u8], metadata: &DatasetDescription) -> Result<Q
             continue;
         }
 
-        // Resolve table name (try query_name, snake_case, then query_aliases)
-        let table_name = query_name_to_table.get(key.as_str()).copied();
+        // Resolve table name (try the request name, snake_case, then aliases)
+        let table_name = request_name_to_table.get(key.as_str()).copied();
         let snake_key = camel_to_snake(key);
         let alias_name: Option<&str> = None;
         let (table_name, alias_name) = if let Some(tn) = table_name {
@@ -219,11 +219,11 @@ pub fn parse_query(json_bytes: &[u8], metadata: &DatasetDescription) -> Result<Q
         } else if metadata.tables.contains_key(&snake_key) {
             (snake_key.as_str(), alias_name)
         } else if let Some(alias) = metadata
-            .query_aliases
+            .aliases
             .get(key.as_str())
-            .or_else(|| metadata.query_aliases.get(&snake_key))
+            .or_else(|| metadata.aliases.get(&snake_key))
         {
-            // Query alias → resolve to the real table
+            // Alias → resolve to the real table
             (alias.table.as_str(), Some(key.as_str()))
         } else {
             engine_bail!(
@@ -236,9 +236,9 @@ pub fn parse_query(json_bytes: &[u8], metadata: &DatasetDescription) -> Result<Q
         let table_desc = metadata.table(table_name).unwrap();
         let alias_def = alias_name.and_then(|an| {
             metadata
-                .query_aliases
+                .aliases
                 .get(an)
-                .or_else(|| metadata.query_aliases.get(&camel_to_snake(an)))
+                .or_else(|| metadata.aliases.get(&camel_to_snake(an)))
         });
 
         let arr = value.as_array().ok_or_else(|| {
@@ -284,7 +284,7 @@ pub fn parse_query(json_bytes: &[u8], metadata: &DatasetDescription) -> Result<Q
 fn parse_fields(
     fields_value: Option<&serde_json::Value>,
     metadata: &DatasetDescription,
-    field_name_to_table: &HashMap<&str, &str>,
+    output_name_to_table: &HashMap<&str, &str>,
 ) -> Result<HashMap<String, Vec<String>>> {
     let mut result = HashMap::new();
 
@@ -305,8 +305,8 @@ fn parse_fields(
     };
 
     for (key, value) in fields_obj {
-        // Resolve field_name to table_name
-        let table_name = field_name_to_table
+        // Resolve the output name to table_name
+        let table_name = output_name_to_table
             .get(key.as_str())
             .copied()
             .ok_or_else(|| {
@@ -378,7 +378,7 @@ fn parse_query_item(
     value: &serde_json::Value,
     table: &TableDescription,
     table_name: &str,
-    alias: Option<&QueryAlias>,
+    alias: Option<&Alias>,
 ) -> Result<QueryItem> {
     let obj = value.as_object().ok_or_else(|| {
         engine_err!(
@@ -397,7 +397,7 @@ fn parse_query_item(
     // will answer.
     let declared_relations = match alias {
         Some(alias_def) => &alias_def.relations,
-        None => &table.relations,
+        None => &table.request.relations,
     };
 
     for (key, val) in obj {
@@ -444,7 +444,7 @@ fn parse_query_item(
         // API.
         let declared = match alias {
             Some(alias_def) => &alias_def.filters,
-            None => &table.filters,
+            None => &table.request.filters,
         };
         engine_ensure!(
             declared.contains(&snake_key),
@@ -455,15 +455,18 @@ fn parse_query_item(
             table_name
         );
 
-        // Alias filter aliases (e.g., topic0 → _evm_log_topic0)
+        // An alias's own filters are renames (topic0 → _evm_log_topic0), which
+        // the loader guarantees, and the item carries the column renamed.
         if let Some(alias_def) = alias {
-            if let Some(real_col) = alias_def.filter_aliases.get(&snake_key) {
-                filters.push((real_col.clone(), val.clone()));
+            if let Some(SpecialFilter::ColumnAlias { column }) =
+                alias_def.special_filters.get(&snake_key)
+            {
+                filters.push((column.clone(), val.clone()));
                 continue;
             }
         }
 
-        if table.special_filters.contains_key(&snake_key) {
+        if table.request.special_filters.contains_key(&snake_key) {
             filters.push((snake_key, val.clone()));
             continue;
         }
@@ -478,9 +481,9 @@ fn parse_query_item(
         filters.push((snake_key, val.clone()));
     }
 
-    // Add implicit predicates from alias (e.g., name: ["EVM.Log"])
+    // Add the alias's implicit filters (e.g., name: ["EVM.Log"])
     if let Some(alias_def) = alias {
-        for (col_name, values) in &alias_def.implicit_predicates {
+        for (col_name, values) in &alias_def.implicit_filters {
             let json_values: Vec<serde_json::Value> = values
                 .iter()
                 .map(|v| serde_json::Value::String(v.clone()))
@@ -700,10 +703,10 @@ mod tests {
 
     #[test]
     fn test_table_name_fallback_resolution() {
-        // "blocks" has no query_name in EVM metadata, so it resolves via the
-        // snake_case table name fallback (line 128), not via query_name lookup.
+        // "blocks" declares no request name in EVM metadata, so it resolves via
+        // the snake_case table name fallback, not via the request name lookup.
         let meta = evm_metadata();
-        assert!(meta.tables.get("blocks").unwrap().query_name.is_none());
+        assert!(meta.tables.get("blocks").unwrap().request.name.is_none());
         let json = br#"{
             "type": "evm",
             "fromBlock": 0,

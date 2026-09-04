@@ -207,23 +207,26 @@ fn a_chunk_with_no_block_table_cannot_clear_the_fork_check() {
     let catalog = parse_dataset_description(
         r#"
 name: test
+
 tables:
   blocks:
     block_number_column: number
     parent_hash_column: parent_hash
     sort_key: [number]
-    filters: []
     columns:
       number: { type: uint64 }
       parent_hash: { type: string }
+
   logs:
-    query_name: logs
-    field_name: log
+    request:
+      name: logs
+      filters: []
+    output:
+      name: log
+      fields: [log_index]
     block_number_column: block_number
     item_order_keys: [log_index]
     sort_key: [block_number, log_index]
-    filters: []
-    fields: [log_index]
     columns:
       block_number: { type: uint64 }
       log_index: { type: uint32 }
@@ -284,14 +287,14 @@ fn a_chunk_below_the_lookback_window_is_not_asked_for_the_parent_hash() {
     let catalog = parse_dataset_description(
         r#"
 name: test
+
 tables:
   blocks:
     block_number_column: number
     parent_hash_column: parent_hash
     sort_key: [number]
-    filters: []
     columns:
-      number: { type: uint64, stats: true }
+      number: { type: uint64 }
       parent_hash: { type: string }
 "#,
     )
@@ -519,15 +522,16 @@ fn a_numbering_gap_wider_than_the_window_still_settles_the_parent() {
     let catalog = parse_dataset_description(
         r#"
 name: test
+
 tables:
   blocks:
-    field_name: block
+    output:
+      name: block
+      fields: [number]
     block_number_column: number
     parent_hash_column: parent_hash
     parent_number_column: parent_number
     sort_key: [number]
-    filters: []
-    fields: [number]
     columns:
       number: { type: uint64 }
       parent_number: { type: uint64 }
@@ -604,11 +608,11 @@ fn parent_block_hash_is_refused_where_the_catalog_cannot_answer_it() {
 
     let without_parent_hash = r#"
 name: test
+
 tables:
   blocks:
     block_number_column: number
     sort_key: [number]
-    filters: []
     columns:
       number: { type: uint64 }
       hash: { type: string }

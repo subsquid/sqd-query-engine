@@ -264,10 +264,10 @@ impl Generator {
                 continue;
             };
 
-            if let Some(field_name) = &table.field_name {
+            if let Some(output_name) = &table.output.name {
                 let selected = projection(table, &columns);
                 if !selected.is_empty() {
-                    fields.insert(field_name.clone(), Value::Object(selected));
+                    fields.insert(output_name.clone(), Value::Object(selected));
                 }
             }
 
@@ -275,7 +275,7 @@ impl Generator {
                 continue;
             }
 
-            let Some(query_name) = &table.query_name else {
+            let Some(query_name) = &table.request.name else {
                 continue;
             };
 
@@ -446,6 +446,7 @@ fn block_range(catalog: &DatasetDescription, chunk: &Path) -> (u64, u64) {
 /// both sides of a law.
 fn projection(table: &TableDescription, columns: &[String]) -> Map<String, Value> {
     table
+        .output
         .fields
         .iter()
         .filter(|field| {
@@ -473,20 +474,19 @@ fn filters_of(
         .table(name)
         .expect("the table came from the catalog");
 
-    let declared = table.filters.iter().map(|key| (key.as_str(), key.as_str()));
-    let aliased = table
-        .special_filters
-        .iter()
-        .filter_map(|(key, special)| match special {
-            SpecialFilter::ColumnAlias { column } => Some((key.as_str(), column.as_str())),
-            _ => None,
-        });
-    let unsupported = table.special_filters.len() - aliased.clone().count();
-
     let mut filters = Vec::new();
-    let mut skipped = unsupported;
+    let mut skipped = 0;
 
-    for (key, column) in declared.chain(aliased) {
+    for key in &table.request.filters {
+        let column = match table.request.special_filters.get(key) {
+            None => key.as_str(),
+            Some(SpecialFilter::ColumnAlias { column }) => column.as_str(),
+            Some(_) => {
+                skipped += 1;
+                continue;
+            }
+        };
+
         match filter_corpus(chunk, name, key, column, catalog, columns) {
             Some(corpus) => filters.push(corpus),
             None => skipped += 1,
@@ -499,6 +499,7 @@ fn filters_of(
 /// The relations whose target table this chunk carries.
 fn relations_of(chunk: &Path, table: &TableDescription) -> Vec<Relation> {
     table
+        .request
         .relations
         .iter()
         .filter(|(_, def)| column_names(chunk, &def.table).is_some())

@@ -2,16 +2,15 @@ name: hyperliquidReplicaCmds
 
 tables:
   blocks:
-    filters: []
-    fields: [ number, hash, parent_hash, round, parent_round, proposer, timestamp, hardfork ]
+    output:
+      name: block
+      fields: [ number, hash, parent_hash, round, parent_round, proposer, timestamp, hardfork ]
     parent_hash_column: parent_hash
     block_number_column: number
-    field_name: block
     sort_key: [ number ]
     columns:
       number:
         type: uint64
-        stats: true
       hash:
         type: string
       parent_hash:
@@ -24,56 +23,48 @@ tables:
         type: string
       timestamp:
         type: timestamp_millisecond
-        json_encoding: timestamp_millisecond
+        encoding: timestamp_millisecond
       hardfork:
         type: string
-        json_encoding: json
+        encoding: json_verbatim
 
   actions:
-    filters: [ action_type, user, vault_address, status ]
-    fields: [ action_index, user, action, signature, nonce, vault_address, status, response ]
-    query_name: actions
-    field_name: action
+    request:
+      name: actions
+      filters: [ action_type, user, vault_address, status ]
+    output:
+      name: action
+      fields: [ action_index, user, action, signature, nonce, vault_address, status, response ]
     item_order_keys: [ action_index ]
     sort_key: [ action_type, user, vault_address, block_number, action_index ]
     columns:
       block_number:
         type: uint64
-        stats: true
       action_index:
         type: uint32
-        stats: true
       user:
         type: string
-        stats: true
-        dictionary: true
       action_type:
         type: string
-        stats: true
-        dictionary: true
       action:
         type: string
-        json_encoding: json
+        encoding: json_verbatim
         weight: action_size
       action_size:
         type: uint64
         system: true
       signature:
         type: string
-        json_encoding: json
+        encoding: json_verbatim
       nonce:
         type: uint64
       vault_address:
         type: string
-        stats: true
-        dictionary: true
       status:
         type: string
-        stats: true
-        dictionary: true
       response:
         type: string
-        json_encoding: json
+        encoding: json_verbatim
         weight: response_size
       response_size:
         type: uint64
@@ -101,35 +92,38 @@ tables:
         type: list_string
         system: true
 
-query_aliases:
+aliases:
   orderActions:
-    filters: [ user, vault_address, status, contains_asset, contains_cloid ]
     table: actions
-    implicit_predicates:
+    implicit_filters:
       action_type: [ "order" ]
-    filter_aliases:
-      contains_asset: order_asset
-      contains_cloid: order_cloid
+    filters: [ user, vault_address, status, contains_asset, contains_cloid ]
+    special_filters:
+      contains_asset: { kind: column_alias, column: order_asset }
+      contains_cloid: { kind: column_alias, column: order_cloid }
+
   cancelActions:
-    filters: [ user, vault_address, status, contains_asset ]
     table: actions
-    implicit_predicates:
+    implicit_filters:
       action_type: [ "cancel" ]
-    filter_aliases:
-      contains_asset: cancel_asset
+    filters: [ user, vault_address, status, contains_asset ]
+    special_filters:
+      contains_asset: { kind: column_alias, column: cancel_asset }
+
   cancelByCloidActions:
-    filters: [ user, vault_address, status, contains_asset, contains_cloid ]
     table: actions
-    implicit_predicates:
+    implicit_filters:
       action_type: [ "cancelByCloid" ]
-    filter_aliases:
-      contains_asset: cancel_by_cloid_asset
-      contains_cloid: cancel_by_cloid_cloid
-  batchModifyActions:
     filters: [ user, vault_address, status, contains_asset, contains_cloid ]
+    special_filters:
+      contains_asset: { kind: column_alias, column: cancel_by_cloid_asset }
+      contains_cloid: { kind: column_alias, column: cancel_by_cloid_cloid }
+
+  batchModifyActions:
     table: actions
-    implicit_predicates:
+    implicit_filters:
       action_type: [ "batchModify" ]
-    filter_aliases:
-      contains_asset: batch_modify_asset
-      contains_cloid: batch_modify_cloid
+    filters: [ user, vault_address, status, contains_asset, contains_cloid ]
+    special_filters:
+      contains_asset: { kind: column_alias, column: batch_modify_asset }
+      contains_cloid: { kind: column_alias, column: batch_modify_cloid }

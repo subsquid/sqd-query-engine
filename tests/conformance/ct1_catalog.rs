@@ -38,41 +38,48 @@ use crate::harness::synthetic::run_json;
 /// note of which block a receipt *refers to*, not the block it is in.
 const HEIGHT_CHAIN: &str = r#"
 name: test
+
 tables:
   blocks:
-    field_name: block
+    output:
+      name: block
+      fields: [height]
     block_number_column: height
     sort_key: [height]
-    filters: []
-    fields: [height]
     columns:
       height: { type: uint64 }
+
   events:
-    query_name: events
-    field_name: event
+    request:
+      name: events
+      filters: [ kind ]
+      relations:
+        receipt:
+          table: receipts
+          key: [height, seq]
+    output:
+      name: event
+      fields: [seq, kind]
     block_number_column: height
     item_order_keys: [seq]
     sort_key: [height, seq]
-    filters: [ kind ]
-    fields: [seq, kind]
-    relations:
-      receipt:
-        table: receipts
-        key: [height, seq]
     columns:
       height: { type: uint64 }
       seq: { type: uint32 }
       kind: { type: string }
+
   receipts:
-    query_name: receipts
-    field_name: receipt
+    request:
+      name: receipts
+      filters: []
+    output:
+      name: receipt
+      # `block_number` here is the block a receipt *cites*, an ordinary data
+      # column of this chain and a selectable field like any other.
+      fields: [seq, block_number, status]
     block_number_column: height
     item_order_keys: [seq]
     sort_key: [height, seq]
-    filters: []
-    # `block_number` here is the block a receipt *cites*, an ordinary data
-    # column of this chain and a selectable field like any other.
-    fields: [seq, block_number, status]
     columns:
       height: { type: uint64 }
       seq: { type: uint32 }

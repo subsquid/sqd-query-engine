@@ -714,7 +714,12 @@ fn the_field_surface_is_exactly_the_declared_one() {
             .table(table)
             .unwrap_or_else(|| panic!("{dataset} has no table '{table}'"));
 
-        let declared: BTreeSet<String> = desc.fields.iter().map(|f| snake_to_camel(f)).collect();
+        let declared: BTreeSet<String> = desc
+            .output
+            .fields
+            .iter()
+            .map(|f| snake_to_camel(f))
+            .collect();
         let expected: BTreeSet<String> = reference.iter().map(|f| f.to_string()).collect();
 
         assert_eq!(
