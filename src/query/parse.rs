@@ -27,6 +27,11 @@ pub struct QueryItem {
     pub filters: Vec<(String, serde_json::Value)>,
     /// Relation names requested (snake_case).
     pub relations: Vec<String>,
+    /// The alias this item was addressed through, when it was. Items are
+    /// collected under the table they read, so without it the plan could not
+    /// tell which of several aliases over one table a relation name was
+    /// admitted against — and admission is the alias's own list (INV-Q6).
+    pub alias: Option<String>,
 }
 
 /// Convert camelCase to snake_case.
@@ -190,7 +195,7 @@ pub fn parse_query(json_bytes: &[u8], metadata: &DatasetDescription) -> Result<Q
     let request_name_to_table: HashMap<&str, &str> = metadata
         .tables
         .iter()
-        .filter_map(|(name, desc)| desc.request.name.as_deref().map(|rn| (rn, name.as_str())))
+        .filter_map(|(name, desc)| desc.request().name.as_deref().map(|rn| (rn, name.as_str())))
         .collect();
 
     let output_name_to_table: HashMap<&str, &str> = metadata
@@ -234,12 +239,15 @@ pub fn parse_query(json_bytes: &[u8], metadata: &DatasetDescription) -> Result<Q
         };
 
         let table_desc = metadata.table(table_name).unwrap();
-        let alias_def = alias_name.and_then(|an| {
+        // Keep the catalog's own spelling of the alias key: the request may use
+        // either, and the plan looks the alias up again by what is recorded here.
+        let alias_entry = alias_name.and_then(|an| {
             metadata
                 .aliases
-                .get(an)
-                .or_else(|| metadata.aliases.get(&camel_to_snake(an)))
+                .get_key_value(an)
+                .or_else(|| metadata.aliases.get_key_value(&camel_to_snake(an)))
         });
+        let alias_def = alias_entry.map(|(_, def)| def);
 
         let arr = value.as_array().ok_or_else(|| {
             engine_err!(
@@ -251,7 +259,8 @@ pub fn parse_query(json_bytes: &[u8], metadata: &DatasetDescription) -> Result<Q
 
         let mut table_items = Vec::new();
         for item_value in arr {
-            let item = parse_query_item(item_value, table_desc, table_name, alias_def)?;
+            let mut item = parse_query_item(item_value, table_desc, table_name, alias_def)?;
+            item.alias = alias_entry.map(|(key, _)| key.clone());
             table_items.push(item);
         }
 
@@ -397,7 +406,7 @@ fn parse_query_item(
     // will answer.
     let declared_relations = match alias {
         Some(alias_def) => &alias_def.relations,
-        None => &table.request.relations,
+        None => &table.request().relations,
     };
 
     for (key, val) in obj {
@@ -444,7 +453,7 @@ fn parse_query_item(
         // API.
         let declared = match alias {
             Some(alias_def) => &alias_def.filters,
-            None => &table.request.filters,
+            None => &table.request().filters,
         };
         engine_ensure!(
             declared.contains(&snake_key),
@@ -466,7 +475,7 @@ fn parse_query_item(
             }
         }
 
-        if table.request.special_filters.contains_key(&snake_key) {
+        if table.request().special_filters.contains_key(&snake_key) {
             filters.push((snake_key, val.clone()));
             continue;
         }
@@ -492,7 +501,11 @@ fn parse_query_item(
         }
     }
 
-    Ok(QueryItem { filters, relations })
+    Ok(QueryItem {
+        filters,
+        relations,
+        alias: None,
+    })
 }
 
 #[cfg(test)]
@@ -706,7 +719,7 @@ mod tests {
         // "blocks" declares no request name in EVM metadata, so it resolves via
         // the snake_case table name fallback, not via the request name lookup.
         let meta = evm_metadata();
-        assert!(meta.tables.get("blocks").unwrap().request.name.is_none());
+        assert!(meta.tables.get("blocks").unwrap().request().name.is_none());
         let json = br#"{
             "type": "evm",
             "fromBlock": 0,

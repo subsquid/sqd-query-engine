@@ -1,6 +1,6 @@
 use crate::error::ErrorKind;
 use crate::metadata::{
-    ColumnDescription, ColumnType, DatasetDescription, JsonEncoding,
+    ColumnDescription, ColumnType, DatasetDescription, JsonEncoding, RelationDef,
     RelationKind as MetaRelationKind, SpecialFilter, TableDescription, MAX_DISCRIMINATOR_BYTES,
 };
 use crate::query::parse::{parse_hex, Query, QueryItem};
@@ -133,7 +133,10 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
         // Compile each item into predicates
         let mut all_predicates = Vec::new();
         let mut all_relations: Vec<RelationPlan> = Vec::new();
-        let mut seen_relations: HashSet<String> = HashSet::new();
+        // Keyed by the alias the item came through as well as the relation's
+        // name: two aliases over one table declare their relations separately,
+        // and the same name can mean a different join on each.
+        let mut seen_relations: HashSet<(Option<String>, String)> = HashSet::new();
         // Track source predicates per relation name, and how many items request each
         let mut rel_source_preds: std::collections::HashMap<String, Option<Vec<RowPredicate>>> =
             std::collections::HashMap::new();
@@ -168,24 +171,14 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
                     preds.extend(item_predicates.clone());
                 }
 
-                if seen_relations.contains(rel_name) {
+                let rel_key = (item.alias.clone(), rel_name.clone());
+                if seen_relations.contains(&rel_key) {
                     continue;
                 }
-                seen_relations.insert(rel_name.clone());
+                seen_relations.insert(rel_key);
 
-                // Look up relation in table first, then in any alias
-                let rel_def = table_desc
-                    .request
-                    .relations
-                    .get(rel_name)
-                    .or_else(|| {
-                        metadata
-                            .aliases
-                            .values()
-                            .find(|a| a.table == *table_name)
-                            .and_then(|a| a.relations.get(rel_name))
-                    })
-                    .ok_or_else(|| {
+                let rel_def =
+                    relation_def(metadata, table_desc, item, rel_name).ok_or_else(|| {
                         engine_err!(
                             ErrorKind::UnknownFilter,
                             "unknown relation '{}' for table '{}'",
@@ -207,14 +200,26 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
                     MetaRelationKind::Parents => RelationKind::Parents,
                 };
 
-                all_relations.push(RelationPlan {
+                let plan = RelationPlan {
                     target_table: rel_def.table.clone(),
                     kind,
                     left_key: rel_def.effective_left_key().to_vec(),
                     right_key: rel_def.effective_right_key().to_vec(),
                     output_columns: target_output,
                     source_predicates: None, // filled in below
+                };
+
+                // Two aliases naming the same join is one scan, not two.
+                let already = all_relations.iter().any(|r| {
+                    r.target_table == plan.target_table
+                        && r.kind == plan.kind
+                        && r.left_key == plan.left_key
+                        && r.right_key == plan.right_key
+                        && r.output_columns == plan.output_columns
                 });
+                if !already {
+                    all_relations.push(plan);
+                }
             }
         }
 
@@ -223,14 +228,12 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
         // since the union of all items' predicates IS the primary scan predicate).
         for rel in &mut all_relations {
             for (rel_name, preds) in &rel_source_preds {
-                // Use the same alias-aware lookup as the relation creation above
-                let rel_def = table_desc.request.relations.get(rel_name).or_else(|| {
-                    metadata
-                        .aliases
-                        .values()
-                        .find(|a| a.table == *table_name)
-                        .and_then(|a| a.relations.get(rel_name))
-                });
+                // Resolve the way the relation was created: through the alias of
+                // any item that asked for it, and otherwise on the table.
+                let rel_def = items
+                    .iter()
+                    .filter(|item| item.relations.contains(rel_name))
+                    .find_map(|item| relation_def(metadata, table_desc, item, rel_name));
                 if let Some(rel_def) = rel_def {
                     if rel_def.table == rel.target_table {
                         let kind = match rel_def.kind {
@@ -278,6 +281,24 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
         block_output_columns,
         table_plans,
     })
+}
+
+/// The relation `name` denotes for one item.
+///
+/// An item addressed through an alias is admitted against the alias's own
+/// relation list (INV-Q6), so that is where its definition comes from: the
+/// table's list would be a different join under the same name, and another
+/// alias's is not this request's at all.
+fn relation_def<'a>(
+    metadata: &'a DatasetDescription,
+    table_desc: &'a TableDescription,
+    item: &QueryItem,
+    name: &str,
+) -> Option<&'a RelationDef> {
+    match &item.alias {
+        Some(alias) => metadata.aliases.get(alias)?.relations.get(name),
+        None => table_desc.request().relations.get(name),
+    }
 }
 
 /// Order output columns according to metadata column definition order (YAML key order).
@@ -334,7 +355,7 @@ enum CompiledItem {
 fn discriminator_family(table: &TableDescription) -> HashSet<&str> {
     let mut family: HashSet<&str> = HashSet::new();
 
-    for (name, special) in &table.request.special_filters {
+    for (name, special) in &table.request().special_filters {
         if let SpecialFilter::Discriminator { by_length } = special {
             family.insert(name.as_str());
             family.extend(by_length.values().map(String::as_str));
@@ -366,7 +387,7 @@ fn check_item_limits(item: &QueryItem, table: &TableDescription) -> Result<()> {
 
     for (key, value) in &item.filters {
         let is_bloom = matches!(
-            table.request.special_filters.get(key),
+            table.request().special_filters.get(key),
             Some(SpecialFilter::Bloom { .. })
         );
         if !is_bloom {
@@ -405,7 +426,7 @@ fn compile_item_predicates(item: &QueryItem, table: &TableDescription) -> Result
         // Only where a list is a value at all: a flag or a range bound takes a
         // scalar, so `[]` there is the wrong type and stays an error.
         let takes_value_list = !matches!(
-            table.request.special_filters.get(key),
+            table.request().special_filters.get(key),
             Some(
                 SpecialFilter::RangeGte { .. }
                     | SpecialFilter::RangeLte { .. }
@@ -418,7 +439,7 @@ fn compile_item_predicates(item: &QueryItem, table: &TableDescription) -> Result
         }
 
         // Special filters
-        if let Some(special) = table.request.special_filters.get(key) {
+        if let Some(special) = table.request().special_filters.get(key) {
             match special {
                 SpecialFilter::Discriminator { by_length } => {
                     let groups = compile_discriminator(value, by_length)?;

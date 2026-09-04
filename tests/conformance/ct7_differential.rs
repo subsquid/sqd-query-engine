@@ -158,7 +158,7 @@ fn probes_for(metadata: &DatasetDescription, chunk: &Path, from: u64, to: u64) -
     let mut probes = Vec::new();
 
     for (table_name, table) in &metadata.tables {
-        let Some(query_name) = table.request.name.as_deref() else {
+        let Some(query_name) = table.request().name.as_deref() else {
             continue;
         };
         let Some(field_name) = table.output.name.as_deref() else {
@@ -167,15 +167,15 @@ fn probes_for(metadata: &DatasetDescription, chunk: &Path, from: u64, to: u64) -
 
         // The bare item request, and every relation the table declares.
         let mut item_shapes = vec![("plain".to_string(), String::new())];
-        for relation in table.request.relations.keys() {
+        for relation in table.request().relations.keys() {
             item_shapes.push((
                 format!("relation {relation}"),
                 format!(r#""{}":true"#, snake_to_camel(relation)),
             ));
         }
-        if table.request.relations.len() > 1 {
+        if table.request().relations.len() > 1 {
             let all: Vec<String> = table
-                .request
+                .request()
                 .relations
                 .keys()
                 .map(|r| format!(r#""{}":true"#, snake_to_camel(r)))
@@ -196,8 +196,8 @@ fn probes_for(metadata: &DatasetDescription, chunk: &Path, from: u64, to: u64) -
 
             // A special filter takes a value shape of its own; the plain columns
             // are the ones a sampled value can drive.
-            for column in &table.request.filters {
-                if table.request.special_filters.contains_key(column) {
+            for column in &table.request().filters {
+                if table.request().special_filters.contains_key(column) {
                     continue;
                 }
                 let values =

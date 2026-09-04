@@ -28,15 +28,15 @@ and a conformance suite checks them without touching a chunk.
 **Every catalog reference resolves.** Every column named by a
 `blockNumberColumn`, `addressColumn`, `itemOrderKeys` entry, `sortKey` entry,
 `weight` source, filter target, `gteConst` target, discriminator length mapping,
-virtual-field roll member, field-group tag or field mapping, alias implicit
-predicate, or alias filter alias MUST exist in the table it is declared on.
+virtual-field roll member, variant column or variant field mapping, alias implicit
+filter, or alias `columnAlias` target MUST exist in the table it is declared on.
 
 *Why:* an unresolved reference fails at query time, on a query nobody ran during testing, in production.
 *Test:* walk the catalog; assert every name resolves. No chunk needed.
 
 ### INV-D2
 **Every alias is well-formed.** An alias's target table exists; its implicit
-predicate columns, filter-alias targets, and relations are all valid against that
+filter columns, `columnAlias` targets, and relations are all valid against that
 table.
 
 *Why:* an alias with a bad target is a latent crash on the first query that uses it.
@@ -94,12 +94,12 @@ selectable, is never filterable except through the filter that declares it, and
 contributes zero weight.
 
 *Test:* for every system column, assert it cannot be named in `fields` directly,
-through a virtual field or through a field-group request key; assert response
+through a virtual field or through a variant field; assert response
 weight is unchanged by its presence.
 
 ### INV-D10
-**Names are unique.** Within a dataset, `queryName` is unique across tables and
-aliases; `fieldName` is unique across tables.
+**Names are unique.** Within a dataset, the request name is unique across tables
+and aliases; the output name is unique across tables.
 
 *Why:* a duplicate makes a client's request ambiguous, resolved by iteration order — arbitrarily.
 *Test:* static.
@@ -116,7 +116,7 @@ name. Otherwise `UnknownDataset`.
 
 ### INV-Q2
 **No unknown top-level keys.** A top-level key is one of the six reserved keys
-(§2.1) or a `queryName`. Anything else is `UnknownTable`.
+(§2.1) or a request name. Anything else is `UnknownTable`.
 
 ### INV-Q3
 **`fromBlock ≤ toBlock`.** Otherwise `InvalidBlockRange`.
@@ -139,7 +139,7 @@ alias. Otherwise `TooManyItemRequests`.
 ### INV-Q6
 **Declared filters and relations only.** Every key of an item request names a
 declared filter or a declared relation of that table (or alias). Anything else is
-`UnknownFilter`. The value of a `queryName` key MUST be an array.
+`UnknownFilter`. The value of a request-name key MUST be an array.
 
 ### INV-Q7
 **Unknown field names are errors.** A key inside `fields.X` that names no
@@ -148,8 +148,8 @@ selectable field of `X` is `UnknownField`. It MUST NOT be silently dropped.
 *Why:* a client that misspells `logIndx` gets a 200 and a response missing the field, and will look for the bug everywhere except in its own request.
 
 ### INV-Q8
-**Unknown field groups are errors.** A key of `fields` naming no table's
-`fieldName` is `UnknownFieldGroup`. `fields.X` MUST be an object.
+**Unknown `fields` keys are errors.** A key of `fields` naming no table's
+output name is `UnknownFieldGroup`. `fields.X` MUST be an object.
 
 ### INV-Q9
 **Defaults.** `fromBlock` = 0. `toBlock` = unbounded. `includeAllBlocks` = false.
@@ -463,7 +463,7 @@ adjacent ranges concatenate into a valid document.
 
 ### INV-O2
 **Block object shape.** `header` is always present, `{}` when no header field was
-selected. Item arrays are keyed by `queryName` and are omitted entirely when
+selected. Item arrays are keyed by request name and are omitted entirely when
 empty, never rendered as `[]`.
 
 ### INV-O3
@@ -504,10 +504,10 @@ nesting it.
 *Test:* a log with two topics set renders `topics` of length 2, not 4.
 
 ### INV-O11
-**Field groups dispatch on the tag.** Base fields flat; groups named `_` flattened,
-others nested. A group with at least one selected field is emitted even if all its
-values are null. **A tag value absent from the catalog emits base fields only, and
-is never an error or a crash.**
+**Variants dispatch on the variant column.** Plain fields flat; groups named `_`
+flattened, others nested. A group with at least one selected field is emitted even
+if all its values are null. **A variant absent from the catalog emits the plain
+fields only, and is never an error or a crash.**
 
 *Why:* archives outlive catalogs. A new trace type must not take the engine down.
 

@@ -302,3 +302,60 @@ fn a_duplicated_item_key_is_caught() {
     let batches = read_columns(repeated.path(), "events", &key).unwrap();
     assert_eq!(duplicate_key(&batches, &key), Some("11, 0".to_string()));
 }
+
+// ---------------------------------------------------------------------------
+// INV-D1 — the format doc is a catalog too
+// ---------------------------------------------------------------------------
+
+/// `metadata/README.md` is the one document that says how a catalog is written,
+/// and its worked examples are what an author copies. An example the loader
+/// refuses teaches the wrong shape and costs whoever follows it an afternoon.
+///
+/// The alias example is the one with enough moving parts to go wrong: its
+/// `filters` list is the whole request surface, so every name in it has to
+/// resolve, and its relation joins two tables that key their rows differently.
+/// Checked by splicing it over the real `substrate` aliases, which is what
+/// copying it amounts to.
+///
+/// Covers CT-1 · INV-D1
+#[test]
+fn the_alias_example_in_the_format_doc_loads() {
+    const README: &str = include_str!("../../metadata/README.md");
+    const SUBSTRATE: &str = include_str!("../../metadata/substrate.yaml");
+
+    let example = fenced_yaml(README)
+        .into_iter()
+        .find(|block| block.starts_with("aliases:"))
+        .expect("the format doc carries an aliases example");
+
+    let tables = &SUBSTRATE[..SUBSTRATE
+        .find("\naliases:\n")
+        .expect("substrate declares aliases")];
+
+    parse_dataset_description(&format!("{tables}\n{example}"))
+        .expect("the aliases example in metadata/README.md must load");
+}
+
+/// The ```yaml blocks of a markdown document, in order.
+fn fenced_yaml(doc: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut lines = doc.lines();
+
+    while let Some(line) = lines.next() {
+        if line.trim_end() != "```yaml" {
+            continue;
+        }
+
+        let mut block = String::new();
+        for line in lines.by_ref() {
+            if line.trim_end() == "```" {
+                break;
+            }
+            block.push_str(line);
+            block.push('\n');
+        }
+        blocks.push(block);
+    }
+
+    blocks
+}

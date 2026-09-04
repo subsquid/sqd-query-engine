@@ -18,10 +18,10 @@ serves the others.
 - **Selectable fields** are listed per table, in camelCase. The list is the
   normative output surface (§2.3): a name absent from it is `UnknownField`, even
   when a column of that name exists. A catalog usually derives the list from its
-  non-`system` columns plus virtual fields plus field-group request keys, but
+  non-`system` columns plus virtual fields plus variant fields, but
   where that derivation and the list disagree, the list wins
   ([INV-Q14](07-invariants.md#inv-q14)). A table addressable in `fields` — one
-  that declares a `fieldName` — declares the list, and there is no default:
+  that declares an output name — declares the list, and there is no default:
   deriving it is what makes the physical column layout part of the wire contract.
   Columns with non-default encodings are called out separately.
 
@@ -39,7 +39,7 @@ serves the others.
 Tables, in output order: `blocks`, `transactions`, `logs`, `traces`,
 `statediffs`.
 
-| Table | queryName | fieldName | itemOrderKeys | addressColumn |
+| Table | request.name | output.name | itemOrderKeys | addressColumn |
 |---|---|---|---|---|
 | `blocks` | `blocks` | `block` | — | — |
 | `transactions` | `transactions` | `transaction` | `transactionIndex` | — |
@@ -47,7 +47,7 @@ Tables, in output order: `blocks`, `transactions`, `logs`, `traces`,
 | `traces` | `traces` | `trace` | `transactionIndex` | `traceAddress` |
 | `statediffs` | `stateDiffs` | `stateDiff` | `transactionIndex, address, key` | — |
 
-Note `statediffs` — the table name, its `queryName` and its `fieldName` all
+Note `statediffs` — the table name, its request name and its output name all
 differ.
 
 ### Filters
@@ -95,12 +95,12 @@ identifiers (`call`, `create`, `delegatecall`), not hex.
 
 `logs.topics` — roll of `topic0, topic1, topic2, topic3`.
 
-### Field groups — `traces`
+### Variants — `traces`
 
-Tag column `type`. Base fields: `transactionIndex`, `traceAddress`, `type`,
-`subtraces`, `error`, `revertReason`.
+Variant column `type`. Plain fields, flat for every row: `transactionIndex`,
+`traceAddress`, `type`, `subtraces`, `error`, `revertReason`.
 
-| Tag | Group | Request key → output path |
+| Variant | Group | Field → output key |
 |---|---|---|
 | `create` | `action` | `createFrom`→`from`, `createValue`→`value`, `createGas`→`gas`, `createInit`→`init` |
 | | `result` | `createResultGasUsed`→`gasUsed`, `createResultCode`→`code`, `createResultAddress`→`address` |
@@ -139,7 +139,7 @@ l1BlobBaseFeeScalar, l1BaseFeeScalar`
 
 `logs`: `logIndex, transactionIndex, transactionHash, address, data, topics`
 
-`traces`: the field-group request keys above.
+`traces`: the plain and variant fields above.
 
 `statediffs`: `transactionIndex, address, key, kind, prev, next`
 
@@ -155,7 +155,7 @@ l1BlobBaseFeeScalar, l1BaseFeeScalar`
 Tables: `blocks`, `transactions`, `instructions`, `logs`, `balances`,
 `token_balances`, `rewards`.
 
-| Table | queryName | fieldName | itemOrderKeys | addressColumn |
+| Table | request.name | output.name | itemOrderKeys | addressColumn |
 |---|---|---|---|---|
 | `blocks` | `blocks` | `block` | — | — |
 | `transactions` | `transactions` | `transaction` | `transactionIndex` | — |
@@ -258,7 +258,7 @@ postAmount`
 
 Tables: `blocks`, `extrinsics`, `calls`, `events`.
 
-| Table | queryName | fieldName | itemOrderKeys | addressColumn |
+| Table | request.name | output.name | itemOrderKeys | addressColumn |
 |---|---|---|---|---|
 | `blocks` | `blocks` | `block` | — | — |
 | `extrinsics` | `extrinsics` **[X]** | `extrinsic` | `index` | — |
@@ -337,7 +337,7 @@ Each selected field appears **exactly once** in an item object
 
 Tables: `blocks`, `transactions`, `logs`, `internal_transactions`.
 
-| Table | queryName | fieldName | itemOrderKeys |
+| Table | request.name | output.name | itemOrderKeys |
 |---|---|---|---|
 | `blocks` | `blocks` | `block` | — |
 | `transactions` | `transactions` | `transaction` | `transactionIndex` |
@@ -419,7 +419,7 @@ emitted.
 
 Tables: `blocks`, `transactions`, `inputs`, `outputs`.
 
-| Table | queryName | fieldName | itemOrderKeys |
+| Table | request.name | output.name | itemOrderKeys |
 |---|---|---|---|
 | `blocks` | `blocks` | `block` | — |
 | `transactions` | `transactions` | `transaction` | `transactionIndex` |
@@ -489,7 +489,7 @@ it.
 
 Tables: `blocks`, `fills`.
 
-| Table | queryName | fieldName | itemOrderKeys |
+| Table | request.name | output.name | itemOrderKeys |
 |---|---|---|---|
 | `blocks` | `blocks` | `block` | — |
 | `fills` | `fills` | `fill` | `fillIndex` |
@@ -519,7 +519,7 @@ twapId`
 
 Tables: `blocks`, `actions`.
 
-| Table | queryName | fieldName | itemOrderKeys |
+| Table | request.name | output.name | itemOrderKeys |
 |---|---|---|---|
 | `blocks` | `blocks` | `block` | — |
 | `actions` | `actions` | `action` | `actionIndex` |

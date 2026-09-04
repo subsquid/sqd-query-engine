@@ -42,7 +42,7 @@ response, never a different query result
   selected — in which case it is `{}` ([INV-O2](07-invariants.md#inv-o2)).
 - An item array is emitted only if it has at least one item. Empty arrays are
   omitted, not rendered as `[]`.
-- Item arrays are keyed by the table's `queryName`.
+- Item arrays are keyed by the table's request name.
 
 Order:
 
@@ -97,14 +97,14 @@ column spread rather than nested ([INV-O10](07-invariants.md#inv-o10)).
 A log with `topic0` and `topic1` set and `topic2`, `topic3` null renders
 `"topics": ["0x…", "0x…"]` — length two, not four with trailing nulls.
 
-### Field groups
+### Variants
 
-The engine reads the tag column, emits the base fields flat, then emits the
-groups belonging to that tag. A group named `_` is flattened into the enclosing
-object; any other group name nests under that key.
+The engine reads the variant column, emits the plain fields flat, then emits the
+groups belonging to that variant. A group named `_` is flattened into the
+enclosing object; any other group name nests under that key.
 
 A group with at least one selected field is emitted even if every one of its
-values is null. A tag value not present in the catalog emits the base fields and
+values is null. A variant not present in the catalog emits the plain fields and
 no groups, and MUST NOT be an error or a crash
 ([INV-O11](07-invariants.md#inv-o11)) — archives outlive catalogs.
 

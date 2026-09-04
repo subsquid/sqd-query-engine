@@ -1,533 +1,399 @@
-# Metadata Module
+# Catalogs
 
-This module defines and loads dataset metadata from YAML files. Metadata drives the entire query engine — new chain types (EVM, Solana, Fuel, etc.) are added by writing a YAML file, not code.
+A catalog describes one dataset: which tables it has, what a client may ask of
+each, and what the parquet files hold. The engine has no chain-specific code;
+everything it knows about EVM or Solana it reads from a catalog at load time.
+Adding a chain means writing a YAML file, not a module.
 
-YAML files live in [`metadata/`](../../metadata/).
+The catalogs live in this directory, one per dataset. They load into the types
+in [`src/metadata/types.rs`](../src/metadata/types.rs) and must pass the checks
+in [`src/metadata/loader.rs`](../src/metadata/loader.rs). A key the types do
+not know is an error, not a warning: a misspelled key would otherwise silently
+do nothing.
 
-## Table of Contents
+## The shape of a table
 
-1. [Top-Level Structure](#top-level-structure)
-2. [Table Properties](#table-properties)
-3. [Columns](#columns)
-   - [Column Properties](#column-properties)
-   - [Column Types](#column-types)
-   - [JSON Encodings](#json-encodings)
-   - [Weight](#weight)
-   - [System Columns](#system-columns)
-4. [Relations](#relations)
-5. [Filters](#filters)
-   - [Fields](#fields)
-6. [Special Filters](#special-filters)
-7. [Virtual Fields](#virtual-fields)
-8. [Field Groups (Polymorphic Output)](#field-groups-polymorphic-output)
-9. [Query Aliases](#query-aliases)
-10. [Complete Minimal Example](#complete-minimal-example)
-
----
-
-## Top-Level Structure
+A table answers three questions, and each has a block of its own: what a client
+may *send* for it, what a client may *see* of it, and what is actually *stored*.
 
 ```yaml
-name: solana                     # Dataset identifier
+name: evm
 
 tables:
-  blocks:                        # Table name (matches parquet filename: blocks.parquet)
-    ...
-  transactions:
-    ...
-
-query_aliases:                   # Optional: virtual query names mapped to existing tables
-  ...
+  logs:
+    request:                      # what a client writes in `logs: [ { ... } ]`
+      name: logs                  # also the key of this table's array in each response block
+      filters: [ address, topic0, topic1, topic2, topic3 ]
+      relations:
+        transaction: { table: transactions, key: [ block_number, transaction_index ] }
+    output:                       # what a client picks in `fields: { log: { ... } }`
+      name: log
+      fields: [ log_index, transaction_index, transaction_hash, address, data, topics ]
+      virtual_fields:
+        topics: { kind: roll, columns: [ topic0, topic1, topic2, topic3 ] }
+    item_order_keys: [ transaction_index, log_index ]
+    sort_key: [ topic0, address, block_number, log_index ]
+    columns:
+      block_number:      { type: uint64 }
+      log_index:         { type: uint32 }
+      transaction_index: { type: uint32 }
+      transaction_hash:  { type: string, encoding: hex_bytes }
+      address:           { type: string, encoding: hex_bytes }
+      data:              { type: string, encoding: hex_bytes, weight: data_size }
+      topic0:            { type: string, encoding: hex_bytes }
+      topic1:            { type: string, encoding: hex_bytes }
+      topic2:            { type: string, encoding: hex_bytes }
+      topic3:            { type: string, encoding: hex_bytes }
+      data_size:         { type: uint64, system: true }
 ```
 
-`tables` is an **ordered map** — insertion order determines the output ordering of table arrays within each block JSON object.
+The two surfaces are closed. A column is filterable because `request.filters`
+names it and visible because `output.fields` names it; a column in neither list
+— `data_size`, `topic1` on its own — is the engine's business alone. This is
+what keeps the physical layout out of the wire contract: a column can be added,
+split or renamed without any client noticing, so long as the two lists still
+resolve.
 
----
+`tables` is ordered. Its order is the order item arrays appear in a response
+block, and a table's `columns` order is the order fields appear in an item. The
+block table comes first.
 
-## Table Properties
+### Names
 
-### Identity & Naming
+Everything inside a catalog is `snake_case`: columns, fields, filters, relation
+names. Clients see `camelCase`, and the engine converts at the boundary —
+`log_index` is `logIndex` on the wire, `call_call_type` is `callCallType`.
 
-| Property | Type | Required | Description |
-|---|---|---|---|
-| `query_name` | string | no | Name used in the JSON query filter (e.g., `"logs"`, `"stateDiffs"`, `"tokenBalances"`). Defaults to the table key. Used as the JSON array key in output. |
-| `field_name` | string | no | Name used in the JSON query `fields` object (e.g., `"log"`, `"stateDiff"`, `"tokenBalance"`). No default: a table that declares none cannot be named in `fields` at all. |
+Four keys are written exactly as they will be read, with no conversion in
+between, so they are spelled the way the client spells them:
 
-The distinction matters because queries use plural names for filters (`"logs": [...]`) and singular for field selection (`"fields": { "log": { "address": true } }`).
+- `request.name` and `output.name` — `tokenBalances` and `tokenBalance`, not
+  `token_balances`;
+- a variant mapping's `as`, and the name of the group holding it — `gasUsed`,
+  `callType`, `refundAddress`, inside `action` and `result`.
 
-### Block Number
+Writing `as: gas_used` is therefore not a style slip the engine corrects; it is
+a response field named `gas_used` while everything around it is camelCase.
 
-| Property | Type | Required | Description |
-|---|---|---|---|
-| `block_number_column` | string | no | Column holding the block number. Defaults to `"block_number"`. The blocks table typically uses `"number"`. Used for block range filtering, block grouping, and cross-table joins. |
-| `parent_hash_column` | string | no | Column holding the *preceding* block's hash. Only the block table sets it, and declaring it is what turns on fork detection: a client's `parentBlockHash` is compared against it, and a mismatch means the chain reorganised between two pages. A dataset that declares nothing cannot answer the question, so it *refuses* `parentBlockHash` rather than accepting and ignoring it. |
-| `parent_number_column` | string | no | Column holding the preceding block's *number*. Needed by chains that skip numbers — a Solana slot's predecessor is not `number - 1`. Where it is absent the predecessor is taken to be `number - 1`. |
+## `request`
 
-### Sorting & Ordering
+| Key | Required | Meaning |
+|---|---|---|
+| `name` | no | The key of this table's item requests in a query, and of its array in every response block. Defaults to the table's own name. |
+| `filters` | **yes** | The filters an item request may carry. Each entry is a non-system column of the same name, or a key of `special_filters`. |
+| `special_filters` | no | Filters that are not a plain column comparison. Each must also appear in `filters`, or no request can reach it. |
+| `relations` | no | The relation flags an item request may switch on. |
 
-| Property | Type | Required | Description |
-|---|---|---|---|
-| `sort_key` | list[string] | no | Physical sort order of the parquet file. Filter columns come first (e.g., `[topic0, address, block_number, log_index]`). This makes row group min/max statistics highly selective for filter pushdown. Not used at query time — only documents the physical layout. |
-| `item_order_keys` | list[string] | no | Output sort order of items within a block (e.g., `[transaction_index, log_index]`). These match the legacy engine's primary keys minus `block_number`. |
-| `address_column` | string | no | Hierarchical address column (e.g., `"trace_address"`, `"instruction_address"`). Appended to `item_order_keys` for output sorting. Also used for children/parents relation joins. |
+The block table has no `request` block: its rows are the headers, which come
+with every response, so it keeps its default name, takes no filters and no
+relations, and accepts `{}` as its only item request.
 
-### Hierarchy (Parent-Child)
+Every other table declares one. Leaving it out is not an error the loader could
+otherwise see — it would be a table that rejects every filter and every relation
+with a 400, which from outside looks like a catalog missing those columns rather
+than one with a hole in it. `filters` is required inside the block for the same
+reason, and a table that really has no filters says `filters: []`.
 
-| Property | Type | Required | Description |
-|---|---|---|---|
-| `children` | list[string] | no | Tables that are children of this table (e.g., transactions has children `[logs, balances, token_balances]`). Currently informational. |
-| `parent_key` | list[string] | no | Key columns linking this table to its parent (e.g., `[block_number, transaction_index]`). Currently informational. |
+A plain filter compares a column against a list of values. A list-typed column
+(`list_uint32`, `list_string`) matches when the lists intersect.
 
-### Query Surface
+### Special filters
 
-| Property | Type | Required | Description |
-|---|---|---|---|
-| `filters` | list[string] | **yes** | Column filters this table accepts. See [Filters](#filters). |
-| `special_filters` | map | no | Filters that do not map to a single column comparison. See [Special Filters](#special-filters). |
-| `relations` | map | no | Relations a query item on this table may request. See [Relations](#relations). |
+Each has a `kind`:
 
----
-
-## Columns
+| `kind` | Keys | Meaning |
+|---|---|---|
+| `column_alias` | `column` | The filter reads a column of another name. `call_call_type` → `call_type`. |
+| `bloom` | `column`, `bytes`, `hashes` | Probabilistic membership in a bloom column, which must be `fixed_binary_N`. `bytes` is the bloom's size and has to be that `N` — the probe reads the width off the stored array, so the key is a statement about the archive writer that the loader holds to the column. `hashes` is how many hash functions the writer used, and nothing but the writer can tell you. |
+| `discriminator` | `by_length` | Dispatches a hex prefix to the column holding prefixes of its byte length: `{ "1": d1, "2": d2, … }`. |
+| `range_gte` / `range_lte` | `column` | An inclusive bound on the column. |
+| `gte_const` | `column`, `value` | A boolean flag. `true` keeps rows where the column is at least a catalog-fixed constant — `call_value >= "0x1"` is the `callValueNonZero` filter. |
 
 ```yaml
-columns:
-  block_number:
-    type: uint64
-    stats: true
-  address:
-    type: string
-    json_encoding: hex
-    stats: true
-    dictionary: true
-  data:
-    type: string
-    json_encoding: hex
-    weight: data_size
-  fee:
-    type: uint64
-    json_encoding: string
-
-  # system
-  data_size:
-    type: uint64
-    system: true
+request:
+  name: instructions
+  filters: [ program_id, discriminator, mentions_account, a0 ]
+  special_filters:
+    discriminator:
+      kind: discriminator
+      by_length: { "1": d1, "2": d2, "4": d4, "8": d8 }
+    mentions_account:
+      kind: bloom
+      column: accounts_bloom
+      bytes: 64
+      hashes: 7
 ```
 
-### Column Properties
+### Relations
 
-| Property | Type | Required | Description |
-|---|---|---|---|
-| `type` | string | **yes** | Data type. See [Column Types](#column-types) below. |
-| `stats` | bool | no | Whether parquet row group statistics (min/max) are available. Enables predicate pushdown for row group pruning. |
-| `dictionary` | bool | no | Whether dictionary encoding is used. Informational — may enable dictionary-level filtering in the future. |
-| `json_encoding` | string | no | Controls JSON output encoding. See [JSON Encodings](#json-encodings) below. |
-| `weight` | string or int | no | Weight for response size limiting. A string references a size column (e.g., `"data_size"`); an integer sets a fixed weight per row (e.g., `0`). Columns without `weight` get a default of 32 bytes per row. See [Weight](#weight). |
-| `system` | bool | no | Marks internal columns not included in user output (size columns, bloom filters, discriminator columns). System columns are excluded from weight calculation. |
+A relation pulls related rows into the response when an item request sets its
+flag to `true`. It never narrows the result.
 
-### Column Types
-
-| Type | Arrow Type | Description |
+| Key | Required | Meaning |
 |---|---|---|
-| `uint8` | UInt8 | |
-| `uint16` | UInt16 | |
-| `uint32` | UInt32 | |
-| `uint64` | UInt64 | |
-| `int16` | Int16 | |
-| `int64` | Int64 | |
-| `float64` | Float64 | |
-| `decimal128` | Decimal128 | High-precision decimal (used for large numeric values) |
-| `boolean` | Boolean | |
-| `string` | Utf8 | |
-| `timestamp_second` | TimestampSecond | Unix timestamp in seconds, output as integer |
-| `timestamp_millisecond` | TimestampMillisecond | Unix timestamp in milliseconds |
-| `list_uint8` | List\<UInt8\> | |
-| `list_uint32` | List\<UInt32\> | |
-| `list_string` | List\<Utf8\> | |
-| `list_struct` | List\<Struct\> | Passed through as JSON |
-| `struct` | Struct | Passed through as JSON |
-| `fixed_binary_N` | FixedSizeBinary(N) | Fixed-size byte array (e.g., `fixed_binary_64` for bloom filters) |
+| `table` | **yes** | The target table. |
+| `kind` | no | `join` (default), `children` or `parents`. |
+| `key` | no | Join columns, the same on both sides. |
+| `left_key` / `right_key` | no | Join columns per side, when they differ. Override `key`. |
 
-**Note:** Actual parquet types may differ from metadata declarations (e.g., `block_number` is declared `uint64` but stored as `Int32` in EVM parquet). The engine handles type coercion automatically.
+The first key column on each side must be that side's block number column;
+that is what keeps a relation inside one block, and a chunk answerable on its
+own.
 
-### JSON Encodings
-
-The `json_encoding` field controls how a column's value is serialized to JSON output.
-
-| Encoding | Description | Example |
-|---|---|---|
-| `hex` | Bytes displayed as `0x`-prefixed hex string | `0xa0b1...` |
-| `base58` | Bytes displayed as base58 string | `So11111111111111111111111111111112` |
-| `string` | Integer as quoted decimal string (avoids JS precision loss for >2^53) | `5000` → `"5000"` |
-| `json` | String containing JSON — parsed and embedded as raw JSON in output | `"{\"a\":1}"` → `{"a":1}` |
-| `hex_number` | Unsigned integer as a quoted hex string, zero-padded to the column's physical width | `uint16` `1600` → `"0x0640"` |
-| `solana_tx_version` | Solana transaction version: `-1` → `"legacy"`, otherwise the number | `-1` → `"legacy"`, `0` → `0` |
-| `timestamp_millisecond` | Millisecond timestamp, output as integer | `1710000000000` |
-
-### Weight
-
-The engine caps responses at 20 MB. Each projected column contributes to the estimated row weight:
-
-- Columns with `weight: <column_name>` use the value of the referenced size column as their dynamic weight per row.
-- Columns with `weight: <integer>` use a fixed weight per row (use `0` for columns already accounted for by another column's weight).
-- Columns without `weight` get a default of 32 bytes per row.
-- System columns (`system: true`) are excluded from weight calculation entirely.
-
-```yaml
-columns:
-  data:
-    type: string
-    json_encoding: hex
-    weight: data_size              # Dynamic: uses data_size column value
-  a0:
-    type: string
-    json_encoding: base58
-    weight: accounts_size          # First account carries weight for all
-  a1:
-    type: string
-    json_encoding: base58
-    weight: 0                      # Zero: already counted by a0
-  block_number:
-    type: uint64                   # No weight specified: defaults to 32 bytes
-
-  # system
-  data_size:
-    type: uint64
-    system: true                   # Not in output, not in weight calc
-  accounts_size:
-    type: uint64
-    system: true
-```
-
-### System Columns
-
-Columns with `system: true` are internal to the storage layer and are never exposed in query output. They exist to support engine features like weight estimation, bloom filter checks, and discriminator matching.
-
-Common system columns:
-- **Size columns**: `data_size`, `input_size`, `accounts_size`, `signatures_size`, etc. — used as weight sources.
-- **Bloom filters**: `accounts_bloom` — used for `mentions_account` special filter.
-- **Filter-only discriminator widths**: `d3`, `d5`–`d7`, `d9`–`d16` — read by the `discriminator` filter and never emitted.
-- **Sort-key columns**: `b9` — part of the physical sort key of Solana `instructions`, so its row group statistics prune, but no filter names it and no client sees it.
-
-Being *read by a filter* does not make a column a system column. Solana's `d1`,
-`d2`, `d4` and `d8` are selectable, so they are ordinary columns: they are
-emitted (as `hex_number`), they carry weight, and selecting one absent from a
-chunk is an error. Marking them `system` made them weightless and rendered them
-by physical type, which silently rounded a `uint64` `d8` in every JavaScript
-client.
-
-In YAML files, system columns are conventionally separated from data columns with a `# system` comment.
-
----
-
-## Relations
-
-Relations define how tables can be joined when a query item requests related data.
+`join` matches rows whose keys are equal. `children` and `parents` walk the
+tree an `address_column` describes: a trace at `[0]` has children `[0, 0]` and
+`[0, 1]`, and an instruction at `[1, 2, 3]` has parents `[1]` and `[1, 2]`.
+Both need an `address_column` on both tables.
 
 ```yaml
 relations:
-  transaction:                   # Relation name (used in query JSON)
-    table: transactions          # Target table to join
-    key: [block_number, transaction_index]  # Join key (same columns on both sides)
-
-  subtraces:
-    table: traces
-    kind: children               # Hierarchical: find child rows
-    key: [block_number, transaction_index, trace_address]
-
-  parents:
-    table: traces
-    kind: parents                # Hierarchical: find parent rows
-    key: [block_number, transaction_index, trace_address]
-
-  instruction:
-    table: instructions
-    left_key: [block_number, transaction_index, instruction_address]  # Key on this table
-    right_key: [block_number, transaction_index, instruction_address] # Key on target table
+  transaction:  { table: transactions, key: [ block_number, transaction_index ] }
+  subtraces:    { table: traces, kind: children, key: [ block_number, transaction_index, trace_address ] }
+  parents:      { table: traces, kind: parents,  key: [ block_number, transaction_index, trace_address ] }
 ```
 
-### Relation Properties
+## `output`
 
-| Property | Type | Required | Description |
-|---|---|---|---|
-| `table` | string | **yes** | Target table name. |
-| `kind` | string | no | Relation type: `join` (default), `children`, or `parents`. |
-| `key` | list[string] | no | Join key columns (used for both sides when `left_key`/`right_key` are not set). |
-| `left_key` | list[string] | no | Key columns on the source (current) table. Overrides `key`. |
-| `right_key` | list[string] | no | Key columns on the target table. Overrides `key`. |
+| Key | Required | Meaning |
+|---|---|---|
+| `name` | no | The key of this table's selection under a query's `fields`. No default: a table without one cannot be selected. |
+| `fields` | with `name` | The fields a client may select. Each names a non-system column, a virtual field, or a variant mapping's field key. |
+| `virtual_fields` | no | Fields assembled from several columns. |
+| `variant_column` | with `variants` | The column whose value says which shape a row has. |
+| `variants` | with `variant_column` | Per-variant nesting of fields. |
 
-### Relation Kinds
+### Virtual fields
 
-- **`join`** (default): Hash-based equi-join. Returns rows from the target table whose key matches the source. With KeyFilter pushdown, matching is done during the scan itself.
-- **`children`**: Hierarchical join using `address_column`. Finds rows in the target whose address is a prefix-child of the source row's address (e.g., trace `[0]` has children `[0,0]`, `[0,1]`, etc.).
-- **`parents`**: Inverse of children. Finds rows whose address is a prefix-parent of the source (e.g., instruction `[1,2,3]` has parents `[1]` and `[1,2]`).
-
----
-
-## Filters
-
-Every table declares which filters it accepts. A query key naming an undeclared
-column is rejected even when a column of that name exists.
-
-```yaml
-logs:
-  filters: [ address, topic0, topic1, topic2, topic3 ]
-```
-
-The list is what keeps the surface closed. Without it, resolving a filter key
-against "any column of the table" exposes the blooms, size counters and
-denormalised extractions a table carries for the engine's own use — and makes
-the column list the public API, so that adding a column adds a filter clients
-can come to depend on.
-
-Each entry names a column of the same name, and no entry may name a `system`
-column: publishing one makes an engine-internal detail part of the request API.
-`special_filters` and `relations` are accepted in addition to this list.
-
-The key is required, with no default, on a table and on a query alias alike. A
-table that omits it accepts no column filters and rejects every one a client
-sends — which is right for `blocks`, and a silent mistake anywhere else, since
-`deny_unknown_fields` catches a misspelled key but not an absent one. Writing
-`filters: []` says it on purpose.
-
-### Fields
-
-The same idea on the way out. Every table declares which fields a client may
-select, and a `fields` key naming anything else is rejected even when a column of
-that name exists.
-
-```yaml
-logs:
-  fields: [ log_index, transaction_index, transaction_hash, address, data, topics ]
-```
-
-Each entry names a non-`system` column, a virtual field, or a field-group request
-key. `topics` above is a virtual field; `block_number` is deliberately absent,
-because it is already in the block header and the column exists to group, join and
-order rather than to be read.
-
-Deriving the list instead — "every non-`system` column" — publishes every column
-the table carries for filtering, grouping, joining or rolling, and makes the
-physical layout the wire contract: a client that pins `topic0` today breaks the
-day the archiver stops writing it, on a field the catalog never promised. Marking
-those columns `system` is not the alternative, because a `system` column
-contributes no weight, and hiding `topic0…3` that way would drop the `topics`
-roll out of the response-budget model.
-
-A table that declares a `field_name` must declare a non-empty list; the validator
-refuses one that does not. A table with no `field_name` cannot be named in
-`fields`, so it needs none.
-
----
-
-## Special Filters
-
-Special filters handle query predicates that don't map to a single column comparison.
-
-```yaml
-special_filters:
-  discriminator:                 # Solana instruction discriminator
-    type: discriminator
-    columns:
-      "1": d1                    # 1-byte discriminator → column d1
-      "2": d2                    # 2-byte → d2
-      "8": d8                    # 8-byte → d8 (most common: Anchor uses 8-byte)
-      ...
-
-  mentions_account:              # Bloom filter for account mentions
-    type: bloom_filter
-    column: accounts_bloom
-    num_bytes: 64
-    num_hashes: 7
-
-  first_nonce:                   # Range filter: nonce >= value
-    type: range_gte
-    column: nonce
-
-  last_nonce:                    # Range filter: nonce <= value
-    type: range_lte
-    column: nonce
-
-  type:                          # Column alias: query key maps to different column
-    type: column_alias
-    column: receipt_type
-```
-
-### Special Filter Types
-
-| Type | Description |
-|---|---|
-| `discriminator` | Dispatches a hex byte string to the appropriate `dN` column based on byte length. Used for Solana instruction discriminators. |
-| `bloom_filter` | Tests membership in a pre-computed bloom filter column. Used for "mentions account" queries without scanning all account columns. |
-| `range_gte` | Maps to a `column >= value` predicate. |
-| `range_lte` | Maps to a `column <= value` predicate. |
-| `column_alias` | Maps a query filter key to a different physical column name (e.g., `type` → `receipt_type`). |
-
----
-
-## Virtual Fields
-
-Virtual fields combine multiple physical columns into a single output value.
+One kind exists, `roll`: an ordered list of columns rendered as one JSON array.
+The array stops at the first null, and if the last column is a list its
+elements are spread into the array rather than nested. It presents a structure
+the writer flattened — `topic0 … topic3`, `a0 … a15, rest_accounts` — as the
+array it logically is.
 
 ```yaml
 virtual_fields:
-  accounts:                      # Output field name
-    type: roll
-    columns: [a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, rest_accounts]
-
-  topics:
-    type: roll
-    columns: [topic0, topic1, topic2, topic3]
+  topics:   { kind: roll, columns: [ topic0, topic1, topic2, topic3 ] }
+  accounts: { kind: roll, columns: [ a0, a1, a2, a3, rest_accounts ] }
 ```
 
-### `roll`
+A virtual field is selectable like a column once `fields` lists it. The columns
+it rolls usually are not; a client sees `topics`, not `topic2`.
 
-Combines multiple columns into a JSON array. Non-null values are collected in order; the roll stops at the first null. If the last column is a list type, its elements are spread into the array.
+### Variants
 
-Example: if `a0="X"`, `a1="Y"`, `a2=null`, then `accounts` outputs `["X","Y"]`.
-
----
-
-## Field Groups (Polymorphic Output)
-
-Field groups handle tables where the output JSON structure depends on a tag column value. Used for EVM traces and Fuel inputs/outputs where `type` determines which nested objects appear.
+Some tables hold rows of several shapes. An EVM trace is a `create`, a `call`,
+a `suicide` or a `reward`, and each carries its own columns and its own nested
+objects in the response.
 
 ```yaml
-field_groups:
-  tag_column: type               # Column that determines the variant
-  base_fields:                   # Fields at top level for ALL variants
-    - transaction_index
-    - trace_address
-    - subtraces
-    - type
-    - error
-    - revert_reason
+output:
+  name: trace
+  fields: [ transaction_index, trace_address, type, call_from, call_to, call_type, call_call_type ]
+  variant_column: type
   variants:
-    create:                      # When type = "create"
-      action:                    # Nested object "action"
-        - { column: create_from, field: from }
-        - { column: create_value, field: value }
-        - { column: create_gas, field: gas }
-        - { column: create_init, field: init }
-      result:                    # Nested object "result"
-        - { column: create_result_gas_used, field: gasUsed }
-        - { column: create_result_code, field: code }
-        - { column: create_result_address, field: address }
     call:
       action:
-        - { column: call_from, field: from }
-        - { column: call_to, field: to }
-        ...
-      result:
-        - { column: call_result_gas_used, field: gasUsed }
-        - { column: call_result_output, field: output }
+        - { column: call_from, as: from }
+        - { column: call_to,   as: to }
+        - { column: call_type, as: type }
+        - { column: call_type, field_key: call_call_type, as: callType }
 ```
 
-Each variant maps its physical `column` to a display `field` name within a group. The group name becomes a nested JSON key. A group is emitted in the output if the user selected at least one field from it, even if all values are null.
+Each variant maps groups to fields. A group is a nested object in the response
+(`action`, `result`); the group `_` is written flat. A mapping reads `column`
+and renders it under the key `as`; a client selects it as `field_key`, which
+defaults to the column's name. Two mappings may read one column under
+different field keys — `call_type` above renders as both `action.type` and
+`action.callType`.
 
-Use `_` as the group name to flatten fields directly into the top-level object instead of nesting:
+`field_key` is not spelled `field`, which is what the key was called when it
+meant the *rendered* name. A mapping still carrying the old spelling is refused
+rather than read the other way round.
+
+A field no variant claims is a plain column, and renders flat for every row —
+which is to say the mappings, and nothing else, decide the shape. Claiming a
+field is all-or-nothing: it leaves the top level for every row, and rows of the
+variants that do not also claim it lose it entirely. That is what
+`create_init` wants and what `type` does not, so a mapping over the columns
+that identify a row — the variant column, `item_order_keys`, `address_column`,
+the block number — is refused.
+
+A row whose `variant_column` holds a value the catalog does not know renders its
+plain fields and nothing else; it is not an error, because archives outlive
+catalogs.
+
+## Storage
+
+| Key | Required | Meaning |
+|---|---|---|
+| `block_number_column` | no | The block number column. Defaults to `block_number`; the block table usually says `number`. |
+| `parent_hash_column` | no | Block table only. The parent block's hash; declaring it is what enables fork detection for the dataset. |
+| `parent_number_column` | no | Block table only. The parent block's number, for chains that skip numbers (Solana slots). Absent means `number - 1`. |
+| `address_column` | no | The tree path of a hierarchical table: `trace_address`, `instruction_address`. Used by `children`/`parents` relations and appended to the item order. |
+| `item_order_keys` | no | The columns that, with the block number, order items within a block. The block table has none — a block number alone identifies its rows, and that is how the engine knows which table is the block table. |
+| `sort_key` | no | The order rows physically sit in. Filter columns first, then block number. The engine may use it to prune work; it never affects a result. |
+| `columns` | **yes** | The columns, in output order. |
+
+### Columns
+
+| Key | Required | Meaning |
+|---|---|---|
+| `type` | **yes** | The logical type, below. |
+| `encoding` | no | How the value renders in a response, when not as the type's natural JSON. |
+| `weight` | no | What the column adds to a row's weight: a size column's name, or a fixed integer. Absent means 32. |
+| `system` | no | The column exists for filters, joins, ordering or weights, and is never emitted. It cannot be a field or a plain filter; a special filter is how it is reached on purpose. Weighs nothing. |
+| `fold_case` | no | Compare filter values case-insensitively. A `hex_bytes` column folds already; this is for hex stored without the `0x` prefix, as Tron writes it, which renders verbatim and so cannot say it through the encoding. |
+
+Types:
+
+| `type` | Arrow |
+|---|---|
+| `uint8`, `uint16`, `uint32`, `uint64` | unsigned integers |
+| `int16`, `int32`, `int64` | signed integers |
+| `float64` | Float64 |
+| `boolean` | Boolean |
+| `string` | Utf8 |
+| `timestamp_second`, `timestamp_millisecond` | timestamps, rendered as integers in the declared unit |
+| `decimal128` | Decimal128 |
+| `list_uint8`, `list_uint32`, `list_string` | lists |
+| `struct`, `list_struct` | passed through as JSON |
+| `fixed_binary_N` | FixedSizeBinary(N) — `fixed_binary_64` for a bloom |
+
+A declared type bounds the values, not the storage. An archive writer narrows
+integers to the smallest width that fits the chunk, so a `uint64` block number
+is usually stored as 32 bits and a `uint32` index as 16, and different chunks of
+one dataset differ. The engine reads any integer width for any declared integer
+type and answers the same.
+
+Encodings, named as the specification names them:
+
+| `encoding` | Renders as |
+|---|---|
+| `hex_bytes` | `0x` + lowercase hex, variable length. Filters on such a column fold case. |
+| `base58` | base58 string. |
+| `decimal_string` | the integer quoted, `"1000000000000000000"`, for values a JavaScript number cannot hold exactly. |
+| `hex_number` | the integer as hex, zero-padded to the column's width: a `uint16` 1600 is `"0x0640"`. Unsigned integers only. |
+| `json_verbatim` | the stored bytes spliced in as they are — the column already holds JSON. Empty renders as `null`. |
+| `timestamp_millisecond` | the raw millisecond integer. |
+| `solana_tx_version` | `-1` renders as `"legacy"`, anything else as the number. |
+
+Weight is how a response is bounded: blocks are added until their rows' weight
+crosses the budget, and a row's weight is the sum over the columns actually
+emitted for it. A variable-size column (`data`, `input`) names a size column the
+writer filled; `a0` carries `accounts_size` for all sixteen account columns and
+`a1 … a15` say `weight: 0`.
+
+## Aliases
+
+An alias is another request surface over an existing table — a narrower view
+under a name of its own. It has the shape of a `request` block, plus the filters
+that make it a view:
 
 ```yaml
-variants:
-  InputCoin:
-    _:                           # Underscore = no nesting, fields go at top level
-      - { column: coin_utxo_id, field: utxoId }
-      - { column: coin_owner, field: owner }
-```
-
----
-
-## Query Aliases
-
-Query aliases create virtual query names that map to existing tables with implicit predicates and column remapping. This allows a single physical table to be queried as if it were multiple specialized tables.
-
-```yaml
-query_aliases:
+aliases:
   evmLogs:
-    table: events                          # Physical table to query
-    implicit_predicates:                   # Always-applied filters
+    table: events
+    implicit_filters:
       name: [ "EVM.Log" ]
-    filter_aliases:                        # Remap query filter keys to physical columns
-      topic0: _evm_log_topic0
-      address: _evm_log_address
-    relations:                             # Relations available for this alias
+    filters: [ address, topic0, topic1, topic2, topic3 ]
+    special_filters:
+      address: { kind: column_alias, column: _evm_log_address }
+      topic0:  { kind: column_alias, column: _evm_log_topic0 }
+      topic1:  { kind: column_alias, column: _evm_log_topic1 }
+      topic2:  { kind: column_alias, column: _evm_log_topic2 }
+      topic3:  { kind: column_alias, column: _evm_log_topic3 }
+    relations:
       extrinsic:
         table: extrinsics
-        left_key: [ block_number, extrinsic_index ]
+        left_key:  [ block_number, extrinsic_index ]
         right_key: [ block_number, index ]
 ```
 
-### Query Alias Properties
+Every name in `filters` resolves, here as on a table: each is a column of the
+target or a key of the alias's own `special_filters`. The five above are all
+renames, so all five are declared — listing `topic1` without defining it is a
+catalog the loader refuses, not a filter that quietly falls through to the
+table.
 
-| Property | Type | Required | Description |
-|---|---|---|---|
-| `table` | string | **yes** | Physical table this alias queries. |
-| `implicit_predicates` | map | no | Column → values filters automatically applied to every query through this alias. |
-| `filter_aliases` | map | no | Maps query filter keys to physical column names (e.g., `topic0` → `_evm_log_topic0`). |
-| `relations` | map | no | Relations available when querying via this alias. Same structure as table-level relations. |
-| `filters` | list | **yes** | Column filters this alias accepts, **in place of** the table's own list. An alias is a narrower view of its table: `evmLogs` accepts the log filters it aliases, not the whole event surface. Required for the same reason it is on a table — see [Filters](#filters). |
+`implicit_filters` are always applied and a client can neither see nor override
+them. `filters`, `special_filters` and `relations` replace the table's own.
 
-### Use Cases
+An alias *defines* only `column_alias` filters, because an alias's job is to
+reach the extraction columns its implicit filter makes meaningful, and because
+an item request carries the column a rename resolves to while the plan looks
+every other kind up on the table. It *reaches* more than that: naming one of the
+table's own special filters in `filters` — a bloom, a bound, a discriminator —
+admits it, whatever its kind. What an alias cannot do is invent one.
 
-- **Substrate `evmLogs`**: Queries the `events` table with `name: ["EVM.Log"]` implicit filter, remapping EVM-style filter keys (`topic0`, `address`) to the physical columns (`_evm_log_topic0`, `_evm_log_address`).
-- **Hyperliquid `orderActions`/`cancelActions`**: Queries the `actions` table with `action_type` implicit filter, remapping `contains_asset` to type-specific columns (`order_asset`, `cancel_asset`).
+Items requested through an alias and through its table in one query land in the
+same array, deduplicated.
 
----
+## What the loader rejects
 
-## Complete Minimal Example
+A catalog is validated when it is loaded, and one that fails is not used. The
+checks need no chunk:
+
+- exactly one block table — the one whose `item_order_keys` is empty and which
+  has no `address_column` — and it is declared first, and every other table
+  declares a `request` block;
+- every column a `block_number_column`, `address_column`, `item_order_keys`,
+  `sort_key`, `weight`, special filter, virtual field, variant or alias names
+  exists;
+- every entry of `filters` is a special filter or a non-system column, and every
+  special filter is in `filters`;
+- every entry of `fields` is a non-system column, a virtual field or a variant
+  field, and a table that declares an output `name` declares `fields`;
+- a roll's spread list column, if any, is last; a discriminator length is
+  written the way the lookup reads it (`"8"`, not `8`) and is at most 16;
+- `variant_column` and `variants` come together; `hex_number` is declared on an
+  unsigned integer; a `bloom` names a `fixed_binary_N` column and declares that
+  `N`;
+- every field mapping resolves once: a `field_key` is its own column's name or
+  no column's, two mappings answering to one field key read one column, no two
+  mappings in a group share an `as`, and none claims a column that identifies a
+  row;
+- no `special_filters` or `virtual_fields` entry carries a key its `kind` does
+  not take — the one place serde would drop it in silence rather than complain;
+- every relation targets a real table, both keys have equal length and begin
+  with the block number column, and `children`/`parents` relations have an
+  `address_column` on both sides;
+- request names are unique across tables and aliases, and output names across
+  tables. A duplicate would be resolved by iteration order, which is to say
+  arbitrarily.
+
+## A minimal catalog
 
 ```yaml
 name: my_chain
 
 tables:
   blocks:
+    output:
+      name: block
+      fields: [ number, hash, parent_hash, timestamp ]
     block_number_column: number
     parent_hash_column: parent_hash
-    field_name: block
-    sort_key: [number]
-    filters: []
-    fields: [number, hash, parent_hash, timestamp]
+    sort_key: [ number ]
     columns:
-      number:
-        type: uint64
-        stats: true
-      hash:
-        type: string
-        json_encoding: hex
-      parent_hash:
-        type: string
-        json_encoding: hex
-      timestamp:
-        type: timestamp_second
+      number:      { type: uint64 }
+      hash:        { type: string, encoding: hex_bytes }
+      parent_hash: { type: string, encoding: hex_bytes }
+      timestamp:   { type: timestamp_second }
 
   transactions:
-    query_name: transactions
-    field_name: transaction
-    item_order_keys: [transaction_index]
-    sort_key: [to, block_number, transaction_index]
-    filters: [to]
-    fields: [transaction_index, to, value, input]
+    request:
+      name: transactions
+      filters: [ from, to ]
+    output:
+      name: transaction
+      fields: [ transaction_index, hash, from, to, value ]
+    item_order_keys: [ transaction_index ]
+    sort_key: [ to, block_number, transaction_index ]
     columns:
-      block_number:
-        type: uint64
-        stats: true
-      transaction_index:
-        type: uint32
-      to:
-        type: string
-        json_encoding: hex
-        stats: true
-        dictionary: true
-      value:
-        type: string
-        json_encoding: hex
-      input:
-        type: string
-        json_encoding: hex
-        weight: input_size
-
-      # system
-      input_size:
-        type: uint64
-        system: true
+      block_number:      { type: uint64 }
+      transaction_index: { type: uint32 }
+      hash:              { type: string, encoding: hex_bytes }
+      from:              { type: string, encoding: hex_bytes }
+      to:                { type: string, encoding: hex_bytes }
+      value:             { type: uint64, encoding: decimal_string }
 ```

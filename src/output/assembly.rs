@@ -96,6 +96,17 @@ fn accumulate_wave_weight(
 /// intersect the chunk's data — a query whose filters match nothing still
 /// yields the boundary blocks of the range as header-only entries. See
 /// [`QueryOutput`] for the block range metadata and lazy block encoding.
+/// Request name → the position its table holds in the catalog, which is the
+/// order item arrays appear in a response block.
+fn request_name_positions(metadata: &DatasetDescription) -> HashMap<&str, usize> {
+    metadata
+        .tables
+        .iter()
+        .enumerate()
+        .map(|(pos, (name, desc))| (desc.request_name(name), pos))
+        .collect()
+}
+
 pub fn execute_plan(
     plan: &Plan,
     metadata: &DatasetDescription,
@@ -827,12 +838,7 @@ fn execute_chunk_fmt(
         }
 
         // Group sources by output table name, ordered by metadata table order.
-        let qn_pos: HashMap<&str, usize> = metadata
-            .tables
-            .iter()
-            .enumerate()
-            .map(|(i, (name, desc))| (desc.request_name(name), i))
-            .collect();
+        let qn_pos = request_name_positions(metadata);
         let mut order: Vec<String> = Vec::new();
         let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
         for (i, s) in srcs.iter().enumerate() {
@@ -864,8 +870,9 @@ fn execute_chunk_fmt(
                 }
             }
             let name = block_table_desc
-                .map(|d| d.request_name(&plan.block_table).to_string())
-                .unwrap_or_else(|| "blocks".to_string());
+                .map(|d| d.request_name(&plan.block_table))
+                .unwrap_or(plan.block_table.as_str())
+                .to_string();
             let mut batches: Vec<RecordBatch> = Vec::with_capacity(block_batches.len());
             for b in &block_batches {
                 let trimmed = filter_to_blocks(&project_columns(b, &wanted)?, &bn, keep)?;
@@ -971,11 +978,7 @@ fn execute_chunk_fmt(
             let bn_col = table_desc.block_number_column.as_str();
             let query_name = table_desc.request_name(&table_plan.table);
 
-            let grouped = table_desc
-                .output
-                .variant_column
-                .as_deref()
-                .map(|by| build_grouped_writers(&table_plan.output_columns, table_desc, by));
+            let grouped = build_grouped_writers(&table_plan.output_columns, table_desc);
             let sort_columns = build_full_sort_columns(table_desc);
             let sort_col_resolved = resolve_sort_columns(&batches, &sort_columns);
             all_indexes.push(IndexedBatches {
@@ -994,11 +997,7 @@ fn execute_chunk_fmt(
                         let rel_bn = rd.block_number_column.as_str();
                         let rel_qn = rd.request_name(&rel.target_table);
 
-                        let rel_grouped = rd
-                            .output
-                            .variant_column
-                            .as_deref()
-                            .map(|by| build_grouped_writers(&rel.output_columns, rd, by));
+                        let rel_grouped = build_grouped_writers(&rel.output_columns, rd);
                         let rel_sort_columns = build_full_sort_columns(rd);
                         let rel_sort_resolved =
                             resolve_sort_columns(&rel_batches, &rel_sort_columns);
@@ -1031,13 +1030,7 @@ fn execute_chunk_fmt(
     }
 
     // Sort table_group_order by metadata table definition order (YAML key order).
-    // Build a map from request name → position in metadata.tables.
-    let query_name_order: HashMap<&str, usize> = metadata
-        .tables
-        .iter()
-        .enumerate()
-        .map(|(pos, (name, desc))| (desc.request_name(name), pos))
-        .collect();
+    let query_name_order = request_name_positions(metadata);
     table_group_order.sort_by_key(|name| {
         query_name_order
             .get(name.as_str())

@@ -23,8 +23,8 @@ A query is a single JSON object.
 ```
 
 Three kinds of key appear at the top level: the six **reserved keys** above, and
-**item request arrays** named after a table's `queryName`. There is no third
-kind. A key that is neither reserved nor a known `queryName` is an error
+**item request arrays** named after a table's request name (§1.2). There is no
+third kind. A key that is neither reserved nor a known request name is an error
 ([INV-Q2](07-invariants.md#inv-q2)).
 
 ## 2.1 Reserved keys
@@ -87,7 +87,7 @@ reorganise ([INV-E5](07-invariants.md#inv-e5)).
 
 ## 2.2 Item request arrays
 
-Each key naming a table's `queryName` carries an array of **item requests**. The
+Each key naming a table's request name carries an array of **item requests**. The
 value MUST be an array ([INV-Q6](07-invariants.md#inv-q6)).
 
 An item request is an object whose keys are either **filters** or **relation
@@ -118,16 +118,17 @@ unioned ([INV-P5](07-invariants.md#inv-p5)).
 
 ### Aliases
 
-A `queryName` may name an **alias** rather than a table. An alias targets a real
-table and adds:
+A request name may name an **alias** rather than a table. An alias targets a
+real table and carries a request surface of its own:
 
-- **implicit predicates** — filters always applied, which the client cannot see or override;
-- **filter aliases** — filter keys that read differently-named columns;
+- **implicit filters** — always applied, which the client cannot see or override;
+- **filters** — its own closed list, typically `columnAlias` keys onto the
+  columns the implicit filter makes meaningful;
 - its own **relations**.
 
 An alias is otherwise an ordinary item request array. Substrate's `evmLogs` is
-an alias over `events` with the implicit predicate `name = "EVM.Log"` and filter
-aliases mapping `address` and `topic0…3` onto extraction columns.
+an alias over `events` with the implicit filter `name = "EVM.Log"` and
+`columnAlias` filters mapping `address` and `topic0…3` onto extraction columns.
 
 Items requested through an alias and items requested through its underlying table
 in the same query land in the same output array, deduplicated
@@ -141,7 +142,7 @@ in the same query land in the same output array, deduplicated
 }
 ```
 
-The keys of `fields` are table `fieldName`s. An unknown one is an error
+The keys of `fields` are tables' output names (§1.2). An unknown one is an error
 ([INV-Q8](07-invariants.md#inv-q8)). The value MUST be an object; each of its
 keys names a selectable field of that table, and each value is a boolean. Only
 `true` selects.
@@ -153,7 +154,7 @@ key that is not a selectable field is an error
 
 The output surface is **closed**, for the same reason the filter surface is
 (§1.6) — [ADR-4](decisions/ADR-4-closed-field-surface.md). A catalog may *derive* it — non-`system` columns, plus virtual fields,
-plus field-group request keys — but the derivation is a convenience, not the
+plus variant fields — but the derivation is a convenience, not the
 definition. Where it would admit a name §3 does not list, §3 wins
 ([INV-Q7](07-invariants.md#inv-q7), [INV-Q14](07-invariants.md#inv-q14)).
 
