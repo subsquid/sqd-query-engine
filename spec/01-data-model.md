@@ -28,21 +28,54 @@ Exactly one table in each dataset is the **block table**. It carries one row per
 block and is the anchor for everything else. Every other table is an **item
 table**: its rows are items belonging to a block.
 
-A **table** is described by:
+A **table** has a name — its identity within the dataset — and three groups of
+properties. Two are the surfaces a client can see; the third is how the rows are
+stored, which a client cannot.
+
+The **request surface** is what an item request may say:
 
 | Property | Meaning |
 |---|---|
-| `name` | The table's identity within the dataset. |
-| `queryName` | The JSON key clients use to request items from it, and the key under which its items appear in the response. Defaults to `name`. |
-| `fieldName` | The JSON key under `fields` used to select this table's output columns. Defaults to `name`. |
+| `request.name` | The **request name**: the JSON key clients use to request items from the table, and the key under which its items appear in the response. Defaults to the table's name. |
+| `request.filters` | The closed set of filters clients may apply. See §1.6. |
+| `request.relations` | Named links to other tables (or to itself). See §1.7. |
+
+The **output surface** is what a field selection may pick:
+
+| Property | Meaning |
+|---|---|
+| `output.name` | The **output name**: the JSON key under `fields` used to select this table's fields. |
+| `output.fields` | The closed set of selectable fields. Each names a column, a virtual field or a variant field. See §2.3. |
+| `output.virtualFields` | Output-only fields synthesised from several columns. See §1.8. |
+| `output.variantColumn` | The column whose value names each row's shape. See §1.9. |
+| `output.variants` | Polymorphic output shape, for tables whose rows come in several kinds. See §1.9. |
+
+`output.variantColumn` and `output.variants` are separate properties and are
+written together or not at all: a column dispatching to nothing and variants
+nothing dispatches to are both catalogs that say less than they look like, and
+§1.10 refuses either.
+
+**Storage** is what the rows look like on disk:
+
+| Property | Meaning |
+|---|---|
 | `blockNumberColumn` | The column holding the block number. |
 | `addressColumn` | For hierarchical tables, the column holding the tree path. Absent otherwise. |
 | `itemOrderKeys` | Ordered columns that, together with the block number, totally order the table's rows within a block. |
+| `sortKey` | The order rows physically sit in. See §1.3. |
 | `columns` | An ordered map of column name → column description. Order is significant; it fixes output field order. |
-| `filters` | The closed set of filters clients may apply. See §1.6. |
-| `relations` | Named links to other tables (or to itself). See §1.7. |
-| `virtualFields` | Output-only fields synthesised from several columns. See §1.8. |
-| `fieldGroups` | Polymorphic output shape, for tables whose rows have variants. See §1.9. |
+
+A request surface may be absent, and only the block table's is: its rows are the
+headers, which come with every response, so it keeps its default request name and
+takes `{}` as its only item request. An item table MUST declare one, `filters:
+[]` included, for the reason `filters` is itself required — a surface that is
+merely left out accepts nothing and refuses every filter a client sends, which
+from outside is a dataset without those columns rather than a catalog with a
+hole in it. An output surface has no default; a table without one is not a key of
+`fields`. The split is the
+point: a column is filterable because `request.filters` lists it and visible
+because `output.fields` does, and a column neither list names is the engine's
+business alone.
 
 A **column** is described by:
 
@@ -50,8 +83,7 @@ A **column** is described by:
 |---|---|
 | `type` | The *logical* type. See §1.4. |
 | `encoding` | How values are rendered in the response. See §1.5. Defaults to the type's natural rendering. |
-| `stats` | Whether the storage layer keeps min/max statistics for this column. Advisory: an optimisation hint only. |
-| `dictionary` | Whether the column is dictionary-encoded in storage. Advisory. |
+| `foldCase` | Filters compare case-insensitively even though the encoding does not say so. See §1.5. |
 | `weight` | How much this column contributes to the response weight budget. See §5.4. |
 | `system` | If true, the column exists to serve filters, joins, ordering or weights, and is never emitted. |
 
@@ -170,7 +202,7 @@ must not be able to corrupt the response framing.
 
 ## 1.6 Filters
 
-`filters` is a **closed allowlist**
+`request.filters` is a **closed allowlist**
 ([ADR-3](decisions/ADR-3-closed-filter-surface.md)). A table declares which of its columns —
 and which of its *special filters* — clients may filter on. A filter key that is
 not declared is an error ([INV-Q6](07-invariants.md#inv-q6)), even if a column of
@@ -234,31 +266,43 @@ nested ([INV-O10](07-invariants.md#inv-o10)).
 
 This exists so that a physically-flattened structure — `topic0, topic1, topic2,
 topic3` or `a0 … a15, restAccounts` — can be presented as the array it logically
-is. Virtual fields are selectable in `fields` exactly like columns. They are not
-filterable.
+is. A virtual field is selectable in `fields` exactly like a column — once
+`output.fields` lists it. It is not filterable.
 
-## 1.9 Field groups
+## 1.9 Variants
 
 Some tables hold rows of several shapes. An EVM trace is a *create*, a *call*, a
 *suicide* or a *reward*, and each carries different columns. Bitcoin-style
 inputs and outputs are similar.
 
-A table with `fieldGroups` declares:
+A table with `output.variants` declares:
 
-- a **tag column** whose value names the variant,
-- **base fields** emitted flat for every variant,
-- for each tag value, a set of **groups**, each a named object of field mappings.
+- a **variant column** whose value names the shape of each row,
+- for each variant, a set of **groups**, each a named object of field mappings.
 
-A field mapping is `(column, outputField, requestKey?)`. It says: read `column`,
-emit it as `outputField`, and let the client select it under `requestKey`
-(defaulting to `outputField`). Distinct request keys may map the same column to
-different output positions.
+A field mapping is `(column, as, fieldKey?)`. It says: read `column`, emit it
+under the JSON key `as`, and let the client select it as `fieldKey` — which
+defaults to the column's own name. Distinct fields may map the same column to
+different output positions: EVM's `callType` and `callCallType` both read the
+column `callType`.
 
-The group name `_` means "flatten into the enclosing object" rather than nesting.
+`as` is written to the wire exactly as the catalog spells it, as is the group
+name; neither is converted at the boundary the way a column name is (§1.2).
 
-For a row, the engine emits the base fields, then the groups belonging to the
-row's tag. A tag value the catalog does not know MUST NOT crash the engine; the
-row emits its base fields and no variant groups
+A **variant field** is a field some mapping names. Every other selectable field
+of the table is a plain column, and renders flat for every row whatever its
+variant. The group name `_` means "flatten into the enclosing object" rather
+than nesting.
+
+Which of the two a field is follows from the mappings alone, so a mapping that
+claims a field takes it out of the flat set for *every* row — and rows of the
+variants that do not also claim it lose the field entirely. That is what a
+per-variant field wants and what a shared one does not, so §1.10 refuses a
+mapping over the columns that identify a row.
+
+For a row, the engine emits the plain fields, then the groups belonging to the
+row's variant. A variant the catalog does not know MUST NOT crash the engine;
+the row emits its plain fields and no groups
 ([INV-O11](07-invariants.md#inv-o11)).
 
 ## 1.10 Catalog well-formedness
@@ -273,6 +317,7 @@ They are collected as [INV-D1](07-invariants.md#inv-d1) … [INV-D10](07-invaria
 - Exactly one block table: a block number alone identifies its rows, which is
   to say `itemOrderKeys` is empty and there is no `addressColumn`. Storage order
   says nothing about it.
+- Every table but that one declares a request surface.
 - `blockNumberColumn`, `addressColumn`, every `itemOrderKeys` entry, every
   `sortKey` entry: exists in `columns`.
 - Every `weight` that names a size column: that column exists.
@@ -285,14 +330,24 @@ They are collected as [INV-D1](07-invariants.md#inv-d1) … [INV-D10](07-invaria
   table defines is in its filter list.
 - Every virtual field: all rolled columns exist; a spread list column, if
   present, is last.
-- Every field group: the tag column exists; every mapped column exists.
-- Every declared output field resolves to a column, virtual field or field-group
-  request key, and none of its physical sources is `system`.
-- Every alias: its target table exists; its implicit-predicate columns exist;
-  its filter aliases target real columns and are in its filter list; its
-  relations are valid.
-- `queryName` and `fieldName` are unique across tables *and* aliases.
+- Every variant: the variant column exists; every mapped column exists; a
+  variant column and variants come together, since one without the other
+  does nothing.
+- Every field mapping resolves to one column and one place: a `fieldKey` is
+  either its own column's name or the name of no column at all; two mappings
+  answering to one `fieldKey` read the same column; no two mappings in a group
+  share an `as`; and no mapping claims the variant column, an `itemOrderKeys`
+  entry, the `addressColumn` or the block number column.
+- Every `bloom` filter: its column is fixed-size binary, and the declared width
+  is that column's.
+- Every entry of `output.fields` resolves to a column, a virtual field or a
+  variant field, and none of its physical sources is `system`.
+- Every alias: its target table exists; its implicit-filter columns exist;
+  its `columnAlias` filters target real columns and are in its filter list;
+  its relations are valid.
+- Request names are unique across tables *and* aliases; output names are
+  unique across tables.
 
-The last check is easy to overlook and easy to violate. A duplicate `queryName`
+The last check is easy to overlook and easy to violate. A duplicate request name
 makes a client's request ambiguous, and the ambiguity is resolved by iteration
 order — which is to say, arbitrarily.

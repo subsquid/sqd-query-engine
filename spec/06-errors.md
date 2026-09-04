@@ -45,9 +45,9 @@ Raised from the request and catalog, before any data is read.
 |---|---|
 | `MalformedRequest` | The body is not a JSON object, or a value has the wrong JSON type. |
 | `UnknownDataset` | `type` is absent, or names no dataset. |
-| `UnknownTable` | A top-level key is neither reserved nor a `queryName`. |
+| `UnknownTable` | A top-level key is neither reserved nor a request name. |
 | `UnknownFilter` | An item request key names neither a declared filter nor a declared relation of its table. |
-| `UnknownFieldGroup` | A key of `fields` names no table's `fieldName`. |
+| `UnknownFieldGroup` | A key of `fields` names no table's output name. |
 | `UnknownField` | A key inside `fields.X` names no selectable field of `X`. |
 | `InvalidBlockRange` | `toBlock < fromBlock`. |
 | `InvalidBlockNumber` | `fromBlock` or `toBlock` is not an unsigned 64-bit integer. |
@@ -132,6 +132,6 @@ For symmetry, because over-erroring is its own failure mode:
 | `toBlock` beyond the chunk's last block | Response covers the chunk. |
 | A relation whose target has no matching rows | The relation contributes nothing. |
 | `includeAllBlocks: true` over a range with no items | Headers for every block. |
-| A tag value not in the catalog's field groups | Base fields only. |
+| A variant not in the catalog | Plain fields only. |
 | A bloom filter admitting a row that does not mention the account | A legal false positive. |
 | The response exceeding `P-WEIGHT-BUDGET` because one block does | The block is emitted whole. |

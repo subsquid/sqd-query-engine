@@ -7,6 +7,7 @@ use crate::output::encoder::{
 use arrow::array::*;
 use arrow::record_batch::RecordBatch;
 use rustc_hash::FxHashMap;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
@@ -107,7 +108,7 @@ pub(crate) enum ResolvedIndices {
 type VariantGroups<W> = HashMap<String, Vec<(Vec<u8>, Vec<W>)>>;
 
 pub(crate) struct GroupedWriters {
-    /// Writers for base fields (shared across all variants).
+    /// Writers for the fields no variant claims, written flat on every row.
     base_writers: Vec<FieldWriter>,
     /// The column whose value picks the variant.
     variant_column: String,
@@ -213,11 +214,15 @@ pub(crate) fn build_field_writers(
 /// Writers for a table whose rows come in variants. A field some variant maps
 /// is written inside that variant's group; every other field is written flat,
 /// for every row, so it is the mappings that decide which is which.
+///
+/// `None` when the table dispatches on nothing, which is the same table for
+/// which the mappings are empty — the loader ties the two together.
 pub(crate) fn build_grouped_writers(
     output_columns: &[String],
     table_desc: &TableDescription,
-    variant_column: &str,
-) -> GroupedWriters {
+) -> Option<GroupedWriters> {
+    let variant_column = table_desc.output.variant_column.as_deref()?;
+
     // Build a reverse map: field -> (variant, group, json_name, physical_column).
     // The field usually equals the physical column, but a column may back
     // several output fields (e.g. trace `call_type` → `type` and `callType`).
@@ -238,10 +243,12 @@ pub(crate) fn build_grouped_writers(
         }
     }
 
-    // Separate output columns into base vs grouped
+    // Separate output columns into base vs grouped.
     let mut base_writers = Vec::new();
-    // variant -> group -> Vec<FieldWriter>
-    let mut variant_groups: HashMap<String, HashMap<String, Vec<FieldWriter>>> = HashMap::new();
+    // variant -> group -> Vec<FieldWriter>. Ordered: the groups of a variant are
+    // written in this order, and a HashMap would give it the process's hash
+    // seed, so `action` and `result` would swap places between restarts.
+    let mut variant_groups: BTreeMap<String, BTreeMap<String, Vec<FieldWriter>>> = BTreeMap::new();
 
     for col_name in output_columns {
         let Some(&(variant, group, json_name, phys_col)) = field_to_group.get(col_name.as_str())
@@ -291,11 +298,11 @@ pub(crate) fn build_grouped_writers(
         variant_writers.insert(variant, group_list);
     }
 
-    GroupedWriters {
+    Some(GroupedWriters {
         base_writers,
         variant_column: variant_column.to_string(),
         variant_writers,
-    }
+    })
 }
 
 pub(crate) fn resolve_grouped_writers(
@@ -762,6 +769,107 @@ mod tests {
             assert_eq!(narrow.cmp_rows(0, &wide, 0), std::cmp::Ordering::Less); // 9 < 10
             assert_eq!(narrow.cmp_rows(1, &wide, 0), std::cmp::Ordering::Greater); // 11 > 10
             assert_eq!(narrow.cmp_rows(1, &wide, 1), std::cmp::Ordering::Less); // 11 < 300
+        }
+    }
+
+    /// A trace catalog in miniature: two variants, two groups each, one column
+    /// that is only ever flat.
+    fn variant_catalog() -> crate::metadata::DatasetDescription {
+        crate::metadata::parse_dataset_description(
+            r#"
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    sort_key: [number]
+    columns:
+      number: { type: uint64 }
+  items:
+    request:
+      filters: []
+    output:
+      name: item
+      fields: [ seq, kind, note, call_from, call_gas, create_init ]
+      variant_column: kind
+      variants:
+        call:
+          action: [ { column: call_from, as: from } ]
+          result: [ { column: call_gas, as: gas } ]
+        create:
+          action: [ { column: create_init, as: init } ]
+    item_order_keys: [ seq ]
+    columns:
+      block_number: { type: uint64 }
+      seq: { type: uint32 }
+      kind: { type: string }
+      note: { type: string }
+      call_from: { type: string }
+      call_gas: { type: uint64 }
+      create_init: { type: string }
+"#,
+        )
+        .expect("the catalog is valid")
+    }
+
+    /// A field no mapping claims is flat; a field some mapping claims is not.
+    ///
+    /// The catalog says which is which by omission — the explicit list of flat
+    /// fields is gone — so nothing but this test states the direction, and the
+    /// direction is the difference between `type` at the top level of every
+    /// trace and `type` inside one variant's group.
+    ///
+    /// Covers CT-6 · INV-O6
+    #[test]
+    fn a_field_is_flat_exactly_when_no_variant_claims_it() {
+        let meta = variant_catalog();
+        let table = meta.table("items").expect("the table is there");
+        let selected: Vec<String> = [
+            "seq",
+            "kind",
+            "note",
+            "call_from",
+            "call_gas",
+            "create_init",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+        let grouped = build_grouped_writers(&selected, table).expect("the table dispatches");
+
+        let flat: Vec<&str> = grouped
+            .base_writers
+            .iter()
+            .map(|w| match w {
+                FieldWriter::Regular { column_name, .. } => column_name.as_str(),
+                FieldWriter::Roll { .. } => "roll",
+            })
+            .collect();
+        assert_eq!(flat, ["seq", "kind", "note"], "only the unclaimed fields");
+    }
+
+    /// The groups of a variant are written in catalog order. Held in a `HashMap`
+    /// they came out in the process's hash order instead, so `action` and
+    /// `result` swapped places between restarts — the one part of field order
+    /// the engine, rather than the catalog, decides.
+    ///
+    /// Covers CT-6 · INV-O6
+    #[test]
+    fn variant_groups_keep_their_catalog_order() {
+        let meta = variant_catalog();
+        let table = meta.table("items").expect("the table is there");
+        let selected: Vec<String> = ["call_from", "call_gas"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        for _ in 0..16 {
+            let grouped = build_grouped_writers(&selected, table).expect("the table dispatches");
+            let keys: Vec<String> = grouped.variant_writers["call"]
+                .iter()
+                .map(|(key, _)| String::from_utf8_lossy(key).into_owned())
+                .collect();
+            assert_eq!(keys, ["\"action\":", "\"result\":"]);
         }
     }
 

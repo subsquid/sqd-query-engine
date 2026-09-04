@@ -431,7 +431,7 @@ tables:
             - { column: call_sighash, as: sighash }
             - { column: call_type, as: type }
             # `callCallType` field outputs `action.callType` from the same column.
-            - { column: call_type, field: call_call_type, as: callType }
+            - { column: call_type, field_key: call_call_type, as: callType }
           result:
             - { column: call_result_gas_used, as: gasUsed }
             - { column: call_result_output, as: output }

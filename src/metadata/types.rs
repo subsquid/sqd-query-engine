@@ -1,6 +1,7 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
 /// Top-level dataset description. One per chain type (evm, solana, etc.).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,11 +56,18 @@ pub struct Alias {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TableDescription {
-    /// What an item request on this table may say. Absent when nothing is
-    /// requested of the table beyond its existence: the block table has no
-    /// filters and no relations, and is still addressed by its own name.
-    #[serde(default)]
-    pub request: RequestSurface,
+    /// What an item request on this table may say. Absent only for the block
+    /// table, which has no filters and no relations and is still addressed by
+    /// its own name; the loader requires it of every other table, for the reason
+    /// [`RequestSurface::filters`] is itself required.
+    ///
+    /// Read it through [`TableDescription::request`], which supplies the empty
+    /// surface. The field is `Option` so that absence stays visible to the
+    /// loader: a defaulted `RequestSurface` is indistinguishable from one
+    /// written out with empty lists, and that is the difference the check turns
+    /// on.
+    #[serde(default, rename = "request")]
+    pub request_surface: Option<RequestSurface>,
 
     /// What a client may ask to see of this table's rows.
     #[serde(default)]
@@ -148,7 +156,7 @@ pub struct OutputSurface {
     pub name: Option<String>,
 
     /// Fields a client may select, each naming a non-system column, a virtual
-    /// field, or a variant mapping's `field`.
+    /// field, or a variant mapping's field key.
     ///
     /// Declaring them is what keeps the output surface closed, for the reason
     /// [`RequestSurface::filters`] closes the input one: derived from the column
@@ -177,6 +185,14 @@ pub struct OutputSurface {
     /// the group holds. A group named `_` is written flat. Fields no variant
     /// claims are written flat for every row.
     ///
+    /// Claiming is therefore all-or-nothing per field: a field one variant maps
+    /// leaves the top level for *every* row, and rows of the variants that do
+    /// not map it lose the field entirely. That is what a per-variant field
+    /// wants (`create_init` has no meaning on a `call` row) and what a shared
+    /// one does not, so the loader refuses a mapping over the columns that
+    /// identify a row — the variant column, the item order keys, the address
+    /// column and the block number.
+    ///
     /// EVM traces: `create` → `action.{from,value,gas,init}`, `result.{...}`;
     /// `call` → `action.{from,to,...}`, `result.{gasUsed,output}`; and so on.
     #[serde(default)]
@@ -184,20 +200,37 @@ pub struct OutputSurface {
 }
 
 impl TableDescription {
+    /// What an item request on this table may say. A table without the block —
+    /// only the block table — takes the empty surface: no filters, no relations,
+    /// and its own name.
+    pub fn request(&self) -> &RequestSurface {
+        static EMPTY: OnceLock<RequestSurface> = OnceLock::new();
+
+        match &self.request_surface {
+            Some(request) => request,
+            None => EMPTY.get_or_init(RequestSurface::default),
+        }
+    }
+
     /// The name a request addresses this table by, `key` being the table's
     /// own name in the catalog.
     pub fn request_name<'a>(&'a self, key: &'a str) -> &'a str {
-        self.request.name.as_deref().unwrap_or(key)
+        self.request().name.as_deref().unwrap_or(key)
     }
 
     /// The physical parquet column an output key reads, when the catalog
-    /// declares one: an ordinary column, or a variant mapping's `field` that
+    /// declares one: an ordinary column, or a variant mapping's `field_key` that
     /// renames it (`call_call_type` → `call_type`).
     ///
     /// A virtual field resolves to nothing — it rolls several columns, and the
     /// caller expands it. Everything that projects, weighs or requires an output
     /// column goes through here, so the three cannot disagree on what a key
     /// means.
+    ///
+    /// The column list is consulted first and the mappings second, which is the
+    /// opposite of the order the row writer resolves them in. The loader keeps
+    /// the two from ever disagreeing: a `field_key` that differs from its own
+    /// column may not name a column at all.
     pub fn physical_output_column(&self, key: &str) -> Option<&str> {
         if let Some((name, _)) = self.columns.get_key_value(key) {
             return Some(name.as_str());
@@ -208,6 +241,10 @@ impl TableDescription {
 
     /// The physical column a variant mapping reads for `field`, if any mapping
     /// is selected by that name.
+    ///
+    /// Takes the first of several mappings that answer to the name; the loader
+    /// requires them all to read the same column, so which one it is does not
+    /// matter.
     pub fn variant_source(&self, field: &str) -> Option<&str> {
         self.output
             .variants
@@ -472,7 +509,10 @@ pub enum SpecialFilter {
     /// Probabilistic membership test against a bloom column.
     Bloom {
         column: String,
-        /// The bloom's size in bytes.
+        /// The bloom's size in bytes. The probe reads the width off the stored
+        /// array, so this is a statement about the archive writer rather than an
+        /// input: the loader requires it to equal the column's own width, which
+        /// is what makes it worth writing down.
         bytes: usize,
         /// How many hash functions the archive writer set per value.
         hashes: usize,
@@ -497,21 +537,46 @@ pub enum SpecialFilter {
 pub struct FieldMapping {
     /// Physical column name in parquet.
     pub column: String,
-    /// The `fields` key that selects this mapping, when it differs from
+    /// The `output.fields` key that selects this mapping, when it differs from
     /// `column`. Lets one physical column back several output fields — EVM
-    /// `call_type` renders as both `action.type` (field `call_type`) and
-    /// `action.callType` (field `call_call_type`).
+    /// `call_type` renders as both `action.type` (field key `call_type`) and
+    /// `action.callType` (field key `call_call_type`).
+    ///
+    /// Not spelled `field`: that key once meant the *rendered* name, which is
+    /// now `as`, and a catalog carrying the old spelling would otherwise load
+    /// clean and move a field to another place in the response.
     #[serde(default)]
-    pub field: Option<String>,
-    /// JSON key inside the group (camelCase).
+    pub field_key: Option<String>,
+    /// JSON key inside the group, written to the wire exactly as it stands.
     #[serde(rename = "as")]
     pub json_name: String,
 }
 
 impl FieldMapping {
-    /// The `fields` key that selects this mapping (defaults to `column`).
+    /// The `output.fields` key that selects this mapping (defaults to `column`).
     pub fn field(&self) -> &str {
-        self.field.as_deref().unwrap_or(&self.column)
+        self.field_key.as_deref().unwrap_or(&self.column)
+    }
+}
+
+impl SpecialFilter {
+    /// The keys a catalog may write under each `kind`, the tag itself included.
+    ///
+    /// Serde cannot apply `deny_unknown_fields` to an internally tagged enum: a
+    /// key it does not know is buffered and dropped, so a filter still carrying
+    /// a spelling from an older catalog would load and quietly do nothing. Every
+    /// other shape in a catalog refuses a stray key, and [`check_stale_keys`]
+    /// gives these two the same answer by reading the list below.
+    ///
+    /// [`check_stale_keys`]: crate::metadata::loader
+    pub fn allowed_keys(kind: &str) -> Option<&'static [&'static str]> {
+        Some(match kind {
+            "discriminator" => &["kind", "by_length"],
+            "bloom" => &["kind", "column", "bytes", "hashes"],
+            "range_gte" | "range_lte" | "column_alias" => &["kind", "column"],
+            "gte_const" => &["kind", "column", "value"],
+            _ => return None,
+        })
     }
 }
 
@@ -523,6 +588,17 @@ pub enum VirtualField {
     /// Non-nullable columns come first, then nullable (stops at first null),
     /// then an optional trailing list column (spread into array).
     Roll { columns: Vec<String> },
+}
+
+impl VirtualField {
+    /// The keys a catalog may write under each `kind`, for the reason
+    /// [`SpecialFilter::allowed_keys`] exists.
+    pub fn allowed_keys(kind: &str) -> Option<&'static [&'static str]> {
+        Some(match kind {
+            "roll" => &["kind", "columns"],
+            _ => return None,
+        })
+    }
 }
 
 impl DatasetDescription {

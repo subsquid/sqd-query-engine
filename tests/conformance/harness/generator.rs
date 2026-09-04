@@ -275,7 +275,7 @@ impl Generator {
                 continue;
             }
 
-            let Some(query_name) = &table.request.name else {
+            let Some(query_name) = &table.request().name else {
                 continue;
             };
 
@@ -477,8 +477,8 @@ fn filters_of(
     let mut filters = Vec::new();
     let mut skipped = 0;
 
-    for key in &table.request.filters {
-        let column = match table.request.special_filters.get(key) {
+    for key in &table.request().filters {
+        let column = match table.request().special_filters.get(key) {
             None => key.as_str(),
             Some(SpecialFilter::ColumnAlias { column }) => column.as_str(),
             Some(_) => {
@@ -499,7 +499,7 @@ fn filters_of(
 /// The relations whose target table this chunk carries.
 fn relations_of(chunk: &Path, table: &TableDescription) -> Vec<Relation> {
     table
-        .request
+        .request()
         .relations
         .iter()
         .filter(|(_, def)| column_names(chunk, &def.table).is_some())

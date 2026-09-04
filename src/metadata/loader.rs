@@ -7,18 +7,105 @@ use std::path::Path;
 pub fn load_dataset_description(path: &Path) -> Result<DatasetDescription> {
     let content =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let desc: DatasetDescription =
-        serde_yaml::from_str(&content).with_context(|| format!("parsing {}", path.display()))?;
-    validate(&desc)?;
-    Ok(desc)
+    parse_dataset_description(&content).with_context(|| format!("parsing {}", path.display()))
 }
 
 /// Load a dataset description from a YAML string.
 pub fn parse_dataset_description(yaml: &str) -> Result<DatasetDescription> {
     let desc: DatasetDescription =
         serde_yaml::from_str(yaml).context("parsing dataset description")?;
+    check_stale_keys(yaml)?;
     validate(&desc)?;
     Ok(desc)
+}
+
+/// Refuse a key serde would drop in silence.
+///
+/// `special_filters` and `virtual_fields` hold internally tagged enums, the one
+/// shape `deny_unknown_fields` cannot be applied to: serde buffers the entry,
+/// takes the keys the variant declares and discards the rest. Every other part
+/// of a catalog fails loudly on a stray key, and a catalog is written by hand,
+/// so a filter left half-renamed would otherwise load and do nothing the author
+/// asked for.
+///
+/// Reads the raw document rather than the parsed description, which by then has
+/// forgotten the keys it dropped. Runs after the parse, so an unknown `kind` is
+/// already refused and every entry here has a key list to check against.
+fn check_stale_keys(yaml: &str) -> Result<()> {
+    let doc: serde_yaml::Value = serde_yaml::from_str(yaml).context("re-reading the catalog")?;
+    let mut trail = Vec::new();
+    walk_tagged_entries(&doc, &mut trail)
+}
+
+/// Walk every mapping, checking the entries of the two blocks that hold a tagged
+/// enum. `trail` is the path taken, for an error a reader can find in the file.
+fn walk_tagged_entries<'a>(node: &'a serde_yaml::Value, trail: &mut Vec<&'a str>) -> Result<()> {
+    let serde_yaml::Value::Mapping(map) = node else {
+        return Ok(());
+    };
+
+    for (key, value) in map {
+        let Some(key) = key.as_str() else { continue };
+
+        let allowed = match key {
+            "special_filters" => {
+                Some(crate::metadata::SpecialFilter::allowed_keys as fn(&str) -> _)
+            }
+            "virtual_fields" => Some(crate::metadata::VirtualField::allowed_keys as fn(&str) -> _),
+            _ => None,
+        };
+
+        trail.push(key);
+
+        if let Some(allowed) = allowed {
+            if let serde_yaml::Value::Mapping(entries) = value {
+                for (name, entry) in entries {
+                    let name = name.as_str().unwrap_or_default();
+                    check_entry_keys(&trail.join("."), name, entry, allowed)?;
+                }
+            }
+        }
+
+        walk_tagged_entries(value, trail)?;
+        trail.pop();
+    }
+
+    Ok(())
+}
+
+/// Every key of one tagged entry must be one its `kind` declares.
+fn check_entry_keys(
+    where_: &str,
+    name: &str,
+    entry: &serde_yaml::Value,
+    allowed: fn(&str) -> Option<&'static [&'static str]>,
+) -> Result<()> {
+    let serde_yaml::Value::Mapping(fields) = entry else {
+        return Ok(());
+    };
+
+    let kind = fields
+        .get(serde_yaml::Value::from("kind"))
+        .and_then(serde_yaml::Value::as_str)
+        .unwrap_or_default();
+
+    let Some(allowed) = allowed(kind) else {
+        return Ok(());
+    };
+
+    for key in fields.keys().filter_map(serde_yaml::Value::as_str) {
+        anyhow::ensure!(
+            allowed.contains(&key),
+            "{}: '{}' is a {} and carries no '{}'; it takes {:?}",
+            where_,
+            name,
+            kind,
+            key,
+            allowed
+        );
+    }
+
+    Ok(())
 }
 
 fn validate(desc: &DatasetDescription) -> Result<()> {
@@ -86,10 +173,24 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
             }
         }
 
+        // A table with no `request` block accepts no filters and no relations,
+        // and answers every one a client sends with a 400 that reads, from
+        // outside, like a dataset missing those columns. `filters` is required
+        // for that reason, and an absent block would step around the
+        // requirement one level up: `deny_unknown_fields` no more sees a missing
+        // `request:` than it saw a missing `filters:`. Only the block table has
+        // nothing to say here.
+        anyhow::ensure!(
+            table.is_block_table() || table.request_surface.is_some(),
+            "table '{}': no request block, so it would take no filters and no \
+             relations; declare one, with 'filters: []' if that is the intent",
+            table_name
+        );
+
         // Validate the declared filter surface. A typo here does not fail a
         // query — it removes a filter, and the query it was meant to narrow
         // comes back wrong instead.
-        let request = &table.request;
+        let request = table.request();
         let special: Vec<&str> = request.special_filters.keys().map(String::as_str).collect();
         check_filter_surface(
             &format!("table '{}'", table_name),
@@ -129,6 +230,37 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
                     "table '{}': special filter '{}' targets column '{}', which is not there",
                     table_name,
                     filter_name,
+                    column
+                );
+            }
+
+            // A bloom is probed as fixed-width bytes. Pointed at anything else
+            // the probe has no array to read and takes the scan threads down
+            // with it, so the type is checked here rather than discovered at
+            // query time. The declared width is the archive writer's, and the
+            // column's width is what the writer produced: a catalog where they
+            // disagree describes a bloom nobody wrote.
+            if let SpecialFilter::Bloom { column, bytes, .. } = special {
+                let data_type = &table.columns[column].data_type;
+                let crate::metadata::ColumnType::FixedBinary(width) = data_type else {
+                    anyhow::bail!(
+                        "table '{}': special filter '{}' probes column '{}' as a bloom, \
+                         but it is {:?}, not fixed-size binary",
+                        table_name,
+                        filter_name,
+                        column,
+                        data_type
+                    );
+                };
+
+                anyhow::ensure!(
+                    width == bytes,
+                    "table '{}': special filter '{}' declares a {}-byte bloom over a \
+                     {}-byte column '{}'",
+                    table_name,
+                    filter_name,
+                    bytes,
+                    width,
                     column
                 );
             }
@@ -213,8 +345,9 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
         // nothing — either is a catalog that says less than it looks like.
         let output = &table.output;
         let dispatches = output.variant_column.is_some();
+        let has_variants = !output.variants.is_empty();
         anyhow::ensure!(
-            dispatches != output.variants.is_empty(),
+            dispatches == has_variants,
             "table '{}': variants and variant_column come together; one without the \
              other does nothing",
             table_name
@@ -229,20 +362,7 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
             );
         }
 
-        for (variant, groups) in &output.variants {
-            for (group, mappings) in groups {
-                for mapping in mappings {
-                    anyhow::ensure!(
-                        table.columns.contains_key(&mapping.column),
-                        "table '{}': variant '{}.{}' maps column '{}', which is not there",
-                        table_name,
-                        variant,
-                        group,
-                        mapping.column
-                    );
-                }
-            }
-        }
+        check_variant_mappings(table_name, table)?;
 
         // A relation naming a table that is not there does not fail: the scan
         // returns nothing for an unknown table and assembly skips the source, so
@@ -292,7 +412,7 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
         let special: Vec<&str> = alias
             .special_filters
             .keys()
-            .chain(table.request.special_filters.keys())
+            .chain(table.request().special_filters.keys())
             .map(String::as_str)
             .collect();
         check_filter_surface(
@@ -314,11 +434,15 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
 
             // An item request carries the column an alias filter resolves to,
             // and the plan looks any other kind of special filter up on the
-            // table — where an alias's own would not be found.
+            // table — where an alias's own would not be found. This constrains
+            // what an alias may *define*, not what it may reach: naming one of
+            // the table's own special filters in `filters` reaches it, whatever
+            // its kind.
             let SpecialFilter::ColumnAlias { column } = special else {
                 anyhow::bail!(
-                    "alias '{}': special filter '{}' is not a column_alias; an alias can \
-                     only rename a column of '{}'",
+                    "alias '{}': special filter '{}' is not a column_alias; an alias \
+                     defines only renames of its own, and reaches every other kind \
+                     through '{}'",
                     alias_name,
                     key,
                     alias.table
@@ -563,6 +687,102 @@ fn check_field_surface(table_name: &str, table: &crate::metadata::TableDescripti
             table_name,
             field
         );
+    }
+
+    Ok(())
+}
+
+/// The mappings that nest a variant's fields, checked for the four ways a
+/// plausible one changes an answer without failing anything.
+///
+/// A mapping says three things: the column it reads, the `output.fields` key
+/// that selects it, and the name it renders under. Each of the three can be
+/// written so that the catalog means one thing and the engine does another.
+fn check_variant_mappings(
+    table_name: &str,
+    table: &crate::metadata::TableDescription,
+) -> Result<()> {
+    // Columns that say which row this is. A mapping over one of them moves it
+    // out of the top level for every row and off the rows of every variant that
+    // does not repeat it — the field vanishes from the shapes that need it most.
+    let mut identity: Vec<&str> = vec![table.block_number_column.as_str()];
+    identity.extend(table.item_order_keys.iter().map(String::as_str));
+    identity.extend(table.address_column.as_deref());
+    identity.extend(table.output.variant_column.as_deref());
+
+    // field key → the column it reads, to catch two mappings answering to one
+    // name with two different answers.
+    let mut source_of: HashMap<&str, &str> = HashMap::new();
+
+    for (variant, groups) in &table.output.variants {
+        for (group, mappings) in groups {
+            let mut rendered: HashMap<&str, &str> = HashMap::new();
+
+            for mapping in mappings {
+                anyhow::ensure!(
+                    table.columns.contains_key(&mapping.column),
+                    "table '{}': variant '{}.{}' maps column '{}', which is not there",
+                    table_name,
+                    variant,
+                    group,
+                    mapping.column
+                );
+
+                let field = mapping.field();
+
+                anyhow::ensure!(
+                    !identity.contains(&field),
+                    "table '{}': variant '{}.{}' maps '{}', which identifies a row and so \
+                     is written flat for every one of them",
+                    table_name,
+                    variant,
+                    group,
+                    field
+                );
+
+                // A field key that renames its column must not be a column of
+                // its own. `physical_output_column` answers from the column list
+                // before it consults the mappings, and the row writer resolves
+                // the mappings first: a key that is both projects one column and
+                // writes another, and the field ships empty.
+                anyhow::ensure!(
+                    field == mapping.column || !table.columns.contains_key(field),
+                    "table '{}': variant '{}.{}' selects column '{}' under the name of \
+                     column '{}'; a field key either is its own column or is not a \
+                     column at all",
+                    table_name,
+                    variant,
+                    group,
+                    mapping.column,
+                    field
+                );
+
+                if let Some(other) = source_of.insert(field, mapping.column.as_str()) {
+                    anyhow::ensure!(
+                        other == mapping.column,
+                        "table '{}': field '{}' is mapped to both '{}' and '{}'; one field \
+                         key reads one column",
+                        table_name,
+                        field,
+                        other,
+                        mapping.column
+                    );
+                }
+
+                if let Some(other) = rendered.insert(mapping.json_name.as_str(), field) {
+                    anyhow::bail!(
+                        "table '{}': variant '{}.{}' renders both '{}' and '{}' as '{}', \
+                         which would repeat the key in one object",
+                        table_name,
+                        variant,
+                        group,
+                        other,
+                        field,
+                        mapping.json_name
+                    );
+                }
+            }
+        }
     }
 
     Ok(())
@@ -878,6 +1098,8 @@ tables:
 
     /// Fork detection is off when nothing is declared, so a typo would turn it
     /// off silently rather than loudly.
+    ///
+    /// Covers CT-1 · INV-D1
     #[test]
     fn test_validate_rejects_unknown_parent_columns() {
         for column in ["parent_hash_column", "parent_number_column"] {
@@ -974,6 +1196,240 @@ aliases:
         assert!(err.contains("column_alias"), "got: {err}");
     }
 
+    /// A table that declares no request surface takes no filters and no
+    /// relations, and refuses every one a client sends — which reads from
+    /// outside like a dataset without those columns. Only the block table, whose
+    /// rows come with every response, has nothing to say here (INV-D1).
+    ///
+    /// Covers CT-1 · INV-D1
+    #[test]
+    fn test_validate_requires_a_request_surface() {
+        let catalog = |request: &str| {
+            format!(
+                r#"
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    sort_key: [number]
+    columns:
+      number: {{ type: uint64 }}
+  items:
+{request}    item_order_keys: [ seq ]
+    columns:
+      block_number: {{ type: uint64 }}
+      seq: {{ type: uint32 }}
+"#
+            )
+        };
+
+        parse_dataset_description(&catalog("    request:\n      filters: []\n"))
+            .expect("an item table that declares an empty surface on purpose must load");
+
+        let err = format!(
+            "{:#}",
+            parse_dataset_description(&catalog(""))
+                .expect_err("a surface left out must be refused")
+        );
+        assert!(err.contains("no request block"), "got: {err}");
+    }
+
+    /// The three names in a field mapping — the column, the key that selects it
+    /// and the key it renders under — can each be written so that the catalog
+    /// means one thing and the engine does another, without failing anything
+    /// (INV-D1).
+    ///
+    /// Covers CT-1 · INV-D1
+    #[test]
+    fn test_validate_rejects_variant_mapping_mistakes() {
+        let catalog = |variants: &str| {
+            format!(
+                r#"
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    sort_key: [number]
+    columns:
+      number: {{ type: uint64 }}
+  items:
+    request:
+      filters: []
+    output:
+      name: item
+      fields: [ seq, kind, payload ]
+      variant_column: kind
+      variants:
+{variants}
+    item_order_keys: [ seq ]
+    columns:
+      block_number: {{ type: uint64 }}
+      seq: {{ type: uint32 }}
+      kind: {{ type: string }}
+      payload: {{ type: string }}
+      other: {{ type: string }}
+"#
+            )
+        };
+
+        parse_dataset_description(&catalog(
+            "        call:\n          action: [ { column: payload, as: payload } ]",
+        ))
+        .expect("a mapping that renames nothing must load");
+
+        let rejected: &[(&str, &str, &str)] = &[
+            (
+                "a mapping over the column that says which variant a row is",
+                "        call:\n          action: [ { column: kind, as: kindOfRow } ]",
+                "identifies a row",
+            ),
+            (
+                "a mapping over an item order key",
+                "        call:\n          action: [ { column: seq, as: seq } ]",
+                "identifies a row",
+            ),
+            (
+                "a mapping over the block number",
+                "        call:\n          action: [ { column: block_number, as: blockNumber } ]",
+                "identifies a row",
+            ),
+            (
+                "a field key that is the name of another column",
+                "        call:\n          action: [ { column: payload, field_key: other, as: p } ]",
+                "is not a column at all",
+            ),
+            (
+                "one field key reading two columns",
+                "        call:\n          action: [ { column: payload, field_key: v, as: p } ]\n\
+                 \x20       create:\n          action: [ { column: other, field_key: v, as: p } ]",
+                "one field key reads one column",
+            ),
+            (
+                "two mappings rendering under one key",
+                "        call:\n          action: [ { column: payload, as: p }, \
+                 { column: other, as: p } ]",
+                "repeat the key in one object",
+            ),
+        ];
+
+        for (what, variants, reason) in rejected {
+            let err = format!(
+                "{:#}",
+                parse_dataset_description(&catalog(variants)).expect_err(what)
+            );
+            assert!(
+                err.contains(reason),
+                "{what}: wanted {reason:?}, got: {err}"
+            );
+        }
+    }
+
+    /// A bloom is probed as fixed-width bytes. Pointed at anything else the probe
+    /// has no array to read and takes the scan threads down with it, and a width
+    /// that is not the column's describes a bloom nobody wrote (INV-D1).
+    ///
+    /// Covers CT-1 · INV-D1
+    #[test]
+    fn test_validate_rejects_a_bloom_that_does_not_match_its_column() {
+        let catalog = |column: &str, bytes: usize| {
+            format!(
+                r#"
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    sort_key: [number]
+    columns:
+      number: {{ type: uint64 }}
+  items:
+    request:
+      filters: [ mentions ]
+      special_filters:
+        mentions: {{ kind: bloom, column: {column}, bytes: {bytes}, hashes: 7 }}
+    item_order_keys: [ seq ]
+    columns:
+      block_number: {{ type: uint64 }}
+      seq: {{ type: uint32 }}
+      label: {{ type: string, system: true }}
+      accounts_bloom: {{ type: fixed_binary_64, system: true }}
+"#
+            )
+        };
+
+        parse_dataset_description(&catalog("accounts_bloom", 64))
+            .expect("a bloom over its own column at its own width must load");
+
+        let err = format!(
+            "{:#}",
+            parse_dataset_description(&catalog("label", 64)).expect_err("a bloom over a string")
+        );
+        assert!(err.contains("not fixed-size binary"), "got: {err}");
+
+        let err = format!(
+            "{:#}",
+            parse_dataset_description(&catalog("accounts_bloom", 8))
+                .expect_err("a bloom at a width the column does not have")
+        );
+        assert!(err.contains("8-byte bloom over a 64-byte"), "got: {err}");
+    }
+
+    /// `special_filters` and `virtual_fields` hold internally tagged enums, the
+    /// one shape serde cannot apply `deny_unknown_fields` to: a key it does not
+    /// know is buffered and dropped. A catalog left half-renamed would otherwise
+    /// load and do nothing the author asked for (INV-D1).
+    ///
+    /// Covers CT-1 · INV-D1
+    #[test]
+    fn test_validate_rejects_stale_keys_in_tagged_blocks() {
+        let catalog = |bloom: &str, roll: &str| {
+            format!(
+                r#"
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    sort_key: [number]
+    columns:
+      number: {{ type: uint64 }}
+  items:
+    request:
+      filters: [ mentions ]
+      special_filters:
+        mentions: {{ kind: bloom, column: accounts_bloom, bytes: 64, hashes: 7{bloom} }}
+    output:
+      name: item
+      fields: [ topics ]
+      virtual_fields:
+        topics: {{ kind: roll, columns: [ topic0 ]{roll} }}
+    item_order_keys: [ seq ]
+    columns:
+      block_number: {{ type: uint64 }}
+      seq: {{ type: uint32 }}
+      topic0: {{ type: string }}
+      accounts_bloom: {{ type: fixed_binary_64, system: true }}
+"#
+            )
+        };
+
+        parse_dataset_description(&catalog("", "")).expect("the catalog without stale keys loads");
+
+        // The spelling `hashes` replaced. Serde takes `hashes`, drops this, and
+        // the author believes the edit took effect.
+        let err = format!(
+            "{:#}",
+            parse_dataset_description(&catalog(", num_hashes: 3", ""))
+                .expect_err("a stale special-filter key")
+        );
+        assert!(err.contains("num_hashes"), "got: {err}");
+
+        let err = format!(
+            "{:#}",
+            parse_dataset_description(&catalog("", ", type: roll"))
+                .expect_err("a stale virtual-field key")
+        );
+        assert!(err.contains("'topics'"), "got: {err}");
+    }
+
     /// A catalog is written by hand and read by nothing else. Each check below
     /// covers a mistake that would otherwise load clean and change an answer.
     #[test]
@@ -992,8 +1448,10 @@ tables:
   items:
     request:
       filters: [ user ]
+    item_order_keys: [ seq ]
     columns:
       block_number: {{ type: uint64 }}
+      seq: {{ type: uint32 }}
       user: {{ type: string }}
       user_bloom: {{ type: string, system: true }}
 {defect}
@@ -1001,42 +1459,59 @@ tables:
             )
         };
 
-        let rejected: &[(&str, &str)] = &[
+        // Without this the whole table below proves nothing: a base catalog that
+        // is itself refused makes every case pass on the base's own defect,
+        // whatever the spliced stanza says.
+        parse_dataset_description(&catalog(""))
+            .expect("the catalog the defects are spliced into must itself be valid");
+
+        let rejected: &[(&str, &str, &str)] = &[
             (
                 "an alias that omits its filter surface",
                 "aliases:\n  view:\n    table: items",
+                "missing field `filters`",
             ),
             (
                 "a misspelled alias key",
                 "aliases:\n  view:\n    table: items\n    filters: []\n    filter: [ user ]",
+                "unknown field `filter`",
             ),
             (
                 "an implicit filter on a column that is not there",
                 "aliases:\n  view:\n    table: items\n    filters: []\n\
                  \x20   implicit_filters:\n      no_such_column: [ x ]",
+                "implicit filter on 'no_such_column'",
             ),
             (
                 "an alias relation to a table that is not there",
                 "aliases:\n  view:\n    table: items\n    filters: []\n    relations:\n\
                  \x20     thing:\n        table: no_such_table\n        left_key: [ block_number ]\n\
                  \x20       right_key: [ block_number ]",
+                "targets table 'no_such_table'",
             ),
             (
                 "an alias filter on a system column, which the table itself may not declare",
                 "aliases:\n  view:\n    table: items\n    filters: [ user_bloom ]",
+                "system column",
             ),
             (
                 "an alias relation joining on a key the target does not have",
                 "aliases:\n  view:\n    table: items\n    filters: []\n    relations:\n\
                  \x20     thing:\n        table: blocks\n        left_key: [ block_number ]\n\
                  \x20       right_key: [ no_such_column ]",
+                "'no_such_column'",
             ),
         ];
 
-        for (what, defect) in rejected {
+        for (what, defect, reason) in rejected {
+            // `{:#}` so a serde error is read through the context anyhow wraps it in.
+            let err = format!(
+                "{:#}",
+                parse_dataset_description(&catalog(defect)).expect_err(what)
+            );
             assert!(
-                parse_dataset_description(&catalog(defect)).is_err(),
-                "{what} must be refused"
+                err.contains(reason),
+                "{what}: wanted {reason:?}, got: {err}"
             );
         }
     }
@@ -1324,87 +1799,111 @@ tables:
         parse_dataset_description(&catalog(GOOD))
             .expect("a catalog whose every reference resolves must load");
 
-        let rejected: &[(&str, &str)] = &[
+        // Each case carries the reason it must be refused *for*. Asserting only
+        // that the load failed would let a case pass on some unrelated defect of
+        // the scaffolding — and the scaffolding grows a check under it every
+        // time the validator does.
+        let rejected: &[(&str, &str, &str)] = &[
             (
                 "an address column that is not there",
-                "    address_column: nope\n",
+                "    request:\n      filters: []\n    address_column: nope\n",
+                "address_column 'nope'",
             ),
             (
                 "a sort key column that is not there",
                 "    sort_key: [ block_number, nope ]\n",
+                "sort_key column 'nope'",
             ),
             (
                 "an item order key that is not there",
                 "    item_order_keys: [ nope ]\n",
+                "item_order_key 'nope'",
             ),
             (
                 "a roll over a column that is not there",
                 "    output:\n      virtual_fields:\n        \
                  accounts: { kind: roll, columns: [ a0, nope ] }\n",
+                "rolls column 'nope'",
             ),
             (
                 "a roll whose spread list is not its last column",
                 "    output:\n      virtual_fields:\n        \
                  accounts: { kind: roll, columns: [ rest, a0 ] }\n",
+                "rolls list column 'rest'",
             ),
             (
                 "a discriminator length that is not a byte count",
                 "    request:\n      filters: [ discriminator ]\n      special_filters:\n        \
                  discriminator: { kind: discriminator, by_length: { d1: d1 } }\n",
+                "maps length 'd1'",
             ),
             (
                 "a discriminator length the lookup will never ask for",
                 "    request:\n      filters: [ discriminator ]\n      special_filters:\n        \
                  discriminator: { kind: discriminator, by_length: { \"01\": d1 } }\n",
+                "maps length '01'",
             ),
             (
                 "a discriminator length beyond the value cap",
                 "    request:\n      filters: [ discriminator ]\n      special_filters:\n        \
                  discriminator: { kind: discriminator, by_length: { \"17\": d1 } }\n",
+                "maps length '17'",
             ),
             (
                 "a special filter the filter list does not reach",
                 "    request:\n      filters: []\n      special_filters:\n        \
                  discriminator: { kind: discriminator, by_length: { \"1\": d1 } }\n",
+                "is not in its filter list",
             ),
             (
                 "a variant column that is not there",
                 "    output:\n      variant_column: nope\n      variants:\n        \
                  call:\n          action: [ { column: payload, as: payload } ]\n",
+                "variant_column 'nope'",
             ),
             (
                 "a variant mapping a column that is not there",
                 "    output:\n      variant_column: kind\n      variants:\n        \
                  call:\n          action: [ { column: nope, as: nope } ]\n",
+                "maps column 'nope'",
             ),
             (
                 "variants with no column to dispatch on",
                 "    output:\n      variants:\n        \
                  call:\n          action: [ { column: payload, as: payload } ]\n",
+                "come together",
             ),
             (
                 "a variant column with nothing to dispatch",
                 "    output:\n      variant_column: kind\n",
+                "come together",
             ),
         ];
 
-        for (what, stanza) in rejected {
+        for (what, stanza, reason) in rejected {
+            // `{:#}` so a serde error is read through the context anyhow wraps it in.
+            let err = format!(
+                "{:#}",
+                parse_dataset_description(&catalog(stanza)).expect_err(what)
+            );
             assert!(
-                parse_dataset_description(&catalog(stanza)).is_err(),
-                "{what} must be refused"
+                err.contains(reason),
+                "{what}: wanted {reason:?}, got: {err}"
             );
         }
 
         // A weight source is declared on the column it charges, so it cannot be
-        // spliced in above `columns:` like the rest.
-        let weighed = catalog("").replace(
+        // spliced in above `columns:` like the rest. It goes onto the stanza that
+        // loads, so the only thing wrong with the catalog is the weight.
+        let weighed = catalog(GOOD).replace(
             "      payload: { type: string }",
             "      payload: { type: string, weight: nope }",
         );
-        assert!(
-            parse_dataset_description(&weighed).is_err(),
-            "a weight column that is not there must be refused"
+        let err = format!(
+            "{:#}",
+            parse_dataset_description(&weighed).expect_err("a weight column that is not there")
         );
+        assert!(err.contains("weight column 'nope'"), "got: {err}");
     }
 
     /// Renaming or rolling a column does not make a system value public. The
@@ -1436,7 +1935,7 @@ tables:
       variant_column: kind
       variants:
         call:
-          action: [ {{ column: hidden, field: grouped, as: hidden }} ]
+          action: [ {{ column: hidden, field_key: grouped, as: hidden }} ]
     sort_key: [block_number, seq]
     item_order_keys: [seq]
     columns:

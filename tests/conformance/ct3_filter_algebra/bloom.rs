@@ -210,7 +210,7 @@ fn the_catalog_declares_the_construction_the_vectors_were_built_with() {
         let filter = solana
             .table(table)
             .unwrap()
-            .request
+            .request()
             .special_filters
             .get("mentions_account")
             .unwrap_or_else(|| panic!("{table} must carry a mentionsAccount filter"));
