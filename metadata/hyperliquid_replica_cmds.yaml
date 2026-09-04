@@ -103,7 +103,7 @@ tables:
 
 query_aliases:
   orderActions:
-    filters: [ user, vault_address, status ]
+    filters: [ user, vault_address, status, contains_asset, contains_cloid ]
     table: actions
     implicit_predicates:
       action_type: [ "order" ]
@@ -111,14 +111,14 @@ query_aliases:
       contains_asset: order_asset
       contains_cloid: order_cloid
   cancelActions:
-    filters: [ user, vault_address, status ]
+    filters: [ user, vault_address, status, contains_asset ]
     table: actions
     implicit_predicates:
       action_type: [ "cancel" ]
     filter_aliases:
       contains_asset: cancel_asset
   cancelByCloidActions:
-    filters: [ user, vault_address, status ]
+    filters: [ user, vault_address, status, contains_asset, contains_cloid ]
     table: actions
     implicit_predicates:
       action_type: [ "cancelByCloid" ]
@@ -126,7 +126,7 @@ query_aliases:
       contains_asset: cancel_by_cloid_asset
       contains_cloid: cancel_by_cloid_cloid
   batchModifyActions:
-    filters: [ user, vault_address, status ]
+    filters: [ user, vault_address, status, contains_asset, contains_cloid ]
     table: actions
     implicit_predicates:
       action_type: [ "batchModify" ]

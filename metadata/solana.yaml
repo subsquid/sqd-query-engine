@@ -27,7 +27,7 @@ tables:
         type: timestamp_second
 
   transactions:
-    filters: [ fee_payer ]
+    filters: [ fee_payer, mentions_account ]
     fields: [
       transaction_index, version, account_keys, address_table_lookups,
       num_readonly_signed_accounts, num_readonly_unsigned_accounts, num_required_signatures,
@@ -127,7 +127,10 @@ tables:
         system: true
 
   instructions:
-    filters: [ program_id, d1, d2, d4, d8, is_committed, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15 ]
+    filters: [
+      program_id, discriminator, d1, d2, d4, d8, mentions_account, is_committed,
+      a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15
+    ]
     fields: [
       transaction_index, instruction_address, program_id, accounts, data, d1, d2, d4, d8,
       error, compute_units_consumed, is_committed, has_dropped_log_messages

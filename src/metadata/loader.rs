@@ -99,9 +99,11 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
         // Validate the declared filter surface. A typo here does not fail a
         // query — it removes a filter, and the query it was meant to narrow
         // comes back wrong instead.
+        let special: Vec<&str> = table.special_filters.keys().map(String::as_str).collect();
         check_filter_surface(
             &format!("table '{}'", table_name),
             &table.filters,
+            &special,
             table_name,
             table,
         )?;
@@ -114,6 +116,14 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
         // A special filter reaches its column the same way a declared filter
         // does, and a typo in one is just as invisible.
         for (filter_name, special) in &table.special_filters {
+            anyhow::ensure!(
+                table.filters.contains(filter_name),
+                "table '{}': special filter '{}' is not in its filter list, so no request \
+                 can reach it",
+                table_name,
+                filter_name
+            );
+
             let columns: Vec<&String> = match special {
                 crate::metadata::SpecialFilter::Discriminator { columns } => {
                     columns.values().collect()
@@ -298,14 +308,28 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
 
         // An alias is the one place the closed filter surface can be reopened, so
         // it is held to the table's rules, system columns included.
+        let special: Vec<&str> = alias
+            .filter_aliases
+            .keys()
+            .chain(table.special_filters.keys())
+            .map(String::as_str)
+            .collect();
         check_filter_surface(
             &format!("alias '{}'", alias_name),
             &alias.filters,
+            &special,
             &alias.table,
             table,
         )?;
 
         for (key, column) in &alias.filter_aliases {
+            anyhow::ensure!(
+                alias.filters.contains(key),
+                "alias '{}': filter alias '{}' is not in its filter list, so no request can \
+                 reach it",
+                alias_name,
+                key
+            );
             anyhow::ensure!(
                 table.columns.contains_key(column),
                 "alias '{}': filter '{}' targets column '{}', which '{}' does not have",
@@ -452,18 +476,25 @@ fn claim<'a>(
     Ok(())
 }
 
-/// Every name in a declared filter list must be a non-system column of `table`.
+/// Every name in a declared filter list must be one of the owner's `special`
+/// filters or a non-system column of `table`.
 ///
 /// System columns — blooms, size counters, denormalised extractions — are the
 /// engine's own, and publishing one as a filter makes an internal detail part of
-/// the request API.
+/// the request API. A special filter is how such a column is reached on
+/// purpose, under a name of the catalog's choosing.
 fn check_filter_surface(
     owner: &str,
     filters: &[String],
+    special: &[&str],
     table_name: &str,
     table: &crate::metadata::TableDescription,
 ) -> Result<()> {
     for filter in filters {
+        if special.contains(&filter.as_str()) {
+            continue;
+        }
+
         let column = table.columns.get(filter).ok_or_else(|| {
             anyhow::anyhow!(
                 "{}: filter '{}' not found in columns of '{}'",
@@ -951,7 +982,7 @@ tables:
 query_aliases:
   view:
     table: items
-    filters: []
+    filters: [ topic0 ]
     filter_aliases:
       topic0: no_such_column
 "#;
@@ -959,6 +990,29 @@ query_aliases:
             .unwrap_err()
             .to_string();
         assert!(err.contains("no_such_column"), "got: {err}");
+
+        let unlisted = r#"
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    filters: []
+    columns:
+      number: { type: uint64 }
+  items:
+    filters: []
+    columns:
+      block_number: { type: uint64 }
+      topic: { type: string }
+query_aliases:
+  view:
+    table: items
+    filters: []
+    filter_aliases:
+      topic0: topic
+"#;
+        let err = parse_dataset_description(unlisted).unwrap_err().to_string();
+        assert!(err.contains("topic0"), "got: {err}");
     }
 
     /// A catalog is written by hand and read by nothing else. Each check below
@@ -1221,11 +1275,11 @@ tables:
     columns:
       number: { type: uint64 }
   items:
-    filters: []
+    filters: [ call_value_non_zero ]
     columns:
       block_number: { type: uint64 }
     special_filters:
-      callValueNonZero:
+      call_value_non_zero:
         type: gte_const
         column: no_such_column
         value: "0x1"
@@ -1273,7 +1327,6 @@ tables:
     columns:
       number: { type: uint64 }
   items:
-    filters: []
 "#;
         const TAIL: &str = r#"
     columns:
@@ -1285,9 +1338,12 @@ tables:
       kind: { type: string }
       payload: { type: string }
 "#;
+        // Every stanza carries its own filter list: a special filter is only
+        // reachable when listed, and the list must not be what a stanza fails on.
         let catalog = |stanza: &str| format!("{HEAD}{stanza}{TAIL}");
 
         const GOOD: &str = r#"
+    filters: [ discriminator ]
     address_column: seq
     parent_key: [ block_number ]
     virtual_fields:
@@ -1307,55 +1363,62 @@ tables:
         let rejected: &[(&str, &str)] = &[
             (
                 "an address column that is not there",
-                "    address_column: nope\n",
+                "    filters: []\n    address_column: nope\n",
             ),
             (
                 "a parent key column that is not there",
-                "    parent_key: [ nope ]\n",
+                "    filters: []\n    parent_key: [ nope ]\n",
             ),
             (
                 "a sort key column that is not there",
-                "    sort_key: [ block_number, nope ]\n",
+                "    filters: []\n    sort_key: [ block_number, nope ]\n",
             ),
             (
                 "an item order key that is not there",
-                "    item_order_keys: [ nope ]\n",
+                "    filters: []\n    item_order_keys: [ nope ]\n",
             ),
             (
                 "a roll over a column that is not there",
-                "    virtual_fields:\n      accounts: { type: roll, columns: [ a0, nope ] }\n",
+                "    filters: []\n    virtual_fields:\n      \
+                 accounts: { type: roll, columns: [ a0, nope ] }\n",
             ),
             (
                 "a roll whose spread list is not its last column",
-                "    virtual_fields:\n      accounts: { type: roll, columns: [ rest, a0 ] }\n",
+                "    filters: []\n    virtual_fields:\n      \
+                 accounts: { type: roll, columns: [ rest, a0 ] }\n",
             ),
             (
                 "a discriminator length that is not a byte count",
-                "    special_filters:\n      \
+                "    filters: [ discriminator ]\n    special_filters:\n      \
                  discriminator: { type: discriminator, columns: { d1: d1 } }\n",
             ),
             (
                 "a discriminator length the lookup will never ask for",
-                "    special_filters:\n      \
+                "    filters: [ discriminator ]\n    special_filters:\n      \
                  discriminator: { type: discriminator, columns: { \"01\": d1 } }\n",
             ),
             (
                 "a discriminator length beyond the value cap",
-                "    special_filters:\n      \
+                "    filters: [ discriminator ]\n    special_filters:\n      \
                  discriminator: { type: discriminator, columns: { \"17\": d1 } }\n",
             ),
             (
+                "a special filter the filter list does not reach",
+                "    filters: []\n    special_filters:\n      \
+                 discriminator: { type: discriminator, columns: { \"1\": d1 } }\n",
+            ),
+            (
                 "a field group tag column that is not there",
-                "    field_groups:\n      tag_column: nope\n      variants: {}\n",
+                "    filters: []\n    field_groups:\n      tag_column: nope\n      variants: {}\n",
             ),
             (
                 "a field group base field that is not there",
-                "    field_groups:\n      tag_column: kind\n      \
+                "    filters: []\n    field_groups:\n      tag_column: kind\n      \
                  base_fields: [ nope ]\n      variants: {}\n",
             ),
             (
                 "a field group mapping a column that is not there",
-                "    field_groups:\n      tag_column: kind\n      variants:\n        \
+                "    filters: []\n    field_groups:\n      tag_column: kind\n      variants:\n        \
                  call:\n          action: [ { column: nope, field: nope } ]\n",
             ),
         ];
@@ -1369,7 +1432,7 @@ tables:
 
         // A weight source is declared on the column it charges, so it cannot be
         // spliced in above `columns:` like the rest.
-        let weighed = catalog("").replace(
+        let weighed = catalog("    filters: []\n").replace(
             "      payload: { type: string }",
             "      payload: { type: string, weight: nope }",
         );

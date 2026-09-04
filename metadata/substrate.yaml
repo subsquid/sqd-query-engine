@@ -249,7 +249,7 @@ tables:
 
 query_aliases:
   evmLogs:
-    filters: []
+    filters: [ address, topic0, topic1, topic2, topic3 ]
     table: events
     implicit_predicates:
       name: [ "EVM.Log" ]
@@ -275,7 +275,7 @@ query_aliases:
         right_key: [ block_number, extrinsic_index ]
 
   ethereumTransactions:
-    filters: []
+    filters: [ to, sighash ]
     table: calls
     implicit_predicates:
       name: [ "Ethereum.transact" ]
@@ -297,7 +297,7 @@ query_aliases:
         left_key: [ block_number, extrinsic_index ]
         right_key: [ block_number, extrinsic_index ]
   contractsEvents:
-    filters: []
+    filters: [ contract_address ]
     table: events
     implicit_predicates:
       name: [ "Contracts.ContractEmitted" ]
@@ -318,7 +318,7 @@ query_aliases:
         left_key: [ block_number, extrinsic_index ]
         right_key: [ block_number, extrinsic_index ]
   gearMessagesEnqueued:
-    filters: []
+    filters: [ program_id ]
     table: events
     implicit_predicates:
       name: [ "Gear.UserMessageEnqueued" ]
@@ -339,7 +339,7 @@ query_aliases:
         left_key: [ block_number, extrinsic_index ]
         right_key: [ block_number, extrinsic_index ]
   gearUserMessagesSent:
-    filters: []
+    filters: [ program_id ]
     table: events
     implicit_predicates:
       name: [ "Gear.UserMessageSent" ]
@@ -360,7 +360,7 @@ query_aliases:
         left_key: [ block_number, extrinsic_index ]
         right_key: [ block_number, extrinsic_index ]
   reviveContractEmitted:
-    filters: []
+    filters: [ contract, topic0, topic1, topic2, topic3 ]
     table: events
     implicit_predicates:
       name: [ "Revive.ContractEmitted" ]

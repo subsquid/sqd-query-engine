@@ -35,7 +35,7 @@ tables:
     block_number_column: block_number
     item_order_keys: [trace_index]
     sort_key: [block_number, trace_index]
-    filters: []
+    filters: [call_value_non_zero, call_value_at_least_nine]
     fields: [trace_index, call_value]
     special_filters:
       call_value_non_zero:
