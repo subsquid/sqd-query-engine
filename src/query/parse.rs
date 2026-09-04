@@ -435,7 +435,27 @@ fn parse_query_item(
             continue;
         }
 
-        // Check alias filter aliases (e.g., topic0 → _evm_log_topic0)
+        // The declared list is the whole surface, special filters included, and
+        // it is what the table (or, when the request came through an alias, the
+        // alias) says is filterable — not whatever the catalog happens to
+        // define. Tables carry blooms, size counters and denormalised
+        // extractions that are no client's business, and anything reachable
+        // without being listed would make the catalog's internals the public
+        // API.
+        let declared = match alias {
+            Some(alias_def) => &alias_def.filters,
+            None => &table.filters,
+        };
+        engine_ensure!(
+            declared.contains(&snake_key),
+            ErrorKind::UnknownFilter,
+            "unknown filter '{}' (resolved: '{}') for table '{}'",
+            key,
+            snake_key,
+            table_name
+        );
+
+        // Alias filter aliases (e.g., topic0 → _evm_log_topic0)
         if let Some(alias_def) = alias {
             if let Some(real_col) = alias_def.filter_aliases.get(&snake_key) {
                 filters.push((real_col.clone(), val.clone()));
@@ -443,40 +463,19 @@ fn parse_query_item(
             }
         }
 
-        // Check if it's a special filter
         if table.special_filters.contains_key(&snake_key) {
             filters.push((snake_key, val.clone()));
             continue;
         }
 
-        // A declared column filter. The list is what the table (or, when the
-        // request came through an alias, the alias) says is filterable — not
-        // whatever columns happen to exist. Tables carry blooms, size counters
-        // and denormalised extractions that are no client's business, and
-        // filtering on any column would make the column list the public API.
-        let declared = match alias {
-            Some(alias_def) => &alias_def.filters,
-            None => &table.filters,
-        };
-        if declared.contains(&snake_key) {
-            engine_ensure!(
-                table.columns.contains_key(&snake_key),
-                ErrorKind::UnknownFilter,
-                "filter '{}' of table '{}' names no column",
-                snake_key,
-                table_name
-            );
-            filters.push((snake_key, val.clone()));
-            continue;
-        }
-
-        engine_bail!(
+        engine_ensure!(
+            table.columns.contains_key(&snake_key),
             ErrorKind::UnknownFilter,
-            "unknown filter '{}' (resolved: '{}') for table '{}'",
-            key,
+            "filter '{}' of table '{}' names no column",
             snake_key,
             table_name
         );
+        filters.push((snake_key, val.clone()));
     }
 
     // Add implicit predicates from alias (e.g., name: ["EVM.Log"])

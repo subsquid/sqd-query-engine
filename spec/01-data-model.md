@@ -174,7 +174,9 @@ must not be able to corrupt the response framing.
 ([ADR-3](decisions/ADR-3-closed-filter-surface.md)). A table declares which of its columns —
 and which of its *special filters* — clients may filter on. A filter key that is
 not declared is an error ([INV-Q6](07-invariants.md#inv-q6)), even if a column of
-that name exists ([INV-P15](07-invariants.md#inv-p15)).
+that name exists ([INV-P15](07-invariants.md#inv-p15)). The list is the whole
+surface: a special filter the table defines but does not list is unreachable,
+and a catalog that defines one without listing it is malformed (§1.10).
 
 This matters. A table's columns include `system` columns holding blooms,
 discriminators, size counters and denormalised extraction results. Letting a
@@ -279,14 +281,16 @@ They are collected as [INV-D1](07-invariants.md#inv-d1) … [INV-D10](07-invaria
   `parents` relations have `addressColumn` on both sides.
 - Every filter: its target column exists and is not `system`-only in a way that
   contradicts the filter kind. Every `discriminator` length→column mapping names
-  a real column. Every `gteConst` names a real column.
+  a real column. Every `gteConst` names a real column. Every special filter the
+  table defines is in its filter list.
 - Every virtual field: all rolled columns exist; a spread list column, if
   present, is last.
 - Every field group: the tag column exists; every mapped column exists.
 - Every declared output field resolves to a column, virtual field or field-group
   request key, and none of its physical sources is `system`.
 - Every alias: its target table exists; its implicit-predicate columns exist;
-  its filter aliases target real columns; its relations are valid.
+  its filter aliases target real columns and are in its filter list; its
+  relations are valid.
 - `queryName` and `fieldName` are unique across tables *and* aliases.
 
 The last check is easy to overlook and easy to violate. A duplicate `queryName`

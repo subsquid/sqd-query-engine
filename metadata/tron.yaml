@@ -246,7 +246,7 @@ tables:
         columns: [ topic0, topic1, topic2, topic3 ]
 
   internal_transactions:
-    filters: []
+    filters: [ caller, transfer_to ]
     fields: [
       transaction_index, internal_transaction_index, hash, caller_address, transfer_to_address,
       call_value_info, note, rejected, extra
@@ -304,7 +304,7 @@ tables:
 
 query_aliases:
   transferTransactions:
-    filters: []
+    filters: [ owner, to ]
     table: transactions
     implicit_predicates:
       type: [ "TransferContract" ]
@@ -319,7 +319,7 @@ query_aliases:
         table: internal_transactions
         key: [ block_number, transaction_index ]
   transferAssetTransactions:
-    filters: []
+    filters: [ owner, to, asset ]
     table: transactions
     implicit_predicates:
       type: [ "TransferAssetContract" ]
@@ -335,7 +335,7 @@ query_aliases:
         table: internal_transactions
         key: [ block_number, transaction_index ]
   triggerSmartContractTransactions:
-    filters: []
+    filters: [ owner, contract, sighash ]
     table: transactions
     implicit_predicates:
       type: [ "TriggerSmartContract" ]

@@ -593,7 +593,7 @@ tables:
     block_number_column: block_number
     item_order_keys: [seq]
     sort_key: [block_number, seq]
-    filters: []
+    filters: [mentions_account]
     fields: [seq, account]
     special_filters:
       mentions_account:
@@ -730,7 +730,7 @@ tables:
     block_number_column: block_number
     item_order_keys: [seq]
     sort_key: [block_number, seq]
-    filters: []
+    filters: [mentions_account]
     fields: [seq]
     special_filters:
       mentions_account:

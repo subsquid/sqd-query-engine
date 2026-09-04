@@ -113,7 +113,7 @@ tables:
         system: true
 
   transactions:
-    filters: [ from, to, sighash ]
+    filters: [ from, to, sighash, first_nonce, last_nonce ]
     fields: [
       transaction_index, hash, nonce, from, to, input, value, gas, gas_price, max_fee_per_gas,
       max_priority_fee_per_gas, v, r, s, y_parity, access_list, chain_id, sighash,
@@ -362,7 +362,12 @@ tables:
         columns: [ topic0, topic1, topic2, topic3 ]
 
   traces:
-    filters: [ type, create_from, create_result_address, call_from, call_to, call_sighash, suicide_address, suicide_refund_address, reward_author ]
+    filters: [
+      type, create_from, create_result_address, call_from, call_to, call_sighash,
+      suicide_address, suicide_refund_address, reward_author, call_call_type,
+      call_value_non_zero, create_value_non_zero, suicide_balance_non_zero,
+      reward_value_non_zero
+    ]
     fields: [
       transaction_index, trace_address, subtraces, type, error, revert_reason, create_from,
       create_value, create_gas, create_init, create_result_gas_used, create_result_code,
