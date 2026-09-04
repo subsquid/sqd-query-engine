@@ -1,95 +1,75 @@
-use arrow::array::*;
+use crate::engine_err;
+use crate::error::ErrorKind;
+use crate::integers::IntColumn;
+use anyhow::Result;
 use arrow::record_batch::RecordBatch;
 use rustc_hash::FxHashMap;
 use rustc_hash::FxHashSet as HashSet;
 
-/// Typed block number reader — downcasts once per column, reads per row without branching.
-/// Parquet stores UInt32/UInt64 as Int32/Int64 physical types, so Int32 is reinterpreted
-/// via u32 to avoid sign-extension.
-enum BlockNumberReader<'a> {
-    UInt64(&'a UInt64Array),
-    UInt32(&'a UInt32Array),
-    Int64(&'a Int64Array),
-    Int32(&'a Int32Array),
-}
+/// Visit every block number a set of batches carries, in the order the rows sit
+/// in, as `(batch, row, block number)`.
+///
+/// A batch that does not carry the column at all is skipped: the callers pass
+/// relation batches, and a relation whose target contributed nothing has no
+/// column to read.
+fn for_each_block_number(
+    batches: &[RecordBatch],
+    bn_column: &str,
+    mut visit: impl FnMut(usize, usize, u64),
+) -> Result<()> {
+    for (batch_idx, batch) in batches.iter().enumerate() {
+        let Some(col) = batch.column_by_name(bn_column) else {
+            continue;
+        };
 
-impl BlockNumberReader<'_> {
-    #[allow(clippy::manual_map)] // one arm per physical width; they read as a table
-    fn resolve(col: &dyn Array) -> Option<BlockNumberReader<'_>> {
-        if let Some(a) = col.as_any().downcast_ref::<UInt64Array>() {
-            Some(BlockNumberReader::UInt64(a))
-        } else if let Some(a) = col.as_any().downcast_ref::<UInt32Array>() {
-            Some(BlockNumberReader::UInt32(a))
-        } else if let Some(a) = col.as_any().downcast_ref::<Int64Array>() {
-            Some(BlockNumberReader::Int64(a))
-        } else if let Some(a) = col.as_any().downcast_ref::<Int32Array>() {
-            Some(BlockNumberReader::Int32(a))
-        } else {
-            None
+        // A column that is not an integer at all is a chunk disagreeing with
+        // the catalog about what a block number is. Returning "no rows" for one
+        // would drop every block of the table silently, so it is an error.
+        let reader = IntColumn::resolve(col.as_ref()).ok_or_else(|| {
+            engine_err!(
+                ErrorKind::UnsupportedKeyType,
+                "block number column '{}' is stored as {:?}, which is not an integer",
+                bn_column,
+                col.data_type()
+            )
+        })?;
+
+        for row in 0..reader.len() {
+            visit(batch_idx, row, reader.block_number(row));
         }
     }
 
-    #[inline]
-    fn read(&self, row: usize) -> u64 {
-        match self {
-            Self::UInt64(a) => a.value(row),
-            Self::UInt32(a) => a.value(row) as u64,
-            Self::Int64(a) => a.value(row) as u64,
-            Self::Int32(a) => (a.value(row) as u32) as u64,
-        }
-    }
-
-    fn len(&self) -> usize {
-        match self {
-            Self::UInt64(a) => a.len(),
-            Self::UInt32(a) => a.len(),
-            Self::Int64(a) => a.len(),
-            Self::Int32(a) => a.len(),
-        }
-    }
+    Ok(())
 }
 
 /// Compute the actual min/max block numbers from scan results (for cross-table pruning).
 pub(crate) fn compute_block_range(
     batches: &[RecordBatch],
     bn_column: &str,
-) -> (Option<u64>, Option<u64>) {
+) -> Result<(Option<u64>, Option<u64>)> {
     let mut min_block: Option<u64> = None;
     let mut max_block: Option<u64> = None;
 
-    for batch in batches {
-        if let Some(col) = batch.column_by_name(bn_column) {
-            if let Some(reader) = BlockNumberReader::resolve(col.as_ref()) {
-                for i in 0..reader.len() {
-                    let bn = reader.read(i);
-                    min_block = Some(min_block.map_or(bn, |m: u64| m.min(bn)));
-                    max_block = Some(max_block.map_or(bn, |m: u64| m.max(bn)));
-                }
-            }
-        }
-    }
-    (min_block, max_block)
+    for_each_block_number(batches, bn_column, |_, _, bn| {
+        min_block = Some(min_block.map_or(bn, |m: u64| m.min(bn)));
+        max_block = Some(max_block.map_or(bn, |m: u64| m.max(bn)));
+    })?;
+
+    Ok((min_block, max_block))
 }
 
 /// Build an index mapping block_number -> list of (batch_index, row_index).
 pub(crate) fn build_block_index(
     batches: &[RecordBatch],
     bn_column: &str,
-) -> FxHashMap<u64, Vec<(usize, usize)>> {
+) -> Result<FxHashMap<u64, Vec<(usize, usize)>>> {
     let mut index: FxHashMap<u64, Vec<(usize, usize)>> = FxHashMap::default();
-    for (batch_idx, batch) in batches.iter().enumerate() {
-        if let Some(col) = batch.column_by_name(bn_column) {
-            if let Some(reader) = BlockNumberReader::resolve(col.as_ref()) {
-                for row in 0..reader.len() {
-                    index
-                        .entry(reader.read(row))
-                        .or_default()
-                        .push((batch_idx, row));
-                }
-            }
-        }
-    }
-    index
+
+    for_each_block_number(batches, bn_column, |batch_idx, row, bn| {
+        index.entry(bn).or_default().push((batch_idx, row));
+    })?;
+
+    Ok(index)
 }
 
 /// Collect block numbers from batches into a set.
@@ -97,16 +77,12 @@ pub(crate) fn collect_block_numbers(
     batches: &[RecordBatch],
     bn_column: &str,
     block_numbers: &mut HashSet<u64>,
-) {
-    for batch in batches {
-        if let Some(col) = batch.column_by_name(bn_column) {
-            if let Some(reader) = BlockNumberReader::resolve(col.as_ref()) {
-                for i in 0..reader.len() {
-                    block_numbers.insert(reader.read(i));
-                }
-            }
-        }
-    }
+) -> Result<()> {
+    for_each_block_number(batches, bn_column, |_, _, bn| {
+        block_numbers.insert(bn);
+    })?;
+
+    Ok(())
 }
 
 /// Collect only the first and last block numbers from the blocks table (boundary blocks).
@@ -114,26 +90,11 @@ pub(crate) fn collect_boundary_blocks(
     batches: &[RecordBatch],
     bn_column: &str,
     block_numbers: &mut HashSet<u64>,
-) {
-    let mut min_block: Option<u64> = None;
-    let mut max_block: Option<u64> = None;
+) -> Result<()> {
+    let (min_block, max_block) = compute_block_range(batches, bn_column)?;
 
-    for batch in batches {
-        if let Some(col) = batch.column_by_name(bn_column) {
-            if let Some(reader) = BlockNumberReader::resolve(col.as_ref()) {
-                for i in 0..reader.len() {
-                    let v = reader.read(i);
-                    min_block = Some(min_block.map_or(v, |m: u64| m.min(v)));
-                    max_block = Some(max_block.map_or(v, |m: u64| m.max(v)));
-                }
-            }
-        }
-    }
+    block_numbers.extend(min_block);
+    block_numbers.extend(max_block);
 
-    if let Some(v) = min_block {
-        block_numbers.insert(v);
-    }
-    if let Some(v) = max_block {
-        block_numbers.insert(v);
-    }
+    Ok(())
 }

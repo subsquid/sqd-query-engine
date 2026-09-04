@@ -1,12 +1,9 @@
-//! CT-6 — output and determinism.
+//! How a column renders, and that reading a response out one way says what
+//! reading it out another way says.
 //!
-//! How a column renders is fixed by the catalog's declared encoding, not by the
-//! physical type the chunk happens to store it at; and a response says the same
-//! thing however it is read out of the engine — block by block, all at once, or
-//! as Arrow.
-//!
-//! Byte determinism (INV-O12) and the thread-count sweep (INV-O13) are not here:
-//! both need HC-3, the chunk writer.
+//! The encoding is fixed by the catalog, not by the physical type the chunk
+//! happens to store the column at. Whether the *chunk* can move under the
+//! answer without changing it is the other half of the class, in `determinism`.
 
 use sqd_query_engine::output::{execute_chunk_arrow, execute_plan};
 use sqd_query_engine::query::{compile, parse_query};

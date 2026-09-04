@@ -409,7 +409,7 @@ fn execute_chunk_fmt(
 
         // Compute actual block range from primary scan for cross-table pruning
         let bn_col_name = table_desc.block_number_column.as_str();
-        let (actual_min_block, actual_max_block) = compute_block_range(&batches, bn_col_name);
+        let (actual_min_block, actual_max_block) = compute_block_range(&batches, bn_col_name)?;
 
         // Execute relations (skip if primary scan returned no rows)
         let mut relation_batches: HashMap<usize, Vec<RecordBatch>> = HashMap::new();
@@ -729,7 +729,7 @@ fn execute_chunk_fmt(
     for (table_name, output) in &table_outputs {
         let table_desc = metadata.table(table_name).unwrap();
         let bn_col = table_desc.block_number_column.as_str();
-        collect_block_numbers(&output.batches, bn_col, &mut block_numbers);
+        collect_block_numbers(&output.batches, bn_col, &mut block_numbers)?;
 
         // A relation's target is a different table, and it names its own block
         // number column. Reading one literal name here would drop every row of
@@ -750,7 +750,7 @@ fn execute_chunk_fmt(
                 .table(&rel.target_table)
                 .map(|d| d.block_number_column.as_str())
                 .unwrap_or(bn_col);
-            collect_block_numbers(rel_batches, rel_bn_col, &mut block_numbers);
+            collect_block_numbers(rel_batches, rel_bn_col, &mut block_numbers)?;
         }
     }
 
@@ -760,9 +760,9 @@ fn execute_chunk_fmt(
             .map(|d| d.block_number_column.as_str())
             .unwrap_or("number");
         if plan.include_all_blocks {
-            collect_block_numbers(&block_batches, bn_col, &mut block_numbers);
+            collect_block_numbers(&block_batches, bn_col, &mut block_numbers)?;
         } else {
-            collect_boundary_blocks(&block_batches, bn_col, &mut block_numbers);
+            collect_boundary_blocks(&block_batches, bn_col, &mut block_numbers)?;
         }
     }
 
@@ -961,7 +961,7 @@ fn execute_chunk_fmt(
         block_table_desc
             .map(|d| d.block_number_column.as_str())
             .unwrap_or("number"),
-    );
+    )?;
 
     // Collect all indexed batch sources (both primary and relation), keyed by output table name.
     // Multiple sources for the same table get merged into a single output array.
@@ -987,7 +987,7 @@ fn execute_chunk_fmt(
             let sort_columns = build_full_sort_columns(table_desc);
             let sort_col_resolved = resolve_sort_columns(&batches, &sort_columns);
             all_indexes.push(IndexedBatches {
-                index: build_block_index(&batches, bn_col),
+                index: build_block_index(&batches, bn_col)?,
                 batches,
                 writers: build_field_writers(&table_plan.output_columns, Some(table_desc)),
                 grouped,
@@ -1010,7 +1010,7 @@ fn execute_chunk_fmt(
                         let rel_sort_resolved =
                             resolve_sort_columns(&rel_batches, &rel_sort_columns);
                         all_indexes.push(IndexedBatches {
-                            index: build_block_index(&rel_batches, rel_bn),
+                            index: build_block_index(&rel_batches, rel_bn)?,
                             batches: rel_batches,
                             writers: build_field_writers(&rel.output_columns, Some(rd)),
                             grouped: rel_grouped,

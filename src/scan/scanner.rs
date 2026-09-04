@@ -1,3 +1,6 @@
+use crate::engine_err;
+use crate::error::ErrorKind;
+use crate::integers::{IntColumn, OwnedIntColumn};
 use crate::scan::chunk::ParquetTable;
 use crate::scan::predicate::RowPredicate;
 use anyhow::{Context, Result};
@@ -6,6 +9,7 @@ use arrow::array::*;
 use arrow::compute::kernels::boolean::and;
 use arrow::compute::kernels::cmp::{gt_eq, lt_eq};
 use arrow::datatypes::{Schema, SchemaRef};
+use arrow::error::ArrowError;
 use parquet::arrow::arrow_reader::{ArrowPredicateFn, ParquetRecordBatchReaderBuilder, RowFilter};
 use parquet::arrow::ProjectionMask;
 use rayon::prelude::*;
@@ -316,21 +320,21 @@ impl HierarchicalFilter {
     }
 }
 
-/// Extract a List value as Vec<u32>, supporting UInt16, UInt32, Int32 element types.
+/// A hierarchical address as a path of item indices, at whatever width the
+/// writer stored the elements.
 fn extract_address_values(array: &GenericListArray<i32>, row: usize) -> Vec<u32> {
     if array.is_null(row) {
         return Vec::new();
     }
+
     let values = array.value(row);
-    if let Some(arr) = values.as_any().downcast_ref::<UInt16Array>() {
-        (0..arr.len()).map(|i| arr.value(i) as u32).collect()
-    } else if let Some(arr) = values.as_any().downcast_ref::<UInt32Array>() {
-        (0..arr.len()).map(|i| arr.value(i)).collect()
-    } else if let Some(arr) = values.as_any().downcast_ref::<Int32Array>() {
-        (0..arr.len()).map(|i| arr.value(i) as u32).collect()
-    } else {
-        Vec::new()
-    }
+    let Some(elements) = IntColumn::resolve(values.as_ref()) else {
+        return Vec::new();
+    };
+
+    (0..elements.len())
+        .map(|i| elements.block_number(i) as u32)
+        .collect()
 }
 
 /// Build a boolean mask for hierarchical filtering.
@@ -458,111 +462,55 @@ fn match_address(
 }
 
 /// Resolved list element array for zero-allocation address comparison.
-enum ListElementType {
-    UInt16(UInt16Array),
-    UInt32(UInt32Array),
-    Int32(Int32Array),
-    None,
-}
+///
+/// `None` where the elements are not integers: an address is a path of item
+/// indices, so anything else is a chunk that disagrees with its catalog, and
+/// nothing matches.
+type ListElementType = Option<OwnedIntColumn>;
 
 fn resolve_list_element_type(values: &dyn Array) -> ListElementType {
-    if let Some(arr) = values.as_any().downcast_ref::<UInt16Array>() {
-        ListElementType::UInt16(arr.clone())
-    } else if let Some(arr) = values.as_any().downcast_ref::<UInt32Array>() {
-        ListElementType::UInt32(arr.clone())
-    } else if let Some(arr) = values.as_any().downcast_ref::<Int32Array>() {
-        ListElementType::Int32(arr.clone())
-    } else {
-        ListElementType::None
-    }
+    OwnedIntColumn::resolve(values)
 }
 
 /// Compare address elements starting at `start` against `expected` without allocating.
 #[inline]
 fn compare_address_prefix(elem_type: &ListElementType, start: usize, expected: &[u32]) -> bool {
-    match elem_type {
-        ListElementType::UInt16(arr) => expected
-            .iter()
-            .enumerate()
-            .all(|(i, &v)| arr.value(start + i) as u32 == v),
-        ListElementType::UInt32(arr) => expected
-            .iter()
-            .enumerate()
-            .all(|(i, &v)| arr.value(start + i) == v),
-        ListElementType::Int32(arr) => expected
-            .iter()
-            .enumerate()
-            .all(|(i, &v)| arr.value(start + i) as u32 == v),
-        ListElementType::None => false,
-    }
+    let Some(elements) = elem_type else {
+        return false;
+    };
+
+    expected
+        .iter()
+        .enumerate()
+        .all(|(i, &v)| elements.value(start + i) == v as i128)
 }
 
 /// Extract all block number values from a column into a HashSet.
+///
+/// A column that is not an integer contributes nothing, which is what it has:
+/// the block-number readers that must not fail silently are the ones the
+/// assembly uses, and they raise `UnsupportedKeyType` on the same input.
 fn extract_block_numbers(col: &dyn Array, out: &mut HashSet<u64>) {
-    if let Some(a) = col.as_any().downcast_ref::<UInt64Array>() {
-        for i in 0..a.len() {
-            out.insert(a.value(i));
-        }
-    } else if let Some(a) = col.as_any().downcast_ref::<UInt32Array>() {
-        for i in 0..a.len() {
-            out.insert(a.value(i) as u64);
-        }
-    } else if let Some(a) = col.as_any().downcast_ref::<UInt16Array>() {
-        for i in 0..a.len() {
-            out.insert(a.value(i) as u64);
-        }
-    } else if let Some(a) = col.as_any().downcast_ref::<Int32Array>() {
-        for i in 0..a.len() {
-            let v = a.value(i);
-            if v >= 0 {
-                out.insert(v as u64);
-            }
-        }
-    } else if let Some(a) = col.as_any().downcast_ref::<Int64Array>() {
-        for i in 0..a.len() {
-            let v = a.value(i);
-            if v >= 0 {
-                out.insert(v as u64);
-            }
-        }
+    let Some(reader) = IntColumn::resolve(col) else {
+        return;
+    };
+
+    for row in 0..reader.len() {
+        out.insert(reader.block_number(row));
     }
 }
 
 /// A typed column extractor that avoids per-row type dispatch.
 enum TypedKeyColumn<'a> {
-    U64(&'a UInt64Array),
-    U32(&'a UInt32Array),
-    U16(&'a UInt16Array),
-    U8(&'a UInt8Array),
-    I64(&'a Int64Array),
-    I32(&'a Int32Array),
-    I16(&'a Int16Array),
+    Int(IntColumn<'a>),
     Str(&'a StringArray),
     List(&'a GenericListArray<i32>),
 }
 
 impl<'a> TypedKeyColumn<'a> {
     fn resolve(col: &'a dyn Array) -> Option<Self> {
-        if let Some(a) = col.as_any().downcast_ref::<UInt64Array>() {
-            return Some(Self::U64(a));
-        }
-        if let Some(a) = col.as_any().downcast_ref::<UInt32Array>() {
-            return Some(Self::U32(a));
-        }
-        if let Some(a) = col.as_any().downcast_ref::<UInt16Array>() {
-            return Some(Self::U16(a));
-        }
-        if let Some(a) = col.as_any().downcast_ref::<UInt8Array>() {
-            return Some(Self::U8(a));
-        }
-        if let Some(a) = col.as_any().downcast_ref::<Int64Array>() {
-            return Some(Self::I64(a));
-        }
-        if let Some(a) = col.as_any().downcast_ref::<Int32Array>() {
-            return Some(Self::I32(a));
-        }
-        if let Some(a) = col.as_any().downcast_ref::<Int16Array>() {
-            return Some(Self::I16(a));
+        if let Some(ints) = IntColumn::resolve(col) {
+            return Some(Self::Int(ints));
         }
         if let Some(a) = col.as_any().downcast_ref::<StringArray>() {
             return Some(Self::Str(a));
@@ -570,19 +518,14 @@ impl<'a> TypedKeyColumn<'a> {
         if let Some(a) = col.as_any().downcast_ref::<GenericListArray<i32>>() {
             return Some(Self::List(a));
         }
+
         None
     }
 
     #[inline(always)]
     fn is_null(&self, row: usize) -> bool {
         match self {
-            Self::U64(a) => a.is_null(row),
-            Self::U32(a) => a.is_null(row),
-            Self::U16(a) => a.is_null(row),
-            Self::U8(a) => a.is_null(row),
-            Self::I64(a) => a.is_null(row),
-            Self::I32(a) => a.is_null(row),
-            Self::I16(a) => a.is_null(row),
+            Self::Int(a) => a.is_null(row),
             Self::Str(a) => a.is_null(row),
             Self::List(a) => a.is_null(row),
         }
@@ -598,13 +541,7 @@ impl<'a> TypedKeyColumn<'a> {
         }
 
         match self {
-            Self::U64(a) => buf.extend_from_slice(&a.value(row).to_le_bytes()),
-            Self::U32(a) => buf.extend_from_slice(&(a.value(row) as u64).to_le_bytes()),
-            Self::U16(a) => buf.extend_from_slice(&(a.value(row) as u64).to_le_bytes()),
-            Self::U8(a) => buf.extend_from_slice(&(a.value(row) as u64).to_le_bytes()),
-            Self::I64(a) => buf.extend_from_slice(&(a.value(row) as u64).to_le_bytes()),
-            Self::I32(a) => buf.extend_from_slice(&(a.value(row) as u64).to_le_bytes()),
-            Self::I16(a) => buf.extend_from_slice(&(a.value(row) as u64).to_le_bytes()),
+            Self::Int(a) => buf.extend_from_slice(&a.join_key(row).to_le_bytes()),
             Self::Str(a) => {
                 let v = a.value(row);
                 buf.extend_from_slice(&(v.len() as u32).to_le_bytes());
@@ -612,33 +549,16 @@ impl<'a> TypedKeyColumn<'a> {
             }
             Self::List(a) => {
                 let arr = a.value(row);
-                let len = arr.len();
-                buf.extend_from_slice(&(len as u32).to_le_bytes());
-                // Serialize each element as u64
-                if let Some(vals) = arr.as_any().downcast_ref::<UInt16Array>() {
-                    for i in 0..len {
-                        buf.extend_from_slice(&(vals.value(i) as u64).to_le_bytes());
-                    }
-                } else if let Some(vals) = arr.as_any().downcast_ref::<Int32Array>() {
-                    for i in 0..len {
-                        buf.extend_from_slice(&(vals.value(i) as u64).to_le_bytes());
-                    }
-                } else if let Some(vals) = arr.as_any().downcast_ref::<UInt32Array>() {
-                    for i in 0..len {
-                        buf.extend_from_slice(&(vals.value(i) as u64).to_le_bytes());
-                    }
-                } else if let Some(vals) = arr.as_any().downcast_ref::<Int16Array>() {
-                    for i in 0..len {
-                        buf.extend_from_slice(&(vals.value(i) as u64).to_le_bytes());
-                    }
-                } else if let Some(vals) = arr.as_any().downcast_ref::<UInt64Array>() {
-                    for i in 0..len {
-                        buf.extend_from_slice(&vals.value(i).to_le_bytes());
-                    }
-                } else if let Some(vals) = arr.as_any().downcast_ref::<Int64Array>() {
-                    for i in 0..len {
-                        buf.extend_from_slice(&(vals.value(i) as u64).to_le_bytes());
-                    }
+                buf.extend_from_slice(&(arr.len() as u32).to_le_bytes());
+
+                // A list key is a path of item indices, so its elements are
+                // integers at whatever width the writer chose, and each is
+                // written the fixed eight bytes the scalar arm writes.
+                let Some(elements) = IntColumn::resolve(arr.as_ref()) else {
+                    return false;
+                };
+                for i in 0..elements.len() {
+                    buf.extend_from_slice(&elements.join_key(i).to_le_bytes());
                 }
             }
         }
@@ -650,13 +570,7 @@ impl<'a> TypedKeyColumn<'a> {
     #[inline(always)]
     fn get_u64(&self, row: usize) -> u64 {
         match self {
-            Self::U64(a) => a.value(row),
-            Self::U32(a) => a.value(row) as u64,
-            Self::U16(a) => a.value(row) as u64,
-            Self::U8(a) => a.value(row) as u64,
-            Self::I64(a) => a.value(row) as u64,
-            Self::I32(a) => a.value(row) as u64,
-            Self::I16(a) => a.value(row) as u64,
+            Self::Int(a) => a.join_key(row),
             _ => 0,
         }
     }
@@ -664,16 +578,7 @@ impl<'a> TypedKeyColumn<'a> {
     /// True for integer key columns (eligible for the packed-u128 fast path).
     #[inline(always)]
     fn is_integer(&self) -> bool {
-        matches!(
-            self,
-            Self::U64(_)
-                | Self::U32(_)
-                | Self::U16(_)
-                | Self::U8(_)
-                | Self::I64(_)
-                | Self::I32(_)
-                | Self::I16(_)
-        )
+        matches!(self, Self::Int(_))
     }
 
     /// Write normalized u64 value directly into a fixed-size buffer slice.
@@ -1006,35 +911,19 @@ fn retain_blocks_below(
 /// no cut can be justified: a physical type this does not recognise, or a null
 /// block number, which is neither below the limit nor above it.
 ///
-/// The type is resolved once per batch. Signed widths are read as unsigned, the
-/// way row-group statistics are: a writer storing block numbers in `Int32`
-/// carries anything above 2^31 as a negative value, and reading it signed would
-/// place it before every block instead of after.
+/// The type is resolved once per batch, and signed widths are read as unsigned
+/// the way `IntColumn::as_u64` explains.
 fn block_below_mask(column: &dyn Array, limit: u64) -> Option<BooleanArray> {
-    macro_rules! mask_over {
-        ($array:ty, $unsigned:ty) => {
-            if let Some(a) = column.as_any().downcast_ref::<$array>() {
-                if a.null_count() > 0 {
-                    return None;
-                }
-                let below: Vec<bool> = a
-                    .values()
-                    .iter()
-                    .map(|&v| ((v as $unsigned) as u64) < limit)
-                    .collect();
-                return Some(BooleanArray::from(below));
-            }
-        };
+    if column.null_count() > 0 {
+        return None;
     }
 
-    mask_over!(UInt64Array, u64);
-    mask_over!(UInt32Array, u32);
-    mask_over!(UInt16Array, u16);
-    mask_over!(Int64Array, u64);
-    mask_over!(Int32Array, u32);
-    mask_over!(Int16Array, u16);
+    let reader = IntColumn::resolve(column)?;
+    let below: Vec<bool> = (0..reader.len())
+        .map(|row| reader.block_number(row) < limit)
+        .collect();
 
-    None
+    Some(BooleanArray::from(below))
 }
 
 /// Select which row groups need to be scanned, skipping those that
@@ -1155,6 +1044,20 @@ fn scan_row_groups(
         if has_block_filter {
             let bn_col = request.block_number_column.unwrap();
             if let Ok(idx) = table.schema().index_of(bn_col) {
+                // Checked once here rather than per batch: the row filter's
+                // callback may only fail with an `ArrowError`, which carries no
+                // kind, and a block number the engine cannot compare has to
+                // reach the client as one (INV-E6).
+                let stored = table.schema().field(idx).data_type();
+                if !crate::integers::is_integer(stored) {
+                    return Err(engine_err!(
+                        ErrorKind::UnsupportedKeyType,
+                        "block number column '{}' is stored as {:?}, which is not an integer",
+                        bn_col,
+                        stored
+                    ));
+                }
+
                 let bn_projection = ProjectionMask::roots(parquet_schema, vec![idx]);
                 let from_block = effective_from;
                 let to_block = request.to_block;
@@ -1162,11 +1065,12 @@ fn scan_row_groups(
                 filter_stages.push(Box::new(ArrowPredicateFn::new(
                     bn_projection,
                     move |batch: RecordBatch| {
-                        if let Some(col) = batch.column_by_name(&bn_col_name) {
-                            Ok(block_range_mask(col, from_block, to_block))
-                        } else {
-                            Ok(BooleanArray::from(vec![true; batch.num_rows()]))
-                        }
+                        let Some(col) = batch.column_by_name(&bn_col_name) else {
+                            return Ok(BooleanArray::from(vec![true; batch.num_rows()]));
+                        };
+
+                        block_range_mask(col, from_block, to_block)
+                            .map_err(|e| ArrowError::InvalidArgumentError(e.to_string()))
                     },
                 )));
             }
@@ -1408,7 +1312,7 @@ fn scan_hierarchical_two_pass(
         let bounded = request.from_block.filter(|&b| b > 0).is_some() || request.to_block.is_some();
         let batch = if let Some(bn_col) = request.block_number_column.filter(|_| bounded) {
             if let Some(col) = batch.column_by_name(bn_col) {
-                let br_mask = block_range_mask(col, request.from_block, request.to_block);
+                let br_mask = block_range_mask(col, request.from_block, request.to_block)?;
                 arrow::compute::filter_record_batch(&batch, &br_mask)
                     .context("block range filter in hierarchical scan")?
             } else {
@@ -1429,116 +1333,60 @@ fn scan_hierarchical_two_pass(
     Ok(output_batches)
 }
 
+/// Rows whose block number falls in `[from_block, to_block]`.
+///
+/// A declared `uint64` bounds the values and not the storage, so every integer
+/// width a writer may choose has an arm (INV-D7). A bound the stored width
+/// cannot hold is not truncated into it: a `from` above the width's ceiling
+/// matches nothing, and a `to` above it constrains nothing (INV-P14).
 fn block_range_mask(
     column: &Arc<dyn Array>,
     from_block: Option<u64>,
     to_block: Option<u64>,
-) -> BooleanArray {
-    // Try UInt32 first (old format), then UInt64 (new format)
-    if let Some(arr) = column.as_any().downcast_ref::<UInt64Array>() {
-        let mut mask = BooleanArray::from(vec![true; arr.len()]);
-        if let Some(from) = from_block {
-            let ge = gt_eq(&arr, &UInt64Array::new_scalar(from)).unwrap();
-            mask = and(&mask, &ge).unwrap();
-        }
-        if let Some(to) = to_block {
-            let le = lt_eq(&arr, &UInt64Array::new_scalar(to)).unwrap();
-            mask = and(&mask, &le).unwrap();
-        }
-        mask
-    } else if let Some(arr) = column.as_any().downcast_ref::<UInt32Array>() {
-        let mut mask = BooleanArray::from(vec![true; arr.len()]);
-        if let Some(from) = from_block {
-            if from > u32::MAX as u64 {
-                return BooleanArray::from(vec![false; arr.len()]);
-            }
-            let ge = gt_eq(&arr, &UInt32Array::new_scalar(from as u32)).unwrap();
-            mask = and(&mask, &ge).unwrap();
-        }
-        if let Some(to) = to_block {
-            if to <= u32::MAX as u64 {
-                let le = lt_eq(&arr, &UInt32Array::new_scalar(to as u32)).unwrap();
-                mask = and(&mask, &le).unwrap();
-            }
-        }
-        mask
-    } else if let Some(arr) = column.as_any().downcast_ref::<Int32Array>() {
-        let mut mask = BooleanArray::from(vec![true; arr.len()]);
-        if let Some(from) = from_block {
-            if from > i32::MAX as u64 {
-                return BooleanArray::from(vec![false; arr.len()]);
-            }
-            let ge = gt_eq(&arr, &Int32Array::new_scalar(from as i32)).unwrap();
-            mask = and(&mask, &ge).unwrap();
-        }
-        if let Some(to) = to_block {
-            if to <= i32::MAX as u64 {
-                let le = lt_eq(&arr, &Int32Array::new_scalar(to as i32)).unwrap();
-                mask = and(&mask, &le).unwrap();
-            }
-        }
-        mask
-    } else if let Some(arr) = column.as_any().downcast_ref::<Int64Array>() {
-        // A bare INT64 block_number column decodes as Int64Array. Block numbers are
-        // non-negative; reinterpret-safe because the values fit in i64 in practice.
-        let mut mask = BooleanArray::from(vec![true; arr.len()]);
-        if let Some(from) = from_block {
-            if from > i64::MAX as u64 {
-                return BooleanArray::from(vec![false; arr.len()]);
-            }
-            let ge = gt_eq(&arr, &Int64Array::new_scalar(from as i64)).unwrap();
-            mask = and(&mask, &ge).unwrap();
-        }
-        if let Some(to) = to_block {
-            if to <= i64::MAX as u64 {
-                let le = lt_eq(&arr, &Int64Array::new_scalar(to as i64)).unwrap();
-                mask = and(&mask, &le).unwrap();
-            }
-        }
-        mask
-    } else if let Some(arr) = column.as_any().downcast_ref::<UInt16Array>() {
-        let mut mask = BooleanArray::from(vec![true; arr.len()]);
-        if let Some(from) = from_block {
-            if from > u16::MAX as u64 {
-                return BooleanArray::from(vec![false; arr.len()]);
-            }
-            let ge = gt_eq(&arr, &UInt16Array::new_scalar(from as u16)).unwrap();
-            mask = and(&mask, &ge).unwrap();
-        }
-        if let Some(to) = to_block {
-            if to <= u16::MAX as u64 {
-                let le = lt_eq(&arr, &UInt16Array::new_scalar(to as u16)).unwrap();
-                mask = and(&mask, &le).unwrap();
-            }
-        }
-        mask
-    } else if let Some(arr) = column.as_any().downcast_ref::<Int16Array>() {
-        let mut mask = BooleanArray::from(vec![true; arr.len()]);
-        if let Some(from) = from_block {
-            if from > i16::MAX as u64 {
-                return BooleanArray::from(vec![false; arr.len()]);
-            }
-            let ge = gt_eq(&arr, &Int16Array::new_scalar(from as i16)).unwrap();
-            mask = and(&mask, &ge).unwrap();
-        }
-        if let Some(to) = to_block {
-            if to <= i16::MAX as u64 {
-                let le = lt_eq(&arr, &Int16Array::new_scalar(to as i16)).unwrap();
-                mask = and(&mask, &le).unwrap();
-            }
-        }
-        mask
-    } else {
-        // Unrecognized physical type for a block_number column: we cannot apply the
-        // range filter here. Surface it loudly — returning all-true would silently
-        // leak out-of-range rows from boundary/interior row groups.
-        eprintln!(
-            "WARN block_range_mask: unsupported block_number physical type {:?}; \
-             block-range filtering skipped for this batch",
-            column.data_type()
-        );
-        BooleanArray::from(vec![true; column.len()])
+) -> Result<BooleanArray> {
+    macro_rules! mask_over {
+        ($($array:ty, $native:ty);+ $(;)?) => {
+            $(if let Some(arr) = column.as_any().downcast_ref::<$array>() {
+                let ceiling = <$native>::MAX as u64;
+                let mut mask = BooleanArray::from(vec![true; arr.len()]);
+
+                if let Some(from) = from_block {
+                    if from > ceiling {
+                        return Ok(BooleanArray::from(vec![false; arr.len()]));
+                    }
+                    let ge = gt_eq(&arr, &<$array>::new_scalar(from as $native))?;
+                    mask = and(&mask, &ge)?;
+                }
+
+                if let Some(to) = to_block.filter(|to| *to <= ceiling) {
+                    let le = lt_eq(&arr, &<$array>::new_scalar(to as $native))?;
+                    mask = and(&mask, &le)?;
+                }
+
+                return Ok(mask);
+            })+
+        };
     }
+
+    mask_over!(
+        UInt64Array, u64;
+        UInt32Array, u32;
+        UInt16Array, u16;
+        UInt8Array, u8;
+        Int64Array, i64;
+        Int32Array, i32;
+        Int16Array, i16;
+        Int8Array, i8;
+    );
+
+    // Returning all-true here would leak every out-of-range row of the batch,
+    // and the client cannot tell (INV-B1). A block number column that is not an
+    // integer is a chunk disagreeing with its catalog.
+    Err(engine_err!(
+        ErrorKind::UnsupportedKeyType,
+        "block number column is stored as {:?}, which is not an integer",
+        column.data_type()
+    ))
 }
 
 /// Project a RecordBatch to only include the given output columns.
@@ -1622,28 +1470,28 @@ mod tests {
     fn test_block_range_mask_int64() {
         // A bare INT64 block_number column must be filtered, not pass-through.
         let col: Arc<dyn Array> = Arc::new(Int64Array::from(vec![100, 150, 200, 250]));
-        let mask = block_range_mask(&col, Some(150), Some(200));
+        let mask = block_range_mask(&col, Some(150), Some(200)).unwrap();
         assert_eq!(mask, BooleanArray::from(vec![false, true, true, false]));
     }
 
     #[test]
     fn test_block_range_mask_uint16() {
         let col: Arc<dyn Array> = Arc::new(UInt16Array::from(vec![10u16, 20, 30, 40]));
-        let mask = block_range_mask(&col, Some(20), Some(30));
+        let mask = block_range_mask(&col, Some(20), Some(30)).unwrap();
         assert_eq!(mask, BooleanArray::from(vec![false, true, true, false]));
     }
 
     #[test]
     fn test_block_range_mask_int16() {
         let col: Arc<dyn Array> = Arc::new(Int16Array::from(vec![10i16, 20, 30, 40]));
-        let mask = block_range_mask(&col, Some(20), None);
+        let mask = block_range_mask(&col, Some(20), None).unwrap();
         assert_eq!(mask, BooleanArray::from(vec![false, true, true, true]));
     }
 
     #[test]
     fn test_block_range_mask_int64_from_above_i64_max() {
         let col: Arc<dyn Array> = Arc::new(Int64Array::from(vec![0, i64::MAX]));
-        let mask = block_range_mask(&col, Some(u64::MAX), None);
+        let mask = block_range_mask(&col, Some(u64::MAX), None).unwrap();
         assert_eq!(mask, BooleanArray::from(vec![false, false]));
     }
 

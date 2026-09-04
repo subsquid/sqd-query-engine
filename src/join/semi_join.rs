@@ -1,5 +1,6 @@
 use crate::engine_err;
 use crate::error::ErrorKind;
+use crate::integers::{is_integer, IntColumn};
 use anyhow::Result;
 use arrow::array::*;
 use arrow::compute;
@@ -35,44 +36,33 @@ fn resolve_key_indices(schema: &SchemaRef, key_columns: &[&str]) -> Result<Vec<u
 
 /// A typed key extractor that avoids per-row downcast checks.
 enum TypedExtractor {
-    UInt32(usize),
-    UInt64(usize),
-    Int32(usize),
-    Int64(usize),
+    /// Any integer width, written eight bytes wide.
+    Int(usize),
     Utf8(usize),
-    UInt16(usize),
-    UInt8(usize),
     Boolean(usize),
     FixedBinary(usize),
-    ListInt32(usize),
+    /// A list of integers, each element written eight bytes wide.
+    IntList(usize),
 }
 
 impl TypedExtractor {
     fn new(batch: &RecordBatch, col_idx: usize) -> Result<Self> {
-        let col = batch.column(col_idx);
-        let dt = col.data_type();
+        let dt = batch.column(col_idx).data_type();
         Ok(match dt {
-            arrow::datatypes::DataType::UInt32 => Self::UInt32(col_idx),
-            arrow::datatypes::DataType::UInt64 => Self::UInt64(col_idx),
-            arrow::datatypes::DataType::Int32 => Self::Int32(col_idx),
-            arrow::datatypes::DataType::Int64 => Self::Int64(col_idx),
+            _ if is_integer(dt) => Self::Int(col_idx),
             arrow::datatypes::DataType::Utf8 => Self::Utf8(col_idx),
-            arrow::datatypes::DataType::UInt16 => Self::UInt16(col_idx),
-            arrow::datatypes::DataType::UInt8 => Self::UInt8(col_idx),
             arrow::datatypes::DataType::Boolean => Self::Boolean(col_idx),
             arrow::datatypes::DataType::FixedSizeBinary(_) => Self::FixedBinary(col_idx),
-            arrow::datatypes::DataType::List(field) => match field.data_type() {
-                arrow::datatypes::DataType::UInt32
-                | arrow::datatypes::DataType::Int32
-                | arrow::datatypes::DataType::UInt16 => Self::ListInt32(col_idx),
-                child_dt => {
-                    return Err(engine_err!(
-                        ErrorKind::UnsupportedKeyType,
-                        "unsupported list element type for join key: {:?}",
-                        child_dt
-                    ))
-                }
-            },
+            arrow::datatypes::DataType::List(field) if is_integer(field.data_type()) => {
+                Self::IntList(col_idx)
+            }
+            arrow::datatypes::DataType::List(field) => {
+                return Err(engine_err!(
+                    ErrorKind::UnsupportedKeyType,
+                    "unsupported list element type for join key: {:?}",
+                    field.data_type()
+                ))
+            }
             dt => {
                 return Err(engine_err!(
                     ErrorKind::UnsupportedKeyType,
@@ -86,16 +76,11 @@ impl TypedExtractor {
     #[inline]
     fn col_idx(&self) -> usize {
         match self {
-            Self::UInt32(i)
-            | Self::UInt64(i)
-            | Self::Int32(i)
-            | Self::Int64(i)
+            Self::Int(i)
             | Self::Utf8(i)
-            | Self::UInt16(i)
-            | Self::UInt8(i)
             | Self::Boolean(i)
             | Self::FixedBinary(i)
-            | Self::ListInt32(i) => *i,
+            | Self::IntList(i) => *i,
         }
     }
 
@@ -108,35 +93,15 @@ impl TypedExtractor {
         }
 
         match self {
-            Self::UInt32(_) => {
-                let a = col.as_any().downcast_ref::<UInt32Array>().unwrap();
-                buf.extend_from_slice(&a.value(row).to_le_bytes());
-            }
-            Self::UInt64(_) => {
-                let a = col.as_any().downcast_ref::<UInt64Array>().unwrap();
-                buf.extend_from_slice(&a.value(row).to_le_bytes());
-            }
-            Self::Int32(_) => {
-                let a = col.as_any().downcast_ref::<Int32Array>().unwrap();
-                buf.extend_from_slice(&a.value(row).to_le_bytes());
-            }
-            Self::Int64(_) => {
-                let a = col.as_any().downcast_ref::<Int64Array>().unwrap();
-                buf.extend_from_slice(&a.value(row).to_le_bytes());
+            Self::Int(_) => {
+                let ints = IntColumn::resolve(col.as_ref()).expect("`is_integer` admitted it");
+                buf.extend_from_slice(&ints.join_key(row).to_le_bytes());
             }
             Self::Utf8(_) => {
                 let a = col.as_any().downcast_ref::<StringArray>().unwrap();
                 let s = a.value(row);
                 buf.extend_from_slice(&(s.len() as u32).to_le_bytes());
                 buf.extend_from_slice(s.as_bytes());
-            }
-            Self::UInt16(_) => {
-                let a = col.as_any().downcast_ref::<UInt16Array>().unwrap();
-                buf.extend_from_slice(&a.value(row).to_le_bytes());
-            }
-            Self::UInt8(_) => {
-                let a = col.as_any().downcast_ref::<UInt8Array>().unwrap();
-                buf.push(a.value(row));
             }
             Self::Boolean(_) => {
                 let a = col.as_any().downcast_ref::<BooleanArray>().unwrap();
@@ -146,26 +111,18 @@ impl TypedExtractor {
                 let a = col.as_any().downcast_ref::<FixedSizeBinaryArray>().unwrap();
                 buf.extend_from_slice(a.value(row));
             }
-            Self::ListInt32(_) => {
+            Self::IntList(_) => {
                 let a = col
                     .as_any()
                     .downcast_ref::<GenericListArray<i32>>()
                     .unwrap();
                 let values = a.value(row);
-                let len = values.len() as u32;
-                buf.extend_from_slice(&len.to_le_bytes());
-                if let Some(arr) = values.as_any().downcast_ref::<UInt32Array>() {
-                    for j in 0..arr.len() {
-                        buf.extend_from_slice(&arr.value(j).to_le_bytes());
-                    }
-                } else if let Some(arr) = values.as_any().downcast_ref::<Int32Array>() {
-                    for j in 0..arr.len() {
-                        buf.extend_from_slice(&arr.value(j).to_le_bytes());
-                    }
-                } else if let Some(arr) = values.as_any().downcast_ref::<UInt16Array>() {
-                    for j in 0..arr.len() {
-                        buf.extend_from_slice(&(arr.value(j) as u32).to_le_bytes());
-                    }
+                buf.extend_from_slice(&(values.len() as u32).to_le_bytes());
+
+                let elements =
+                    IntColumn::resolve(values.as_ref()).expect("`is_integer` admitted it");
+                for j in 0..elements.len() {
+                    buf.extend_from_slice(&elements.join_key(j).to_le_bytes());
                 }
             }
         }

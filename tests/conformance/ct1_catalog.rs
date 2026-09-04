@@ -18,11 +18,15 @@
 
 use arrow::array::{ArrayRef, StringArray, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field};
+use arrow::record_batch::RecordBatch;
+use arrow::row::{RowConverter, SortField};
 use sqd_query_engine::metadata::parse_dataset_description;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tempfile::TempDir;
 
-use crate::harness::chunk::{blocks_parquet_named, write_table};
+use crate::harness::chunk::{blocks_parquet_named, read_columns, write_table};
+use crate::harness::fixtures::{fixture_chunk, fixture_tree_is_present, meta};
 use crate::harness::synthetic::run_json;
 
 // ---------------------------------------------------------------------------
@@ -158,4 +162,136 @@ fn a_relation_target_names_its_own_block_column() {
         .map(|b| b["receipts"].as_array().map(|a| a.len()).unwrap_or(0))
         .sum();
     assert_eq!(receipts, 3, "one receipt joins each event");
+}
+
+// ---------------------------------------------------------------------------
+// INV-D4 — the item key identifies a row
+// ---------------------------------------------------------------------------
+
+/// Every fixture dataset and the catalog it is served by.
+const FIXTURE_DATASETS: [(&str, &str); 11] = [
+    ("ethereum", "evm"),
+    ("optimism", "evm"),
+    ("binance", "evm"),
+    ("tempo", "evm"),
+    ("tron", "tron"),
+    ("bitcoin", "bitcoin"),
+    ("solana", "solana"),
+    ("kusama", "substrate"),
+    ("moonbeam", "substrate"),
+    ("hyperliquid", "hyperliquid_fills"),
+    ("hyperliquid_replica_cmds", "hyperliquid_replica_cmds"),
+];
+
+/// `[blockNumberColumn] ++ itemOrderKeys ++ [addressColumn]?` must identify a
+/// row. Deduplication and output ordering both use it: where two rows share a
+/// key, which of them the response carries depends on scan order, and nothing in
+/// the response says so.
+///
+/// This is the one CT-1 check that needs a chunk rather than a catalog — the
+/// catalog cannot say whether the data holds.
+///
+/// Covers CT-1 · INV-D4
+#[test]
+#[ignore = "requires external fixture data"]
+fn item_keys_are_unique_within_a_chunk() {
+    if !fixture_tree_is_present() {
+        return;
+    }
+
+    let mut checked = 0;
+
+    for (dataset, catalog) in FIXTURE_DATASETS {
+        let chunk = fixture_chunk(dataset);
+        if !chunk.is_dir() {
+            continue;
+        }
+
+        let metadata = meta(catalog);
+        for (table, desc) in &metadata.tables {
+            let mut key = vec![desc.block_number_column.as_str()];
+            key.extend(desc.item_order_keys.iter().map(String::as_str));
+            key.extend(desc.address_column.as_deref());
+
+            let Some(batches) = read_columns(&chunk, table, &key) else {
+                continue;
+            };
+
+            assert_eq!(
+                duplicate_key(&batches, &key),
+                None,
+                "{dataset}.{table}: two rows share the item key {key:?}, so which one the \
+                 response carries depends on scan order"
+            );
+            checked += 1;
+        }
+    }
+
+    assert!(
+        checked > 20,
+        "only {checked} tables were checked, so the fixture tree is not the one this \
+         test was written against"
+    );
+}
+
+/// The first key value two rows share, if any.
+///
+/// The comparison goes through Arrow's row format rather than a hand-written
+/// extractor per physical type, because the key columns include lists
+/// (`instruction_address`) and integers at four widths, and a comparison that
+/// silently declines to compare one of them reports uniqueness it never checked.
+fn duplicate_key(batches: &[RecordBatch], key: &[&str]) -> Option<String> {
+    let first = batches.first()?;
+
+    let fields: Vec<SortField> = key
+        .iter()
+        .map(|name| SortField::new(first.column_by_name(name).unwrap().data_type().clone()))
+        .collect();
+    let converter =
+        RowConverter::new(fields).expect("the key columns must have a row encoding to compare");
+
+    let mut seen: HashSet<Vec<u8>> = HashSet::new();
+
+    for batch in batches {
+        let columns: Vec<ArrayRef> = key
+            .iter()
+            .map(|name| batch.column_by_name(name).unwrap().clone())
+            .collect();
+        let rows = converter.convert_columns(&columns).unwrap();
+
+        for (row_idx, row) in rows.iter().enumerate() {
+            if !seen.insert(row.as_ref().to_vec()) {
+                let values: Vec<String> = columns
+                    .iter()
+                    .map(|c| {
+                        arrow::util::display::array_value_to_string(c.as_ref(), row_idx)
+                            .unwrap_or_default()
+                    })
+                    .collect();
+                return Some(values.join(", "));
+            }
+        }
+    }
+
+    None
+}
+
+/// The sweep above passes on every chunk on disk, which is also what a check
+/// that compares nothing does. This is the other direction: a chunk written with
+/// one key twice, which the sweep must call out.
+///
+/// Covers CT-1 · INV-D4
+#[test]
+fn a_duplicated_item_key_is_caught() {
+    let unique = height_chain_chunk(&[10, 11, 12]);
+    let key = ["height", "seq"];
+
+    let batches = read_columns(unique.path(), "events", &key).unwrap();
+    assert_eq!(duplicate_key(&batches, &key), None);
+
+    // The same block twice, which is what an archiver writing a fork boundary
+    // twice produces.
+    let repeated = height_chain_chunk(&[10, 11, 11]);
+    let batches = read_columns(repeated.path(), "events", &key).unwrap();
+    assert_eq!(duplicate_key(&batches, &key), Some("11, 0".to_string()));
 }

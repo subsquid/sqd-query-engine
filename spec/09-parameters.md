@@ -76,7 +76,7 @@ upward only: a change may raise them, never lower them.
 
 | Parameter | Role | Observed | Target |
 |---|---|---|---|
-| `P-COV-PROPERTY` | Fraction of invariants at status **C** in the traceability matrix ([MG-1](08-conformance.md#812-merge-gates)) | 0.51 (43 of 85) | ⚠ 0.60, then ratchet |
+| `P-COV-PROPERTY` | Fraction of invariants at status **C** in the traceability matrix ([MG-1](08-conformance.md#812-merge-gates)) | 0.58 (49 of 85) | ⚠ 0.60, then ratchet |
 | `P-COV-DIFF` | Line coverage of lines a change touches ([MG-2](08-conformance.md#812-merge-gates)) | unmeasured | ⚠ 0.80 |
 | `P-COV-TOTAL` | Whole-repository line coverage floor ([MG-2](08-conformance.md#812-merge-gates)) | unmeasured | ⚠ 0.70 |
 | `P-FLAKE-RETRIES` | Retries a test gets before it is quarantined ([MG-7](08-conformance.md#812-merge-gates)) | none | ⚠ 1 |

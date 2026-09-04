@@ -1,27 +1,30 @@
 use crate::engine_err;
 use crate::error::ErrorKind;
+use crate::integers::IntColumn;
 use anyhow::Result;
 use arrow::array::*;
 use arrow::compute;
 use arrow::datatypes::SchemaRef;
 use std::collections::HashMap;
 
-/// Extract a List value as a Vec<u32> from a row.
-/// Supports List<UInt16>, List<UInt32>, and List<Int32>.
+/// A hierarchical address as a path of item indices.
+///
+/// The elements are integers at whatever width the writer chose — Solana stores
+/// them in sixteen bits, EVM in thirty-two — so the width is read off the array
+/// rather than assumed.
 fn extract_address(array: &GenericListArray<i32>, row: usize) -> Vec<u32> {
     if array.is_null(row) {
         return Vec::new();
     }
+
     let values = array.value(row);
-    if let Some(arr) = values.as_any().downcast_ref::<UInt16Array>() {
-        (0..arr.len()).map(|i| arr.value(i) as u32).collect()
-    } else if let Some(arr) = values.as_any().downcast_ref::<UInt32Array>() {
-        (0..arr.len()).map(|i| arr.value(i)).collect()
-    } else if let Some(arr) = values.as_any().downcast_ref::<Int32Array>() {
-        (0..arr.len()).map(|i| arr.value(i) as u32).collect()
-    } else {
-        Vec::new()
-    }
+    let Some(elements) = IntColumn::resolve(values.as_ref()) else {
+        return Vec::new();
+    };
+
+    (0..elements.len())
+        .map(|i| elements.block_number(i) as u32)
+        .collect()
 }
 
 /// Composite key for grouping by (block_number, transaction_index).
@@ -35,36 +38,24 @@ fn make_group_key(
     key_indices: &[usize],
 ) -> Result<Option<GroupKey>> {
     let mut buf = Vec::with_capacity(key_indices.len() * 8);
+
     for &idx in key_indices {
         let col = batch.column(idx);
-        if let Some(a) = col.as_any().downcast_ref::<UInt64Array>() {
-            if a.is_null(row) {
-                return Ok(None);
-            }
-            buf.extend_from_slice(&a.value(row).to_le_bytes());
-        } else if let Some(a) = col.as_any().downcast_ref::<UInt32Array>() {
-            if a.is_null(row) {
-                return Ok(None);
-            }
-            buf.extend_from_slice(&(a.value(row) as u64).to_le_bytes());
-        } else if let Some(a) = col.as_any().downcast_ref::<UInt16Array>() {
-            if a.is_null(row) {
-                return Ok(None);
-            }
-            buf.extend_from_slice(&(a.value(row) as u64).to_le_bytes());
-        } else if let Some(a) = col.as_any().downcast_ref::<Int32Array>() {
-            if a.is_null(row) {
-                return Ok(None);
-            }
-            buf.extend_from_slice(&((a.value(row) as u32) as u64).to_le_bytes());
-        } else {
+        let Some(ints) = IntColumn::resolve(col.as_ref()) else {
             return Err(engine_err!(
                 ErrorKind::UnsupportedKeyType,
                 "unsupported group key column type: {:?}",
                 col.data_type()
             ));
+        };
+
+        if ints.is_null(row) {
+            return Ok(None);
         }
+
+        buf.extend_from_slice(&ints.join_key(row).to_le_bytes());
     }
+
     Ok(Some(GroupKey(buf)))
 }
 

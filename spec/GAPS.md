@@ -24,10 +24,13 @@ Compared against the reference implementation, as of 2026-09-03.
 
 ## Summary
 
-**The register is empty.** Every dataset [chapter 3](03-catalog.md) names is
-served except `fuel`, which is out of scope
-([ADR-10](decisions/ADR-10-fuel-is-out-of-scope.md)). Nothing the reference
-answers is refused here except by the bounds the table below says are
+| # | Gap | Invariant | Sev |
+|---|---|---|---|
+| 31 | A block number above 2³¹ stored in `Int32` is read as negative by the range filter | [INV-D7](07-invariants.md#inv-d7) | **S4** |
+
+Every dataset [chapter 3](03-catalog.md) names is served except `fuel`, which is
+out of scope ([ADR-10](decisions/ADR-10-fuel-is-out-of-scope.md)). Nothing the
+reference answers is refused here except by the bounds the table below says are
 deliberate.
 
 The last three entries were missing surface rather than wrong behaviour, and each
@@ -55,11 +58,54 @@ the signed floor and the block-bound half of it both have tests now — and left
 [INV-P8](07-invariants.md#inv-p8), [INV-Q6](07-invariants.md#inv-q6) and
 [INV-P15](07-invariants.md#inv-p15) covered from one more direction each.
 
-The next work is not in this document. It is the capability gaps in
-[§8.13](08-conformance.md#813-harness-capability-register) — a chunk writer and a
-query generator — which are what stand between the suite and the eleven
-invariants nothing would notice breaking, [INV-P9](07-invariants.md#inv-p9)
-first among them.
+Gap 31 arrived the way the rest of this document did not: nobody was looking for
+it. The chunk writer that [§8.13](08-conformance.md#813-harness-capability-register)
+asks for got finished, and the equality runs it made possible failed four times
+over, each on a different reader that knew a different subset of the eight
+integer widths — one that dropped a block's header fields, one that dropped a
+whole relation, one that emitted items in file order, one that matched no address
+at all. Those are fixed, and the readers now share one list of widths. Gap 31 is
+what was left over.
+
+The next work is still not in this document. It is the one remaining capability
+gap, the query generator, which is what stands between the suite and the five
+invariants nothing would notice breaking,
+[INV-P9](07-invariants.md#inv-p9) first among them.
+
+---
+
+## S4 — Latent
+
+### 31. A block number above 2³¹ stored in `Int32` reads as negative
+
+Two places widen a stored block number and they disagree about sign.
+`IntColumn::block_number` reinterprets — `(v as u32) as u64` — so a wrapped value
+reads back as the block it is, and every reader that resolves a block number
+through it agrees. `block_range_mask` in `src/scan/scanner.rs` does not: it
+compares through Arrow's kernels at the stored type, so the same value sorts
+below every bound and the row group is filtered away.
+
+The visible effect is a response of zero bytes for a range the chunk covers. Not
+"the wrong rows" — no rows, and no error, which is indistinguishable from a chunk
+that ends before the range starts.
+
+[INV-D7](07-invariants.md#inv-d7) says any integer width and *signedness*, so the
+engine is wrong and the spec is right. It is **S4** rather than **S1** because
+reaching it needs a writer that keeps `Int32` past 2³¹ instead of widening — the
+`UInt32` arm, which any sane writer would pick, is already correct — and because
+the chains served are between one and two orders of magnitude below that number.
+
+The fix is not a one-line reinterpretation: a `[from, to]` range that straddles
+2³¹ is two disjoint intervals in the signed domain, so the arm needs the straddle
+case rather than a different scalar. Writing it as a scalar loop the way
+`block_below_mask` does would work and would give up the SIMD kernel on a path
+that runs over every row of every block-filtered scan.
+
+*First test:* a chunk whose block numbers start at 2 200 000 000 stored as
+`Int32`, queried over its own range, must return the same response as the same
+chunk stored as `UInt64`. `physical_width_does_not_reach_the_answer` sweeps every
+width already; what it cannot reach is a value that does not fit the width it is
+stored at, which needs a writer that wraps rather than widens.
 
 ---
 

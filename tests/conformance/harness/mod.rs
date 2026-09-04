@@ -6,6 +6,7 @@
 //! suite lies.
 
 pub mod chunk;
+pub mod evm_like;
 pub mod fixtures;
 pub mod guard;
 pub mod json;
