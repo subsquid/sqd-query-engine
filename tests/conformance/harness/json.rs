@@ -56,3 +56,48 @@ pub fn items_in(block: &Value, table_key: &str) -> Vec<Value> {
         .cloned()
         .unwrap_or_default()
 }
+
+/// Assert two responses are byte-identical, reporting the first line that
+/// differs — and, within it, the first byte — rather than two megabytes of
+/// NDJSON or three hundred identical characters of prefix.
+pub fn assert_same_response(expected: &[u8], actual: &[u8], what: &str) {
+    if expected == actual {
+        return;
+    }
+
+    let (want, got) = (lines(expected), lines(actual));
+    let at = (0..want.len().max(got.len()))
+        .find(|&i| want.get(i) != got.get(i))
+        .expect("the responses differ, so some line does");
+
+    let (Some(want), Some(got)) = (want.get(at), got.get(at)) else {
+        panic!(
+            "{what} changed the response length: {} lines expected, {} actual",
+            want.len(),
+            got.len()
+        );
+    };
+
+    let byte = (0..want.len().max(got.len()))
+        .find(|&i| want.get(i) != got.get(i))
+        .unwrap_or(0);
+    let from = byte.saturating_sub(60);
+
+    panic!(
+        "{what} changed the response at line {at}, byte {byte}\n  expected: …{}\n  actual:   …{}",
+        window(want, from),
+        window(got, from),
+    );
+}
+
+fn lines(body: &[u8]) -> Vec<&[u8]> {
+    body.split(|b| *b == b'\n')
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+fn window(line: &[u8], from: usize) -> String {
+    let slice = &line[from.min(line.len())..(from + 240).min(line.len())];
+
+    String::from_utf8_lossy(slice).into_owned()
+}

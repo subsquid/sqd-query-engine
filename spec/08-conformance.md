@@ -309,11 +309,11 @@ renamed out from under a comment inside it.
 | [INV-D1](07-invariants.md#inv-d1) | CT-1 | **C** | every reference the invariant lists has a negative case: `test_validate_rejects_unresolvable_references` covers the address, parent-key, sort-key, item-order, weight, roll, discriminator-length and field-group ones, and with them the two shape rules §1.10 carries alongside — a roll's spread list is last, and a discriminator length is written the way the lookup asks for it; `test_validate_rejects_broken_alias_references`, `test_validate_rejects_unknown_filter_column`, `test_validate_rejects_a_special_filter_on_a_missing_column` and `test_validation_bad_block_number_column` the rest |
 | [INV-D2](07-invariants.md#inv-d2) | CT-1 | **C** | `test_validate_rejects_broken_alias_references` |
 | [INV-D3](07-invariants.md#inv-d3) | CT-1 | **C** | `test_validate_requires_exactly_one_block_table` — none, two, and one that does not lead the catalog; identity is the item key, so a block table stored under another sort key is still one and an addressed table with no order keys is not |
-| [INV-D4](07-invariants.md#inv-d4) | CT-1 | **U** | no chunk-level key-uniqueness check on any fixture |
+| [INV-D4](07-invariants.md#inv-d4) | CT-1 | **C** | `item_keys_are_unique_within_a_chunk` projects `[blockNumberColumn] ++ itemOrderKeys ++ [addressColumn]?` for every table of every fixture chunk and compares through Arrow's row format, so a list-valued address column is compared rather than skipped; `a_duplicated_item_key_is_caught` is the other direction, and it runs where the fixture tree does not |
 | [INV-D5](07-invariants.md#inv-d5) | CT-1 | **P** | the static half is checked on both sides — key non-empty, equal length, block number first — one case per shape in `test_validate_rejects_a_relation_that_cannot_join`. The chunk-level half its *Test:* line asks for, that no matched pair spans two blocks, is not run |
 | [INV-D6](07-invariants.md#inv-d6) | CT-1 | **C** | both sides are checked for `children` and `parents` alike, with a case in `test_validate_rejects_a_relation_that_cannot_join` |
-| [INV-D7](07-invariants.md#inv-d7) | CT-6 | **P** | width tolerance is covered per mechanism — block-range masks, in-lists, semi-joins, range predicates, and on the output side `test_solana_tx_version_reads_the_sentinel_at_every_physical_width` and `test_bignum_reads_a_narrowed_column`. No same-chunk-at-several-widths equality run |
-| [INV-D8](07-invariants.md#inv-d8) | CT-6 | **U** | needs the chunk writer, HC-3 |
+| [INV-D7](07-invariants.md#inv-d7) | CT-6 | **C** | `physical_width_does_not_reach_the_answer` rewrites one chunk at every one of the eight integer widths, for every integer column that can hold its values, and byte-compares each; `narrowing_every_column_at_once_does_not_reach_the_answer` the combination one column at a time hides; `a_narrow_column_in_a_shuffled_chunk_does_not_reach_the_answer` the pairing with a storage order that is not the item-key order, which is what reaches the sort comparator at all. `a_list_key_answers_the_same_at_any_element_width` covers the element types inside a list on a real chunk, and `a_fixture_chunk_answers_the_same_at_any_width` the scalar widths there. Underneath: `a_narrower_column_orders_against_a_wider_one_by_value`, block-range masks, in-lists, semi-joins, range predicates, `test_solana_tx_version_reads_the_sentinel_at_every_physical_width`, `test_bignum_reads_a_narrowed_column` |
+| [INV-D8](07-invariants.md#inv-d8) | CT-6 | **C** | `storage_layout_does_not_reach_the_answer` turns one knob per case, one per mechanism the invariant names — row groups of 1, 7 and more than the table holds; data pages of 1 and 5; uncompressed and snappy; no dictionary; no statistics; and the rows stored back to front and then in no order at all, which is a permutation no sort key produces. `a_fixture_chunk_answers_the_same_under_any_layout` repeats six of them on an archiver's chunk |
 | [INV-D9](07-invariants.md#inv-d9) | CT-1 | **C** | `test_system_columns_excluded_from_weight`, `undeclared_columns_are_not_filterable`, `test_validate_rejects_fields_backed_by_system_columns` — direct, virtual-field and field-group exposure |
 | [INV-D10](07-invariants.md#inv-d10) | CT-1 | **C** | `test_validate_rejects_duplicate_names` — two tables on one `queryName`, two on one `fieldName`, an alias on a table's `queryName`, and a table on the name another holds without declaring it |
 | [INV-Q1](07-invariants.md#inv-q1) | CT-2 | **P** | reached through every fixture; no negative case for an unknown `type` |
@@ -345,7 +345,7 @@ renamed out from under a comment inside it.
 | [INV-P13](07-invariants.md#inv-p13) | CT-3 | **C** | `test_compile_discriminator_mixed_lengths`, `discriminator_hex_is_a_prefix_chain`, and the Kleene cases in the predicate unit tests |
 | [INV-P14](07-invariants.md#inv-p14) | CT-3 | **C** | `unmatchable_values_are_not_errors` and `a_hex_value_too_wide_for_the_column_matches_nothing` for values wider than the column, `a_signed_column_takes_negative_filter_values` for one below its floor, and `a_block_bound_past_the_stored_width_matches_nothing` for the half the invariant states about the block bounds — where wrapping would truncate into a block the chunk holds |
 | [INV-P15](07-invariants.md#inv-p15) | CT-3 | **C** | `undeclared_columns_are_not_filterable`, `an_alias_has_its_own_filter_surface`, `an_alias_has_its_own_relation_surface` |
-| [INV-P16](07-invariants.md#inv-p16) | CT-3 | **P** | row-group pruning and the `can_skip` cases; no pruning-disabled equality run |
+| [INV-P16](07-invariants.md#inv-p16) | CT-3 | **P** | the pruning-disabled equality run exists: `a_filter_returns_the_same_rows_with_nothing_to_prune_on` runs five filters — matching, non-matching, conjunctive, empty-list, absent — against chunks written with no statistics to prune on, a row per row group, a row per data page, and no dictionary, and compares bytes. Early termination is CT-5's `scan` module. Filter reordering is not varied, and it is five filters over one query shape rather than every fixture query |
 | [INV-R1](07-invariants.md#inv-r1) | CT-4 | **P** | `test_alias_relation_source_predicates`, `test_resolve_includes_source_predicate_columns`; the two-item-request construction of §8.5 is not written |
 | [INV-R2](07-invariants.md#inv-r2) | CT-4 | **U** | nothing asserts relations stop at one hop |
 | [INV-R3](07-invariants.md#inv-r3) | CT-4 | **P** | `test_arrow_multisource_dedup` |
@@ -359,27 +359,27 @@ renamed out from under a comment inside it.
 | [INV-R11](07-invariants.md#inv-r11) | CT-4 | **U** | no idempotence test |
 | [INV-B1](07-invariants.md#inv-b1) | CT-5 | **C** | `test_scan_with_block_range`, `test_scan_with_predicate_and_block_range` |
 | [INV-B2](07-invariants.md#inv-b2) | CT-5 | **C** | `untrimmed_scan_includes_all_blocks` |
-| [INV-B3](07-invariants.md#inv-b3) | CT-5 | **C** | `boundary_blocks_emitted_without_items`, `budget_trim_excludes_range_end_boundary_block` |
+| [INV-B3](07-invariants.md#inv-b3) | CT-5 | **C** | `boundary_blocks_emitted_without_items`, `budget_trim_excludes_range_end_boundary_block`, and `a_split_adds_only_boundary_headers`, which bounds at two the headers a split may add |
 | [INV-B4](07-invariants.md#inv-b4) | CT-5 | **P** | implied by the budget suite; no block-larger-than-budget case |
 | [INV-B5](07-invariants.md#inv-b5) | CT-5 | **P** | the weight unit tests cover the components, not the block sum |
 | [INV-B6](07-invariants.md#inv-b6) | CT-5 | **P** | `multi_table_trim_reports_true_last_block`; the keep-at-least-one rule is untested |
 | [INV-B7](07-invariants.md#inv-b7) | CT-5 | **P** | same test; no end-to-end paging run |
-| [INV-B8](07-invariants.md#inv-b8) | CT-5 | **U** | **partition invariance is not tested.** §8.6 calls it the single most valuable test in the suite, and it transitively exercises five other invariants |
+| [INV-B8](07-invariants.md#inv-b8) | CT-5 | **C** | `splitting_the_range_returns_the_same_items` splits at every block boundary of a sixteen-block chunk and concatenates the halves back, per table, in response order — for seven item-request shapes, since composability is a claim about how a filter and a relation meet a range boundary and a query carrying neither says nothing about either. `splitting_a_fixture_range_returns_the_same_items` does it over forty blocks an archiver wrote, and `splitting_a_hierarchical_range_returns_the_same_items` over a relation that matches an address *prefix* rather than an equal key, which is where locality is least obvious. A half the weight budget trimmed is a failure rather than a difference to explain away, so the comparison cannot be satisfied by two short responses |
 | [INV-B9](07-invariants.md#inv-b9) | CT-5 | **P** | the arithmetic is checked — `a_negative_size_weighs_nothing`, `block_weight_saturates_rather_than_wrapping`. That it is the *same* function twice over one chunk is not asserted |
 | [INV-B10](07-invariants.md#inv-b10) | CT-5 | **C** | four weight-projection cases |
 | [INV-O1](07-invariants.md#inv-o1) | CT-6 | **C** | `empty_result_is_none`, `iteration_matches_json_lines`, `test_json_close` |
 | [INV-O2](07-invariants.md#inv-o2) | CT-6 | **P** | fixtures only |
 | [INV-O3](07-invariants.md#inv-o3) | CT-6 | **P** | fixtures only |
 | [INV-O4](07-invariants.md#inv-o4) | CT-6 | **P** | fixtures only |
-| [INV-O5](07-invariants.md#inv-o5) | CT-6 | **P** | fixtures plus the typed sort-column case |
+| [INV-O5](07-invariants.md#inv-o5) | CT-6 | **P** | the fixtures pin *which* order, and the shuffled-chunk cases of INV-D7 and INV-D8 pin that it is not the stored one — a chunk whose rows are in no order must answer what the same chunk in key order answers. `a_narrower_column_orders_against_a_wider_one_by_value` covers the comparator across widths. What no shuffled run reaches is a list-valued address key, which is the ordering Solana and EVM traces both depend on |
 | [INV-O6](07-invariants.md#inv-o6) | CT-6 | **P** | fixtures compare values, not bytes — see the divergence table in GAPS.md |
 | [INV-O7](07-invariants.md#inv-o7) | CT-6 | **P** | `test_arrow_parity_and_projection`; no empty-`fields` case |
 | [INV-O8](07-invariants.md#inv-o8) | CT-6 | **C** | `test_snake_to_camel`, `test_snake_to_camel_in_output` |
 | [INV-O9](07-invariants.md#inv-o9) | CT-6 | **P** | sixteen encoder cases plus `discriminator_columns_render_as_padded_hex`, `test_a_timestamp_takes_its_unit_from_the_declared_type` over all four unit pairings, and `test_hex_and_base58_render_a_column_stored_as_bytes`. The NaN and ±∞ arm is the one the invariant names that nothing asserts |
 | [INV-O10](07-invariants.md#inv-o10) | CT-6 | **C** | `test_encode_roll`, `test_encode_roll_with_list_spread` |
 | [INV-O11](07-invariants.md#inv-o11) | CT-6 | **P** | field groups are exercised; an unknown tag value is not, and that is the case archives outliving catalogs produce |
-| [INV-O12](07-invariants.md#inv-o12) | CT-6 | **U** | byte determinism is never asserted |
-| [INV-O13](07-invariants.md#inv-o13) | CT-6 | **U** | no thread-count sweep |
+| [INV-O12](07-invariants.md#inv-o12) | CT-6 | **C** | `the_same_chunk_and_query_give_the_same_bytes`, and every case of INV-D7 and INV-D8 is a second assertion of it |
+| [INV-O13](07-invariants.md#inv-o13) | CT-6 | **C** | `thread_count_does_not_reach_the_answer` runs seven item-request shapes in pools of 1, 2, 4 and 16 and compares bytes; the rest of what the invariant names — row-group and page boundaries, compression, physical row order, physical widths, statistics and dictionaries — is INV-D7's and INV-D8's equality runs, which are the same assertion made of the chunk instead of the pool |
 | [INV-O14](07-invariants.md#inv-o14) | CT-6 | **C** | six Arrow-parity cases |
 | [INV-E1](07-invariants.md#inv-e1) | CT-9 | **P** | the request half is fuzzed under CT-9, and `a_chunk_that_disagrees_with_the_catalog_does_not_panic` pins the encoders against a chunk written to disagree. The chunk-type *sweep* the invariant asks for needs HC-3, and two existing tests still assert a panic rather than forbid one |
 | [INV-E2](07-invariants.md#inv-e2) | CT-2 | **P** | validation precedes scanning by construction; nothing asserts that no output precedes an error |
@@ -392,38 +392,45 @@ renamed out from under a comment inside it.
 | [INV-X2](07-invariants.md#inv-x2) | CT-8 | **C** | `an_ignored_nullable_column_does_not_change_output` |
 | [INV-X3](07-invariants.md#inv-x3) | CT-8 | **C** | `filtering_an_absent_column_is_an_error` on both scan entry points, `filtering_a_present_column_still_works` for the other direction, `one_unanswerable_item_rejects_the_whole_request` for a filter one item request of several carries, and `an_alias_filter_on_a_column_the_chunk_lacks_is_an_error` for one reached through an alias's extraction column |
 
-**Totals: 43 C, 31 P, 11 U** of 85. Property coverage is therefore 0.51
+**Totals: 49 C, 30 P, 6 U** of 85. Property coverage is therefore 0.58
 (`P-COV-PROPERTY` in [09-parameters.md](09-parameters.md)).
 
-Of the 74 rows at **C** or **P**, 52 are backed by a tagged test and 22 rest on
-prose alone. The 22 are the rows whose note says "fixtures only" or describes a
+Of the 79 rows at **C** or **P**, 59 are backed by a tagged test and 20 rest on
+prose alone. Those 20 are the rows whose note says "fixtures only" or describes a
 group of cases without naming one, and they are the ones nothing recomputes: the
 status is what somebody believed on the day they typed it. Shrinking that number
 is what turns MG-1's ratchet from an intention into an arithmetic fact, so the
 checker recomputes all three numbers in this paragraph rather than trusting them.
 
-A tag is not the same as a gate. 7 of the 52 are backed only by tests marked
+A tag is not the same as a gate. 7 of the 59 are backed only by tests marked
 `#[ignore]`, which MG-3's portable job does not run: the test would fail if the
 invariant broke, but only on a machine that has the chunks. The checker reports
 those rows on every run too, because a status that no job can falsify is a status
 worth seeing.
 
-The shape of the U column is worth reading on its own. The unchecked invariants
-cluster in three places, and none of them is an accident:
+The shape of the U column is worth reading on its own. What is left there is
+almost all one thing:
 
-- **The remaining chunk-writer axes** — D8, O12, O13, and half of D7. Adding and
-  dropping columns and tables is portable now; physical widths, sort keys,
-  row-group sizes and compression still cannot be varied. Finishing HC-3 remains
-  the single highest-leverage piece of work.
-- **Everything needing generated queries** — P5, R2, R4, R11, B8. Each is a law
-  over pairs of queries, and a suite of hand-written cases cannot express one.
-- **The catalog validator's remaining blind spot** — D4, and the chunk-level half
-  of D5. Both need a chunk to look at rather than a catalog, so both wait on
-  HC-3 with the first group.
+- **Everything needing generated queries** — P5, R2, R4, R11. Each is a law over
+  a *pair* of queries rather than over one, and a suite of hand-written cases
+  cannot express one. Building HC-4 is now the single highest-leverage piece of
+  work, as finishing HC-3 was before it.
+- **`gteConst` lexicographic comparison** — P11, which needs no machinery at all
+  and is unwritten for no reason but that nobody has written it.
 
-INV-P9 belongs to none of those groups and is the most dangerous single row in
-the table: a bloom construction that disagrees with the archive writer's returns
-false negatives, and no client — and no fixture test — can see them.
+INV-P9 belongs to neither and is the most dangerous single row in the table: a
+bloom construction that disagrees with the archive writer's returns false
+negatives, and no client — and no fixture test — can see them.
+
+Two rows moved for a reason worth recording. B8 was the U the build order put
+third, behind two capabilities, and it turned out to need neither: splitting a
+range and concatenating the halves is a law you can write against any chunk you
+already have. And the first equality run under a rewritten chunk found a real
+defect on its first execution — a block number stored in sixteen bits was read by
+the scan and dropped by the assembly, so a response came back with its headers
+stripped of every field but the number, and with a narrower chunk, empty. That is
+the class of failure §8.1 says fixtures cannot find, found the week the machinery
+to look for it existed.
 
 ## 8.12 Merge gates
 
@@ -440,7 +447,7 @@ and its promotion is tracked in [GAPS.md](GAPS.md).
 | **MG-1** Property coverage never regresses | `P-COV-PROPERTY`, ratchet only | per-PR | HC-8 | advisory until HC-8 ratchets |
 | **MG-2** Line coverage on changed lines, and a repository floor | `P-COV-DIFF`, `P-COV-TOTAL` | per-PR | HC-9 | advisory until HC-9 exists |
 | **MG-3** The PR-budget classes pass | CT-1, CT-2, CT-3, CT-4, CT-5, CT-6 green | per-PR | HC-1, HC-2, HC-4, HC-6 | **blocking for portable tests**; external-data coverage is advisory |
-| **MG-4** The capability-blocked classes pass | CT-7, CT-8, CT-9 green | nightly | HC-3, HC-5, HC-7 | advisory until HC-3 is complete |
+| **MG-4** The capability-blocked classes pass | CT-7, CT-8, CT-9 green | nightly | HC-3, HC-5, HC-7 | advisory until HC-5 and HC-7 exist |
 | **MG-5** No performance regression outside the noise band | `P-PERF-NOISE-BAND` | nightly | HC-10 | advisory |
 | **MG-6** Spec integrity | the suite's own checker reports no error | per-PR | HC-11 | **blocking** |
 | **MG-7** Flake policy | `P-FLAKE-RETRIES`, then quarantine with an owner and an expiry | per-PR | HC-8 | advisory until HC-8 ratchets |
@@ -490,7 +497,7 @@ The gates and the CT classes both assume machinery. Listed with build status, or
 |---|---|---|---|
 | **HC-1** Fixture chunk loader and query runner | CT-2 – CT-6 | **C** | exists |
 | **HC-2** Catalog builder for deliberately invalid catalogs | CT-1 | **P** | a few negative cases exist; no systematic "one violation per check" sweep |
-| **HC-3** Chunk *writer* — rewrite a fixture at a chosen physical type, sort key, row-group size, with a column dropped or added | CT-6, CT-8 | **P** | portable mutations can add or drop a column and drop a table, closing X2, E3 and E4; physical type, sort key, row-group size and compression remain |
+| **HC-3** Chunk *writer* — rewrite a fixture at a chosen physical type, sort key, row-group size, with a column dropped or added | CT-6, CT-8 | **C** | `harness/chunk.rs`: drop a column or a table, add a nullable one, fill one, retype a column or a list's elements to any physical width, and rewrite the whole chunk under a `Layout` — row-group size, page size, compression, dictionary, statistics, and a row order that is reversed or shuffled |
 | **HC-4** Query generator walking the catalog — pick a table, a filter, values from the chunk's actual contents, a relation subset, a projection | CT-3, CT-4, CT-7 | **U** | what turns the algebraic laws from prose into tests |
 | **HC-5** Reference-implementation runner and value-level comparator, with skip counting and a per-dataset floor | CT-7 | **P** | fixtures compare against recorded reference output; nothing runs the reference live |
 | **HC-6** Injectable `P-WEIGHT-BUDGET` | CT-5 | **C** | the budget suite already drives it |
@@ -509,15 +516,14 @@ CT-9 is in that state.
 
 Each phase ends by updating §8.11 and [GAPS.md](GAPS.md).
 
-1. **Finish the chunk writer** (HC-3). Add physical-type, sort-key, row-group and
-   compression control. The add/drop slice has closed X2, E3 and E4; nothing
-   else unblocks as much of what remains.
-2. **The query generator** (HC-4). Turns §8.4 and §8.5 from tables of prose into
-   generated laws, and closes P5, R2, R4, R11.
-3. **INV-B8, partition invariance.** One test, six invariants, and the property
-   the distributed architecture rests on.
-4. **INV-P9, the bloom oracle.** Compare the engine's bloom bits against the
+1. **The query generator** (HC-4). Turns §8.4 and §8.5 from tables of prose into
+   generated laws, and closes P5, R2, R4 and R11 — every invariant left at **U**
+   but one.
+2. **INV-P9, the bloom oracle.** Compare the engine's bloom bits against the
    writer's for known values. The only invariant here whose failure is invisible
    to every other test in the suite.
-5. **Coverage reporting** (HC-8) and line instrumentation (HC-9), which promote
+3. **Coverage reporting** (HC-8) and line instrumentation (HC-9), which promote
    MG-1 and MG-2 from advisory to blocking.
+
+Done: the chunk writer (HC-3), whose last axes closed D7, D8, O12 and O13; and
+INV-B8, which needed no capability once someone tried to write it.

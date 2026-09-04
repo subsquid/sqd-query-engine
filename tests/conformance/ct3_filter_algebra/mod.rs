@@ -9,5 +9,6 @@
 //! does not exist yet.
 
 mod case_folding;
+mod pruning;
 mod surface;
 mod values;

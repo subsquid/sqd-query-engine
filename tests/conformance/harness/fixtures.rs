@@ -53,3 +53,26 @@ pub fn plan_error(catalog: &DatasetDescription, query: &str) -> anyhow::Error {
     let parsed = parse_query(query.as_bytes(), catalog).expect("the filter surface accepts it");
     compile(&parsed, catalog).expect_err("the value does not")
 }
+
+/// Assert that rewriting a chunk did not change the answer.
+///
+/// Byte-for-byte on purpose: [INV-D7] and [INV-D8] both say *identical*, and a
+/// value-level comparison would accept a response whose numbers render
+/// differently because the column narrowed under it.
+pub fn answers_the_same(
+    catalog: &DatasetDescription,
+    query: &str,
+    baseline: &Path,
+    rewritten: &Path,
+    what: &str,
+) {
+    let expected = run_against(catalog, baseline, query).unwrap();
+    let actual = run_against(catalog, rewritten, query)
+        .unwrap_or_else(|e| panic!("{what} made the query fail: {e:#}"));
+
+    assert!(
+        !expected.is_empty(),
+        "{what} is compared against an empty baseline, which would pass however it broke"
+    );
+    crate::harness::json::assert_same_response(&expected, &actual, what);
+}

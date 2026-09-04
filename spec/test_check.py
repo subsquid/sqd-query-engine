@@ -202,7 +202,7 @@ def test_flipping_a_status_invalidates_the_stated_totals(s):
 @case
 def test_a_hand_edited_coverage_baseline_is_caught(s):
     """MG-1 ratchets on this number; it may not be loosened by typing."""
-    s.edit("09-parameters.md", "0.51 (43 of 85)", "0.99 (84 of 85)")
+    s.edit("09-parameters.md", "0.58 (49 of 85)", "0.99 (84 of 85)")
     assert "param-observed-stale" in checks_in(run(s.root)[1])
 
 
@@ -235,8 +235,8 @@ def test_a_renamed_bound_heading_is_loud(s):
 def test_a_capability_cited_only_from_the_build_order_is_not_orphaned(s):
     s.edit("08-conformance.md", "| **HC-12**",
            "| **HC-13** Cited from the build order alone | CT-1 | **U** | |\n| **HC-12**")
-    s.edit("08-conformance.md", "5. **Coverage reporting**",
-           "5. HC-13, named only here.\n6. **Coverage reporting**")
+    s.edit("08-conformance.md", "3. **Coverage reporting**",
+           "3. HC-13, named only here.\n4. **Coverage reporting**")
     assert "hc-orphan" not in checks_in(run(s.root)[1])
 
 

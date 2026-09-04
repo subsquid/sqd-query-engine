@@ -551,23 +551,17 @@ fn weight_projection(
 }
 
 /// Hash a single array value for row dedup.
+///
+/// Integers hash by value rather than by stored width, so a column narrowed in
+/// one source and not in another still dedups against itself.
 fn hash_array_value(col: &dyn arrow::array::Array, row: usize, hasher: &mut impl Hasher) {
     if col.is_null(row) {
         0xFFu8.hash(hasher);
         return;
     }
-    if let Some(a) = col.as_any().downcast_ref::<UInt64Array>() {
-        a.value(row).hash(hasher);
-    } else if let Some(a) = col.as_any().downcast_ref::<UInt32Array>() {
-        a.value(row).hash(hasher);
-    } else if let Some(a) = col.as_any().downcast_ref::<UInt16Array>() {
-        a.value(row).hash(hasher);
-    } else if let Some(a) = col.as_any().downcast_ref::<Int64Array>() {
-        a.value(row).hash(hasher);
-    } else if let Some(a) = col.as_any().downcast_ref::<Int32Array>() {
-        a.value(row).hash(hasher);
-    } else if let Some(a) = col.as_any().downcast_ref::<Int16Array>() {
-        a.value(row).hash(hasher);
+
+    if let Some(ints) = crate::integers::IntColumn::resolve(col) {
+        ints.value(row).hash(hasher);
     } else if let Some(a) = col.as_any().downcast_ref::<StringArray>() {
         a.value(row).hash(hasher);
     } else if let Some(a) = col.as_any().downcast_ref::<GenericListArray<i32>>() {

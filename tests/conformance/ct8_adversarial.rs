@@ -5,8 +5,10 @@
 //! not carry must be an error, because the alternative is a filter that matches
 //! every row and a client that cannot tell.
 //!
-//! Dropping and adding columns or tables are now portable synthetic cases.
-//! Retyping, reordering and row-group control are the remaining HC-3 axes.
+//! Dropping and adding columns or tables are portable synthetic cases. Retyping
+//! and relaying a chunk are HC-3's other axes, and they live in CT-6, where what
+//! they are being asked is whether the answer moved rather than whether the
+//! engine noticed.
 
 use arrow::datatypes::DataType;
 use sqd_query_engine::error::{error_kind, ErrorKind};

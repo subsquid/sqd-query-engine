@@ -1,3 +1,4 @@
+use crate::integers::OwnedIntColumn;
 use crate::metadata::{ColumnType, FieldGrouping, JsonEncoding, TableDescription, VirtualField};
 use crate::output::encoder::{
     encode_json_string, encode_roll, resolve_encoder, snake_to_camel, EncoderFn,
@@ -24,50 +25,36 @@ pub(crate) struct IndexedBatches {
 }
 
 /// Pre-resolved typed array (Arc-backed, cheap to clone) for sort comparisons.
-/// Resolved once per column per batch; eliminates 8-way downcast chain per comparison.
+/// Resolved once per column per batch; eliminates the downcast chain per
+/// comparison.
 pub(crate) enum TypedSortColumn {
-    UInt64(UInt64Array),
-    UInt32(UInt32Array),
-    UInt16(UInt16Array),
-    Int64(Int64Array),
-    Int32(Int32Array),
-    Int16(Int16Array),
+    Int(OwnedIntColumn),
     Utf8(StringArray),
     List(GenericListArray<i32>),
 }
 
 impl TypedSortColumn {
-    #[allow(clippy::manual_map)] // one arm per physical type; they read as a table
     fn resolve(col: &dyn Array) -> Option<Self> {
-        if let Some(a) = col.as_any().downcast_ref::<UInt64Array>() {
-            Some(Self::UInt64(a.clone()))
-        } else if let Some(a) = col.as_any().downcast_ref::<UInt32Array>() {
-            Some(Self::UInt32(a.clone()))
-        } else if let Some(a) = col.as_any().downcast_ref::<UInt16Array>() {
-            Some(Self::UInt16(a.clone()))
-        } else if let Some(a) = col.as_any().downcast_ref::<Int64Array>() {
-            Some(Self::Int64(a.clone()))
-        } else if let Some(a) = col.as_any().downcast_ref::<Int32Array>() {
-            Some(Self::Int32(a.clone()))
-        } else if let Some(a) = col.as_any().downcast_ref::<Int16Array>() {
-            Some(Self::Int16(a.clone()))
-        } else if let Some(a) = col.as_any().downcast_ref::<StringArray>() {
-            Some(Self::Utf8(a.clone()))
-        } else if let Some(a) = col.as_any().downcast_ref::<GenericListArray<i32>>() {
-            Some(Self::List(a.clone()))
-        } else {
-            None
+        if let Some(ints) = OwnedIntColumn::resolve(col) {
+            return Some(Self::Int(ints));
         }
+        if let Some(a) = col.as_any().downcast_ref::<StringArray>() {
+            return Some(Self::Utf8(a.clone()));
+        }
+        if let Some(a) = col.as_any().downcast_ref::<GenericListArray<i32>>() {
+            return Some(Self::List(a.clone()));
+        }
+
+        None
     }
 
+    /// Order two rows by this column.
+    ///
+    /// Integers compare as `i128`, so two sides stored at different widths — or
+    /// one signed and one not — order by value rather than by bit pattern.
     fn cmp_rows(&self, row_a: usize, other: &TypedSortColumn, row_b: usize) -> std::cmp::Ordering {
         match (self, other) {
-            (Self::UInt64(a), Self::UInt64(b)) => a.value(row_a).cmp(&b.value(row_b)),
-            (Self::UInt32(a), Self::UInt32(b)) => a.value(row_a).cmp(&b.value(row_b)),
-            (Self::UInt16(a), Self::UInt16(b)) => a.value(row_a).cmp(&b.value(row_b)),
-            (Self::Int64(a), Self::Int64(b)) => a.value(row_a).cmp(&b.value(row_b)),
-            (Self::Int32(a), Self::Int32(b)) => a.value(row_a).cmp(&b.value(row_b)),
-            (Self::Int16(a), Self::Int16(b)) => a.value(row_a).cmp(&b.value(row_b)),
+            (Self::Int(a), Self::Int(b)) => a.value(row_a).cmp(&b.value(row_b)),
             (Self::Utf8(a), Self::Utf8(b)) => a.value(row_a).cmp(b.value(row_b)),
             (Self::List(a), Self::List(b)) => compare_list_values(a, row_a, b, row_b),
             _ => {
@@ -710,7 +697,12 @@ fn sort_rows_by_order_keys_indexed(
     });
 }
 
-/// Compare two List<UInt16/UInt32/Int32> arrays element by element.
+/// Compare two lists of integers element by element.
+///
+/// A list key is a path of item indices — a trace or instruction address — so
+/// its elements are integers at whatever width the writer chose. Elements that
+/// are not integers order as equal, which leaves the file-order tiebreaker to
+/// decide; there is no order to invent for them.
 fn compare_list_values(
     a: &GenericListArray<i32>,
     row_a: usize,
@@ -721,33 +713,22 @@ fn compare_list_values(
 
     let va = a.value(row_a);
     let vb = b.value(row_b);
-    let len = va.len().min(vb.len());
 
-    for i in 0..len {
-        let val_a = if let Some(arr) = va.as_any().downcast_ref::<UInt16Array>() {
-            arr.value(i) as i64
-        } else if let Some(arr) = va.as_any().downcast_ref::<UInt32Array>() {
-            arr.value(i) as i64
-        } else if let Some(arr) = va.as_any().downcast_ref::<Int32Array>() {
-            arr.value(i) as i64
-        } else {
-            0
-        };
-        let val_b = if let Some(arr) = vb.as_any().downcast_ref::<UInt16Array>() {
-            arr.value(i) as i64
-        } else if let Some(arr) = vb.as_any().downcast_ref::<UInt32Array>() {
-            arr.value(i) as i64
-        } else if let Some(arr) = vb.as_any().downcast_ref::<Int32Array>() {
-            arr.value(i) as i64
-        } else {
-            0
-        };
-        let ord = val_a.cmp(&val_b);
+    let (Some(ea), Some(eb)) = (
+        OwnedIntColumn::resolve(va.as_ref()),
+        OwnedIntColumn::resolve(vb.as_ref()),
+    ) else {
+        return Ordering::Equal;
+    };
+
+    for i in 0..ea.len().min(eb.len()) {
+        let ord = ea.value(i).cmp(&eb.value(i));
         if ord != Ordering::Equal {
             return ord;
         }
     }
-    va.len().cmp(&vb.len())
+
+    ea.len().cmp(&eb.len())
 }
 
 /// Replace trailing comma with closing bracket, or just add closing bracket.
@@ -767,25 +748,52 @@ pub(crate) fn json_close(end: u8, buf: &mut Vec<u8>) {
 mod tests {
     use super::*;
 
+    fn sort_column(array: impl Array + 'static) -> TypedSortColumn {
+        TypedSortColumn::resolve(&array).expect("the array is a sortable type")
+    }
+
+    /// Covers CT-6 · INV-O5
     #[test]
     fn test_typed_sort_column_same_type_comparison() {
-        let a = UInt32Array::from(vec![10, 20, 30]);
-        let b = UInt32Array::from(vec![15, 25, 5]);
-        let col_a = TypedSortColumn::UInt32(a);
-        let col_b = TypedSortColumn::UInt32(b);
+        let col_a = sort_column(UInt32Array::from(vec![10, 20, 30]));
+        let col_b = sort_column(UInt32Array::from(vec![15, 25, 5]));
         assert_eq!(col_a.cmp_rows(0, &col_b, 0), std::cmp::Ordering::Less); // 10 < 15
         assert_eq!(col_a.cmp_rows(1, &col_b, 2), std::cmp::Ordering::Greater); // 20 > 5
         assert_eq!(col_a.cmp_rows(0, &col_b, 2), std::cmp::Ordering::Greater); // 10 > 5
     }
 
+    /// Two sources of one table can be stored at different widths, and the
+    /// items still have to come back in item-key order. This used to assert the
+    /// opposite — that a width mismatch was a programming error worth a
+    /// `debug_assert` — which is what let a chunk written in eight bits emit its
+    /// items in file order.
+    ///
+    /// Covers CT-6 · INV-D7
+    /// Covers CT-6 · INV-O5
+    #[test]
+    fn a_narrower_column_orders_against_a_wider_one_by_value() {
+        let wide = sort_column(UInt64Array::from(vec![10, 300]));
+
+        for narrow in [
+            sort_column(UInt8Array::from(vec![9, 11])),
+            sort_column(Int8Array::from(vec![9, 11])),
+            sort_column(UInt16Array::from(vec![9, 11])),
+            sort_column(Int32Array::from(vec![9, 11])),
+        ] {
+            assert_eq!(narrow.cmp_rows(0, &wide, 0), std::cmp::Ordering::Less); // 9 < 10
+            assert_eq!(narrow.cmp_rows(1, &wide, 0), std::cmp::Ordering::Greater); // 11 > 10
+            assert_eq!(narrow.cmp_rows(1, &wide, 1), std::cmp::Ordering::Less); // 11 < 300
+        }
+    }
+
+    /// A width mismatch is no longer a mismatch; a *kind* mismatch still is, and
+    /// the `debug_assert` is what says so rather than an invented ordering.
     #[test]
     #[cfg(debug_assertions)]
     #[should_panic(expected = "TypedSortColumn type mismatch")]
     fn test_typed_sort_column_type_mismatch_panics_in_debug() {
-        let a = UInt32Array::from(vec![10]);
-        let b = Int32Array::from(vec![10]);
-        let col_a = TypedSortColumn::UInt32(a);
-        let col_b = TypedSortColumn::Int32(b);
-        col_a.cmp_rows(0, &col_b, 0);
+        let number = sort_column(UInt32Array::from(vec![10]));
+        let text = sort_column(StringArray::from(vec!["10"]));
+        number.cmp_rows(0, &text, 0);
     }
 }
