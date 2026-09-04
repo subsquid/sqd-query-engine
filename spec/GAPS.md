@@ -27,6 +27,7 @@ Compared against the reference implementation, as of 2026-09-03.
 | # | Gap | Invariant | Sev |
 |---|---|---|---|
 | 31 | A block number above 2³¹ stored in `Int32` is read as negative by the range filter | [INV-D7](07-invariants.md#inv-d7) | **S4** |
+| 32 | The bloom's hash function is not pinned by the manifest, and the version it resolves to today ignores the seed above 240 bytes | [INV-P9](07-invariants.md#inv-p9) | **S4** |
 
 Every dataset [chapter 3](03-catalog.md) names is served except `fuel`, which is
 out of scope ([ADR-10](decisions/ADR-10-fuel-is-out-of-scope.md)). Nothing the
@@ -66,6 +67,11 @@ integer widths — one that dropped a block's header fields, one that dropped a
 whole relation, one that emitted items in file order, one that matched no address
 at all. Those are fixed, and the readers now share one list of widths. Gap 31 is
 what was left over.
+
+Gap 32 arrived the same way one step later: the bloom oracle had to state what
+the engine's hash actually is, and stating it exposed that the manifest does not
+pin it. Neither gap is reachable by a query anyone writes today, which is what
+**S4** means and why the register stays as short as it looks.
 
 The next work is still not in this document. The capability gaps this paragraph
 used to point at are closed — the query generator, and after it the bloom oracle
@@ -108,6 +114,55 @@ that runs over every row of every block-filtered scan.
 chunk stored as `UInt64`. `physical_width_does_not_reach_the_answer` sweeps every
 width already; what it cannot reach is a value that does not fit the width it is
 stored at, which needs a writer that wraps rather than widens.
+
+
+### 32. The bloom's hash function is not pinned, and today's version drops the seed above 240 bytes
+
+`bloom_bit` tells one of a value's seven hashes from another by exactly one
+thing: it passes `n` as the seed. XXH3 mixes a seed differently in its two
+regimes — directly on inputs up to 240 bytes, and through a secret derived from
+it above that — and on the version `Cargo.lock` currently resolves, 0.8.15, the
+derivation does not happen. Above the threshold the seed is ignored, so all seven
+hashes return one bit and the filter carries one bit per value instead of seven.
+
+Measured against 0.8.18, which does not have it. Below the threshold the two are
+byte-identical, including for a real 44-byte account key; at 240 bytes 0.8.15
+returns the same bit seven times and 0.8.18 returns seven different ones.
+
+Nothing the engine hashes reaches the threshold. `mentionsAccount` needles are
+base58 account keys, 44 bytes at most, and no other filter uses a bloom — which
+is why this is **S4** and not **S1**, and why `cargo update` is safe today rather
+than the hash change it looks like.
+
+The direction that would hurt is a version skew between the archive writer and
+the engine, on a value long enough to reach the long path. A writer on the broken
+version sets one bit where a reader on the fixed one tests seven, so every such
+value is a false negative — what [INV-P9](07-invariants.md#inv-p9) forbids and no
+client can detect. The reverse skew only floods false positives, which the
+invariant permits.
+
+Half of this is already guarded, and it is worth being precise about which half.
+`the_engine_builds_the_bloom_the_archiver_wrote` compares the engine's bits
+against rows an archiver wrote, and the portable gate runs it, so a hash that
+moved under a resolution would fail the build for any value of ordinary length.
+What no test reaches is a value of 240 bytes or more, and a vector for one cannot
+be written: no chunk carries such a value, so there is nothing to oracle against
+and the test would only pin the engine to itself.
+
+The manifest is the real gap. `xxhash-rust = { version = "0.8.15" }` is a caret
+requirement, so the hash function is fixed by `Cargo.lock` alone — and a lock does
+not apply to a consumer that takes this crate as a library. INV-P9 says the hash
+function must match the archive writer's exactly; the manifest does not say which
+one that is. An exact `=` requirement, on 0.8.18 rather than 0.8.15, states it and
+costs nothing measurable.
+
+`bloom_bit`'s own doc says the value goes "through XXH3 seeded with `n`", which is
+true only below the threshold on the pinned version.
+
+*First test:* not an oracle — there is nothing to compare a long value against.
+The check that fits is a unit test pinning `bloom_bit`'s seven bits for a
+240-byte value once a version is chosen, which fails if the resolution moves
+across the bug in either direction.
 
 ---
 
