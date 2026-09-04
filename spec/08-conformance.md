@@ -93,7 +93,8 @@ Then fuzz — [CT-9](#810-ct-9--fuzz).
 
 ## 8.4 CT-3 — Filter algebra
 
-This is where the interesting bugs are, because these tests can be generated.
+This is where the interesting bugs are, because these tests can be generated —
+and are, in `ct3_filter_algebra/laws.rs`, by HC-4.
 
 Pick a chunk. Enumerate a few dozen filter values that actually occur in it, plus
 a few that do not. Then assert the laws, over randomly composed queries:
@@ -123,6 +124,10 @@ they encode the two catastrophic misreadings:
   this an *equality*. Assert strict subset for a value you know is selective.
 
 ## 8.5 CT-4 — Relations
+
+Generated the same way, in `ct4_relations/laws.rs`. Every property below is a
+claim about two queries and the difference between them, which is why none of
+them is a case somebody writes by hand and gets right for more than one shape.
 
 | Property | Invariant |
 |---|---|
@@ -310,7 +315,7 @@ renamed out from under a comment inside it.
 | [INV-D2](07-invariants.md#inv-d2) | CT-1 | **C** | `test_validate_rejects_broken_alias_references` |
 | [INV-D3](07-invariants.md#inv-d3) | CT-1 | **C** | `test_validate_requires_exactly_one_block_table` — none, two, and one that does not lead the catalog; identity is the item key, so a block table stored under another sort key is still one and an addressed table with no order keys is not |
 | [INV-D4](07-invariants.md#inv-d4) | CT-1 | **C** | `item_keys_are_unique_within_a_chunk` projects `[blockNumberColumn] ++ itemOrderKeys ++ [addressColumn]?` for every table of every fixture chunk and compares through Arrow's row format, so a list-valued address column is compared rather than skipped; `a_duplicated_item_key_is_caught` is the other direction, and it runs where the fixture tree does not |
-| [INV-D5](07-invariants.md#inv-d5) | CT-1 | **P** | the static half is checked on both sides — key non-empty, equal length, block number first — one case per shape in `test_validate_rejects_a_relation_that_cannot_join`. The chunk-level half its *Test:* line asks for, that no matched pair spans two blocks, is not run |
+| [INV-D5](07-invariants.md#inv-d5) | CT-1, CT-4 | **C** | the static half is checked on both sides — key non-empty, equal length, block number first — one case per shape in `test_validate_rejects_a_relation_that_cannot_join`. The chunk-level half its *Test:* line asks for is `a_relation_pulls_nothing_out_of_its_sources_blocks`: with only the source table requested, every row of the target arrived through the relation, so a matched pair spanning two blocks shows up as a target row in a block where no source row sits |
 | [INV-D6](07-invariants.md#inv-d6) | CT-1 | **C** | both sides are checked for `children` and `parents` alike, with a case in `test_validate_rejects_a_relation_that_cannot_join` |
 | [INV-D7](07-invariants.md#inv-d7) | CT-6 | **C** | `physical_width_does_not_reach_the_answer` rewrites one chunk at every one of the eight integer widths, for every integer column that can hold its values, and byte-compares each; `narrowing_every_column_at_once_does_not_reach_the_answer` the combination one column at a time hides; `a_narrow_column_in_a_shuffled_chunk_does_not_reach_the_answer` the pairing with a storage order that is not the item-key order, which is what reaches the sort comparator at all. `a_list_key_answers_the_same_at_any_element_width` covers the element types inside a list on a real chunk, and `a_fixture_chunk_answers_the_same_at_any_width` the scalar widths there. Underneath: `a_narrower_column_orders_against_a_wider_one_by_value`, block-range masks, in-lists, semi-joins, range predicates, `test_solana_tx_version_reads_the_sentinel_at_every_physical_width`, `test_bignum_reads_a_narrowed_column` |
 | [INV-D8](07-invariants.md#inv-d8) | CT-6 | **C** | `storage_layout_does_not_reach_the_answer` turns one knob per case, one per mechanism the invariant names — row groups of 1, 7 and more than the table holds; data pages of 1 and 5; uncompressed and snappy; no dictionary; no statistics; and the rows stored back to front and then in no order at all, which is a permutation no sort key produces. `a_fixture_chunk_answers_the_same_under_any_layout` repeats six of them on an archiver's chunk |
@@ -330,12 +335,12 @@ renamed out from under a comment inside it.
 | [INV-Q12](07-invariants.md#inv-q12) | CT-2 | **C** | `malformed_hex_in_list_is_an_error`, `test_parse_hex`; the byte cap is enforced where discriminators compile |
 | [INV-Q13](07-invariants.md#inv-q13) | CT-2 | **C** | `a_request_is_bounded_in_bytes` and `an_in_list_is_bounded_in_length`, either side of each cap; the list case is written with short values so the byte cap cannot be what it is measuring |
 | [INV-Q14](07-invariants.md#inv-q14) | CT-2 | **C** | `the_field_surface_is_exactly_the_declared_one` compares every table's declared list against the reference's, as a set, and then parses each name; `a_column_the_catalog_carries_is_not_a_field` covers `blockNumber` and `topic0` |
-| [INV-P1](07-invariants.md#inv-p1) | CT-3 | **P** | `test_compile_empty_item_no_filters`; not asserted as a law over generated queries |
-| [INV-P2](07-invariants.md#inv-p2) | CT-3 | **C** | `test_in_list_predicate_strings`, `test_in_list_predicate_u64`, `test_numeric_in_list_filter` |
+| [INV-P1](07-invariants.md#inv-p1) | CT-3 | **C** | `an_unfiltered_item_request_is_the_whole_table_and_a_filter_only_narrows` counts an unfiltered request against the chunk's own rows in range, read off the parquet rather than from another query |
+| [INV-P2](07-invariants.md#inv-p2) | CT-3 | **C** | `test_in_list_predicate_strings`, `test_in_list_predicate_u64`, `test_numeric_in_list_filter`, and `a_value_list_is_the_union_of_its_values` over generated splits of a column's real values — including the split that leaves one side empty, which is the same law with [INV-P3](07-invariants.md#inv-p3) on one arm. `value_order_repetition_and_misses_do_not_reach_the_answer` pins the list as a set |
 | [INV-P3](07-invariants.md#inv-p3) | CT-3 | **C** | `an_empty_filter_list_matches_nothing` — the discriminator, a discriminator column, an ordinary in-list, and an empty list beside a filter that does match |
-| [INV-P4](07-invariants.md#inv-p4) | CT-3 | **C** | `test_row_predicate_and` |
-| [INV-P5](07-invariants.md#inv-p5) | CT-3 | **U** | nothing asserts `Q([s₁]) ∪ Q([s₂]) = Q([s₁, s₂])` |
-| [INV-P6](07-invariants.md#inv-p6) | CT-3 | **P** | compile-side only |
+| [INV-P4](07-invariants.md#inv-p4) | CT-3 | **C** | `test_row_predicate_and`, and `conjoining_a_filter_only_narrows` over generated pairs that differ in exactly one filter — built by adding to a request rather than by generating two, so the difference is the filter and nothing else |
+| [INV-P5](07-invariants.md#inv-p5) | CT-3 | **C** | `item_requests_on_one_table_disjoin` asserts `Q([s₁]) ∪ Q([s₂]) = Q([s₁, s₂])` as a *set* over item requests HC-4 composed, and `item_request_order_and_repetition_do_not_reach_the_answer` the same law read as a byte-identity under reordering and repetition. `the_laws_hold_over_a_chunk_an_archiver_wrote` repeats the union over a real chunk, where a trimmed response makes the comparison a prefix |
+| [INV-P6](07-invariants.md#inv-p6) | CT-3 | **C** | `an_unfiltered_item_request_is_the_whole_table_and_a_filter_only_narrows` again, from the other side: every generated filtered request is a subset of the unfiltered one, and the sweep fails unless some case was a *proper* subset — which is what §8.4 asks for, since an engine whose filters silently no-op satisfies the inclusion everywhere |
 | [INV-P7](07-invariants.md#inv-p7) | CT-3 | **P** | the disjunction cases cover null propagation; no per-filter-kind null sweep |
 | [INV-P8](07-invariants.md#inv-p8) | CT-3 | **C** | `hex_filters_fold_case_in_both_shapes`, `an_alias_folds_case_on_the_column_it_resolves_to`, `bare_hex_columns_fold_case_too` — a `hexBytes` column, an alias reaching one, and Tron's unprefixed hex, which folds without the encoding to say so; `non_hex_columns_are_not_folded` the other direction |
 | [INV-P9](07-invariants.md#inv-p9) | CT-3 | **U** | **nothing checks the engine's bloom bits against the writer's.** A construction mismatch produces false *negatives*, which no client can detect |
@@ -346,17 +351,17 @@ renamed out from under a comment inside it.
 | [INV-P14](07-invariants.md#inv-p14) | CT-3 | **C** | `unmatchable_values_are_not_errors` and `a_hex_value_too_wide_for_the_column_matches_nothing` for values wider than the column, `a_signed_column_takes_negative_filter_values` for one below its floor, and `a_block_bound_past_the_stored_width_matches_nothing` for the half the invariant states about the block bounds — where wrapping would truncate into a block the chunk holds |
 | [INV-P15](07-invariants.md#inv-p15) | CT-3 | **C** | `undeclared_columns_are_not_filterable`, `an_alias_has_its_own_filter_surface`, `an_alias_has_its_own_relation_surface` |
 | [INV-P16](07-invariants.md#inv-p16) | CT-3 | **P** | the pruning-disabled equality run exists: `a_filter_returns_the_same_rows_with_nothing_to_prune_on` runs five filters — matching, non-matching, conjunctive, empty-list, absent — against chunks written with no statistics to prune on, a row per row group, a row per data page, and no dictionary, and compares bytes. Early termination is CT-5's `scan` module. Filter reordering is not varied, and it is five filters over one query shape rather than every fixture query |
-| [INV-R1](07-invariants.md#inv-r1) | CT-4 | **P** | `test_alias_relation_source_predicates`, `test_resolve_includes_source_predicate_columns`; the two-item-request construction of §8.5 is not written |
-| [INV-R2](07-invariants.md#inv-r2) | CT-4 | **U** | nothing asserts relations stop at one hop |
-| [INV-R3](07-invariants.md#inv-r3) | CT-4 | **P** | `test_arrow_multisource_dedup` |
-| [INV-R4](07-invariants.md#inv-r4) | CT-4 | **U** | the widening sweep does not exist — the most useful metamorphic property in the suite |
+| [INV-R1](07-invariants.md#inv-r1) | CT-4 | **C** | `a_relation_pulls_only_its_own_item_requests_matches` generates §8.5's two-item-request construction — disjoint halves of one filter's values, only the first carrying the flag. The sweep fails unless some split had a second half reaching a target the first does not, which is the only case that can tell the two behaviours apart: over a filter whose every value shares the same targets, an engine scoping the relation to the whole table answers identically, and no number of cases notices. `test_alias_relation_source_predicates` and `test_resolve_includes_source_predicate_columns` are the compile-side half |
+| [INV-R2](07-invariants.md#inv-r2) | CT-4 | **C** | `a_pulled_row_does_not_pull_its_own`. The chain's relations are a cycle on purpose, so a second hop is *observable* rather than merely non-terminating: from a filtered log request it would come back through `transactions.log` carrying the logs the filter excluded, and through `transactions.trace` carrying traces nothing asked for. Both are asserted — the origin table unchanged, the table two hops out empty |
+| [INV-R3](07-invariants.md#inv-r3) | CT-4 | **C** | `a_row_reachable_several_ways_is_returned_once` compares emitted rows against distinct rows for every table of every generated query, over queries that ask every table directly *and* through its relations — which is what builds the overlapping paths nobody enumerates: a row matched by two item requests, a row pulled by two relations, a row both matched and pulled. `test_arrow_multisource_dedup` is the Arrow path's |
+| [INV-R4](07-invariants.md#inv-r4) | CT-4 | **C** | `adding_a_relation_flag_never_removes_a_row` runs a generated query against the same query with one flag taken out of one item request, and compares *every* table — the invariant's `for every table U`, not the relation's target. Every table is requested directly as well, so the target is reachable two ways at once: that is where a relation removes rows, not by pulling too few but by a merge of two sources that keeps one. A run where no flag added a row is a failure |
 | [INV-R5](07-invariants.md#inv-r5) | CT-4 | **C** | `test_semi_join_null_key_no_false_match`, `test_semi_join_null_null_no_match`, and six more |
 | [INV-R6](07-invariants.md#inv-r6) | CT-4 | **C** | `test_find_children_basic` and three siblings |
 | [INV-R7](07-invariants.md#inv-r7) | CT-4 | **P** | `test_find_parents_basic` only; the full ancestor chain is not asserted |
 | [INV-R8](07-invariants.md#inv-r8) | CT-4 | **P** | reached through the Kusama and Moonbeam fixtures; no synthetic tree |
 | [INV-R9](07-invariants.md#inv-r9) | CT-4 | **P** | fixtures only |
 | [INV-R10](07-invariants.md#inv-r10) | CT-4 | **P** | `test_execute_with_relations` plus the budget suite |
-| [INV-R11](07-invariants.md#inv-r11) | CT-4 | **U** | no idempotence test |
+| [INV-R11](07-invariants.md#inv-r11) | CT-4 | **C** | `a_relation_asked_from_two_item_requests_is_asked_once_of_their_union` — the same relation asked from two item requests over disjoint halves of a filter's values, against one request carrying both halves. The halves come from splitting one filter, which is what makes "the union of their matches" an item request that can be written at all |
 | [INV-B1](07-invariants.md#inv-b1) | CT-5 | **C** | `test_scan_with_block_range`, `test_scan_with_predicate_and_block_range` |
 | [INV-B2](07-invariants.md#inv-b2) | CT-5 | **C** | `untrimmed_scan_includes_all_blocks` |
 | [INV-B3](07-invariants.md#inv-b3) | CT-5 | **C** | `boundary_blocks_emitted_without_items`, `budget_trim_excludes_range_end_boundary_block`, and `a_split_adds_only_boundary_headers`, which bounds at two the headers a split may add |
@@ -392,37 +397,37 @@ renamed out from under a comment inside it.
 | [INV-X2](07-invariants.md#inv-x2) | CT-8 | **C** | `an_ignored_nullable_column_does_not_change_output` |
 | [INV-X3](07-invariants.md#inv-x3) | CT-8 | **C** | `filtering_an_absent_column_is_an_error` on both scan entry points, `filtering_a_present_column_still_works` for the other direction, `one_unanswerable_item_rejects_the_whole_request` for a filter one item request of several carries, and `an_alias_filter_on_a_column_the_chunk_lacks_is_an_error` for one reached through an alias's extraction column |
 
-**Totals: 49 C, 30 P, 6 U** of 85. Property coverage is therefore 0.58
+**Totals: 58 C, 25 P, 2 U** of 85. Property coverage is therefore 0.68
 (`P-COV-PROPERTY` in [09-parameters.md](09-parameters.md)).
 
-Of the 79 rows at **C** or **P**, 59 are backed by a tagged test and 20 rest on
+Of the 83 rows at **C** or **P**, 64 are backed by a tagged test and 19 rest on
 prose alone. Those 20 are the rows whose note says "fixtures only" or describes a
 group of cases without naming one, and they are the ones nothing recomputes: the
 status is what somebody believed on the day they typed it. Shrinking that number
 is what turns MG-1's ratchet from an intention into an arithmetic fact, so the
 checker recomputes all three numbers in this paragraph rather than trusting them.
 
-A tag is not the same as a gate. 7 of the 59 are backed only by tests marked
+A tag is not the same as a gate. 4 of the 64 are backed only by tests marked
 `#[ignore]`, which MG-3's portable job does not run: the test would fail if the
 invariant broke, but only on a machine that has the chunks. The checker reports
 those rows on every run too, because a status that no job can falsify is a status
 worth seeing.
 
-The shape of the U column is worth reading on its own. What is left there is
-almost all one thing:
+Two rows are left at **U**, and they have nothing in common:
 
-- **Everything needing generated queries** — P5, R2, R4, R11. Each is a law over
-  a *pair* of queries rather than over one, and a suite of hand-written cases
-  cannot express one. Building HC-4 is now the single highest-leverage piece of
-  work, as finishing HC-3 was before it.
-- **`gteConst` lexicographic comparison** — P11, which needs no machinery at all
-  and is unwritten for no reason but that nobody has written it.
+- **INV-P9**, the most dangerous single row in the table. A bloom construction
+  that disagrees with the archive writer's returns false *negatives*, and no
+  client — and no fixture test — can see them. It is next in the build order.
+- **INV-P11**, `gteConst` lexicographic comparison, which needs no machinery at
+  all and is unwritten for no reason but that nobody has written it.
 
-INV-P9 belongs to neither and is the most dangerous single row in the table: a
-bloom construction that disagrees with the archive writer's returns false
-negatives, and no client — and no fixture test — can see them.
+The four rows that were here with them — P5, R2, R4, R11 — are closed, and they
+were the reason to build HC-4. Each is a law over a *pair* of queries rather than
+over one: a union, a widening, an idempotence, a hop that does not happen. A
+suite of hand-written cases can state such a law at one pair, which is the pair
+whoever wrote it already believed worked.
 
-Two rows moved for a reason worth recording. B8 was the U the build order put
+Rows moved for reasons worth recording. B8 was the U the build order put
 third, behind two capabilities, and it turned out to need neither: splitting a
 range and concatenating the halves is a law you can write against any chunk you
 already have. And the first equality run under a rewritten chunk found a real
@@ -431,6 +436,13 @@ the scan and dropped by the assembly, so a response came back with its headers
 stripped of every field but the number, and with a narrower chunk, empty. That is
 the class of failure §8.1 says fixtures cannot find, found the week the machinery
 to look for it existed.
+
+And INV-R4 moved twice inside one change. Written first over single-table
+queries, it passed against an engine deliberately broken to drop a table's direct
+rows wherever a relation also supplied them — because a query naming one table
+never makes any table reachable two ways, and that is the only place the bug
+lives. The invariant says *for every table U*. The queries have to be the ones
+where U has more than one source, or the quantifier is decoration.
 
 ## 8.12 Merge gates
 
@@ -498,7 +510,7 @@ The gates and the CT classes both assume machinery. Listed with build status, or
 | **HC-1** Fixture chunk loader and query runner | CT-2 – CT-6 | **C** | exists |
 | **HC-2** Catalog builder for deliberately invalid catalogs | CT-1 | **P** | a few negative cases exist; no systematic "one violation per check" sweep |
 | **HC-3** Chunk *writer* — rewrite a fixture at a chosen physical type, sort key, row-group size, with a column dropped or added | CT-6, CT-8 | **C** | `harness/chunk.rs`: drop a column or a table, add a nullable one, fill one, retype a column or a list's elements to any physical width, and rewrite the whole chunk under a `Layout` — row-group size, page size, compression, dictionary, statistics, and a row order that is reversed or shuffled |
-| **HC-4** Query generator walking the catalog — pick a table, a filter, values from the chunk's actual contents, a relation subset, a projection | CT-3, CT-4, CT-7 | **U** | what turns the algebraic laws from prose into tests |
+| **HC-4** Query generator walking the catalog — pick a table, a filter, values from the chunk's actual contents, a relation subset, a projection | CT-3, CT-4, CT-7 | **C** | `harness/generator.rs`: reads a chunk's own values per filter column, derives one value it does not hold, and composes item requests, relation subsets, block ranges and a projection of what the chunk actually carries. Seeded, so a counterexample replays. In-list filters and column aliases; a discriminator, a bloom, a range bound and a `gteConst` flag take value shapes of their own, and are counted as skipped rather than passed over in silence |
 | **HC-5** Reference-implementation runner and value-level comparator, with skip counting and a per-dataset floor | CT-7 | **P** | fixtures compare against recorded reference output; nothing runs the reference live |
 | **HC-6** Injectable `P-WEIGHT-BUDGET` | CT-5 | **C** | the budget suite already drives it |
 | **HC-7** Deterministic fuzzer with a recorded seed | CT-9 | **U** | |
@@ -516,14 +528,15 @@ CT-9 is in that state.
 
 Each phase ends by updating §8.11 and [GAPS.md](GAPS.md).
 
-1. **The query generator** (HC-4). Turns §8.4 and §8.5 from tables of prose into
-   generated laws, and closes P5, R2, R4 and R11 — every invariant left at **U**
-   but one.
-2. **INV-P9, the bloom oracle.** Compare the engine's bloom bits against the
+1. **INV-P9, the bloom oracle.** Compare the engine's bloom bits against the
    writer's for known values. The only invariant here whose failure is invisible
-   to every other test in the suite.
-3. **Coverage reporting** (HC-8) and line instrumentation (HC-9), which promote
+   to every other test in the suite, and now the only dangerous one left at **U**.
+2. **Coverage reporting** (HC-8) and line instrumentation (HC-9), which promote
    MG-1 and MG-2 from advisory to blocking.
+3. **The fuzzer seed** (HC-7), which is what CT-9 needs to be a class rather than
+   a proptest file.
 
-Done: the chunk writer (HC-3), whose last axes closed D7, D8, O12 and O13; and
-INV-B8, which needed no capability once someone tried to write it.
+Done: the chunk writer (HC-3), whose last axes closed D7, D8, O12 and O13; the
+query generator (HC-4), which closed P5, R2, R4 and R11 and moved seven more
+rows to **C**; and INV-B8, which needed no capability once someone tried to
+write it.

@@ -16,8 +16,20 @@ use tempfile::TempDir;
 
 use crate::harness::chunk::write_table;
 
-/// A cut-down EVM: the log table's four-part sort key and a relation onto
-/// transactions, which is where a narrowed join key would bite.
+/// A cut-down EVM: the log table's four-part sort key, a relation onto
+/// transactions — which is where a narrowed join key would bite — and, back from
+/// transactions, relations onto logs and traces. That cycle is deliberate: it is
+/// what makes "relations resolve one hop" ([INV-R2]) a question this chain can
+/// ask, since a second hop would come back with logs the filter excluded, and a
+/// third-table one with traces nothing asked for.
+///
+/// Two of the three relations are named in two words, as the real catalog names
+/// them. A request spells the key camelCased and the catalog keys its map in
+/// snake case, so a chain whose relations are all one word is a chain where
+/// those two names are the same string and nothing notices a missing
+/// conversion.
+///
+/// [INV-R2]: ../../../spec/07-invariants.md#inv-r2
 const CHAIN: &str = r#"
 name: test
 tables:
@@ -55,12 +67,32 @@ tables:
     block_number_column: block_number
     item_order_keys: [transaction_index]
     sort_key: [block_number, transaction_index]
-    filters: []
+    filters: [transaction_index]
     fields: [transaction_index, gas_used]
+    relations:
+      transaction_logs:
+        table: logs
+        key: [block_number, transaction_index]
+      transaction_traces:
+        table: traces
+        key: [block_number, transaction_index]
     columns:
       block_number: { type: uint64, stats: true }
       transaction_index: { type: uint32, stats: true }
       gas_used: { type: uint64 }
+  traces:
+    query_name: traces
+    field_name: trace
+    block_number_column: block_number
+    item_order_keys: [transaction_index, trace_index]
+    sort_key: [block_number, transaction_index, trace_index]
+    filters: [kind]
+    fields: [transaction_index, trace_index, kind]
+    columns:
+      block_number: { type: uint64, stats: true }
+      transaction_index: { type: uint32, stats: true }
+      trace_index: { type: uint32, stats: true }
+      kind: { type: string, stats: true, dictionary: true }
 "#;
 
 pub const BLOCKS: std::ops::RangeInclusive<u64> = 100..=115;
@@ -81,8 +113,8 @@ pub fn catalog() -> DatasetDescription {
     parse_dataset_description(CHAIN).unwrap()
 }
 
-/// Sixteen blocks, four logs and two transactions each, over two addresses and
-/// two topics — enough that a filter prunes something and a row-group boundary
+/// Sixteen blocks; four logs, two transactions and four traces each, over two
+/// addresses and two topics — enough that a filter prunes something and a row-group boundary
 /// can fall inside a block.
 pub fn chunk() -> TempDir {
     let dir = tempfile::tempdir().unwrap();
@@ -162,8 +194,37 @@ pub fn chunk() -> TempDir {
         ],
     );
 
+    // Two traces per transaction, of two kinds. Nothing reaches this table but
+    // `transactions.trace`, which is what lets a test say "no trace was asked
+    // for, so no trace came back".
+    let traces: Vec<(u64, u32, u32)> = txs
+        .iter()
+        .flat_map(|(block, index)| (0..2u32).map(move |trace| (*block, *index, trace)))
+        .collect();
+    write_table(
+        dir.path(),
+        "traces",
+        vec![
+            Field::new("block_number", DataType::UInt64, false),
+            Field::new("transaction_index", DataType::UInt32, false),
+            Field::new("trace_index", DataType::UInt32, false),
+            Field::new("kind", DataType::Utf8, false),
+        ],
+        vec![
+            Arc::new(UInt64Array::from_iter_values(traces.iter().map(|t| t.0))) as ArrayRef,
+            Arc::new(UInt32Array::from_iter_values(traces.iter().map(|t| t.1))) as ArrayRef,
+            Arc::new(UInt32Array::from_iter_values(traces.iter().map(|t| t.2))) as ArrayRef,
+            Arc::new(StringArray::from_iter_values(
+                traces.iter().map(|t| TRACE_KINDS[t.2 as usize % 2]),
+            )) as ArrayRef,
+        ],
+    );
+
     dir
 }
+
+/// The two values `traces.kind` takes.
+pub const TRACE_KINDS: [&str; 2] = ["call", "create"];
 
 /// A filter (so pruning runs), a relation (so a join runs), a block range
 /// narrower than the chunk (so trimming runs), and a projection of every column

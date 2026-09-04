@@ -5,6 +5,7 @@
 //! split that forgets the trailing newline reports one block too many.
 
 use serde_json::Value;
+use std::collections::BTreeSet;
 
 /// Every block object in a response, in the order it was written.
 pub fn parse_response(body: &[u8]) -> Vec<Value> {
@@ -30,6 +31,18 @@ pub fn count_items(body: &[u8], table_key: &str) -> usize {
         .iter()
         .map(|block| items_in(block, table_key).len())
         .sum()
+}
+
+/// Every item a response carries under one table key, as a set.
+///
+/// The laws of §8.4 and §8.5 are set equalities and set inclusions — a union, a
+/// widening, an idempotence — so comparing lists would make each of them an
+/// assertion about emission order as well, and fail for the wrong reason.
+pub fn row_set(body: &[u8], table_key: &str) -> BTreeSet<(u64, String)> {
+    items_of(body, table_key)
+        .into_iter()
+        .map(|(block, item)| (block, item.to_string()))
+        .collect()
 }
 
 /// Every item a response carries under one table key, as `(block, item)` pairs.
