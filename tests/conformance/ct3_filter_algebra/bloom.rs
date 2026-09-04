@@ -197,7 +197,7 @@ fn the_engine_builds_the_bloom_the_archiver_wrote() {
 /// that construction. The count is the half the reader takes from the catalog,
 /// so a catalog declaring some other one would leave the engine reading real
 /// chunks with a filter these vectors do not describe. The width it takes from
-/// the stored array instead, and `num_bytes` has to agree only for the vectors
+/// the stored array instead, and `bytes` has to agree only for the vectors
 /// frozen above to be describing the filters a real chunk holds — which is what
 /// the sweeps check directly.
 ///
@@ -210,24 +210,16 @@ fn the_catalog_declares_the_construction_the_vectors_were_built_with() {
         let filter = solana
             .table(table)
             .unwrap()
+            .request
             .special_filters
             .get("mentions_account")
             .unwrap_or_else(|| panic!("{table} must carry a mentionsAccount filter"));
 
-        let SpecialFilter::BloomFilter {
-            num_bytes,
-            num_hashes,
-            ..
-        } = filter
-        else {
+        let SpecialFilter::Bloom { bytes, hashes, .. } = filter else {
             panic!("{table}'s mentionsAccount must be a bloom filter");
         };
 
-        assert_eq!(
-            (*num_bytes, *num_hashes),
-            (NUM_BYTES, NUM_HASHES),
-            "{table}"
-        );
+        assert_eq!((*bytes, *hashes), (NUM_BYTES, NUM_HASHES), "{table}");
     }
 }
 
@@ -578,29 +570,33 @@ fn a_false_positive_is_not_filtered_away() {
 
     const CATALOG: &str = r#"
 name: overapprox
+
 tables:
   blocks:
-    field_name: block
+    output:
+      name: block
+      fields: [number]
     block_number_column: number
     sort_key: [number]
-    filters: []
-    fields: [number]
     columns:
       number: { type: uint64 }
+
   items:
-    query_name: items
-    field_name: item
+    request:
+      name: items
+      filters: [mentions_account]
+      special_filters:
+        mentions_account:
+          kind: bloom
+          column: accounts_bloom
+          bytes: 64
+          hashes: 7
+    output:
+      name: item
+      fields: [seq, account]
     block_number_column: block_number
     item_order_keys: [seq]
     sort_key: [block_number, seq]
-    filters: [mentions_account]
-    fields: [seq, account]
-    special_filters:
-      mentions_account:
-        type: bloom_filter
-        column: accounts_bloom
-        num_bytes: 64
-        num_hashes: 7
     columns:
       block_number: { type: uint64 }
       seq: { type: uint32 }
@@ -715,29 +711,33 @@ fn the_hash_count_is_the_one_the_catalog_declares() {
 
     const CATALOG: &str = r#"
 name: bloomed
+
 tables:
   blocks:
-    field_name: block
+    output:
+      name: block
+      fields: [number]
     block_number_column: number
     sort_key: [number]
-    filters: []
-    fields: [number]
     columns:
       number: { type: uint64 }
+
   items:
-    query_name: items
-    field_name: item
+    request:
+      name: items
+      filters: [mentions_account]
+      special_filters:
+        mentions_account:
+          kind: bloom
+          column: accounts_bloom
+          bytes: 64
+          hashes: HASHES
+    output:
+      name: item
+      fields: [seq]
     block_number_column: block_number
     item_order_keys: [seq]
     sort_key: [block_number, seq]
-    filters: [mentions_account]
-    fields: [seq]
-    special_filters:
-      mentions_account:
-        type: bloom_filter
-        column: accounts_bloom
-        num_bytes: 64
-        num_hashes: HASHES
     columns:
       block_number: { type: uint64 }
       seq: { type: uint32 }

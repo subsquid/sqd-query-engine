@@ -191,41 +191,45 @@ fn a_chunk_that_disagrees_with_the_catalog_does_not_panic() {
     let catalog = parse_dataset_description(
         r#"
 name: test
+
 tables:
   blocks:
-    field_name: block
+    output:
+      name: block
+      fields: [number]
     block_number_column: number
     sort_key: [number]
-    filters: []
-    fields: [number]
     columns:
       number: { type: uint64 }
+
   items:
-    query_name: items
-    field_name: item
+    request:
+      name: items
+      filters: []
+    output:
+      name: item
+      fields: [seq, stamp, version, doc, big, d8]
     block_number_column: block_number
     item_order_keys: [seq]
     sort_key: [block_number, seq]
-    filters: []
-    fields: [seq, stamp, version, doc, big, d8]
     columns:
       block_number: { type: uint64 }
       seq: { type: uint32 }
       stamp:
         type: timestamp_millisecond
-        json_encoding: timestamp_millisecond
+        encoding: timestamp_millisecond
       version:
         type: int16
-        json_encoding: solana_tx_version
+        encoding: solana_tx_version
       doc:
         type: string
-        json_encoding: json
+        encoding: json_verbatim
       big:
         type: uint64
-        json_encoding: string
+        encoding: decimal_string
       d8:
         type: uint64
-        json_encoding: hex_number
+        encoding: hex_number
 "#,
     )
     .unwrap();

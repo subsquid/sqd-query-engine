@@ -20,7 +20,7 @@
 //!   several relations (e.g. `transactions` pulled by both `traces` and
 //!   `stateDiffs`) is unioned and deduped by `block_number + item_order_keys +
 //!   address` (the same key the JSON path uses).
-//! - **Optional hex→bytes**: with `binary`, columns declared `json_encoding: hex`
+//! - **Optional hex→bytes**: with `binary`, columns declared `encoding: hex_bytes`
 //!   in the metadata are decoded from `0x…` `Utf8` to raw `Binary`. The hex set
 //!   is taken from the schema, not sniffed from the values, so a column's emitted
 //!   type is stable across responses (an all-null hex column is still `Binary`;
@@ -172,7 +172,7 @@ pub fn dedup_first(batch: &RecordBatch, key_cols: &[String]) -> Result<RecordBat
 
 /// Decode the table's hex `Utf8` columns from `0x…` text to raw `Binary`.
 ///
-/// Which columns are hex is taken from the metadata (`json_encoding: hex`), not
+/// Which columns are hex is taken from the metadata (`encoding: hex_bytes`), not
 /// sniffed from the values — so a column's emitted type is **stable across
 /// responses** regardless of which rows are present: an all-null hex column is
 /// still `Binary`, and base58/other `Utf8` columns are left as `Utf8`. Always
@@ -196,8 +196,8 @@ pub fn hexify_group(
                     table_desc
                         .columns
                         .get(f.name())
-                        .and_then(|c| c.json_encoding.as_ref()),
-                    Some(JsonEncoding::Hex)
+                        .and_then(|c| c.encoding.as_ref()),
+                    Some(JsonEncoding::HexBytes)
                 )
         })
         .map(|(i, _)| i)

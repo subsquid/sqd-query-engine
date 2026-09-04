@@ -1,5 +1,5 @@
 use crate::integers::OwnedIntColumn;
-use crate::metadata::{ColumnType, FieldGrouping, JsonEncoding, TableDescription, VirtualField};
+use crate::metadata::{ColumnType, JsonEncoding, TableDescription, VirtualField};
 use crate::output::encoder::{
     encode_json_string, encode_roll, resolve_encoder, snake_to_camel, EncoderFn,
     ResolvedRollEncoder,
@@ -109,16 +109,16 @@ type VariantGroups<W> = HashMap<String, Vec<(Vec<u8>, Vec<W>)>>;
 pub(crate) struct GroupedWriters {
     /// Writers for base fields (shared across all variants).
     base_writers: Vec<FieldWriter>,
-    /// Tag column name for variant dispatch.
-    tag_column: String,
-    /// Per-variant grouped writers: tag_value -> [(group_json_key, writers)].
+    /// The column whose value picks the variant.
+    variant_column: String,
+    /// Per-variant grouped writers: variant -> [(group_json_key, writers)].
     variant_writers: VariantGroups<FieldWriter>,
 }
 
 /// Resolved grouped writers for a specific batch schema.
 pub(crate) struct ResolvedGroupedWriters {
     base_resolved: Vec<ResolvedFieldWriter>,
-    tag_col_idx: Option<usize>,
+    variant_col_idx: Option<usize>,
     variant_resolved: VariantGroups<ResolvedFieldWriter>,
 }
 
@@ -179,7 +179,7 @@ pub(crate) fn build_field_writers(
         .map(|col_name| {
             // Check virtual fields first
             if let Some(desc) = table_desc {
-                if let Some(vf) = desc.virtual_fields.get(col_name) {
+                if let Some(vf) = desc.output.virtual_fields.get(col_name) {
                     match vf {
                         VirtualField::Roll { columns } => {
                             let mut prefix = Vec::with_capacity(col_name.len() + 4);
@@ -203,33 +203,34 @@ pub(crate) fn build_field_writers(
             FieldWriter::Regular {
                 json_key_prefix: prefix,
                 column_name: col_name.clone(),
-                encoding: declared.and_then(|c| c.json_encoding.clone()),
+                encoding: declared.and_then(|c| c.encoding.clone()),
                 declared_type: declared.map(|c| c.data_type.clone()),
             }
         })
         .collect()
 }
 
+/// Writers for a table whose rows come in variants. A field some variant maps
+/// is written inside that variant's group; every other field is written flat,
+/// for every row, so it is the mappings that decide which is which.
 pub(crate) fn build_grouped_writers(
     output_columns: &[String],
     table_desc: &TableDescription,
-    grouping: &FieldGrouping,
+    variant_column: &str,
 ) -> GroupedWriters {
-    let base_set: HashSet<&str> = grouping.base_fields.iter().map(|s| s.as_str()).collect();
-
-    // Build a reverse map: request_key -> (variant, group, field_name, physical_column).
-    // The request key usually equals the physical column, but a column may back
+    // Build a reverse map: field -> (variant, group, json_name, physical_column).
+    // The field usually equals the physical column, but a column may back
     // several output fields (e.g. trace `call_type` → `type` and `callType`).
-    let mut col_to_group: HashMap<&str, (&str, &str, &str, &str)> = HashMap::new();
-    for (variant_name, groups) in &grouping.variants {
+    let mut field_to_group: HashMap<&str, (&str, &str, &str, &str)> = HashMap::new();
+    for (variant_name, groups) in &table_desc.output.variants {
         for (group_name, mappings) in groups {
             for mapping in mappings {
-                col_to_group.insert(
-                    mapping.request_key(),
+                field_to_group.insert(
+                    mapping.field(),
                     (
                         variant_name.as_str(),
                         group_name.as_str(),
-                        mapping.field.as_str(),
+                        mapping.json_name.as_str(),
                         mapping.column.as_str(),
                     ),
                 );
@@ -243,54 +244,32 @@ pub(crate) fn build_grouped_writers(
     let mut variant_groups: HashMap<String, HashMap<String, Vec<FieldWriter>>> = HashMap::new();
 
     for col_name in output_columns {
-        if base_set.contains(col_name.as_str()) {
-            // Base field — write flat
-            if let Some(vf) = table_desc.virtual_fields.get(col_name) {
-                match vf {
-                    VirtualField::Roll { columns } => {
-                        let mut prefix = Vec::with_capacity(col_name.len() + 4);
-                        encode_json_string(&snake_to_camel(col_name), &mut prefix);
-                        prefix.push(b':');
-                        base_writers.push(FieldWriter::Roll {
-                            json_key_prefix: prefix,
-                            source_column_names: columns.clone(),
-                        });
-                        continue;
-                    }
-                }
-            }
-            let mut prefix = Vec::with_capacity(col_name.len() + 4);
-            encode_json_string(&snake_to_camel(col_name), &mut prefix);
-            prefix.push(b':');
-            let declared = table_desc.columns.get(col_name);
-            base_writers.push(FieldWriter::Regular {
+        let Some(&(variant, group, json_name, phys_col)) = field_to_group.get(col_name.as_str())
+        else {
+            base_writers.extend(build_field_writers(
+                std::slice::from_ref(col_name),
+                Some(table_desc),
+            ));
+            continue;
+        };
+
+        // Grouped field. `phys_col` is the parquet column to read, which may
+        // differ from the field `col_name` (one column, many fields).
+        let mut prefix = Vec::with_capacity(json_name.len() + 4);
+        encode_json_string(json_name, &mut prefix);
+        prefix.push(b':');
+        let declared = table_desc.columns.get(phys_col);
+        variant_groups
+            .entry(variant.to_string())
+            .or_default()
+            .entry(group.to_string())
+            .or_default()
+            .push(FieldWriter::Regular {
                 json_key_prefix: prefix,
-                column_name: col_name.clone(),
-                encoding: declared.and_then(|c| c.json_encoding.clone()),
+                column_name: phys_col.to_string(),
+                encoding: declared.and_then(|c| c.encoding.clone()),
                 declared_type: declared.map(|c| c.data_type.clone()),
             });
-        } else if let Some(&(variant, group, field_name, phys_col)) =
-            col_to_group.get(col_name.as_str())
-        {
-            // Grouped field. `phys_col` is the parquet column to read, which may
-            // differ from the request key `col_name` (one column, many fields).
-            let mut prefix = Vec::with_capacity(field_name.len() + 4);
-            encode_json_string(field_name, &mut prefix);
-            prefix.push(b':');
-            let declared = table_desc.columns.get(phys_col);
-            variant_groups
-                .entry(variant.to_string())
-                .or_default()
-                .entry(group.to_string())
-                .or_default()
-                .push(FieldWriter::Regular {
-                    json_key_prefix: prefix,
-                    column_name: phys_col.to_string(),
-                    encoding: declared.and_then(|c| c.json_encoding.clone()),
-                    declared_type: declared.map(|c| c.data_type.clone()),
-                });
-        }
-        // else: column not in base or any group — skip (e.g., weight columns)
     }
 
     // Convert variant_groups into the final structure
@@ -314,7 +293,7 @@ pub(crate) fn build_grouped_writers(
 
     GroupedWriters {
         base_writers,
-        tag_column: grouping.tag_column.clone(),
+        variant_column: variant_column.to_string(),
         variant_writers,
     }
 }
@@ -324,7 +303,7 @@ pub(crate) fn resolve_grouped_writers(
     batch: &RecordBatch,
 ) -> ResolvedGroupedWriters {
     let base_resolved = resolve_writers(&gw.base_writers, batch);
-    let tag_col_idx = batch.schema().index_of(&gw.tag_column).ok();
+    let variant_col_idx = batch.schema().index_of(&gw.variant_column).ok();
     let mut variant_resolved: VariantGroups<ResolvedFieldWriter> = HashMap::new();
     for (variant, groups) in &gw.variant_writers {
         let resolved_groups: Vec<_> = groups
@@ -338,7 +317,7 @@ pub(crate) fn resolve_grouped_writers(
     }
     ResolvedGroupedWriters {
         base_resolved,
-        tag_col_idx,
+        variant_col_idx,
         variant_resolved,
     }
 }
@@ -383,8 +362,8 @@ fn write_row_grouped(
     // Write base fields
     write_row_fields_resolved(buf, batch, row, &resolved.base_resolved);
 
-    // Read tag column to determine variant
-    let tag_value = resolved.tag_col_idx.and_then(|idx| {
+    // Read the variant column to determine the variant
+    let tag_value = resolved.variant_col_idx.and_then(|idx| {
         let col = batch.column(idx);
         col.as_any().downcast_ref::<StringArray>().and_then(|arr| {
             if arr.is_null(row) {

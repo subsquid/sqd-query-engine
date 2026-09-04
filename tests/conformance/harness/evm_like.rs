@@ -32,67 +32,77 @@ use crate::harness::chunk::write_table;
 /// [INV-R2]: ../../../spec/07-invariants.md#inv-r2
 const CHAIN: &str = r#"
 name: test
+
 tables:
   blocks:
+    output:
+      name: block
+      fields: [number, hash]
     block_number_column: number
-    field_name: block
     sort_key: [number]
-    filters: []
-    fields: [number, hash]
     columns:
-      number: { type: uint64, stats: true }
-      hash: { type: string, json_encoding: hex }
+      number: { type: uint64 }
+      hash: { type: string, encoding: hex_bytes }
+
   logs:
-    query_name: logs
-    field_name: log
+    request:
+      name: logs
+      filters: [address, topic0]
+      relations:
+        transaction:
+          table: transactions
+          key: [block_number, transaction_index]
+    output:
+      name: log
+      fields: [log_index, transaction_index, address, topic0, data]
     block_number_column: block_number
     item_order_keys: [transaction_index, log_index]
     sort_key: [topic0, address, block_number, log_index]
-    filters: [address, topic0]
-    fields: [log_index, transaction_index, address, topic0, data]
-    relations:
-      transaction:
-        table: transactions
-        key: [block_number, transaction_index]
     columns:
-      block_number: { type: uint64, stats: true }
-      log_index: { type: uint32, stats: true }
-      transaction_index: { type: uint32, stats: true }
-      address: { type: string, json_encoding: hex, stats: true, dictionary: true }
-      topic0: { type: string, json_encoding: hex, stats: true, dictionary: true }
-      data: { type: string, json_encoding: hex }
+      block_number: { type: uint64 }
+      log_index: { type: uint32 }
+      transaction_index: { type: uint32 }
+      address: { type: string, encoding: hex_bytes }
+      topic0: { type: string, encoding: hex_bytes }
+      data: { type: string, encoding: hex_bytes }
+
   transactions:
-    query_name: transactions
-    field_name: transaction
+    request:
+      name: transactions
+      filters: [transaction_index]
+      relations:
+        transaction_logs:
+          table: logs
+          key: [block_number, transaction_index]
+        transaction_traces:
+          table: traces
+          key: [block_number, transaction_index]
+    output:
+      name: transaction
+      fields: [transaction_index, gas_used]
     block_number_column: block_number
     item_order_keys: [transaction_index]
     sort_key: [block_number, transaction_index]
-    filters: [transaction_index]
-    fields: [transaction_index, gas_used]
-    relations:
-      transaction_logs:
-        table: logs
-        key: [block_number, transaction_index]
-      transaction_traces:
-        table: traces
-        key: [block_number, transaction_index]
     columns:
-      block_number: { type: uint64, stats: true }
-      transaction_index: { type: uint32, stats: true }
+      block_number: { type: uint64 }
+      transaction_index: { type: uint32 }
       gas_used: { type: uint64 }
+
   traces:
-    query_name: traces
-    field_name: trace
+    request:
+      name: traces
+      filters: [kind]
+    output:
+      name: trace
+      fields: [transaction_index, trace_index, kind]
     block_number_column: block_number
     item_order_keys: [transaction_index, trace_index]
     sort_key: [block_number, transaction_index, trace_index]
-    filters: [kind]
-    fields: [transaction_index, trace_index, kind]
     columns:
-      block_number: { type: uint64, stats: true }
-      transaction_index: { type: uint32, stats: true }
-      trace_index: { type: uint32, stats: true }
-      kind: { type: string, stats: true, dictionary: true }
+      block_number: { type: uint64 }
+      transaction_index: { type: uint32 }
+      trace_index: { type: uint32 }
+      kind: { type: string }
 "#;
 
 pub const BLOCKS: std::ops::RangeInclusive<u64> = 100..=115;

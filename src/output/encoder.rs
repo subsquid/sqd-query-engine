@@ -21,9 +21,9 @@ pub fn resolve_encoder(
 ) -> EncoderFn {
     let declared: Option<EncoderFn> = match encoding {
         // Reads its own type and emits null for anything else.
-        Some(JsonEncoding::String) => Some(encode_bignum),
+        Some(JsonEncoding::DecimalString) => Some(encode_bignum),
         Some(JsonEncoding::HexNumber) => Some(resolve_hex_number_encoder(data_type, declared_type)),
-        Some(JsonEncoding::Json) => {
+        Some(JsonEncoding::JsonVerbatim) => {
             matches!(data_type, DataType::Utf8).then_some(encode_json_passthrough as EncoderFn)
         }
         Some(JsonEncoding::SolanaTxVersion) => {
@@ -34,7 +34,7 @@ pub fn resolve_encoder(
             DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, _)
         )
         .then_some(encode_timestamp_millisecond_raw as EncoderFn),
-        Some(JsonEncoding::Hex) => resolve_hex_bytes_encoder(data_type),
+        Some(JsonEncoding::HexBytes) => resolve_hex_bytes_encoder(data_type),
         Some(JsonEncoding::Base58) => resolve_base58_encoder(data_type),
         None => None,
     };
@@ -1205,11 +1205,11 @@ mod tests {
         let wrong: std::sync::Arc<dyn Array> = std::sync::Arc::new(UInt32Array::from(vec![7u32]));
 
         for encoding in [
-            JsonEncoding::Json,
+            JsonEncoding::JsonVerbatim,
             JsonEncoding::SolanaTxVersion,
             JsonEncoding::TimestampMillisecond,
-            JsonEncoding::String,
-            JsonEncoding::Hex,
+            JsonEncoding::DecimalString,
+            JsonEncoding::HexBytes,
             JsonEncoding::Base58,
         ] {
             let encoder = resolve_encoder(wrong.data_type(), Some(&encoding), None);
@@ -1253,7 +1253,7 @@ mod tests {
     }
 
     /// The *declared* type carries the unit (INV-O9). Every catalog entry today
-    /// also sets `json_encoding: timestamp_millisecond`, which hid this: a
+    /// also sets `encoding: timestamp_millisecond`, which hid this: a
     /// millisecond column that leaves the encoding off was divided by 1000 and
     /// served as seconds.
     ///
@@ -1326,11 +1326,11 @@ mod tests {
         );
 
         assert_eq!(
-            rendered_with(binary, Some(&JsonEncoding::Hex), None),
+            rendered_with(binary, Some(&JsonEncoding::HexBytes), None),
             "\"0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\""
         );
         assert_eq!(
-            rendered_with(fixed, Some(&JsonEncoding::Hex), None),
+            rendered_with(fixed, Some(&JsonEncoding::HexBytes), None),
             "\"0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\""
         );
     }
@@ -1342,7 +1342,7 @@ mod tests {
         let text: std::sync::Arc<dyn Array> =
             std::sync::Arc::new(StringArray::from(vec!["0xdeadbeef"]));
         assert_eq!(
-            rendered_with(text.clone(), Some(&JsonEncoding::Hex), None),
+            rendered_with(text.clone(), Some(&JsonEncoding::HexBytes), None),
             "\"0xdeadbeef\""
         );
 

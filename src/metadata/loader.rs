@@ -1,4 +1,4 @@
-use crate::metadata::{DatasetDescription, MAX_DISCRIMINATOR_BYTES};
+use crate::metadata::{DatasetDescription, SpecialFilter, MAX_DISCRIMINATOR_BYTES};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::Path;
@@ -68,7 +68,7 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
         // physical width, which only means anything for an unsigned integer. The
         // encoder assumes this check exists.
         for (col_name, col) in &table.columns {
-            if col.json_encoding == Some(crate::metadata::JsonEncoding::HexNumber) {
+            if col.encoding == Some(crate::metadata::JsonEncoding::HexNumber) {
                 anyhow::ensure!(
                     matches!(
                         col.data_type,
@@ -77,7 +77,7 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
                             | crate::metadata::ColumnType::UInt32
                             | crate::metadata::ColumnType::UInt64
                     ),
-                    "table '{}': column '{}' declares json_encoding hex_number, \
+                    "table '{}': column '{}' declares encoding hex_number, \
                      which needs an unsigned integer column, not {:?}",
                     table_name,
                     col_name,
@@ -86,23 +86,14 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
             }
         }
 
-        // Validate children references
-        for child in &table.children {
-            anyhow::ensure!(
-                desc.tables.contains_key(child),
-                "table '{}': child table '{}' not found in dataset",
-                table_name,
-                child
-            );
-        }
-
         // Validate the declared filter surface. A typo here does not fail a
         // query — it removes a filter, and the query it was meant to narrow
         // comes back wrong instead.
-        let special: Vec<&str> = table.special_filters.keys().map(String::as_str).collect();
+        let request = &table.request;
+        let special: Vec<&str> = request.special_filters.keys().map(String::as_str).collect();
         check_filter_surface(
             &format!("table '{}'", table_name),
-            &table.filters,
+            &request.filters,
             &special,
             table_name,
             table,
@@ -115,9 +106,9 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
 
         // A special filter reaches its column the same way a declared filter
         // does, and a typo in one is just as invisible.
-        for (filter_name, special) in &table.special_filters {
+        for (filter_name, special) in &request.special_filters {
             anyhow::ensure!(
-                table.filters.contains(filter_name),
+                request.filters.contains(filter_name),
                 "table '{}': special filter '{}' is not in its filter list, so no request \
                  can reach it",
                 table_name,
@@ -125,14 +116,12 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
             );
 
             let columns: Vec<&String> = match special {
-                crate::metadata::SpecialFilter::Discriminator { columns } => {
-                    columns.values().collect()
-                }
-                crate::metadata::SpecialFilter::BloomFilter { column, .. }
-                | crate::metadata::SpecialFilter::RangeGte { column }
-                | crate::metadata::SpecialFilter::RangeLte { column }
-                | crate::metadata::SpecialFilter::ColumnAlias { column }
-                | crate::metadata::SpecialFilter::GteConst { column, .. } => vec![column],
+                SpecialFilter::Discriminator { by_length } => by_length.values().collect(),
+                SpecialFilter::Bloom { column, .. }
+                | SpecialFilter::RangeGte { column }
+                | SpecialFilter::RangeLte { column }
+                | SpecialFilter::ColumnAlias { column }
+                | SpecialFilter::GteConst { column, .. } => vec![column],
             };
             for column in columns {
                 anyhow::ensure!(
@@ -150,8 +139,8 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
             // then never matches the `"1"` the lookup asks for — leaves its column
             // unreachable, and every request carrying a value of that length is
             // refused as having no column.
-            if let crate::metadata::SpecialFilter::Discriminator { columns } = special {
-                for length in columns.keys() {
+            if let SpecialFilter::Discriminator { by_length } = special {
+                for length in by_length.keys() {
                     let byte_count = length
                         .parse::<usize>()
                         .ok()
@@ -181,19 +170,10 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
             );
         }
 
-        for key in &table.parent_key {
-            anyhow::ensure!(
-                table.columns.contains_key(key),
-                "table '{}': parent_key column '{}' not found in columns",
-                table_name,
-                key
-            );
-        }
-
         // A roll gathers several columns into one array and stops at the first
         // null. A name that resolves to nothing is not an error at query time —
         // it shortens the array, on every row, quietly.
-        for (field_name, virtual_field) in &table.virtual_fields {
+        for (field_name, virtual_field) in &table.output.virtual_fields {
             let crate::metadata::VirtualField::Roll { columns } = virtual_field;
             for column in columns {
                 anyhow::ensure!(
@@ -226,39 +206,40 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
             }
         }
 
-        // A field group is dispatched on its tag column's value. A typo in the
-        // tag drops every variant field from every row; a typo in a mapping
-        // drops one field from one variant.
-        if let Some(groups) = &table.field_groups {
+        // Variants are dispatched on the variant column's value. A typo in the
+        // column drops every variant field from every row; a typo in a mapping
+        // drops one field from one variant. Variants with no column to dispatch
+        // on are never consulted, and a column with no variants dispatches
+        // nothing — either is a catalog that says less than it looks like.
+        let output = &table.output;
+        let dispatches = output.variant_column.is_some();
+        anyhow::ensure!(
+            dispatches != output.variants.is_empty(),
+            "table '{}': variants and variant_column come together; one without the \
+             other does nothing",
+            table_name
+        );
+
+        if let Some(column) = &output.variant_column {
             anyhow::ensure!(
-                table.columns.contains_key(&groups.tag_column),
-                "table '{}': field group tag column '{}' not found in columns",
+                table.columns.contains_key(column),
+                "table '{}': variant_column '{}' not found in columns",
                 table_name,
-                groups.tag_column
+                column
             );
+        }
 
-            for column in &groups.base_fields {
-                anyhow::ensure!(
-                    table.columns.contains_key(column),
-                    "table '{}': field group base field '{}' not found in columns",
-                    table_name,
-                    column
-                );
-            }
-
-            for (variant, variant_groups) in &groups.variants {
-                for (group, mappings) in variant_groups {
-                    for mapping in mappings {
-                        anyhow::ensure!(
-                            table.columns.contains_key(&mapping.column),
-                            "table '{}': field group '{}.{}' maps column '{}', which is \
-                             not there",
-                            table_name,
-                            variant,
-                            group,
-                            mapping.column
-                        );
-                    }
+        for (variant, groups) in &output.variants {
+            for (group, mappings) in groups {
+                for mapping in mappings {
+                    anyhow::ensure!(
+                        table.columns.contains_key(&mapping.column),
+                        "table '{}': variant '{}.{}' maps column '{}', which is not there",
+                        table_name,
+                        variant,
+                        group,
+                        mapping.column
+                    );
                 }
             }
         }
@@ -268,7 +249,7 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
         // the relation comes back empty at 200. A mistyped key column is worse —
         // an unresolvable key makes the key set guaranteed-empty, so the relation
         // is empty rather than absent.
-        for (relation_name, relation) in &table.relations {
+        for (relation_name, relation) in &request.relations {
             check_relation(
                 &format!("table '{}'", table_name),
                 relation_name,
@@ -297,7 +278,7 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
         }
     }
 
-    for (alias_name, alias) in &desc.query_aliases {
+    for (alias_name, alias) in &desc.aliases {
         let table = desc.tables.get(&alias.table).ok_or_else(|| {
             anyhow::anyhow!(
                 "alias '{}': table '{}' not found in dataset",
@@ -309,9 +290,9 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
         // An alias is the one place the closed filter surface can be reopened, so
         // it is held to the table's rules, system columns included.
         let special: Vec<&str> = alias
-            .filter_aliases
+            .special_filters
             .keys()
-            .chain(table.special_filters.keys())
+            .chain(table.request.special_filters.keys())
             .map(String::as_str)
             .collect();
         check_filter_surface(
@@ -322,14 +303,27 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
             table,
         )?;
 
-        for (key, column) in &alias.filter_aliases {
+        for (key, special) in &alias.special_filters {
             anyhow::ensure!(
                 alias.filters.contains(key),
-                "alias '{}': filter alias '{}' is not in its filter list, so no request can \
-                 reach it",
+                "alias '{}': special filter '{}' is not in its filter list, so no request \
+                 can reach it",
                 alias_name,
                 key
             );
+
+            // An item request carries the column an alias filter resolves to,
+            // and the plan looks any other kind of special filter up on the
+            // table — where an alias's own would not be found.
+            let SpecialFilter::ColumnAlias { column } = special else {
+                anyhow::bail!(
+                    "alias '{}': special filter '{}' is not a column_alias; an alias can \
+                     only rename a column of '{}'",
+                    alias_name,
+                    key,
+                    alias.table
+                );
+            };
             anyhow::ensure!(
                 table.columns.contains_key(column),
                 "alias '{}': filter '{}' targets column '{}', which '{}' does not have",
@@ -340,13 +334,13 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
             );
         }
 
-        // An implicit predicate is what makes an alias a *narrower* view of its
+        // An implicit filter is what makes an alias a *narrower* view of its
         // table. Naming a column that is not there widens it back to the whole
         // table without saying so.
-        for column in alias.implicit_predicates.keys() {
+        for column in alias.implicit_filters.keys() {
             anyhow::ensure!(
                 table.columns.contains_key(column),
-                "alias '{}': implicit predicate on '{}', which '{}' does not have",
+                "alias '{}': implicit filter on '{}', which '{}' does not have",
                 alias_name,
                 column,
                 alias.table
@@ -412,42 +406,47 @@ fn check_block_table(desc: &DatasetDescription) -> Result<()> {
     Ok(())
 }
 
-/// `query_name` is unique across tables and aliases, `field_name` across tables
-/// (INV-D10). A duplicate makes a client's request ambiguous, and iteration
-/// order — not the catalog — decides which table answers it.
+/// A request name is unique across tables and aliases, an output name across
+/// tables (INV-D10). A duplicate makes a client's request ambiguous, and
+/// iteration order — not the catalog — decides which table answers it.
 ///
-/// A table with no `query_name` still holds one: a request may address a table
-/// by its own name, so an undeclared name is claimed as surely as a declared
-/// one, and another table declaring it shadows the first out of the request
-/// surface entirely. `field_name` has no such default — a table that declares
-/// none is simply not addressable in `fields` — so only declared ones are
-/// claimed there.
+/// A table with no `request.name` still holds one: a request may address a
+/// table by its own name, so an undeclared name is claimed as surely as a
+/// declared one, and another table declaring it shadows the first out of the
+/// request surface entirely. `output.name` has no such default — a table that
+/// declares none is simply not addressable in `fields` — so only declared ones
+/// are claimed there.
 fn check_names_are_unique(desc: &DatasetDescription) -> Result<()> {
-    let mut query_names: HashMap<&str, &str> = HashMap::new();
-    let mut field_names: HashMap<&str, &str> = HashMap::new();
+    let mut request_names: HashMap<&str, &str> = HashMap::new();
+    let mut output_names: HashMap<&str, &str> = HashMap::new();
 
     for (table_name, table) in &desc.tables {
-        let query_name = table.query_name.as_deref().unwrap_or(table_name);
         claim(
             &desc.name,
-            "queryName",
-            query_name,
+            "request name",
+            table.request_name(table_name),
             table_name,
-            &mut query_names,
+            &mut request_names,
         )?;
 
-        if let Some(name) = &table.field_name {
-            claim(&desc.name, "fieldName", name, table_name, &mut field_names)?;
+        if let Some(name) = &table.output.name {
+            claim(
+                &desc.name,
+                "output name",
+                name,
+                table_name,
+                &mut output_names,
+            )?;
         }
     }
 
-    for alias_name in desc.query_aliases.keys() {
+    for alias_name in desc.aliases.keys() {
         claim(
             &desc.name,
-            "queryName",
+            "request name",
             alias_name,
             alias_name,
-            &mut query_names,
+            &mut request_names,
         )?;
     }
 
@@ -516,22 +515,24 @@ fn check_filter_surface(
 }
 
 /// Every name in a declared field list must resolve to something the table can
-/// emit: a non-system column, a virtual field, or a field-group request key.
+/// emit: a non-system column, a virtual field, or a variant mapping's field.
 ///
-/// A table addressable in `fields` — one that declares a `field_name` — must
+/// A table addressable in `fields` — one that declares an output name — must
 /// declare a list. An absent one reads as "nothing is selectable", which answers
 /// every field a client asks of it with `UnknownField` and looks, from outside,
 /// exactly like a dataset that carries no such columns.
 fn check_field_surface(table_name: &str, table: &crate::metadata::TableDescription) -> Result<()> {
+    let output = &table.output;
+
     anyhow::ensure!(
-        table.field_name.is_none() || !table.fields.is_empty(),
-        "table '{}': declares field_name '{}' but no output fields, so every \
+        output.name.is_none() || !output.fields.is_empty(),
+        "table '{}': declares output name '{}' but no output fields, so every \
          selection against it would be refused",
         table_name,
-        table.field_name.as_deref().unwrap_or_default()
+        output.name.as_deref().unwrap_or_default()
     );
 
-    for field in &table.fields {
+    for field in &output.fields {
         if let Some(column) = table.columns.get(field) {
             anyhow::ensure!(
                 !column.system,
@@ -544,7 +545,7 @@ fn check_field_surface(table_name: &str, table: &crate::metadata::TableDescripti
         }
 
         if let Some(crate::metadata::VirtualField::Roll { columns }) =
-            table.virtual_fields.get(field)
+            output.virtual_fields.get(field)
         {
             for physical in columns {
                 check_public_field_source(table_name, field, physical, table)?;
@@ -552,17 +553,13 @@ fn check_field_surface(table_name: &str, table: &crate::metadata::TableDescripti
             continue;
         }
 
-        if let Some(physical) = table
-            .field_groups
-            .as_ref()
-            .and_then(|fg| fg.physical_column_for_request(field))
-        {
+        if let Some(physical) = table.variant_source(field) {
             check_public_field_source(table_name, field, physical, table)?;
             continue;
         }
 
         anyhow::bail!(
-            "table '{}': field '{}' names no column, virtual field or field-group key",
+            "table '{}': field '{}' names no column, virtual field or variant field",
             table_name,
             field
         );
@@ -718,11 +715,9 @@ tables:
   blocks:
     block_number_column: number
     sort_key: [number]
-    filters: []
     columns:
       number:
         type: uint64
-        stats: true
       hash:
         type: string
 "#;
@@ -732,7 +727,8 @@ tables:
         let blocks = desc.table("blocks").unwrap();
         assert_eq!(blocks.block_number_column, "number");
         assert_eq!(blocks.sort_key, vec!["number"]);
-        assert_eq!(blocks.stats_columns(), vec!["number"]);
+        assert_eq!(blocks.request_name("blocks"), "blocks");
+        assert!(blocks.output.name.is_none());
     }
 
     #[test]
@@ -741,7 +737,6 @@ tables:
 name: test
 tables:
   transactions:
-    filters: []
     sort_key: [block_number]
     columns:
       block_number: { type: uint64 }
@@ -752,36 +747,35 @@ tables:
     }
 
     #[test]
-    fn test_column_json_encoding() {
+    fn test_column_encoding() {
         let yaml = r#"
 name: test
 tables:
   blocks:
     block_number_column: number
     sort_key: [number]
-    filters: []
     columns:
       number: { type: uint64 }
       hash:
         type: string
-        json_encoding: hex
+        encoding: hex_bytes
       fee:
         type: uint64
-        json_encoding: string
+        encoding: decimal_string
 "#;
         let desc = parse_dataset_description(yaml).unwrap();
         let blocks = desc.table("blocks").unwrap();
         let hash = blocks.column("hash").unwrap();
         assert_eq!(hash.data_type, crate::metadata::ColumnType::String);
-        assert_eq!(hash.json_encoding, Some(crate::metadata::JsonEncoding::Hex));
+        assert_eq!(hash.encoding, Some(crate::metadata::JsonEncoding::HexBytes));
         let fee = blocks.column("fee").unwrap();
         assert_eq!(fee.data_type, crate::metadata::ColumnType::UInt64);
         assert_eq!(
-            fee.json_encoding,
-            Some(crate::metadata::JsonEncoding::String)
+            fee.encoding,
+            Some(crate::metadata::JsonEncoding::DecimalString)
         );
         let number = blocks.column("number").unwrap();
-        assert_eq!(number.json_encoding, None);
+        assert_eq!(number.encoding, None);
     }
 
     /// Covers CT-1 · INV-D1
@@ -792,7 +786,6 @@ name: test
 tables:
   blocks:
     block_number_column: nonexistent
-    filters: []
     columns:
       number: { type: uint64 }
 "#;
@@ -827,8 +820,8 @@ tables:
             instructions.item_order_keys,
             vec!["transaction_index", "instruction_address"]
         );
-        assert!(instructions.column("program_id").unwrap().stats);
-        assert!(instructions.column("program_id").unwrap().dictionary);
+        assert_eq!(instructions.request_name("instructions"), "instructions");
+        assert_eq!(instructions.output.name.as_deref(), Some("instruction"));
         assert_eq!(
             instructions.column("d8").unwrap().data_type,
             crate::metadata::ColumnType::UInt64
@@ -851,33 +844,11 @@ tables:
             txs.sort_key,
             vec!["sighash", "to", "block_number", "transaction_index"]
         );
-        assert!(txs.column("sighash").unwrap().stats);
-        assert!(txs.column("sighash").unwrap().dictionary);
 
         let logs = desc.table("logs").unwrap();
         assert_eq!(
             logs.sort_key,
             vec!["topic0", "address", "block_number", "log_index"]
-        );
-    }
-
-    #[test]
-    fn test_validation_bad_child_reference() {
-        let yaml = r#"
-name: test
-tables:
-  blocks:
-    block_number_column: number
-    children: [missing_table]
-    filters: []
-    columns:
-      number: { type: uint64 }
-"#;
-        let err = parse_dataset_description(yaml).unwrap_err();
-        assert!(
-            err.to_string().contains("missing_table"),
-            "unexpected error: {}",
-            err
         );
     }
 
@@ -893,11 +864,11 @@ name: test
 tables:
   blocks:
     block_number_column: number
-    filters: []
     columns:
       number: { type: uint64 }
   items:
-    filters: [ no_such_column ]
+    request:
+      filters: [ no_such_column ]
     columns:
       block_number: { type: uint64 }
 "#;
@@ -917,7 +888,6 @@ tables:
   blocks:
     block_number_column: number
     {column}: no_such_column
-    filters: []
     columns:
       number: {{ type: uint64 }}
 "#
@@ -935,84 +905,73 @@ name: test
 tables:
   blocks:
     block_number_column: number
-    filters: []
     columns:
       number: { type: uint64 }
-query_aliases:
+aliases:
   view:
     table: no_such_table
     filters: []
 "#;
         assert!(parse_dataset_description(bad_table).is_err());
 
-        let bad_filter = r#"
+        // `{alias}` is spliced in as the body of one alias over `items`.
+        let catalog = |alias: &str| {
+            format!(
+                r#"
 name: test
 tables:
   blocks:
     block_number_column: number
-    filters: []
     columns:
-      number: { type: uint64 }
+      number: {{ type: uint64 }}
   items:
-    filters: []
+    request:
+      filters: []
     columns:
-      block_number: { type: uint64 }
-query_aliases:
+      block_number: {{ type: uint64 }}
+      topic: {{ type: string }}
+aliases:
   view:
     table: items
-    filters: [ no_such_column ]
-"#;
-        let err = parse_dataset_description(bad_filter)
+{alias}
+"#
+            )
+        };
+
+        let bad_filter = catalog("    filters: [ no_such_column ]");
+        let err = parse_dataset_description(&bad_filter)
             .unwrap_err()
             .to_string();
         assert!(err.contains("no_such_column"), "got: {err}");
 
-        let bad_target = r#"
-name: test
-tables:
-  blocks:
-    block_number_column: number
-    filters: []
-    columns:
-      number: { type: uint64 }
-  items:
-    filters: []
-    columns:
-      block_number: { type: uint64 }
-query_aliases:
-  view:
-    table: items
-    filters: [ topic0 ]
-    filter_aliases:
-      topic0: no_such_column
-"#;
-        let err = parse_dataset_description(bad_target)
+        let bad_target = catalog(
+            "    filters: [ topic0 ]\n    special_filters:\n      \
+             topic0: { kind: column_alias, column: no_such_column }",
+        );
+        let err = parse_dataset_description(&bad_target)
             .unwrap_err()
             .to_string();
         assert!(err.contains("no_such_column"), "got: {err}");
 
-        let unlisted = r#"
-name: test
-tables:
-  blocks:
-    block_number_column: number
-    filters: []
-    columns:
-      number: { type: uint64 }
-  items:
-    filters: []
-    columns:
-      block_number: { type: uint64 }
-      topic: { type: string }
-query_aliases:
-  view:
-    table: items
-    filters: []
-    filter_aliases:
-      topic0: topic
-"#;
-        let err = parse_dataset_description(unlisted).unwrap_err().to_string();
+        let unlisted = catalog(
+            "    filters: []\n    special_filters:\n      \
+             topic0: { kind: column_alias, column: topic }",
+        );
+        let err = parse_dataset_description(&unlisted)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("topic0"), "got: {err}");
+
+        // A request carries the column an alias filter resolves to, and the plan
+        // looks any other kind up on the table — where the alias's own is not.
+        let not_a_rename = catalog(
+            "    filters: [ topic0 ]\n    special_filters:\n      \
+             topic0: { kind: range_gte, column: topic }",
+        );
+        let err = parse_dataset_description(&not_a_rename)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("column_alias"), "got: {err}");
     }
 
     /// A catalog is written by hand and read by nothing else. Each check below
@@ -1028,15 +987,15 @@ tables:
   blocks:
     block_number_column: number
     sort_key: [number]
-    filters: []
     columns:
       number: {{ type: uint64 }}
   items:
+    request:
+      filters: [ user ]
     columns:
       block_number: {{ type: uint64 }}
       user: {{ type: string }}
       user_bloom: {{ type: string, system: true }}
-    filters: [ user ]
 {defect}
 "#
             )
@@ -1045,30 +1004,30 @@ tables:
         let rejected: &[(&str, &str)] = &[
             (
                 "an alias that omits its filter surface",
-                "query_aliases:\n  view:\n    table: items",
+                "aliases:\n  view:\n    table: items",
             ),
             (
                 "a misspelled alias key",
-                "query_aliases:\n  view:\n    table: items\n    filters: []\n    filter: [ user ]",
+                "aliases:\n  view:\n    table: items\n    filters: []\n    filter: [ user ]",
             ),
             (
-                "an implicit predicate on a column that is not there",
-                "query_aliases:\n  view:\n    table: items\n    filters: []\n\
-                 \x20   implicit_predicates:\n      no_such_column: [ x ]",
+                "an implicit filter on a column that is not there",
+                "aliases:\n  view:\n    table: items\n    filters: []\n\
+                 \x20   implicit_filters:\n      no_such_column: [ x ]",
             ),
             (
                 "an alias relation to a table that is not there",
-                "query_aliases:\n  view:\n    table: items\n    filters: []\n    relations:\n\
+                "aliases:\n  view:\n    table: items\n    filters: []\n    relations:\n\
                  \x20     thing:\n        table: no_such_table\n        left_key: [ block_number ]\n\
                  \x20       right_key: [ block_number ]",
             ),
             (
                 "an alias filter on a system column, which the table itself may not declare",
-                "query_aliases:\n  view:\n    table: items\n    filters: [ user_bloom ]",
+                "aliases:\n  view:\n    table: items\n    filters: [ user_bloom ]",
             ),
             (
                 "an alias relation joining on a key the target does not have",
-                "query_aliases:\n  view:\n    table: items\n    filters: []\n    relations:\n\
+                "aliases:\n  view:\n    table: items\n    filters: []\n    relations:\n\
                  \x20     thing:\n        table: blocks\n        left_key: [ block_number ]\n\
                  \x20       right_key: [ no_such_column ]",
             ),
@@ -1097,23 +1056,24 @@ tables:
   blocks:
     block_number_column: number
     sort_key: [number]
-    filters: []
     columns:
       number: {{ type: uint64 }}
   items:
+    request:
+      filters: []
+      relations:
+        kids:
+          table: {table}
+          left_key: [ block_number, index ]
+          right_key: [ block_number, {right_key} ]
     item_order_keys: [ index ]
-    filters: []
-    relations:
-      kids:
-        table: {table}
-        left_key: [ block_number, index ]
-        right_key: [ block_number, {right_key} ]
     columns:
       block_number: {{ type: uint64 }}
       index: {{ type: uint32 }}
   children:
+    request:
+      filters: []
     item_order_keys: [ parent_index ]
-    filters: []
     columns:
       block_number: {{ type: uint64 }}
       parent_index: {{ type: uint32 }}
@@ -1156,21 +1116,22 @@ tables:
   blocks:
     block_number_column: number
     sort_key: [number]
-    filters: []
     columns:
       number: {{ type: uint64 }}
   items:
-    item_order_keys: [ index ]
-    filters: []
-    relations:
-      kids:
+    request:
+      filters: []
+      relations:
+        kids:
 {relation}
+    item_order_keys: [ index ]
     columns:
       block_number: {{ type: uint64 }}
       index: {{ type: uint32 }}
   children:
+    request:
+      filters: []
     item_order_keys: [ parent_index ]
-    filters: []
     columns:
       block_number: {{ type: uint64 }}
       parent_index: {{ type: uint32 }}
@@ -1179,37 +1140,37 @@ tables:
             )
         };
 
-        let good = "        table: children\n\
-                    \x20       left_key: [ block_number, index ]\n\
-                    \x20       right_key: [ block_number, parent_index ]";
+        let good = "          table: children\n\
+                    \x20         left_key: [ block_number, index ]\n\
+                    \x20         right_key: [ block_number, parent_index ]";
         parse_dataset_description(&catalog(good)).expect("a well-formed relation must load");
 
         let rejected: &[(&str, &str)] = &[
             (
                 // Every composite key is then the same empty key.
                 "a relation with no join key at all",
-                "        table: children",
+                "          table: children",
             ),
             (
                 // The two sides are zipped, and the mismatch panics the scan.
                 "a relation whose two sides are different lengths",
-                "        table: children\n\
-                 \x20       left_key: [ block_number, index ]\n\
-                 \x20       right_key: [ block_number ]",
+                "          table: children\n\
+                 \x20         left_key: [ block_number, index ]\n\
+                 \x20         right_key: [ block_number ]",
             ),
             (
                 // Joins rows of one block onto another block's items.
                 "a relation whose key does not start with the block number",
-                "        table: children\n\
-                 \x20       left_key: [ index, block_number ]\n\
-                 \x20       right_key: [ parent_index, block_number ]",
+                "          table: children\n\
+                 \x20         left_key: [ index, block_number ]\n\
+                 \x20         right_key: [ parent_index, block_number ]",
             ),
             (
                 // There is no hierarchy to walk, so it resolves to nothing.
                 "a children relation onto a table with no address column",
-                "        table: items\n        kind: children\n\
-                 \x20       left_key: [ block_number, index ]\n\
-                 \x20       right_key: [ block_number, index ]",
+                "          table: items\n          kind: children\n\
+                 \x20         left_key: [ block_number, index ]\n\
+                 \x20         right_key: [ block_number, index ]",
             ),
         ];
 
@@ -1221,11 +1182,11 @@ tables:
         }
     }
 
-    /// A table that omits `filters` accepts no filters at all and 400s every one
-    /// a client sends, which `deny_unknown_fields` cannot catch — it sees an
-    /// absent key, not a misspelled one.
+    /// A request block that omits `filters` accepts no filters at all and 400s
+    /// every one a client sends, which `deny_unknown_fields` cannot catch — it
+    /// sees an absent key, not a misspelled one.
     #[test]
-    fn test_validate_rejects_a_table_without_a_filter_surface() {
+    fn test_validate_rejects_a_request_without_a_filter_surface() {
         let yaml = r#"
 name: test
 tables:
@@ -1233,6 +1194,11 @@ tables:
     block_number_column: number
     columns:
       number: { type: uint64 }
+  items:
+    request:
+      name: items
+    columns:
+      block_number: { type: uint64 }
 "#;
         // The missing key is a serde error, so it arrives as the cause rather than
         // the context line.
@@ -1248,14 +1214,14 @@ name: test
 tables:
   blocks:
     block_number_column: number
-    filters: []
     columns:
       number: { type: uint64 }
   items:
+    request:
+      filters: [ user_bloom ]
     columns:
       block_number: { type: uint64 }
       user_bloom: { type: string, system: true }
-    filters: [ user_bloom ]
 "#;
         let err = parse_dataset_description(yaml).unwrap_err().to_string();
         assert!(err.contains("system column"), "got: {err}");
@@ -1271,18 +1237,18 @@ name: test
 tables:
   blocks:
     block_number_column: number
-    filters: []
     columns:
       number: { type: uint64 }
   items:
-    filters: [ call_value_non_zero ]
+    request:
+      filters: [ call_value_non_zero ]
+      special_filters:
+        call_value_non_zero:
+          kind: gte_const
+          column: no_such_column
+          value: "0x1"
     columns:
       block_number: { type: uint64 }
-    special_filters:
-      call_value_non_zero:
-        type: gte_const
-        column: no_such_column
-        value: "0x1"
 "#;
         let err = parse_dataset_description(yaml).unwrap_err().to_string();
         assert!(err.contains("no_such_column"), "got: {err}");
@@ -1297,14 +1263,14 @@ name: test
 tables:
   blocks:
     block_number_column: number
-    filters: []
     columns:
       number: { type: uint64 }
   items:
-    filters: []
+    request:
+      filters: []
     columns:
       block_number: { type: uint64 }
-      label: { type: string, json_encoding: hex_number }
+      label: { type: string, encoding: hex_number }
 "#;
         let err = parse_dataset_description(yaml).unwrap_err().to_string();
         assert!(err.contains("hex_number"), "got: {err}");
@@ -1323,7 +1289,6 @@ tables:
   blocks:
     block_number_column: number
     sort_key: [number]
-    filters: []
     columns:
       number: { type: uint64 }
   items:
@@ -1338,24 +1303,23 @@ tables:
       kind: { type: string }
       payload: { type: string }
 "#;
-        // Every stanza carries its own filter list: a special filter is only
-        // reachable when listed, and the list must not be what a stanza fails on.
+        // A stanza that declares a special filter carries the filter list that
+        // reaches it, so the list is never what a stanza fails on.
         let catalog = |stanza: &str| format!("{HEAD}{stanza}{TAIL}");
 
         const GOOD: &str = r#"
-    filters: [ discriminator ]
-    address_column: seq
-    parent_key: [ block_number ]
-    virtual_fields:
-      accounts: { type: roll, columns: [ a0, rest ] }
-    special_filters:
-      discriminator: { type: discriminator, columns: { "1": d1 } }
-    field_groups:
-      tag_column: kind
-      base_fields: [ seq ]
+    request:
+      filters: [ discriminator ]
+      special_filters:
+        discriminator: { kind: discriminator, by_length: { "1": d1 } }
+    output:
+      virtual_fields:
+        accounts: { kind: roll, columns: [ a0, rest ] }
+      variant_column: kind
       variants:
         call:
-          action: [ { column: payload, field: payload } ]
+          action: [ { column: payload, as: payload } ]
+    address_column: seq
 "#;
         parse_dataset_description(&catalog(GOOD))
             .expect("a catalog whose every reference resolves must load");
@@ -1363,63 +1327,64 @@ tables:
         let rejected: &[(&str, &str)] = &[
             (
                 "an address column that is not there",
-                "    filters: []\n    address_column: nope\n",
-            ),
-            (
-                "a parent key column that is not there",
-                "    filters: []\n    parent_key: [ nope ]\n",
+                "    address_column: nope\n",
             ),
             (
                 "a sort key column that is not there",
-                "    filters: []\n    sort_key: [ block_number, nope ]\n",
+                "    sort_key: [ block_number, nope ]\n",
             ),
             (
                 "an item order key that is not there",
-                "    filters: []\n    item_order_keys: [ nope ]\n",
+                "    item_order_keys: [ nope ]\n",
             ),
             (
                 "a roll over a column that is not there",
-                "    filters: []\n    virtual_fields:\n      \
-                 accounts: { type: roll, columns: [ a0, nope ] }\n",
+                "    output:\n      virtual_fields:\n        \
+                 accounts: { kind: roll, columns: [ a0, nope ] }\n",
             ),
             (
                 "a roll whose spread list is not its last column",
-                "    filters: []\n    virtual_fields:\n      \
-                 accounts: { type: roll, columns: [ rest, a0 ] }\n",
+                "    output:\n      virtual_fields:\n        \
+                 accounts: { kind: roll, columns: [ rest, a0 ] }\n",
             ),
             (
                 "a discriminator length that is not a byte count",
-                "    filters: [ discriminator ]\n    special_filters:\n      \
-                 discriminator: { type: discriminator, columns: { d1: d1 } }\n",
+                "    request:\n      filters: [ discriminator ]\n      special_filters:\n        \
+                 discriminator: { kind: discriminator, by_length: { d1: d1 } }\n",
             ),
             (
                 "a discriminator length the lookup will never ask for",
-                "    filters: [ discriminator ]\n    special_filters:\n      \
-                 discriminator: { type: discriminator, columns: { \"01\": d1 } }\n",
+                "    request:\n      filters: [ discriminator ]\n      special_filters:\n        \
+                 discriminator: { kind: discriminator, by_length: { \"01\": d1 } }\n",
             ),
             (
                 "a discriminator length beyond the value cap",
-                "    filters: [ discriminator ]\n    special_filters:\n      \
-                 discriminator: { type: discriminator, columns: { \"17\": d1 } }\n",
+                "    request:\n      filters: [ discriminator ]\n      special_filters:\n        \
+                 discriminator: { kind: discriminator, by_length: { \"17\": d1 } }\n",
             ),
             (
                 "a special filter the filter list does not reach",
-                "    filters: []\n    special_filters:\n      \
-                 discriminator: { type: discriminator, columns: { \"1\": d1 } }\n",
+                "    request:\n      filters: []\n      special_filters:\n        \
+                 discriminator: { kind: discriminator, by_length: { \"1\": d1 } }\n",
             ),
             (
-                "a field group tag column that is not there",
-                "    filters: []\n    field_groups:\n      tag_column: nope\n      variants: {}\n",
+                "a variant column that is not there",
+                "    output:\n      variant_column: nope\n      variants:\n        \
+                 call:\n          action: [ { column: payload, as: payload } ]\n",
             ),
             (
-                "a field group base field that is not there",
-                "    filters: []\n    field_groups:\n      tag_column: kind\n      \
-                 base_fields: [ nope ]\n      variants: {}\n",
+                "a variant mapping a column that is not there",
+                "    output:\n      variant_column: kind\n      variants:\n        \
+                 call:\n          action: [ { column: nope, as: nope } ]\n",
             ),
             (
-                "a field group mapping a column that is not there",
-                "    filters: []\n    field_groups:\n      tag_column: kind\n      variants:\n        \
-                 call:\n          action: [ { column: nope, field: nope } ]\n",
+                "variants with no column to dispatch on",
+                "    output:\n      variants:\n        \
+                 call:\n          action: [ { column: payload, as: payload } ]\n",
+            ),
+            (
+                "a variant column with nothing to dispatch",
+                "    output:\n      variant_column: kind\n",
             ),
         ];
 
@@ -1432,7 +1397,7 @@ tables:
 
         // A weight source is declared on the column it charges, so it cannot be
         // spliced in above `columns:` like the rest.
-        let weighed = catalog("    filters: []\n").replace(
+        let weighed = catalog("").replace(
             "      payload: { type: string }",
             "      payload: { type: string, weight: nope }",
         );
@@ -1444,7 +1409,7 @@ tables:
 
     /// Renaming or rolling a column does not make a system value public. The
     /// declared field surface must validate the physical source as well as the
-    /// request key.
+    /// name a selection uses.
     ///
     /// Covers CT-1 · INV-D9
     #[test]
@@ -1457,23 +1422,23 @@ tables:
   blocks:
     block_number_column: number
     sort_key: [number]
-    filters: []
     columns:
       number: {{ type: uint64 }}
   items:
-    query_name: items
-    field_name: item
-    sort_key: [block_number, seq]
-    item_order_keys: [seq]
-    filters: []
-    fields: [{fields}]
-    virtual_fields:
-      rolled: {{ type: roll, columns: [hidden] }}
-    field_groups:
-      tag_column: kind
+    request:
+      name: items
+      filters: []
+    output:
+      name: item
+      fields: [{fields}]
+      virtual_fields:
+        rolled: {{ kind: roll, columns: [hidden] }}
+      variant_column: kind
       variants:
         call:
-          action: [ {{ column: hidden, field: hidden, request: grouped }} ]
+          action: [ {{ column: hidden, field: grouped, as: hidden }} ]
+    sort_key: [block_number, seq]
+    item_order_keys: [seq]
     columns:
       block_number: {{ type: uint64 }}
       seq: {{ type: uint32 }}
@@ -1504,8 +1469,20 @@ tables:
     fn test_validate_requires_exactly_one_block_table() {
         let catalog = |tables: &str| format!("name: test\ntables:\n{tables}");
 
-        let blocks = "  blocks:\n                           block_number_column: number\n                           sort_key: [number]\n                           filters: []\n                           columns:\n                             number: { type: uint64 }\n";
-        let items = "  items:\n                          block_number_column: block_number\n                          sort_key: [block_number, seq]\n                          item_order_keys: [seq]\n                          filters: []\n                          columns:\n                            block_number: { type: uint64 }\n                            seq: { type: uint32 }\n";
+        let blocks = "  blocks:\n\
+                      \x20   block_number_column: number\n\
+                      \x20   sort_key: [number]\n\
+                      \x20   columns:\n\
+                      \x20     number: { type: uint64 }\n";
+        let items = "  items:\n\
+                     \x20   request:\n\
+                     \x20     filters: []\n\
+                     \x20   block_number_column: block_number\n\
+                     \x20   sort_key: [block_number, seq]\n\
+                     \x20   item_order_keys: [seq]\n\
+                     \x20   columns:\n\
+                     \x20     block_number: { type: uint64 }\n\
+                     \x20     seq: { type: uint32 }\n";
 
         parse_dataset_description(&catalog(&format!("{blocks}{items}")))
             .expect("one block table followed by an item table must load");
@@ -1515,7 +1492,11 @@ tables:
             "a dataset with no block table must be refused"
         );
 
-        let second_block_table = "  epochs:\n                                       block_number_column: number\n                                       sort_key: [number]\n                                       filters: []\n                                       columns:\n                                         number: { type: uint64 }\n";
+        let second_block_table = "  epochs:\n\
+                                  \x20   block_number_column: number\n\
+                                  \x20   sort_key: [number]\n\
+                                  \x20   columns:\n\
+                                  \x20     number: { type: uint64 }\n";
         assert!(
             parse_dataset_description(&catalog(&format!("{blocks}{second_block_table}"))).is_err(),
             "two tables of block shape must be refused"
@@ -1526,13 +1507,26 @@ tables:
             "a block table that does not lead the catalog must be refused"
         );
 
-        let unsorted_blocks = "  blocks:\n                                    block_number_column: number\n                                    sort_key: [hash, number]\n                                    filters: []\n                                    columns:\n                                      number: { type: uint64 }\n                                      hash: { type: string }\n";
+        let unsorted_blocks = "  blocks:\n\
+                               \x20   block_number_column: number\n\
+                               \x20   sort_key: [hash, number]\n\
+                               \x20   columns:\n\
+                               \x20     number: { type: uint64 }\n\
+                               \x20     hash: { type: string }\n";
         parse_dataset_description(&catalog(&format!("{unsorted_blocks}{items}")))
             .expect("storage order does not decide what a block is");
 
         // Its item key is `number ++ address`, so a block number alone does not
         // identify one of its rows and it is not a second block table.
-        let addressed = "  traces:\n                             block_number_column: number\n                             address_column: address\n                             sort_key: [number]\n                             filters: []\n                             columns:\n                               number: { type: uint64 }\n                               address: { type: list_uint32 }\n";
+        let addressed = "  traces:\n\
+                         \x20   request:\n\
+                         \x20     filters: []\n\
+                         \x20   block_number_column: number\n\
+                         \x20   address_column: address\n\
+                         \x20   sort_key: [number]\n\
+                         \x20   columns:\n\
+                         \x20     number: { type: uint64 }\n\
+                         \x20     address: { type: list_uint32 }\n";
         parse_dataset_description(&catalog(&format!("{blocks}{addressed}")))
             .expect("an addressed table with no order keys is not a block table");
     }
@@ -1543,7 +1537,7 @@ tables:
     /// Covers CT-1 · INV-D10
     #[test]
     fn test_validate_rejects_duplicate_names() {
-        let catalog = |second: &str| {
+        let catalog = |request_name: &str, output_name: &str| {
             format!(
                 r#"
 name: test
@@ -1551,29 +1545,33 @@ tables:
   blocks:
     block_number_column: number
     sort_key: [number]
-    filters: []
     columns:
       number: {{ type: uint64 }}
   items:
-    query_name: items
-    field_name: item
+    request:
+      name: items
+      filters: []
+    output:
+      name: item
+      fields: [seq]
     sort_key: [block_number, seq]
     item_order_keys: [seq]
-    filters: []
-    fields: [seq]
     columns:
       block_number: {{ type: uint64 }}
       seq: {{ type: uint32 }}
   others:
-{second}
+    request:
+      name: {request_name}
+      filters: []
+    output:
+      name: {output_name}
+      fields: [seq]
     sort_key: [block_number, seq]
     item_order_keys: [seq]
-    filters: []
-    fields: [seq]
     columns:
       block_number: {{ type: uint64 }}
       seq: {{ type: uint32 }}
-query_aliases:
+aliases:
   aliased:
     table: items
     filters: []
@@ -1581,32 +1579,27 @@ query_aliases:
             )
         };
 
-        parse_dataset_description(&catalog("    query_name: others\n    field_name: other"))
-            .expect("distinct names must load");
+        parse_dataset_description(&catalog("others", "other")).expect("distinct names must load");
 
-        for (what, second) in [
+        for (what, request_name, output_name) in [
+            ("two tables claiming one request name", "items", "other"),
+            ("two tables claiming one output name", "others", "item"),
             (
-                "two tables claiming one queryName",
-                "    query_name: items\n    field_name: other",
+                "an alias claiming a table's request name",
+                "aliased",
+                "other",
             ),
+            // `blocks` declares no request name, so it holds its own — and a
+            // table declaring that name takes it, leaving the block table
+            // unaddressable.
             (
-                "two tables claiming one fieldName",
-                "    query_name: others\n    field_name: item",
-            ),
-            (
-                "an alias claiming a table's queryName",
-                "    query_name: aliased\n    field_name: other",
-            ),
-            (
-                // `blocks` declares no `query_name`, so it holds its own name —
-                // and a table declaring that name takes it, leaving the block
-                // table unaddressable.
-                "a table claiming another's undeclared queryName",
-                "    query_name: blocks\n    field_name: other",
+                "a table claiming another's undeclared request name",
+                "blocks",
+                "other",
             ),
         ] {
             assert!(
-                parse_dataset_description(&catalog(second)).is_err(),
+                parse_dataset_description(&catalog(request_name, output_name)).is_err(),
                 "{what} must be refused"
             );
         }

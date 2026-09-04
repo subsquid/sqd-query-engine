@@ -806,10 +806,7 @@ fn execute_chunk_fmt(
             if let Some(output) = table_outputs.get(&table_plan.table) {
                 let td = metadata.table(&table_plan.table).unwrap();
                 srcs.push(Src {
-                    qn: td
-                        .query_name
-                        .clone()
-                        .unwrap_or_else(|| table_plan.table.clone()),
+                    qn: td.request_name(&table_plan.table).to_string(),
                     td,
                     out_cols: &table_plan.output_columns,
                     batches: &output.batches,
@@ -818,10 +815,7 @@ fn execute_chunk_fmt(
                     if let Some(rb) = output.relation_batches.get(&rel_idx) {
                         if let Some(rd) = metadata.table(&rel.target_table) {
                             srcs.push(Src {
-                                qn: rd
-                                    .query_name
-                                    .clone()
-                                    .unwrap_or_else(|| rel.target_table.clone()),
+                                qn: rd.request_name(&rel.target_table).to_string(),
                                 td: rd,
                                 out_cols: &rel.output_columns,
                                 batches: rb,
@@ -837,7 +831,7 @@ fn execute_chunk_fmt(
             .tables
             .iter()
             .enumerate()
-            .map(|(i, (name, desc))| (desc.query_name.as_deref().unwrap_or(name.as_str()), i))
+            .map(|(i, (name, desc))| (desc.request_name(name), i))
             .collect();
         let mut order: Vec<String> = Vec::new();
         let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
@@ -870,7 +864,7 @@ fn execute_chunk_fmt(
                 }
             }
             let name = block_table_desc
-                .and_then(|d| d.query_name.clone())
+                .map(|d| d.request_name(&plan.block_table).to_string())
                 .unwrap_or_else(|| "blocks".to_string());
             let mut batches: Vec<RecordBatch> = Vec::with_capacity(block_batches.len());
             for b in &block_batches {
@@ -975,15 +969,13 @@ fn execute_chunk_fmt(
             } = output;
             let table_desc = metadata.table(&table_plan.table).unwrap();
             let bn_col = table_desc.block_number_column.as_str();
-            let query_name = table_desc
-                .query_name
-                .as_deref()
-                .unwrap_or(&table_plan.table);
+            let query_name = table_desc.request_name(&table_plan.table);
 
             let grouped = table_desc
-                .field_groups
-                .as_ref()
-                .map(|fg| build_grouped_writers(&table_plan.output_columns, table_desc, fg));
+                .output
+                .variant_column
+                .as_deref()
+                .map(|by| build_grouped_writers(&table_plan.output_columns, table_desc, by));
             let sort_columns = build_full_sort_columns(table_desc);
             let sort_col_resolved = resolve_sort_columns(&batches, &sort_columns);
             all_indexes.push(IndexedBatches {
@@ -1000,12 +992,13 @@ fn execute_chunk_fmt(
                 if let Some(rel_batches) = relation_batches.remove(&rel_idx) {
                     if let Some(rd) = metadata.table(&rel.target_table) {
                         let rel_bn = rd.block_number_column.as_str();
-                        let rel_qn = rd.query_name.as_deref().unwrap_or(&rel.target_table);
+                        let rel_qn = rd.request_name(&rel.target_table);
 
                         let rel_grouped = rd
-                            .field_groups
-                            .as_ref()
-                            .map(|fg| build_grouped_writers(&rel.output_columns, rd, fg));
+                            .output
+                            .variant_column
+                            .as_deref()
+                            .map(|by| build_grouped_writers(&rel.output_columns, rd, by));
                         let rel_sort_columns = build_full_sort_columns(rd);
                         let rel_sort_resolved =
                             resolve_sort_columns(&rel_batches, &rel_sort_columns);
@@ -1038,15 +1031,12 @@ fn execute_chunk_fmt(
     }
 
     // Sort table_group_order by metadata table definition order (YAML key order).
-    // Build a map from query_name → position in metadata.tables.
+    // Build a map from request name → position in metadata.tables.
     let query_name_order: HashMap<&str, usize> = metadata
         .tables
         .iter()
         .enumerate()
-        .map(|(pos, (name, desc))| {
-            let qn = desc.query_name.as_deref().unwrap_or(name.as_str());
-            (qn, pos)
-        })
+        .map(|(pos, (name, desc))| (desc.request_name(name), pos))
         .collect();
     table_group_order.sort_by_key(|name| {
         query_name_order
@@ -1404,7 +1394,7 @@ mod tests {
             .unwrap()
             .into_data();
 
-        // Inspect the logs stream schema: hex columns (json_encoding: hex) decode
+        // Inspect the logs stream schema: hex columns (encoding: hex_bytes) decode
         // to variable Binary, driven by metadata so the type is stable across
         // responses — including all-null columns like topic3 on 3-topic logs.
         use arrow::ipc::reader::StreamReader;

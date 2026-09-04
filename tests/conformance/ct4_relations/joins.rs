@@ -31,26 +31,29 @@ use crate::harness::synthetic::run_json as run_chunk;
 /// transaction index *and* an address within it.
 const TRACES: &str = r#"
 name: test
+
 tables:
   blocks:
     block_number_column: number
     sort_key: [number]
-    filters: []
     columns:
       number: { type: uint64 }
+
   traces:
-    query_name: traces
-    field_name: trace
+    request:
+      name: traces
+      filters: [ kind ]
+      relations:
+        transaction_traces:
+          table: traces
+          key: [block_number, transaction_index]
+    output:
+      name: trace
+      fields: [transaction_index, trace_address, kind, payload]
     block_number_column: block_number
     item_order_keys: [transaction_index]
     address_column: trace_address
     sort_key: [block_number, transaction_index]
-    filters: [ kind ]
-    fields: [transaction_index, trace_address, kind, payload]
-    relations:
-      transaction_traces:
-        table: traces
-        key: [block_number, transaction_index]
     columns:
       block_number: { type: uint64 }
       transaction_index: { type: uint32 }
@@ -58,7 +61,7 @@ tables:
       kind: { type: string }
       payload:
         type: string
-        json_encoding: hex
+        encoding: hex_bytes
         weight: payload_size
       payload_size: { type: uint64, system: true }
 "#;
@@ -147,38 +150,44 @@ fn traces_of_one_transaction_are_weighed_separately() {
 
 const LOGS_AND_TXS: &str = r#"
 name: test
+
 tables:
   blocks:
     block_number_column: number
     sort_key: [number]
-    filters: []
     columns:
       number: { type: uint64 }
+
   logs:
-    query_name: logs
-    field_name: log
+    request:
+      name: logs
+      filters: [ address ]
+      relations:
+        transaction:
+          table: transactions
+          key: [block_number, transaction_index]
+    output:
+      name: log
+      fields: [log_index, transaction_index, address]
     block_number_column: block_number
     item_order_keys: [log_index]
     sort_key: [block_number, log_index]
-    filters: [ address ]
-    fields: [log_index, transaction_index, address]
-    relations:
-      transaction:
-        table: transactions
-        key: [block_number, transaction_index]
     columns:
       block_number: { type: uint64 }
       log_index: { type: uint32 }
       transaction_index: { type: uint32 }
       address: { type: string }
+
   transactions:
-    query_name: transactions
-    field_name: transaction
+    request:
+      name: transactions
+      filters: []
+    output:
+      name: transaction
+      fields: [transaction_index, hash]
     block_number_column: block_number
     item_order_keys: [transaction_index]
     sort_key: [block_number, transaction_index]
-    filters: []
-    fields: [transaction_index, hash]
     columns:
       block_number: { type: uint64 }
       transaction_index: { type: uint32 }

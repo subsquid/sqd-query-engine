@@ -2,19 +2,18 @@ name: bitcoin
 
 tables:
   blocks:
-    filters: []
-    fields: [
-      number, hash, parent_hash, timestamp, median_time, version, merkle_root, nonce, target,
-      bits, difficulty, chain_work, stripped_size, size, weight
-    ]
+    output:
+      name: block
+      fields: [
+        number, hash, parent_hash, timestamp, median_time, version, merkle_root, nonce, target,
+        bits, difficulty, chain_work, stripped_size, size, weight
+      ]
     parent_hash_column: parent_hash
     block_number_column: number
-    field_name: block
     sort_key: [ number ]
     columns:
       number:
         type: uint64
-        stats: true
       hash:
         type: string
       parent_hash:
@@ -45,28 +44,26 @@ tables:
         type: uint64
 
   transactions:
-    filters: []
-    fields: [ transaction_index, hex, txid, hash, size, vsize, weight, version, locktime ]
-    query_name: transactions
-    field_name: transaction
+    request:
+      name: transactions
+      filters: []
+      relations:
+        inputs:
+          table: inputs
+          key: [ block_number, transaction_index ]
+        outputs:
+          table: outputs
+          key: [ block_number, transaction_index ]
+    output:
+      name: transaction
+      fields: [ transaction_index, hex, txid, hash, size, vsize, weight, version, locktime ]
     item_order_keys: [ transaction_index ]
     sort_key: [ block_number, transaction_index ]
-    children: [ inputs, outputs ]
-    parent_key: [ block_number, transaction_index ]
-    relations:
-      inputs:
-        table: inputs
-        key: [ block_number, transaction_index ]
-      outputs:
-        table: outputs
-        key: [ block_number, transaction_index ]
     columns:
       block_number:
         type: uint64
-        stats: true
       transaction_index:
         type: uint32
-        stats: true
       hex:
         type: string
       txid:
@@ -85,40 +82,38 @@ tables:
         type: uint32
 
   inputs:
-    filters: [ type, prevout_script_pub_key_address, prevout_script_pub_key_type, prevout_generated ]
-    fields: [
-      transaction_index, input_index, type, txid, vout, script_sig_hex, script_sig_asm,
-      sequence, coinbase, tx_in_witness, prevout_generated, prevout_height, prevout_value,
-      prevout_script_pub_key_hex, prevout_script_pub_key_asm, prevout_script_pub_key_desc,
-      prevout_script_pub_key_type, prevout_script_pub_key_address
-    ]
-    query_name: inputs
-    field_name: input
+    request:
+      name: inputs
+      filters: [ type, prevout_script_pub_key_address, prevout_script_pub_key_type, prevout_generated ]
+      relations:
+        transaction:
+          table: transactions
+          key: [ block_number, transaction_index ]
+        transaction_inputs:
+          table: inputs
+          key: [ block_number, transaction_index ]
+        transaction_outputs:
+          table: outputs
+          key: [ block_number, transaction_index ]
+    output:
+      name: input
+      fields: [
+        transaction_index, input_index, type, txid, vout, script_sig_hex, script_sig_asm,
+        sequence, coinbase, tx_in_witness, prevout_generated, prevout_height, prevout_value,
+        prevout_script_pub_key_hex, prevout_script_pub_key_asm, prevout_script_pub_key_desc,
+        prevout_script_pub_key_type, prevout_script_pub_key_address
+      ]
     item_order_keys: [ transaction_index, input_index ]
     sort_key: [ prevout_script_pub_key_address, block_number, transaction_index, input_index ]
-    relations:
-      transaction:
-        table: transactions
-        key: [ block_number, transaction_index ]
-      transaction_inputs:
-        table: inputs
-        key: [ block_number, transaction_index ]
-      transaction_outputs:
-        table: outputs
-        key: [ block_number, transaction_index ]
     columns:
       block_number:
         type: uint64
-        stats: true
       transaction_index:
         type: uint32
-        stats: true
       input_index:
         type: uint32
       type:
         type: string
-        stats: true
-        dictionary: true
       txid:
         type: string
       vout:
@@ -135,7 +130,6 @@ tables:
         type: list_string
       prevout_generated:
         type: boolean
-        stats: true
       prevout_height:
         type: uint64
       prevout_value:
@@ -148,40 +142,36 @@ tables:
         type: string
       prevout_script_pub_key_type:
         type: string
-        stats: true
-        dictionary: true
       prevout_script_pub_key_address:
         type: string
-        stats: true
-        dictionary: true
 
   outputs:
-    filters: [ script_pub_key_address, script_pub_key_type ]
-    fields: [
-      transaction_index, output_index, value, script_pub_key_hex, script_pub_key_asm,
-      script_pub_key_desc, script_pub_key_type, script_pub_key_address
-    ]
-    query_name: outputs
-    field_name: output
+    request:
+      name: outputs
+      filters: [ script_pub_key_address, script_pub_key_type ]
+      relations:
+        transaction:
+          table: transactions
+          key: [ block_number, transaction_index ]
+        transaction_inputs:
+          table: inputs
+          key: [ block_number, transaction_index ]
+        transaction_outputs:
+          table: outputs
+          key: [ block_number, transaction_index ]
+    output:
+      name: output
+      fields: [
+        transaction_index, output_index, value, script_pub_key_hex, script_pub_key_asm,
+        script_pub_key_desc, script_pub_key_type, script_pub_key_address
+      ]
     item_order_keys: [ transaction_index, output_index ]
     sort_key: [ script_pub_key_address, block_number, transaction_index, output_index ]
-    relations:
-      transaction:
-        table: transactions
-        key: [ block_number, transaction_index ]
-      transaction_inputs:
-        table: inputs
-        key: [ block_number, transaction_index ]
-      transaction_outputs:
-        table: outputs
-        key: [ block_number, transaction_index ]
     columns:
       block_number:
         type: uint64
-        stats: true
       transaction_index:
         type: uint32
-        stats: true
       output_index:
         type: uint32
       value:
@@ -194,9 +184,5 @@ tables:
         type: string
       script_pub_key_type:
         type: string
-        stats: true
-        dictionary: true
       script_pub_key_address:
         type: string
-        stats: true
-        dictionary: true

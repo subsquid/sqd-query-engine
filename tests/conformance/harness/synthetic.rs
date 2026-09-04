@@ -20,29 +20,33 @@ use crate::harness::chunk::{blocks_parquet, write_table};
 /// state what a row costs without writing a row that large.
 const CATALOG: &str = r#"
 name: test
+
 tables:
   blocks:
+    output:
+      name: block
+      fields: [number]
     block_number_column: number
-    field_name: block
     sort_key: [number]
-    filters: []
-    fields: [number]
     columns:
       number:
         type: uint64
+
   logs:
-    query_name: logs
-    field_name: log
+    request:
+      name: logs
+      filters: []
+      relations:
+        transaction:
+          table: transactions
+          left_key: [block_number, log_index]
+          right_key: [block_number, transaction_index]
+    output:
+      name: log
+      fields: [log_index, data]
     block_number_column: block_number
     item_order_keys: [log_index]
     sort_key: [block_number, log_index]
-    filters: []
-    fields: [log_index, data]
-    relations:
-      transaction:
-        table: transactions
-        left_key: [block_number, log_index]
-        right_key: [block_number, transaction_index]
     columns:
       block_number:
         type: uint64
@@ -50,19 +54,22 @@ tables:
         type: uint32
       data:
         type: string
-        json_encoding: hex
+        encoding: hex_bytes
         weight: data_size
       data_size:
         type: uint64
         system: true
+
   transactions:
-    query_name: transactions
-    field_name: transaction
+    request:
+      name: transactions
+      filters: []
+    output:
+      name: transaction
+      fields: [transaction_index, input]
     block_number_column: block_number
     item_order_keys: [transaction_index]
     sort_key: [block_number, transaction_index]
-    filters: []
-    fields: [transaction_index, input]
     columns:
       block_number:
         type: uint64
@@ -70,7 +77,7 @@ tables:
         type: uint32
       input:
         type: string
-        json_encoding: hex
+        encoding: hex_bytes
         weight: input_size
       input_size:
         type: uint64

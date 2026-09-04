@@ -175,11 +175,12 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
 
                 // Look up relation in table first, then in any alias
                 let rel_def = table_desc
+                    .request
                     .relations
                     .get(rel_name)
                     .or_else(|| {
                         metadata
-                            .query_aliases
+                            .aliases
                             .values()
                             .find(|a| a.table == *table_name)
                             .and_then(|a| a.relations.get(rel_name))
@@ -223,9 +224,9 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
         for rel in &mut all_relations {
             for (rel_name, preds) in &rel_source_preds {
                 // Use the same alias-aware lookup as the relation creation above
-                let rel_def = table_desc.relations.get(rel_name).or_else(|| {
+                let rel_def = table_desc.request.relations.get(rel_name).or_else(|| {
                     metadata
-                        .query_aliases
+                        .aliases
                         .values()
                         .find(|a| a.table == *table_name)
                         .and_then(|a| a.relations.get(rel_name))
@@ -300,7 +301,7 @@ fn order_columns_by_metadata(
     }
 
     // Second pass: add virtual fields in metadata definition order
-    for vf_name in desc.virtual_fields.keys() {
+    for vf_name in desc.output.virtual_fields.keys() {
         if col_set.contains(vf_name.as_str()) {
             result.push(vf_name.clone());
         }
@@ -333,10 +334,10 @@ enum CompiledItem {
 fn discriminator_family(table: &TableDescription) -> HashSet<&str> {
     let mut family: HashSet<&str> = HashSet::new();
 
-    for (name, special) in &table.special_filters {
-        if let SpecialFilter::Discriminator { columns } = special {
+    for (name, special) in &table.request.special_filters {
+        if let SpecialFilter::Discriminator { by_length } = special {
             family.insert(name.as_str());
-            family.extend(columns.values().map(String::as_str));
+            family.extend(by_length.values().map(String::as_str));
         }
     }
 
@@ -365,8 +366,8 @@ fn check_item_limits(item: &QueryItem, table: &TableDescription) -> Result<()> {
 
     for (key, value) in &item.filters {
         let is_bloom = matches!(
-            table.special_filters.get(key),
-            Some(SpecialFilter::BloomFilter { .. })
+            table.request.special_filters.get(key),
+            Some(SpecialFilter::Bloom { .. })
         );
         if !is_bloom {
             continue;
@@ -404,7 +405,7 @@ fn compile_item_predicates(item: &QueryItem, table: &TableDescription) -> Result
         // Only where a list is a value at all: a flag or a range bound takes a
         // scalar, so `[]` there is the wrong type and stays an error.
         let takes_value_list = !matches!(
-            table.special_filters.get(key),
+            table.request.special_filters.get(key),
             Some(
                 SpecialFilter::RangeGte { .. }
                     | SpecialFilter::RangeLte { .. }
@@ -417,23 +418,18 @@ fn compile_item_predicates(item: &QueryItem, table: &TableDescription) -> Result
         }
 
         // Special filters
-        if let Some(special) = table.special_filters.get(key) {
+        if let Some(special) = table.request.special_filters.get(key) {
             match special {
-                SpecialFilter::Discriminator { columns } => {
-                    let groups = compile_discriminator(value, columns)?;
+                SpecialFilter::Discriminator { by_length } => {
+                    let groups = compile_discriminator(value, by_length)?;
                     discriminator_groups = groups;
                 }
-                SpecialFilter::BloomFilter {
+                SpecialFilter::Bloom {
                     column,
-                    num_bytes,
-                    num_hashes,
+                    bytes,
+                    hashes,
                 } => {
-                    col_predicates.push(compile_bloom_filter(
-                        value,
-                        column,
-                        *num_bytes,
-                        *num_hashes,
-                    )?);
+                    col_predicates.push(compile_bloom_filter(value, column, *bytes, *hashes)?);
                 }
                 SpecialFilter::RangeGte { column } => {
                     let pred = compile_range_gte(value, column, table)?;
@@ -564,10 +560,10 @@ fn compile_item_predicates(item: &QueryItem, table: &TableDescription) -> Result
     }
 }
 
-/// Reject a malformed value on a column declared `json_encoding: hex`
+/// Reject a malformed value on a column declared `encoding: hex_bytes`
 /// (INV-Q12). Columns with any other encoding take their values verbatim.
 fn ensure_hex_for_column(s: &str, column: &str, col_desc: &ColumnDescription) -> Result<()> {
-    if col_desc.json_encoding != Some(JsonEncoding::Hex) {
+    if col_desc.encoding != Some(JsonEncoding::HexBytes) {
         return Ok(());
     }
 
@@ -1477,28 +1473,29 @@ tables:
   blocks:
     block_number_column: number
     sort_key: [number]
-    filters: []
     columns:
-      number: { type: uint64, stats: true }
+      number: { type: uint64 }
   items:
-    filters: []
+    request:
+      filters: []
     columns:
       block_number: { type: uint64 }
       transaction_index: { type: uint32 }
       kind: { type: string }
     item_order_keys: [transaction_index]
   related:
-    filters: []
+    request:
+      filters: []
     columns:
       block_number: { type: uint64 }
       transaction_index: { type: uint32 }
       data: { type: string }
     item_order_keys: [transaction_index]
-query_aliases:
+aliases:
   filteredItems:
     table: items
     filters: [kind]
-    implicit_predicates:
+    implicit_filters:
       kind: ["special"]
     relations:
       related:

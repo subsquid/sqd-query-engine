@@ -296,7 +296,7 @@ fn compute_weight_params(
 
     let mut projected: HashSet<&str> = HashSet::new();
     for col_name in output_columns {
-        if let Some(vf) = desc.virtual_fields.get(col_name.as_str()) {
+        if let Some(vf) = desc.output.virtual_fields.get(col_name.as_str()) {
             match vf {
                 VirtualField::Roll { columns } => {
                     for c in columns {
@@ -305,7 +305,7 @@ fn compute_weight_params(
                 }
             }
         } else if let Some(phys) = desc.physical_output_column(col_name) {
-            // A field-group request key names its column indirectly
+            // A variant field names its column indirectly
             // (`call_call_type` → `call_type`). Missing that resolution here
             // while `required_output_columns` makes it gives the row a weight of
             // zero, so it is emitted and never counted (INV-B10).
@@ -525,7 +525,7 @@ fn weight_projection(
 
     // 2. User-requested output columns (with virtual field expansion)
     for col_name in user_output_columns {
-        if let Some(vf) = desc.virtual_fields.get(col_name.as_str()) {
+        if let Some(vf) = desc.output.virtual_fields.get(col_name.as_str()) {
             match vf {
                 VirtualField::Roll { columns } => {
                     for c in columns {
