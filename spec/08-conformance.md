@@ -341,9 +341,9 @@ renamed out from under a comment inside it.
 | [INV-P4](07-invariants.md#inv-p4) | CT-3 | **C** | `test_row_predicate_and`, and `conjoining_a_filter_only_narrows` over generated pairs that differ in exactly one filter — built by adding to a request rather than by generating two, so the difference is the filter and nothing else |
 | [INV-P5](07-invariants.md#inv-p5) | CT-3 | **C** | `item_requests_on_one_table_disjoin` asserts `Q([s₁]) ∪ Q([s₂]) = Q([s₁, s₂])` as a *set* over item requests HC-4 composed, and `item_request_order_and_repetition_do_not_reach_the_answer` the same law read as a byte-identity under reordering and repetition. `the_laws_hold_over_a_chunk_an_archiver_wrote` repeats the union over a real chunk, where a trimmed response makes the comparison a prefix |
 | [INV-P6](07-invariants.md#inv-p6) | CT-3 | **C** | `an_unfiltered_item_request_is_the_whole_table_and_a_filter_only_narrows` again, from the other side: every generated filtered request is a subset of the unfiltered one, and the sweep fails unless some case was a *proper* subset — which is what §8.4 asks for, since an engine whose filters silently no-op satisfies the inclusion everywhere |
-| [INV-P7](07-invariants.md#inv-p7) | CT-3 | **P** | the disjunction cases cover null propagation; no per-filter-kind null sweep |
+| [INV-P7](07-invariants.md#inv-p7) | CT-3 | **P** | the disjunction cases cover null propagation, and `a_null_is_not_greater_than_the_constant` the one filter kind whose comparison hands the scan a mask with nulls in it; still no per-filter-kind sweep |
 | [INV-P8](07-invariants.md#inv-p8) | CT-3 | **C** | `hex_filters_fold_case_in_both_shapes`, `an_alias_folds_case_on_the_column_it_resolves_to`, `bare_hex_columns_fold_case_too` — a `hexBytes` column, an alias reaching one, and Tron's unprefixed hex, which folds without the encoding to say so; `non_hex_columns_are_not_folded` the other direction |
-| [INV-P9](07-invariants.md#inv-p9) | CT-3 | **C** | `the_engine_builds_the_bloom_the_archiver_wrote` rebuilds three rows an archiver wrote — frozen with the accounts they were built from — and compares the bits, which is the assertion membership cannot make: a filter built too narrow still contains everything the writer put in it. `the_hash_count_is_the_one_the_catalog_declares` is the other direction, a row whose filter holds a value's first six bits and not its seventh, so the same chunk answers two ways under two catalogs. `the_catalog_declares_the_construction_the_vectors_were_built_with` ties the frozen hash count to the one the bundled catalog asks for — the width the reader takes from the stored array rather than from the catalog, so it is the sweeps that pin that half. `every_transaction_rebuilds_the_bloom_the_archiver_wrote` and `every_instruction_rebuilds_the_bloom_the_archiver_wrote` repeat the reconstruction over a whole chunk, one per shape the two writers assemble an account set from; `a_transaction_that_mentions_an_account_is_returned` is the client-visible half |
+| [INV-P9](07-invariants.md#inv-p9) | CT-3 | **C** | `the_engine_builds_the_bloom_the_archiver_wrote` rebuilds three rows an archiver wrote — frozen with the accounts they were built from — and compares the bits, which is the assertion membership cannot make: a filter built too narrow still contains everything the writer put in it. `the_hash_count_is_the_one_the_catalog_declares` is the other direction, a row whose filter holds a value's first six bits and not its seventh, so the same chunk answers two ways under two catalogs. `the_catalog_declares_the_construction_the_vectors_were_built_with` ties the frozen hash count to the one the bundled catalog asks for — the width the reader takes from the stored array rather than from the catalog, so it is the sweeps that pin that half. `every_transaction_rebuilds_the_bloom_the_archiver_wrote` and `every_instruction_rebuilds_the_bloom_the_archiver_wrote` repeat the reconstruction over a whole chunk, one per shape the two writers assemble an account set from; `a_transaction_that_mentions_an_account_is_returned` is the client-visible half of the first clause. `a_false_positive_is_not_filtered_away` is the second — "an engine MUST NOT post-filter them away" — over a filter carrying enough accounts to admit one nobody inserted, so the row the response must carry is a row whose every account is something else. The stranger is admitted on seven bits and not on eight, which is what makes an engine narrowing the filter at all fail the test rather than pass it by luck |
 | [INV-P10](07-invariants.md#inv-p10) | CT-3 | **C** | four range cases across physical widths |
 | [INV-P11](07-invariants.md#inv-p11) | CT-3 | **C** | `gte_const_compares_lexicographically` over a second constant, `"0x9"`, as well as the catalog's `"0x1"`. The `"0x1"` cases cannot tell the readings apart — over minimal-form hex, "≥ 0x1" and "is not zero" pick the same rows however the comparison is done — and `"0x10"` is sixteen and lexicographically below `"0x9"`, so the two part there. A 256-bit value covers what an engine parsing the column has nowhere to put, and `a_null_is_not_greater_than_the_constant` the rows a `create` trace writes |
 | [INV-P12](07-invariants.md#inv-p12) | CT-3 | **C** | three `ListContainsAnyPredicate` cases including the unknown-type one |
@@ -400,14 +400,14 @@ renamed out from under a comment inside it.
 **Totals: 60 C, 25 P, 0 U** of 85. Property coverage is therefore 0.71
 (`P-COV-PROPERTY` in [09-parameters.md](09-parameters.md)).
 
-Of the 85 rows at **C** or **P**, 66 are backed by a tagged test and 19 rest on
-prose alone. Those 19 are the rows whose note says "fixtures only" or describes a
+Of the 85 rows at **C** or **P**, 67 are backed by a tagged test and 18 rest on
+prose alone. Those 18 are the rows whose note says "fixtures only" or describes a
 group of cases without naming one, and they are the ones nothing recomputes: the
 status is what somebody believed on the day they typed it. Shrinking that number
 is what turns MG-1's ratchet from an intention into an arithmetic fact, so the
 checker recomputes all three numbers in this paragraph rather than trusting them.
 
-A tag is not the same as a gate. 4 of the 66 are backed only by tests marked
+A tag is not the same as a gate. 4 of the 67 are backed only by tests marked
 `#[ignore]`, which MG-3's portable job does not run: the test would fail if the
 invariant broke, but only on a machine that has the chunks. The checker reports
 those rows on every run too, because a status that no job can falsify is a status
@@ -540,7 +540,7 @@ Each phase ends by updating §8.11 and [GAPS.md](GAPS.md).
    MG-1 and MG-2 from advisory to blocking. With no row left at **U**, the
    ratchet is what stops the next change from talking one down, and it is the
    only gate here whose absence lets the matrix get quietly worse.
-2. **The 19 rows resting on prose.** A status nothing recomputes is a status that
+2. **The 18 rows resting on prose.** A status nothing recomputes is a status that
    drifts, and most of these say "fixtures only" — which is §8.1's first
    complaint about fixtures written as a matrix row. They are also where the
    remaining **P**s are concentrated.

@@ -5,7 +5,7 @@
 //! absence from a skip into a failure; the portable suite leaves it unset and
 //! does not select the tests that read it.
 
-pub use crate::harness::guard::{fixture_chunk, fixture_tree_is_present};
+pub use crate::harness::guard::{fixture_chunk, fixture_tree_has, fixture_tree_is_present};
 
 use sqd_query_engine::metadata::{load_dataset_description, DatasetDescription};
 use sqd_query_engine::output::execute_plan;

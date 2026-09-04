@@ -157,6 +157,7 @@ fn gte_const_compares_lexicographically() {
 /// [INV-P7]: ../../../spec/07-invariants.md#inv-p7
 ///
 /// Covers CT-3 · INV-P11
+/// Covers CT-3 · INV-P7
 #[test]
 fn a_null_is_not_greater_than_the_constant() {
     let (catalog, chunk) = dataset();
@@ -167,6 +168,13 @@ fn a_null_is_not_greater_than_the_constant() {
     ] {
         let returned = values(&catalog, chunk.path(), filter);
 
+        // Without this the test is one an empty response passes: a filter
+        // compiling to "match nothing" returns no null because it returns no
+        // row, and reports green having compared nothing.
+        assert!(
+            !returned.is_empty(),
+            "{filter} returned no rows at all, so the null's absence asserts nothing"
+        );
         assert!(
             !returned.contains(&"null".to_string()),
             "{filter} returned the trace whose call value is null"

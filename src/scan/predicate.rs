@@ -616,9 +616,16 @@ impl BloomFilterPredicate {
 /// writer's. Too few hashes, or too narrow a filter, never produces a false
 /// negative, so `contains` alone cannot see the mismatch that matters.
 ///
+/// `num_bits` must be non-zero: a filter of no bits has no bit to name, and the
+/// caller that can reach one — an empty stored array — answers that case for
+/// itself. Stated here because the guard used to sit in the only caller, and a
+/// bare `% 0` reports a contract violation as an arithmetic panic.
+///
 /// [INV-P9]: ../../spec/07-invariants.md#inv-p9
 #[inline]
 pub fn bloom_bit(value: &[u8], n: usize, num_bits: usize) -> usize {
+    assert!(num_bits > 0, "a bloom filter of no bits has no bit {n}");
+
     let mut hasher = xxhash_rust::xxh3::Xxh3Builder::new()
         .with_seed(n as u64)
         .build();
