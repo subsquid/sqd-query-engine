@@ -343,9 +343,9 @@ renamed out from under a comment inside it.
 | [INV-P6](07-invariants.md#inv-p6) | CT-3 | **C** | `an_unfiltered_item_request_is_the_whole_table_and_a_filter_only_narrows` again, from the other side: every generated filtered request is a subset of the unfiltered one, and the sweep fails unless some case was a *proper* subset — which is what §8.4 asks for, since an engine whose filters silently no-op satisfies the inclusion everywhere |
 | [INV-P7](07-invariants.md#inv-p7) | CT-3 | **P** | the disjunction cases cover null propagation; no per-filter-kind null sweep |
 | [INV-P8](07-invariants.md#inv-p8) | CT-3 | **C** | `hex_filters_fold_case_in_both_shapes`, `an_alias_folds_case_on_the_column_it_resolves_to`, `bare_hex_columns_fold_case_too` — a `hexBytes` column, an alias reaching one, and Tron's unprefixed hex, which folds without the encoding to say so; `non_hex_columns_are_not_folded` the other direction |
-| [INV-P9](07-invariants.md#inv-p9) | CT-3 | **U** | **nothing checks the engine's bloom bits against the writer's.** A construction mismatch produces false *negatives*, which no client can detect |
+| [INV-P9](07-invariants.md#inv-p9) | CT-3 | **C** | `the_engine_builds_the_bloom_the_archiver_wrote` rebuilds three rows an archiver wrote — frozen with the accounts they were built from — and compares the bits, which is the assertion membership cannot make: a filter built too narrow still contains everything the writer put in it. `the_hash_count_is_the_one_the_catalog_declares` is the other direction, a row whose filter holds a value's first six bits and not its seventh, so the same chunk answers two ways under two catalogs. `the_catalog_declares_the_construction_the_vectors_were_built_with` ties the frozen hash count to the one the bundled catalog asks for — the width the reader takes from the stored array rather than from the catalog, so it is the sweeps that pin that half. `every_transaction_rebuilds_the_bloom_the_archiver_wrote` and `every_instruction_rebuilds_the_bloom_the_archiver_wrote` repeat the reconstruction over a whole chunk, one per shape the two writers assemble an account set from; `a_transaction_that_mentions_an_account_is_returned` is the client-visible half |
 | [INV-P10](07-invariants.md#inv-p10) | CT-3 | **C** | four range cases across physical widths |
-| [INV-P11](07-invariants.md#inv-p11) | CT-3 | **U** | `gteConst` lexicographic comparison has no test |
+| [INV-P11](07-invariants.md#inv-p11) | CT-3 | **C** | `gte_const_compares_lexicographically` over a second constant, `"0x9"`, as well as the catalog's `"0x1"`. The `"0x1"` cases cannot tell the readings apart — over minimal-form hex, "≥ 0x1" and "is not zero" pick the same rows however the comparison is done — and `"0x10"` is sixteen and lexicographically below `"0x9"`, so the two part there. A 256-bit value covers what an engine parsing the column has nowhere to put, and `a_null_is_not_greater_than_the_constant` the rows a `create` trace writes |
 | [INV-P12](07-invariants.md#inv-p12) | CT-3 | **C** | three `ListContainsAnyPredicate` cases including the unknown-type one |
 | [INV-P13](07-invariants.md#inv-p13) | CT-3 | **C** | `test_compile_discriminator_mixed_lengths`, `discriminator_hex_is_a_prefix_chain`, and the Kleene cases in the predicate unit tests |
 | [INV-P14](07-invariants.md#inv-p14) | CT-3 | **C** | `unmatchable_values_are_not_errors` and `a_hex_value_too_wide_for_the_column_matches_nothing` for values wider than the column, `a_signed_column_takes_negative_filter_values` for one below its floor, and `a_block_bound_past_the_stored_width_matches_nothing` for the half the invariant states about the block bounds — where wrapping would truncate into a block the chunk holds |
@@ -397,35 +397,43 @@ renamed out from under a comment inside it.
 | [INV-X2](07-invariants.md#inv-x2) | CT-8 | **C** | `an_ignored_nullable_column_does_not_change_output` |
 | [INV-X3](07-invariants.md#inv-x3) | CT-8 | **C** | `filtering_an_absent_column_is_an_error` on both scan entry points, `filtering_a_present_column_still_works` for the other direction, `one_unanswerable_item_rejects_the_whole_request` for a filter one item request of several carries, and `an_alias_filter_on_a_column_the_chunk_lacks_is_an_error` for one reached through an alias's extraction column |
 
-**Totals: 58 C, 25 P, 2 U** of 85. Property coverage is therefore 0.68
+**Totals: 60 C, 25 P, 0 U** of 85. Property coverage is therefore 0.71
 (`P-COV-PROPERTY` in [09-parameters.md](09-parameters.md)).
 
-Of the 83 rows at **C** or **P**, 64 are backed by a tagged test and 19 rest on
-prose alone. Those 20 are the rows whose note says "fixtures only" or describes a
+Of the 85 rows at **C** or **P**, 66 are backed by a tagged test and 19 rest on
+prose alone. Those 19 are the rows whose note says "fixtures only" or describes a
 group of cases without naming one, and they are the ones nothing recomputes: the
 status is what somebody believed on the day they typed it. Shrinking that number
 is what turns MG-1's ratchet from an intention into an arithmetic fact, so the
 checker recomputes all three numbers in this paragraph rather than trusting them.
 
-A tag is not the same as a gate. 4 of the 64 are backed only by tests marked
+A tag is not the same as a gate. 4 of the 66 are backed only by tests marked
 `#[ignore]`, which MG-3's portable job does not run: the test would fail if the
 invariant broke, but only on a machine that has the chunks. The checker reports
 those rows on every run too, because a status that no job can falsify is a status
 worth seeing.
 
-Two rows are left at **U**, and they have nothing in common:
+No row is left at **U**. That is a smaller claim than it sounds: 25 rows are
+partial, and a **P** is a row somebody looked at and did not finish. What it does
+settle is that every invariant now has somewhere for a failure to show up.
 
-- **INV-P9**, the most dangerous single row in the table. A bloom construction
-  that disagrees with the archive writer's returns false *negatives*, and no
-  client — and no fixture test — can see them. It is next in the build order.
-- **INV-P11**, `gteConst` lexicographic comparison, which needs no machinery at
-  all and is unwritten for no reason but that nobody has written it.
+The last two were closed together and had nothing in common. **INV-P11** needed
+no machinery at all and was unwritten for no reason but that nobody had written
+it. **INV-P9** was the dangerous one, and it is worth recording what made it
+hard: the assertion the invariant asks for cannot be made about an answer. A
+bloom that disagrees with the archive writer's returns rows to nobody, and every
+response it produces is a well-formed response. So the test had to reach the bits
+— and the only artifact of the writer's construction is a chunk it wrote, which
+is why three of its rows are frozen in the test file with the accounts they were
+built from. Membership was not enough on its own either: a filter built too
+narrow contains everything the writer put in it, so half the construction is
+pinned by a row carrying a value's first six bits and not its seventh.
 
-The four rows that were here with them — P5, R2, R4, R11 — are closed, and they
-were the reason to build HC-4. Each is a law over a *pair* of queries rather than
-over one: a union, a widening, an idempotence, a hop that does not happen. A
-suite of hand-written cases can state such a law at one pair, which is the pair
-whoever wrote it already believed worked.
+The four rows that were at **U** before them — P5, R2, R4, R11 — were the reason
+to build HC-4. Each is a law over a *pair* of queries rather than over one: a
+union, a widening, an idempotence, a hop that does not happen. A suite of
+hand-written cases can state such a law at one pair, which is the pair whoever
+wrote it already believed worked.
 
 Rows moved for reasons worth recording. B8 was the U the build order put
 third, behind two capabilities, and it turned out to need neither: splitting a
@@ -528,15 +536,19 @@ CT-9 is in that state.
 
 Each phase ends by updating §8.11 and [GAPS.md](GAPS.md).
 
-1. **INV-P9, the bloom oracle.** Compare the engine's bloom bits against the
-   writer's for known values. The only invariant here whose failure is invisible
-   to every other test in the suite, and now the only dangerous one left at **U**.
-2. **Coverage reporting** (HC-8) and line instrumentation (HC-9), which promote
-   MG-1 and MG-2 from advisory to blocking.
+1. **Coverage reporting** (HC-8) and line instrumentation (HC-9), which promote
+   MG-1 and MG-2 from advisory to blocking. With no row left at **U**, the
+   ratchet is what stops the next change from talking one down, and it is the
+   only gate here whose absence lets the matrix get quietly worse.
+2. **The 19 rows resting on prose.** A status nothing recomputes is a status that
+   drifts, and most of these say "fixtures only" — which is §8.1's first
+   complaint about fixtures written as a matrix row. They are also where the
+   remaining **P**s are concentrated.
 3. **The fuzzer seed** (HC-7), which is what CT-9 needs to be a class rather than
    a proptest file.
 
 Done: the chunk writer (HC-3), whose last axes closed D7, D8, O12 and O13; the
 query generator (HC-4), which closed P5, R2, R4 and R11 and moved seven more
-rows to **C**; and INV-B8, which needed no capability once someone tried to
-write it.
+rows to **C**; INV-B8, which needed no capability once someone tried to write
+it; and the bloom oracle, which needed no new capability either — only HC-3 and
+the recognition that the assertion had to be about bits rather than about rows.

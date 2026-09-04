@@ -8,7 +8,9 @@
 //! The generated half is `laws`: §8.4's table over queries HC-4 composed out of
 //! the catalog and the chunk's own contents.
 
+mod bloom;
 mod case_folding;
+mod gte_const;
 mod laws;
 mod pruning;
 mod surface;
