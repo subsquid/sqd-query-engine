@@ -605,30 +605,44 @@ impl BloomFilterPredicate {
     }
 }
 
+/// The bit a value's `n`-th hash sets in a filter `num_bits` bits wide.
+///
+/// The value is hashed the way Rust hashes a `str`: the bytes, then a `0xff`
+/// terminator, through XXH3 seeded with `n`.
+///
+/// Public because [INV-P9] is a claim about the *construction* — width, hash
+/// count, hash function, value serialisation — and a construction reachable only
+/// through a membership test is one nothing can compare against the archive
+/// writer's. Too few hashes, or too narrow a filter, never produces a false
+/// negative, so `contains` alone cannot see the mismatch that matters.
+///
+/// [INV-P9]: ../../spec/07-invariants.md#inv-p9
+#[inline]
+pub fn bloom_bit(value: &[u8], n: usize, num_bits: usize) -> usize {
+    let mut hasher = xxhash_rust::xxh3::Xxh3Builder::new()
+        .with_seed(n as u64)
+        .build();
+    std::hash::Hasher::write(&mut hasher, value);
+    std::hash::Hasher::write_u8(&mut hasher, 0xff);
+
+    (std::hash::Hasher::finish(&hasher) as usize) % num_bits
+}
+
 /// Check if a bloom filter (byte array) might contain a value.
-/// Uses the same XXHash3-based hashing scheme as the legacy sqd_bloom_filter.
-/// Each hash is: xxh3(value_via_Hash_trait, seed=i) % num_bits
+///
+/// The width comes from the stored array rather than from the catalog: the bits
+/// were set at whatever width the writer used, and that is the only width that
+/// reads them back.
 fn bloom_contains(filter: &[u8], value: &[u8], num_hashes: usize) -> bool {
     let num_bits = filter.len() * 8;
     if num_bits == 0 {
         return false;
     }
 
-    for i in 0..num_hashes {
-        // Match Rust's Hash trait for &str: writes bytes then 0xFF separator byte
-        let mut hasher = xxhash_rust::xxh3::Xxh3Builder::new()
-            .with_seed(i as u64)
-            .build();
-        std::hash::Hasher::write(&mut hasher, value);
-        std::hash::Hasher::write_u8(&mut hasher, 0xff);
-        let bit = (std::hash::Hasher::finish(&hasher) as usize) % num_bits;
-        let byte_idx = bit / 8;
-        let bit_idx = bit % 8;
-        if filter[byte_idx] & (1 << bit_idx) == 0 {
-            return false;
-        }
-    }
-    true
+    (0..num_hashes).all(|n| {
+        let bit = bloom_bit(value, n, num_bits);
+        filter[bit / 8] & (1 << (bit % 8)) != 0
+    })
 }
 
 impl ArrayPredicate for BloomFilterPredicate {
