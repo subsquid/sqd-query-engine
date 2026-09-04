@@ -15,18 +15,29 @@ pub fn fixture_chunk(dataset: &str) -> PathBuf {
     fixture_dir().join(dataset).join("chunk")
 }
 
-/// Whether the external fixture tree is available. `make test-data` sets
+/// Whether one dataset's chunk is available. `make test-data` sets
 /// `SQD_REQUIRE_FIXTURES=1`, which turns its absence from a skip into a failure.
-pub fn fixture_tree_is_present() -> bool {
-    if fixture_chunk("ethereum").is_dir() {
+pub fn fixture_tree_has(dataset: &str) -> bool {
+    if fixture_chunk(dataset).is_dir() {
         return true;
     }
 
     assert!(
         std::env::var_os("SQD_REQUIRE_FIXTURES").is_none(),
-        "SQD_REQUIRE_FIXTURES is set but tests/fixtures is not checked out, so these \
-         tests would report green having compared nothing"
+        "SQD_REQUIRE_FIXTURES is set but tests/fixtures/{dataset} is not checked out, \
+         so these tests would report green having compared nothing"
     );
 
     false
+}
+
+/// Whether the fixture tree is available, answered by its ethereum chunk.
+///
+/// A test reading some other dataset must name that one instead. A checkout
+/// carrying only solana takes the false branch here and skips with the chunk it
+/// needed sitting on disk unread, and one carrying only ethereum takes the true
+/// branch and then dies inside the reader — a missing input reported as a
+/// malformed chunk.
+pub fn fixture_tree_is_present() -> bool {
+    fixture_tree_has("ethereum")
 }

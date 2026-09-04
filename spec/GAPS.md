@@ -67,10 +67,12 @@ whole relation, one that emitted items in file order, one that matched no addres
 at all. Those are fixed, and the readers now share one list of widths. Gap 31 is
 what was left over.
 
-The next work is still not in this document. It is the one remaining capability
-gap, the query generator, which is what stands between the suite and the five
-invariants nothing would notice breaking,
-[INV-P9](07-invariants.md#inv-p9) first among them.
+The next work is still not in this document. The capability gaps this paragraph
+used to point at are closed — the query generator, and after it the bloom oracle
+that [INV-P9](07-invariants.md#inv-p9) needed, which turned out to need no
+capability of its own. What is left is coverage reporting, and the rows of
+[§8.11](08-conformance.md#811-traceability-matrix) whose status rests on prose
+that nothing recomputes.
 
 ---
 

@@ -19,7 +19,7 @@ use sqd_query_engine::scan::predicate::bloom_bit;
 use std::collections::BTreeSet;
 
 use crate::harness::chunk::read_columns;
-use crate::harness::fixtures::{fixture_chunk, fixture_tree_is_present, meta, run};
+use crate::harness::fixtures::{fixture_chunk, fixture_tree_has, meta, run};
 use crate::harness::json::items_of;
 
 /// What the catalog declares for `mentionsAccount`, asserted against it below so
@@ -277,7 +277,7 @@ fn blooms_of(batch: &RecordBatch) -> FixedSizeBinaryArray {
 #[test]
 #[ignore = "requires external fixture data"]
 fn every_transaction_rebuilds_the_bloom_the_archiver_wrote() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("solana") {
         return;
     }
 
@@ -359,16 +359,19 @@ fn every_transaction_rebuilds_the_bloom_the_archiver_wrote() {
     );
 }
 
-/// The instruction writer assembles its account set from sixteen columns and an
-/// overflow list. Enough rows to reach the ones with more accounts than columns;
-/// the rows are independent, so a prefix falsifies what the whole table would.
-const INSTRUCTION_ROWS: usize = 20_000;
-
+/// Every instruction the archiver wrote, whose account set its writer assembles
+/// from sixteen columns and an overflow list rather than from one.
+///
+/// The whole table rather than a prefix: `instructions` is sorted
+/// `program_id -> d1 -> b9 -> block_number`, so a prefix is a biased sample of
+/// programs, not a shuffle, and an archiver that assembled the set differently
+/// for a program sorting late would be invisible to one.
+///
 /// Covers CT-3 · INV-P9
 #[test]
 #[ignore = "requires external fixture data"]
 fn every_instruction_rebuilds_the_bloom_the_archiver_wrote() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("solana") {
         return;
     }
 
@@ -425,10 +428,6 @@ fn every_instruction_rebuilds_the_bloom_the_archiver_wrote() {
             );
             rows += 1;
         }
-
-        if rows >= INSTRUCTION_ROWS {
-            break;
-        }
     }
 
     assert!(rows > 0, "the sweep read no rows, so it compared nothing");
@@ -450,7 +449,7 @@ fn every_instruction_rebuilds_the_bloom_the_archiver_wrote() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn a_transaction_that_mentions_an_account_is_returned() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("solana") {
         return;
     }
 
@@ -545,6 +544,145 @@ fn a_transaction_that_mentions_an_account_is_returned() {
     assert!(
         returned.len() < in_range,
         "the filter returned every transaction in range, so it narrowed nothing"
+    );
+}
+
+/// A row the filter admits but that does not mention the account is returned.
+///
+/// [INV-P9] has two clauses, and every test above serves the first: the
+/// construction must be the writer's. The second is what the over-approximation
+/// costs the client — "an engine MUST NOT post-filter them away" — and it is the
+/// clause an engine breaks by being helpful. Re-checking the bloom's answer
+/// against the row's real accounts looks like an improvement, returns a strictly
+/// more accurate response, and is wrong: the account set the writer hashed is
+/// not always a column the reader has, so the re-check drops rows that do
+/// mention the account.
+///
+/// The false positive here is a real one rather than a mismatch written by hand.
+/// A filter carrying enough accounts admits values nobody inserted, and one of
+/// those is what the query asks for, so the row the response must carry is a row
+/// whose every account is something else.
+///
+/// [INV-P9]: ../../../spec/07-invariants.md#inv-p9
+///
+/// Covers CT-3 · INV-P9
+#[test]
+fn a_false_positive_is_not_filtered_away() {
+    use arrow::array::{ArrayRef, StringArray, UInt32Array, UInt64Array};
+    use arrow::datatypes::{DataType, Field};
+    use sqd_query_engine::metadata::parse_dataset_description;
+    use std::sync::Arc;
+
+    use crate::harness::chunk::{blocks_parquet, write_table};
+    use crate::harness::fixtures::run_against;
+
+    const CATALOG: &str = r#"
+name: overapprox
+tables:
+  blocks:
+    field_name: block
+    block_number_column: number
+    sort_key: [number]
+    filters: []
+    fields: [number]
+    columns:
+      number: { type: uint64 }
+  items:
+    query_name: items
+    field_name: item
+    block_number_column: block_number
+    item_order_keys: [seq]
+    sort_key: [block_number, seq]
+    filters: []
+    fields: [seq, account]
+    special_filters:
+      mentions_account:
+        type: bloom_filter
+        column: accounts_bloom
+        num_bytes: 64
+        num_hashes: 7
+    columns:
+      block_number: { type: uint64 }
+      seq: { type: uint32 }
+      account: { type: string }
+      accounts_bloom: { type: fixed_binary_64, system: true }
+"#;
+
+    const BLOCK: u64 = 10;
+    const MENTIONED: &str = "mentioned-0";
+
+    // Enough accounts that the filter admits values nobody inserted, which is
+    // the condition the invariant is about. Too few and there is no false
+    // positive to find; a saturated filter would admit everything and assert
+    // nothing, so the popcount is checked below.
+    let inserted: Vec<String> = (0..64).map(|i| format!("mentioned-{i}")).collect();
+
+    let mut bloom = Bloom::new();
+    for account in &inserted {
+        bloom.insert(account);
+    }
+
+    let set = popcount(&bloom.bytes);
+    assert!(
+        set < (NUM_BYTES * 8) as u32,
+        "the filter is saturated, so admitting a stranger asserts nothing"
+    );
+
+    // A marginal false positive: every one of its seven bits is set, and its
+    // eighth is not. The seven are what the filter admits it on; the eighth is
+    // what makes an engine that narrows the filter at all — one hash more, a
+    // re-check against the row — fail this test rather than pass it by luck.
+    let stranger = (0..1 << 16)
+        .map(|i| format!("stranger-{i}"))
+        .find(|candidate| {
+            (0..NUM_HASHES).all(|n| bloom.holds(candidate, n))
+                && !bloom.holds(candidate, NUM_HASHES)
+        })
+        .expect("some stranger is admitted on seven bits and not on eight");
+    assert!(
+        !inserted.contains(&stranger),
+        "the stranger was inserted, so it is not a false positive"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    blocks_parquet(dir.path(), &[BLOCK]);
+    write_table(
+        dir.path(),
+        "items",
+        vec![
+            Field::new("block_number", DataType::UInt64, false),
+            Field::new("seq", DataType::UInt32, false),
+            Field::new("account", DataType::Utf8, false),
+            Field::new("accounts_bloom", DataType::FixedSizeBinary(64), false),
+        ],
+        vec![
+            Arc::new(UInt64Array::from(vec![BLOCK])) as ArrayRef,
+            Arc::new(UInt32Array::from(vec![0u32])) as ArrayRef,
+            Arc::new(StringArray::from(vec![MENTIONED])) as ArrayRef,
+            Arc::new(
+                FixedSizeBinaryArray::try_from_iter(std::iter::once(bloom.bytes.clone())).unwrap(),
+            ) as ArrayRef,
+        ],
+    );
+
+    let catalog = parse_dataset_description(CATALOG).unwrap();
+    let query = format!(
+        r#"{{"type":"overapprox","fromBlock":{BLOCK},"toBlock":{BLOCK},
+            "fields":{{"block":{{"number":true}},"item":{{"seq":true,"account":true}}}},
+            "items":[{{"mentionsAccount":["{stranger}"]}}]}}"#
+    );
+    let body = run_against(&catalog, dir.path(), &query).expect("the query must be answerable");
+
+    let items = items_of(&body, "items");
+    assert_eq!(
+        items.len(),
+        1,
+        "the filter admits this row, so post-filtering it away is the only way to lose it"
+    );
+    assert_eq!(
+        items[0].1["account"].as_str().unwrap(),
+        MENTIONED,
+        "the row returned is the one whose accounts are not what the query asked for"
     );
 }
 

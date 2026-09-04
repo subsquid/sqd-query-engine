@@ -27,4 +27,6 @@ exactly, because a mismatch produces false negatives and no client can detect
 those.
 
 That is the one property in the suite whose failure is invisible to every other
-test, which is why it has its own line in the build order.
+test, which is why the assertion that closed it is about the bits rather than
+about an answer: `the_engine_builds_the_bloom_the_archiver_wrote` compares the
+engine's construction against rows an archiver wrote.
