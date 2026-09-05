@@ -1,3 +1,4 @@
+use crate::integers::BlockNumbers;
 use crate::metadata::DatasetDescription;
 use crate::output::arrow_out::{
     dedup_first, filter_to_blocks, hexify_group, project_columns, write_arrow_frames, ArrowOutput,
@@ -16,9 +17,8 @@ use crate::output::row_writer::{
     resolve_sort_columns, resolve_writers, IndexedBatches,
 };
 use crate::output::weight::{
-    accumulate_block_weights, apply_weight_limit, block_scan_columns, get_block_number,
-    get_weight_value, primary_weight_params, weight_cutoff_block, weight_scan_columns, TableOutput,
-    MAX_RESPONSE_BYTES,
+    accumulate_block_weights, apply_weight_limit, block_scan_columns, get_weight_value,
+    primary_weight_params, weight_cutoff_block, weight_scan_columns, TableOutput,
 };
 use crate::output::writer::QueryOutput;
 use crate::query::{Plan, RelationKind};
@@ -30,7 +30,7 @@ use anyhow::Result;
 use arrow::record_batch::RecordBatch;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet as HashSet};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 /// A table is block-sorted when its physical sort key leads with the block
@@ -44,51 +44,113 @@ fn is_block_sorted(table_desc: &crate::metadata::TableDescription) -> bool {
         .unwrap_or(false)
 }
 
-/// Fold one parallel wave's batches into the running budget weight: each row adds
-/// this table's own per-row weight, and the first time a block is seen it also
-/// adds that block's `external` weight (other tables already scanned) plus the
-/// block-header weight. Returns the updated cumulative. Counting the full wave
-/// (rather than stopping mid-wave) only over-estimates, which is safe — the exact
-/// `apply_weight_limit` trims afterwards.
-#[allow(clippy::too_many_arguments)]
-fn accumulate_wave_weight(
-    batches: &[RecordBatch],
-    bn_col: &str,
-    fixed: u64,
-    weight_cols: &[String],
-    external: &FxHashMap<u64, u64>,
-    header_fixed: u64,
-    seen: &mut HashSet<u64>,
-    cumulative: &mut u64,
-) -> u64 {
-    for batch in batches {
-        let bn = match batch.column_by_name(bn_col) {
-            Some(c) => c,
-            None => continue,
-        };
-        let wc_arrays: Vec<Option<&dyn arrow::array::Array>> = weight_cols
-            .iter()
-            .map(|name| batch.column_by_name(name).map(|c| c.as_ref()))
-            .collect();
-        for i in 0..batch.num_rows() {
-            if let Some(block) = get_block_number(bn.as_ref(), i) {
-                let mut row_weight = fixed;
+/// The running weight of a budget walk, split at the walk's settle boundary.
+///
+/// Only the settled side may stop the walk. Rows above the boundary belong to a
+/// block the next row group still owns, so their weight is not the block's; a
+/// walk that stopped on them would leave the response short of the budget by
+/// however much the last wave happened to hold, and by a different amount at
+/// every wave width (INV-O13).
+///
+/// Every part of the estimate is a lower bound on what `apply_weight_limit`
+/// charges the same block — this table's rows without its relations, the other
+/// tables' rows without theirs, the fixed part of the header without its
+/// data-dependent columns. That is what makes the cut safe to act on: once the
+/// settled blocks weigh more than the budget, the exact trim lands at or below
+/// the cut, so the blocks it selects are the ones a full scan would have
+/// selected.
+struct WaveWeight {
+    /// Per-block weight of the blocks the walk has read but not yet settled.
+    open: BTreeMap<u64, u64>,
+    /// Blocks no unread row group can add to, summed.
+    settled: u64,
+    /// Blocks already charged their header and other-table weight.
+    seen: HashSet<u64>,
+}
+
+impl WaveWeight {
+    fn new() -> Self {
+        Self {
+            open: BTreeMap::new(),
+            settled: 0,
+            seen: HashSet::default(),
+        }
+    }
+
+    /// Fold one wave's batches in, then settle every block below `boundary`
+    /// (`None` settles all of them: the walk has read the last row group).
+    /// Returns the settled weight so far.
+    fn fold(
+        &mut self,
+        batches: &[RecordBatch],
+        boundary: Option<u64>,
+        params: &WaveWeightParams,
+    ) -> u64 {
+        for batch in batches {
+            let bn = match batch.column_by_name(params.bn_col) {
+                Some(c) => c,
+                None => continue,
+            };
+            let wc_arrays: Vec<Option<&dyn arrow::array::Array>> = params
+                .weight_cols
+                .iter()
+                .map(|name| batch.column_by_name(name).map(|c| c.as_ref()))
+                .collect();
+
+            // The scan resolves the block-number column on every batch it hands
+            // out, so a batch arriving here without a readable one did not come
+            // from one. Weighing nothing for it keeps the walk from cutting on
+            // rows it cannot place: it reads on instead.
+            let Ok(blocks) = BlockNumbers::resolve(bn.as_ref(), params.bn_col) else {
+                continue;
+            };
+
+            for i in 0..batch.num_rows() {
+                let block = blocks.at(i);
+
+                let mut row_weight = params.fixed;
                 for arr in wc_arrays.iter().flatten() {
                     row_weight = row_weight.saturating_add(get_weight_value(*arr, i));
                 }
-                *cumulative = cumulative.saturating_add(row_weight);
-                if seen.insert(block) {
-                    let block_total = external
-                        .get(&block)
-                        .copied()
-                        .unwrap_or(0)
-                        .saturating_add(header_fixed);
-                    *cumulative = cumulative.saturating_add(block_total);
+                if self.seen.insert(block) {
+                    row_weight = row_weight.saturating_add(
+                        params
+                            .external
+                            .get(&block)
+                            .copied()
+                            .unwrap_or(0)
+                            .saturating_add(params.header_fixed),
+                    );
                 }
+
+                let entry = self.open.entry(block).or_insert(0);
+                *entry = entry.saturating_add(row_weight);
             }
         }
+
+        let closed = match boundary {
+            Some(b) => {
+                let still_open = self.open.split_off(&b);
+                std::mem::replace(&mut self.open, still_open)
+            }
+            None => std::mem::take(&mut self.open),
+        };
+        for weight in closed.into_values() {
+            self.settled = self.settled.saturating_add(weight);
+        }
+
+        self.settled
     }
-    *cumulative
+}
+
+/// What a row of the walked table costs, and what its block costs the first time
+/// the walk sees it.
+struct WaveWeightParams<'a> {
+    bn_col: &'a str,
+    fixed: u64,
+    weight_cols: &'a [String],
+    external: &'a FxHashMap<u64, u64>,
+    header_fixed: u64,
 }
 
 /// Execute a plan against a chunk directory. Returns `None` if the output
@@ -107,6 +169,46 @@ fn request_name_positions(metadata: &DatasetDescription) -> HashMap<&str, usize>
         .collect()
 }
 
+/// The knobs production leaves alone and a test has to move.
+///
+/// Both fields hold one value in the field — `P-WEIGHT-BUDGET`, and a budget
+/// walk that is always allowed — and exist because a test that cannot move them
+/// has to reach past the pipeline to say anything about them. A budget test that
+/// cannot lower the budget runs against the scanner alone, where the estimate
+/// and the exact trim never meet; a differential test that cannot switch the walk
+/// off has to model what the walk does in order to check it, and a model of the
+/// thing under test agrees with its bugs.
+#[derive(Debug, Clone, Copy)]
+pub struct ExecOptions {
+    /// Print stage timings to stderr.
+    pub profile: bool,
+    /// The cumulative block weight a response may carry (`P-WEIGHT-BUDGET`).
+    pub weight_budget: u64,
+    /// Whether a block-sorted scan may stop early once the budget walk has read
+    /// enough. Off reads every table whole, which is the answer the walk exists
+    /// to reach sooner and must not change.
+    pub budget_walk: bool,
+}
+
+impl Default for ExecOptions {
+    fn default() -> Self {
+        Self {
+            profile: false,
+            weight_budget: crate::output::weight::MAX_RESPONSE_BYTES,
+            budget_walk: true,
+        }
+    }
+}
+
+impl ExecOptions {
+    pub fn profiled(profile: bool) -> Self {
+        Self {
+            profile,
+            ..Self::default()
+        }
+    }
+}
+
 pub fn execute_plan(
     plan: &Plan,
     metadata: &DatasetDescription,
@@ -114,6 +216,20 @@ pub fn execute_plan(
 ) -> Result<Option<QueryOutput>> {
     let chunk = ParquetChunkReader::open(chunk_dir)?;
     execute_chunk(plan, metadata, &chunk, false)
+}
+
+/// Execute a plan against any ChunkReader, with the engine's knobs given
+/// explicitly. See [`ExecOptions`].
+pub fn execute_chunk_with(
+    plan: &Plan,
+    metadata: &DatasetDescription,
+    chunk: &dyn ChunkReader,
+    options: ExecOptions,
+) -> Result<Option<QueryOutput>> {
+    match execute_chunk_fmt(plan, metadata, chunk, options, OutputFormat::Json)? {
+        FmtOutput::Json(blocks) => Ok(blocks.map(|b| *b)),
+        FmtOutput::Arrow(_) => unreachable!(),
+    }
 }
 
 /// Execute a plan with timing instrumentation printed to stderr.
@@ -147,7 +263,13 @@ pub fn execute_chunk(
     chunk: &dyn ChunkReader,
     profile: bool,
 ) -> Result<Option<QueryOutput>> {
-    match execute_chunk_fmt(plan, metadata, chunk, profile, OutputFormat::Json)? {
+    match execute_chunk_fmt(
+        plan,
+        metadata,
+        chunk,
+        ExecOptions::profiled(profile),
+        OutputFormat::Json,
+    )? {
         FmtOutput::Json(blocks) => Ok(blocks.map(|b| *b)),
         FmtOutput::Arrow(_) => unreachable!(),
     }
@@ -166,7 +288,7 @@ pub fn execute_chunk_arrow(
         plan,
         metadata,
         chunk,
-        false,
+        ExecOptions::default(),
         OutputFormat::Arrow { compress, binary },
     )? {
         FmtOutput::Arrow(output) => Ok(output),
@@ -208,10 +330,12 @@ fn execute_chunk_fmt(
     plan: &Plan,
     metadata: &DatasetDescription,
     chunk: &dyn ChunkReader,
-    profile: bool,
+    options: ExecOptions,
     format: OutputFormat,
 ) -> Result<FmtOutput> {
     use std::time::Instant;
+
+    let profile = options.profile;
 
     macro_rules! timer {
         () => {
@@ -284,6 +408,11 @@ fn execute_chunk_fmt(
     // budget trim, unlike in the exact path.
     let mut header_to_block = plan.to_block;
 
+    // The highest block every early-stopped budget walk covers completely. The
+    // walks read one table each and stop where its weight crosses the budget;
+    // the response may not reach past the lowest of those cuts.
+    let mut complete_through: Option<u64> = None;
+
     for &tp_idx in &proc_order {
         let table_plan = &plan.table_plans[tp_idx];
         let table_desc = metadata.table(&table_plan.table).ok_or_else(|| {
@@ -332,9 +461,12 @@ fn execute_chunk_fmt(
 
             let t_phase1 = timer!();
             let narrow_batches = chunk.scan(&table_plan.table, &narrow_req)?;
-            if let Some(cutoff) =
-                weight_cutoff_block(&narrow_batches, &table_plan.output_columns, table_desc)
-            {
+            if let Some(cutoff) = weight_cutoff_block(
+                &narrow_batches,
+                &table_plan.output_columns,
+                table_desc,
+                options.weight_budget,
+            ) {
                 effective_to_block = Some(match plan.to_block {
                     Some(tb) => tb.min(cutoff),
                     None => cutoff,
@@ -354,8 +486,10 @@ fn execute_chunk_fmt(
         // these a `to_block` cap prunes whole row groups, so reading row groups in
         // block order and stopping at the budget avoids decoding wide columns for
         // blocks that can't be emitted.
-        let wave_eligible =
-            is_block_sorted(table_desc) && !plan.include_all_blocks && !single_full_scan;
+        let wave_eligible = options.budget_walk
+            && is_block_sorted(table_desc)
+            && !plan.include_all_blocks
+            && !single_full_scan;
 
         let mut request = ScanRequest::new(output_col_refs);
         request.predicates = pred_refs;
@@ -372,32 +506,38 @@ fn execute_chunk_fmt(
             let (fixed, weight_cols) =
                 primary_weight_params(&table_plan.output_columns, Some(table_desc));
             let bn_col = table_desc.block_number_column.to_string();
-            let ext = &external_block_weight;
-            let mut seen: HashSet<u64> = HashSet::default();
-            let mut cumulative: u64 = 0;
-            // Wave width = the rayon pool size: each wave saturates all cores in
-            // one parallel shot, and the budget is re-checked at every wave
-            // boundary (over-read ≤ one wave).
-            let wave_size = rayon::current_num_threads().max(1);
-            let mut weight_of = |wave: &[RecordBatch]| {
-                accumulate_wave_weight(
-                    wave,
-                    &bn_col,
-                    fixed,
-                    &weight_cols,
-                    ext,
-                    header_fixed,
-                    &mut seen,
-                    &mut cumulative,
-                )
+            let params = WaveWeightParams {
+                bn_col: &bn_col,
+                fixed,
+                weight_cols: &weight_cols,
+                external: &external_block_weight,
+                header_fixed,
             };
-            chunk.scan_budget(
+            let mut weight = WaveWeight::new();
+            // Wave width = the rayon pool size: each wave saturates all cores in
+            // one parallel shot. It decides how far the walk over-reads, never
+            // which blocks come back — the walk stops on settled weight alone.
+            let wave_size = rayon::current_num_threads().max(1);
+            let mut settled_weight =
+                |wave: &[RecordBatch], boundary: Option<u64>| weight.fold(wave, boundary, &params);
+
+            let scan = chunk.scan_budget(
                 &table_plan.table,
                 &request,
                 wave_size,
-                MAX_RESPONSE_BYTES,
-                &mut weight_of,
-            )?
+                options.weight_budget,
+                &mut settled_weight,
+            )?;
+
+            // A walk that stopped early read this table only up to its cut. Every
+            // other table was read for the whole range, so nothing further down
+            // can tell that this one is short — the cut has to reach block
+            // selection itself (INV-B7).
+            if let Some(cut) = scan.complete_through {
+                complete_through = Some(complete_through.map_or(cut, |c: u64| c.min(cut)));
+            }
+
+            scan.batches
         } else {
             chunk.scan(&table_plan.table, &request)?
         };
@@ -709,6 +849,14 @@ fn execute_chunk_fmt(
         );
     }
 
+    // A budget walk stopped short of `to_block`, so the covered range ends at its
+    // cut: the header scan must not reach past it either, or the range-end
+    // boundary block of INV-B3 enters selection weighing nothing and survives the
+    // trim as a header with no items below it.
+    if let Some(cut) = complete_through {
+        header_to_block = Some(header_to_block.map_or(cut, |t: u64| t.min(cut)));
+    }
+
     // 3. Read blocks table header
     let t_blocks = timer!();
     let block_table_desc = metadata.table(&plan.block_table);
@@ -781,13 +929,57 @@ fn execute_chunk_fmt(
     let mut sorted_blocks: Vec<u64> = block_numbers.into_iter().collect();
     sorted_blocks.sort_unstable();
 
+    // A block above a walk's cut carries rows from the tables that were read
+    // whole and none from the one that stopped, and `lastBlock` naming it sends
+    // the client past rows it will never ask for again (INV-B7).
+    //
+    // The walk only cuts once the blocks below the cut outweigh the budget, and
+    // it weighs them at or below what the trim charges — so the trim ends at or
+    // under the cut on its own, and this line normally drops nothing. It is the
+    // scan's contract rather than the trim's backstop: the two agree only while
+    // the walk's estimate stays under the exact model, and a block whose header
+    // the chunk is missing is already outside that.
+    #[cfg(debug_assertions)]
+    let before_cut = sorted_blocks.clone();
+
+    if let Some(cut) = complete_through {
+        sorted_blocks.retain(|&block| block <= cut);
+    }
+
     let selected_blocks = apply_weight_limit(
+        options.weight_budget,
         &sorted_blocks,
         &table_outputs,
         &block_batches,
         metadata,
         plan,
     );
+
+    // The paragraph above is a claim, so it is checked rather than believed.
+    //
+    // A cut above where the trim stops cannot change an answer, which is exactly
+    // why a test that compares responses cannot see one drawn wrong until it
+    // drops below — by then the response is already short of the budget the
+    // client was promised, and the walk's estimate has already stopped being a
+    // lower bound. Comparing the two selections says so at the moment it happens,
+    // in whichever test happens to run the walk, rather than in the one somebody
+    // wrote for it.
+    #[cfg(debug_assertions)]
+    if complete_through.is_some() {
+        let uncut = apply_weight_limit(
+            options.weight_budget,
+            &before_cut,
+            &table_outputs,
+            &block_batches,
+            metadata,
+            plan,
+        );
+
+        debug_assert_eq!(
+            selected_blocks, uncut,
+            "the budget walk cut below the trim: it stopped at {complete_through:?}"
+        );
+    }
 
     if selected_blocks.is_empty() {
         return Ok(match format {

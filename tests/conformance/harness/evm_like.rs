@@ -233,6 +233,32 @@ pub fn chunk() -> TempDir {
     dir
 }
 
+/// The same chunk, with every block-sorted table split across row groups.
+///
+/// `chunk()` writes one row group per table, and a budget walk over one row
+/// group has nothing unread to settle against, so it never draws a cut. Any law
+/// about the walk needs this one, or it compares two full reads and passes.
+///
+/// Only the block-sorted tables are split: `logs` is stored in its declared
+/// `topic0, address, block_number` order, so its rows do not ascend by block and
+/// splitting them would give overlapping groups — a layout the walk refuses,
+/// which is the same vacuum by another route.
+pub fn partitioned_chunk() -> TempDir {
+    let dir = chunk();
+
+    // Small enough that a group boundary falls inside a block — two transactions
+    // per block split three ways puts a block in two groups, the layout a chunk
+    // written today actually has — and numerous enough that a wave as wide as
+    // the machine's rayon pool still leaves groups unread. One wave has no
+    // unread group to settle against and so draws no cut, which is the vacuum
+    // this chunk exists to avoid.
+    crate::harness::chunk::repartition(dir.path(), "blocks", 2);
+    crate::harness::chunk::repartition(dir.path(), "transactions", 3);
+    crate::harness::chunk::repartition(dir.path(), "traces", 3);
+
+    dir
+}
+
 /// The two values `traces.kind` takes.
 pub const TRACE_KINDS: [&str; 2] = ["call", "create"];
 

@@ -1,6 +1,6 @@
 use crate::engine_err;
 use crate::error::ErrorKind;
-use crate::integers::{IntColumn, OwnedIntColumn};
+use crate::integers::{BlockNumbers, IntColumn, OwnedIntColumn};
 use crate::scan::chunk::ParquetTable;
 use crate::scan::predicate::RowPredicate;
 use anyhow::{Context, Result};
@@ -763,69 +763,145 @@ pub fn scan(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<RecordBat
     Ok(all_batches)
 }
 
-/// Scan a block-sorted table's matching row groups in ascending block order, in
-/// parallel waves of `wave_size`. After each wave the freshly read batches are
-/// passed to `weight_of`, which returns the *cumulative* response weight seen so
-/// far; once that exceeds `budget` scanning stops — the wave that tripped the
-/// budget is kept, so the result over-reads by at most one wave (a safe
-/// over-estimate: the exact `apply_weight_limit` trims precisely afterwards).
+/// What a budget-limited scan returns: the rows it read, and how far the read
+/// is complete.
+#[derive(Debug)]
+pub struct BudgetScan {
+    pub batches: Vec<RecordBatch>,
+    /// The highest block the scan covers completely, when the walk stopped
+    /// before the end. `None` when every matching row group was read, and the
+    /// scan therefore covers the request's whole range.
+    ///
+    /// The caller MUST NOT emit a block above this: those blocks were left
+    /// unread on this table alone, and a response carrying them would be short
+    /// of rows no other table can supply — indistinguishable, to the client,
+    /// from blocks that genuinely had none (INV-B7).
+    pub complete_through: Option<u64>,
+}
+
+/// The block-number range one row group states, or `None` when the file states
+/// none this can act on.
 ///
-/// For a block-sorted table the budget cutoff prunes every later row group, so
-/// wide data columns decode only for blocks that can actually be emitted, while
-/// intra-wave parallelism preserves throughput (a fully sequential scan was
-/// measured 3–4x slower).
+/// Every pruner and the budget walk read bounds through here, because a
+/// statistic no reader can trust has to be refused by all of them or by none.
+/// `select_row_groups` drops a group whose range excludes the query and the walk
+/// settles blocks a later group still owns, so a rule kept in one place and not
+/// the next is how one query loses rows and the next answers.
+///
+/// An inverted pair is the case worth naming. A block number past 2³¹ stored in
+/// a signed `Int32` wraps, and a writer that compares the values as stored
+/// records the block above the wrap as the group's minimum and the highest block
+/// below it as the maximum. Widened back the pair reads `min > max`: a range
+/// that excludes most of the rows the group holds (gap 31).
+fn block_bounds(table: &ParquetTable, rg: usize, bn_column: &str) -> Option<(u64, u64)> {
+    let stats = table.column_stats(rg, bn_column)?;
+    let min = stat_value_to_u64(&stats.min?)?;
+    let max = stat_value_to_u64(&stats.max?)?;
+
+    (min <= max).then_some((min, max))
+}
+
+/// The matching row groups in ascending block order, when the file is laid out
+/// so that a prefix of them settles a prefix of the blocks.
+///
+/// That holds when the groups' block ranges do not overlap beyond the boundary
+/// block two neighbours share (`max[i] <= min[i+1]`), which is what a
+/// block-partitioned chunk looks like. It does not hold when a group spans the
+/// whole chunk, and it does not hold for every file whose catalog declares a
+/// block-leading `sort_key`: some supported layouts are written in another order
+/// than the one they declare. Reading the statistics answers that for the file at
+/// hand; the declared sort key only says what the writer meant.
+///
+/// A statistic that reads back inverted disqualifies the file too. Block numbers
+/// above 2³¹ stored in a signed `Int32` wrap, and a writer that compares them
+/// signed records the block *above* the wrap as the minimum and the highest block
+/// *below* it as the maximum. Widened back to `u64` that pair is `min > max`: a
+/// group whose reported range excludes most of the blocks it holds. Sorting on it
+/// puts the group after row groups it precedes, and its understated maximum lets
+/// the check below pass, so the walk would settle blocks that group still owns.
+/// See gap 31, which is the same widening read from the other end.
+fn block_ordered_row_groups(
+    table: &ParquetTable,
+    request: &ScanRequest,
+    row_groups: &[usize],
+) -> Option<Vec<(usize, u64)>> {
+    let bn_col = request.block_number_column?;
+
+    let mut bounds: Vec<(usize, u64, u64)> = Vec::with_capacity(row_groups.len());
+    for &rg in row_groups {
+        let (min, max) = block_bounds(table, rg, bn_col)?;
+        bounds.push((rg, min, max));
+    }
+
+    bounds.sort_by_key(|&(_, min, _)| min);
+
+    let disjoint = bounds.windows(2).all(|pair| pair[0].2 <= pair[1].1);
+    if !disjoint {
+        return None;
+    }
+
+    Some(bounds.into_iter().map(|(rg, min, _)| (rg, min)).collect())
+}
+
+/// Scan a block-partitioned table's matching row groups in ascending block
+/// order, in parallel waves of `wave_size`, stopping once the response weight of
+/// the blocks the walk has settled crosses `budget`.
+///
+/// A block is settled once no unread row group can still add rows to it: on this
+/// layout that is every block below the first unread group's first block. After
+/// each wave `settled_weight` is handed the freshly read batches and that
+/// boundary, and returns the cumulative weight below it.
+///
+/// Weighing the settled blocks rather than everything read is what keeps the
+/// answer independent of `wave_size` (INV-O13). A wider wave settles more blocks
+/// per step, so it stops later and returns more rows — but it never stops before
+/// the budget is covered, so the exact `apply_weight_limit` trims to the same
+/// blocks either way. Stopping on everything read would cross the budget on rows
+/// belonging to a block the next row group still owns, and the response would
+/// end short of the budget by however much that wave happened to hold.
 pub fn scan_waves_until_budget<F>(
     table: &ParquetTable,
     request: &ScanRequest,
     wave_size: usize,
     budget: u64,
-    mut weight_of: F,
-) -> Result<Vec<RecordBatch>>
+    mut settled_weight: F,
+) -> Result<BudgetScan>
 where
-    F: FnMut(&[RecordBatch]) -> u64,
+    F: FnMut(&[RecordBatch], Option<u64>) -> u64,
 {
     ensure_columns_present(table, request)?;
 
-    let mut row_groups = select_row_groups(table, request)?;
+    let row_groups = select_row_groups(table, request)?;
     if row_groups.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Visit row groups in ascending block-number order. For a block-sorted table
-    // the row-group index already follows block order; sort by min block_number
-    // defensively so the budget walk is monotonic regardless of file layout.
-    if let Some(bn_col) = request.block_number_column {
-        row_groups.sort_by_key(|&rg| {
-            table
-                .column_stats(rg, bn_col)
-                .and_then(|s| s.min)
-                .and_then(|m| stat_value_to_u64(&m))
-                .unwrap_or(u64::MAX)
+        return Ok(BudgetScan {
+            batches: Vec::new(),
+            complete_through: None,
         });
     }
+
+    // No usable order, no sound cut. Reading everything is what the reference
+    // does on every layout, so falling back to it costs memory, not answers.
+    let Some(ordered) = block_ordered_row_groups(table, request, &row_groups) else {
+        return Ok(BudgetScan {
+            batches: scan(table, request)?,
+            complete_through: None,
+        });
+    };
 
     let all_columns = collect_read_columns(table, request);
     let output_schema = build_output_schema(table.schema(), &request.output_columns);
 
-    // The block bounds of one row group, or None when the file carries no usable
-    // statistic — in which case nothing below may assume anything about layout.
-    let block_bound = |rg: usize, upper: bool| -> Option<u64> {
-        let bn_col = request.block_number_column?;
-        let stats = table.column_stats(rg, bn_col)?;
-        let bound = if upper { stats.max } else { stats.min };
-        stat_value_to_u64(&bound?)
-    };
-
     let wave_size = wave_size.max(1);
     let mut all_batches = Vec::new();
-    // How far into `row_groups` the walk has got.
     let mut scanned = 0usize;
 
-    for wave in row_groups.chunks(wave_size) {
-        let wave_batches: Vec<RecordBatch> = if wave.len() == 1 {
-            scan_row_groups(table, wave, &all_columns, request, &output_schema)?
+    for wave in ordered.chunks(wave_size) {
+        let groups: Vec<usize> = wave.iter().map(|&(rg, _)| rg).collect();
+
+        let wave_batches: Vec<RecordBatch> = if groups.len() == 1 {
+            scan_row_groups(table, &groups, &all_columns, request, &output_schema)?
         } else {
-            let results: Vec<Result<Vec<RecordBatch>>> = wave
+            let results: Vec<Result<Vec<RecordBatch>>> = groups
                 .par_iter()
                 .map(|&rg| scan_row_groups(table, &[rg], &all_columns, request, &output_schema))
                 .collect();
@@ -836,119 +912,104 @@ where
             v
         };
 
-        let cumulative = weight_of(&wave_batches);
-        all_batches.extend(wave_batches);
         scanned += wave.len();
 
-        if cumulative <= budget {
+        // Groups are in ascending order and do not overlap, so the first unread
+        // one starts at or above every block read so far: it is the boundary
+        // that settles the blocks below it.
+        let boundary = ordered.get(scanned).map(|&(_, min)| min);
+        let settled = settled_weight(&wave_batches, boundary);
+        all_batches.extend(wave_batches);
+
+        if settled <= budget {
             continue;
         }
 
-        // Stopping here is only sound once every block kept is whole. Row groups
-        // overlap in block range far more often than a declared block-leading
-        // sort key suggests — chunks written today share the boundary block
-        // between neighbouring row groups, and in the fixture chunks every row
-        // group of every table spans the whole chunk — and a block that loses
-        // rows to an unread row group is indistinguishable, to the client, from a
-        // block that genuinely had fewer rows.
+        // The last wave settles everything, so there is nothing left to cut and
+        // nothing left to read.
+        let Some(boundary) = boundary else { break };
+
+        // Drop the rows above the boundary: they belong to a block the next row
+        // group still owns, and the caller caps selection at the cut anyway, so
+        // carrying them through relation expansion and the weight model is work
+        // on rows nobody will see.
         //
-        // So the cut is not "is there a gap between the row groups" (there never
-        // is, which made this walk a full scan) but "which blocks can no unread
-        // row group still add to": those below every unread group's first block.
-        // The block straddling that line is dropped along with everything after
-        // it. When that leaves nothing the walk reads on, and the budget is
-        // enforced by the exact `apply_weight_limit` instead.
-        let unread = &row_groups[scanned..];
-        if unread.is_empty() {
-            break;
+        // A table read without its block-number column projected cannot be cut
+        // on: the walk claims nothing and reads on, and the exact
+        // `apply_weight_limit` enforces the budget instead.
+        let cut = match request.block_number_column {
+            Some(bn_col) => retain_blocks_below(&all_batches, bn_col, boundary)?,
+            None => None,
         }
+        .filter(|whole| !whole.is_empty());
 
-        let unread_min = unread
-            .iter()
-            .try_fold(u64::MAX, |acc, &rg| Some(acc.min(block_bound(rg, false)?)));
-
-        let (Some(unread_min), Some(bn_col)) = (unread_min, request.block_number_column) else {
+        let Some(whole) = cut else {
             continue;
         };
 
-        if let Some(whole) = retain_blocks_below(&all_batches, bn_col, unread_min) {
-            if !whole.is_empty() {
-                return Ok(whole);
-            }
-        }
+        return Ok(BudgetScan {
+            batches: whole,
+            complete_through: boundary.checked_sub(1),
+        });
     }
 
-    Ok(all_batches)
+    Ok(BudgetScan {
+        batches: all_batches,
+        complete_through: None,
+    })
 }
 
 /// Keep only the rows whose block number is strictly below `limit`, dropping the
 /// batches that end up empty.
 ///
-/// `None` when a batch does not carry the block-number column, or carries it in a
-/// physical type this cannot read. No cut is justified then, and answering with
-/// a guess is exactly the partial block the caller is avoiding.
+/// `None` when a batch does not carry the block-number column at all: nothing
+/// here can place a row, so no cut is justified and the caller reads on. A column
+/// that is present but unreadable is not this function's call to make — the scan
+/// refused the batch before it got here.
 fn retain_blocks_below(
     batches: &[RecordBatch],
     bn_column: &str,
     limit: u64,
-) -> Option<Vec<RecordBatch>> {
+) -> Result<Option<Vec<RecordBatch>>> {
     let mut kept = Vec::with_capacity(batches.len());
 
     for batch in batches {
-        let column = batch.column_by_name(bn_column)?;
-        let mask = block_below_mask(column.as_ref(), limit)?;
-        let filtered = arrow::compute::filter_record_batch(batch, &mask).ok()?;
+        let Some(column) = batch.column_by_name(bn_column) else {
+            return Ok(None);
+        };
+
+        let blocks = BlockNumbers::resolve(column.as_ref(), bn_column)?;
+        let mask: BooleanArray = (0..blocks.len())
+            .map(|row| Some(blocks.at(row) < limit))
+            .collect();
+        let filtered = arrow::compute::filter_record_batch(batch, &mask)?;
 
         if filtered.num_rows() > 0 {
             kept.push(filtered);
         }
     }
 
-    Some(kept)
+    Ok(Some(kept))
 }
 
-/// Mask of the rows whose block number is strictly below `limit`, or `None` when
-/// no cut can be justified: a physical type this does not recognise, or a null
-/// block number, which is neither below the limit nor above it.
-///
-/// The type is resolved once per batch, and signed widths are read as unsigned
-/// the way `IntColumn::as_u64` explains.
-fn block_below_mask(column: &dyn Array, limit: u64) -> Option<BooleanArray> {
-    if column.null_count() > 0 {
-        return None;
-    }
-
-    let reader = IntColumn::resolve(column)?;
-    let below: Vec<bool> = (0..reader.len())
-        .map(|row| reader.block_number(row) < limit)
-        .collect();
-
-    Some(BooleanArray::from(below))
-}
-
-/// Select which row groups need to be scanned, skipping those that
-/// can be eliminated via statistics.
 fn select_row_groups(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<usize>> {
     let mut row_groups = Vec::new();
 
     for rg_idx in 0..table.num_row_groups() {
         // Check block range filter
+        // Bounds the file does not state, or states in a way no reader can
+        // trust, prune nothing: reading the group costs time, skipping it costs
+        // the rows, and it costs them silently.
         if let Some(bn_col) = request.block_number_column {
-            if let Some(stats) = table.column_stats(rg_idx, bn_col) {
-                if let (Some(ref min), Some(ref max)) = (stats.min, stats.max) {
-                    let rg_min = stat_value_to_u64(min);
-                    let rg_max = stat_value_to_u64(max);
-                    if let (Some(rg_min), Some(rg_max)) = (rg_min, rg_max) {
-                        if let Some(from_block) = request.from_block {
-                            if rg_max < from_block {
-                                continue; // Entire row group is before our range
-                            }
-                        }
-                        if let Some(to_block) = request.to_block {
-                            if rg_min > to_block {
-                                continue; // Entire row group is after our range
-                            }
-                        }
+            if let Some((rg_min, rg_max)) = block_bounds(table, rg_idx, bn_col) {
+                if let Some(from_block) = request.from_block {
+                    if rg_max < from_block {
+                        continue; // Entire row group is before our range
+                    }
+                }
+                if let Some(to_block) = request.to_block {
+                    if rg_min > to_block {
+                        continue; // Entire row group is after our range
                     }
                 }
             }
@@ -970,18 +1031,11 @@ fn select_row_groups(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<
 
         // Key filter: skip row groups whose block_number range has no overlap with key set
         if let Some(kf) = &request.key_filter {
-            let bn_col = &kf.block_number_column;
-            if let Some(stats) = table.column_stats(rg_idx, bn_col) {
-                if let (Some(ref min), Some(ref max)) = (stats.min, stats.max) {
-                    if let (Some(rg_min), Some(rg_max)) =
-                        (stat_value_to_u64(min), stat_value_to_u64(max))
-                    {
-                        // Binary search: any key block number in [rg_min, rg_max]?
-                        let first = kf.sorted_blocks.partition_point(|&bn| bn < rg_min);
-                        if first >= kf.sorted_blocks.len() || kf.sorted_blocks[first] > rg_max {
-                            continue; // No matching block numbers in this row group
-                        }
-                    }
+            if let Some((rg_min, rg_max)) = block_bounds(table, rg_idx, &kf.block_number_column) {
+                // Binary search: any key block number in [rg_min, rg_max]?
+                let first = kf.sorted_blocks.partition_point(|&bn| bn < rg_min);
+                if first >= kf.sorted_blocks.len() || kf.sorted_blocks[first] > rg_max {
+                    continue; // No matching block numbers in this row group
                 }
             }
         }
@@ -1210,6 +1264,19 @@ fn scan_row_groups(
 
         // Project to output columns only
         let projected = project_batch(&batch, output_schema)?;
+
+        // Resolve the block-number column once, here, where every batch the
+        // engine reads is produced. A row whose block cannot be read is placed
+        // by no layer downstream — not weighed, not cut on, not emitted under a
+        // block — and each of them would answer differently about it. Refusing
+        // once is what stops one query from erroring on a chunk that the next
+        // one answers (INV-E1).
+        if let Some(bn_column) = request.block_number_column {
+            if let Some(column) = projected.column_by_name(bn_column) {
+                BlockNumbers::resolve(column.as_ref(), bn_column)?;
+            }
+        }
+
         output_batches.push(projected);
     }
 

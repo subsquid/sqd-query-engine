@@ -199,11 +199,10 @@ fn read_prev_blocks(
                 )
             })?;
 
+        let block_numbers = crate::integers::BlockNumbers::resolve(blocks.as_ref(), block_column)?;
+
         for row in 0..batch.num_rows() {
-            let Some(row_block) = crate::output::weight::get_block_number(blocks.as_ref(), row)
-            else {
-                continue;
-            };
+            let row_block = block_numbers.at(row);
 
             // Which block this row is *about*: the number it states as its
             // parent's where the chunk carries one, and `n - 1` otherwise.
@@ -216,8 +215,11 @@ fn read_prev_blocks(
                 // A null reads as zero through the width-tolerant reader, which
                 // would report block 0 as this block's parent.
                 Some(col) if col.is_null(row) => continue,
-                Some(col) => match crate::output::weight::get_block_number(col.as_ref(), row) {
-                    Some(n) => n,
+                // Not the block-number column but a field beside it, which the
+                // chunk may legitimately leave unset — so it resolves through the
+                // width reader, not through the one that refuses a null.
+                Some(col) => match crate::integers::IntColumn::resolve(col.as_ref()) {
+                    Some(reader) => reader.block_number(row),
                     None => continue,
                 },
                 None => row_block.saturating_sub(1),

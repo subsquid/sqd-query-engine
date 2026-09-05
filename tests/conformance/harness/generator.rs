@@ -33,7 +33,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::harness::chunk::{column_names, read_columns};
-use crate::harness::fixtures::run_against;
+use crate::harness::fixtures::{run_against, run_against_with};
+use sqd_query_engine::output::ExecOptions;
 
 /// How many distinct values of one column a filter may be offered. Enough that a
 /// generated list is a choice rather than the whole column, few enough that the
@@ -411,6 +412,13 @@ impl Generator {
     /// bug in the generator or in the engine, never something a law may skip.
     pub fn run(&self, query: &str) -> Vec<u8> {
         run_against(&self.catalog, &self.chunk, query)
+            .unwrap_or_else(|e| panic!("a generated query failed: {e:#}\n  query: {query}"))
+    }
+
+    /// The same query under a different set of engine knobs. See
+    /// [`sqd_query_engine::output::ExecOptions`].
+    pub fn run_with(&self, query: &str, options: ExecOptions) -> Vec<u8> {
+        run_against_with(&self.catalog, &self.chunk, query, options)
             .unwrap_or_else(|e| panic!("a generated query failed: {e:#}\n  query: {query}"))
     }
 }

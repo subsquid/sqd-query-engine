@@ -1,4 +1,5 @@
 use super::scanner;
+use super::scanner::BudgetScan;
 use super::ChunkReader;
 use super::ScanRequest;
 use anyhow::{Context, Result};
@@ -135,13 +136,18 @@ impl ChunkReader for ParquetChunkReader {
         request: &ScanRequest,
         wave_size: usize,
         budget: u64,
-        weight_of: &mut dyn FnMut(&[RecordBatch]) -> u64,
-    ) -> Result<Vec<RecordBatch>> {
+        settled_weight: &mut dyn FnMut(&[RecordBatch], Option<u64>) -> u64,
+    ) -> Result<BudgetScan> {
         let parquet_table = match self.cache.get(table) {
             Some(t) => t,
-            None => return Ok(Vec::new()),
+            None => {
+                return Ok(BudgetScan {
+                    batches: Vec::new(),
+                    complete_through: None,
+                })
+            }
         };
-        scanner::scan_waves_until_budget(parquet_table, request, wave_size, budget, weight_of)
+        scanner::scan_waves_until_budget(parquet_table, request, wave_size, budget, settled_weight)
     }
 
     fn has_table(&self, table: &str) -> bool {

@@ -50,6 +50,70 @@ pub fn write_table(dir: &Path, table: &str, fields: Vec<Field>, columns: Vec<Arr
     write_parquet(&dir.join(format!("{table}.parquet")), &batch);
 }
 
+/// The same, one row group per entry: the writer is flushed after each, which is
+/// what puts a block shared by two groups in both of them.
+pub fn write_table_row_groups(
+    dir: &Path,
+    table: &str,
+    fields: Vec<Field>,
+    groups: Vec<Vec<ArrayRef>>,
+) {
+    let schema = Arc::new(Schema::new(fields));
+    let file = File::create(dir.join(format!("{table}.parquet"))).unwrap();
+    let mut writer = ArrowWriter::try_new(file, schema.clone(), None).unwrap();
+
+    for columns in groups {
+        writer
+            .write(&RecordBatch::try_new(schema.clone(), columns).unwrap())
+            .unwrap();
+        writer.flush().unwrap();
+    }
+
+    writer.close().unwrap();
+}
+
+/// Rewrite a table's parquet with its rows split into row groups of
+/// `rows_per_group`, in the order they are already stored.
+///
+/// A chunk written in one row group has one wave and therefore no unread group
+/// to settle against, so a budget walk over it can never draw a cut. A law about
+/// the walk run on such a chunk compares two full reads and passes whatever the
+/// walk does — which is what this exists to prevent.
+///
+/// The caller is responsible for the table's rows being in ascending block
+/// order: nothing here reorders them, and a split of rows that are not gives a
+/// file whose groups overlap, which the walk declines to walk at all.
+pub fn repartition(dir: &Path, table: &str, rows_per_group: usize) {
+    let path = dir.join(format!("{table}.parquet"));
+    let reader = ParquetRecordBatchReaderBuilder::try_new(File::open(&path).unwrap())
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let batches: Vec<RecordBatch> = reader.map(Result::unwrap).collect();
+    let schema = batches
+        .first()
+        .map(RecordBatch::schema)
+        .expect("a table has at least one batch");
+    let all = concat_batches(&schema, &batches).unwrap();
+
+    let mut groups = Vec::new();
+    let mut offset = 0;
+    while offset < all.num_rows() {
+        let len = rows_per_group.min(all.num_rows() - offset);
+        groups.push(all.slice(offset, len));
+        offset += len;
+    }
+
+    let file = File::create(&path).unwrap();
+    let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+    for group in groups {
+        writer.write(&group).unwrap();
+        writer.flush().unwrap();
+    }
+    writer.close().unwrap();
+}
+
 /// A blocks table carrying nothing but the numbers, under the column name the
 /// minimal catalogs in these tests declare.
 pub fn blocks_parquet(dir: &Path, numbers: &[u64]) {

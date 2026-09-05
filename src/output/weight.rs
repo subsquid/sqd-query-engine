@@ -1,3 +1,4 @@
+use crate::integers::{BlockNumbers, IntColumn};
 use crate::metadata::{DatasetDescription, TableDescription, VirtualField, WeightSource};
 use crate::query::Plan;
 use arrow::array::*;
@@ -7,6 +8,10 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 /// Maximum response size in bytes (20 MB).
+/// `P-WEIGHT-BUDGET` of `spec/09-parameters.md`: the default every caller gets.
+/// The value in force is [`crate::output::ExecOptions::weight_budget`] — reading
+/// the constant instead of the field is how a stage comes to enforce a budget
+/// the rest of the query is not using.
 pub(crate) const MAX_RESPONSE_BYTES: u64 = 20 * 1024 * 1024;
 
 /// Default weight per row when no weight column is specified.
@@ -36,6 +41,7 @@ struct WeightContribution<'a> {
 /// - Direct scan results and relation results targeting the same table are merged
 /// - Duplicate rows (same block_number + item_order_keys) are counted only once
 pub(crate) fn apply_weight_limit(
+    budget: u64,
     sorted_blocks: &[u64],
     table_outputs: &HashMap<String, TableOutput>,
     block_batches: &[RecordBatch],
@@ -166,17 +172,28 @@ pub(crate) fn apply_weight_limit(
                 .filter_map(|c| batch.column_by_name(c))
                 .collect();
 
+            // The scan resolves the block-number column on every batch it hands
+            // out, so a batch arriving here without a readable one did not come
+            // from one. Weighing nothing for it runs the response large rather
+            // than short, which is the direction INV-B9 tolerates.
+            let Ok(blocks) = BlockNumbers::resolve(bn_col.as_ref(), header_bn_col) else {
+                continue;
+            };
+
             for i in 0..batch.num_rows() {
-                if let Some(block_num) = get_block_number(bn_col.as_ref(), i) {
-                    if blocks_with_items.contains(&block_num) {
-                        let dynamic: u64 = weight_arrays
-                            .iter()
-                            .map(|col| get_weight_value(col.as_ref(), i))
-                            .fold(0u64, u64::saturating_add);
-                        let entry = block_weights.entry(block_num).or_default();
-                        *entry = entry.saturating_add(header_fixed.saturating_add(dynamic));
-                    }
+                let block_num = blocks.at(i);
+
+                if !blocks_with_items.contains(&block_num) {
+                    continue;
                 }
+
+                let dynamic: u64 = weight_arrays
+                    .iter()
+                    .map(|col| get_weight_value(col.as_ref(), i))
+                    .fold(0u64, u64::saturating_add);
+
+                let entry = block_weights.entry(block_num).or_default();
+                *entry = entry.saturating_add(header_fixed.saturating_add(dynamic));
             }
         }
     }
@@ -189,7 +206,7 @@ pub(crate) fn apply_weight_limit(
         let block_weight = block_weights.get(&block_num).copied().unwrap_or(0);
         cumulative_weight = cumulative_weight.saturating_add(block_weight);
 
-        if selected.is_empty() || cumulative_weight <= MAX_RESPONSE_BYTES {
+        if selected.is_empty() || cumulative_weight <= budget {
             selected.push(block_num);
         } else {
             break;
@@ -251,6 +268,7 @@ pub(crate) fn weight_cutoff_block(
     narrow_batches: &[RecordBatch],
     output_columns: &[String],
     table_desc: &TableDescription,
+    budget: u64,
 ) -> Option<u64> {
     let (fixed_weight, weight_cols) = compute_weight_params(output_columns, Some(table_desc));
     let bn_col = table_desc.block_number_column.as_str();
@@ -273,7 +291,7 @@ pub(crate) fn weight_cutoff_block(
     let mut cutoff: Option<u64> = None;
     for (i, &bn) in sorted_blocks.iter().enumerate() {
         cumulative = cumulative.saturating_add(block_weights.get(&bn).copied().unwrap_or(0));
-        if i == 0 || cumulative <= MAX_RESPONSE_BYTES {
+        if i == 0 || cumulative <= budget {
             cutoff = Some(bn);
         } else {
             // Budget exceeded — blocks beyond `cutoff` won't be emitted.
@@ -363,25 +381,6 @@ pub(crate) fn header_weight_params(
     compute_weight_params(block_output_columns, block_desc)
 }
 
-/// Get block number from an array at row index.
-///
-/// One arm per physical width, read as a table. `manual_map` would fold the last
-/// one into a `.map()` and leave the four no longer looking alike.
-#[allow(clippy::manual_map)]
-pub(crate) fn get_block_number(col: &dyn arrow::array::Array, i: usize) -> Option<u64> {
-    if let Some(a) = col.as_any().downcast_ref::<UInt64Array>() {
-        Some(a.value(i))
-    } else if let Some(a) = col.as_any().downcast_ref::<UInt32Array>() {
-        Some(a.value(i) as u64)
-    } else if let Some(a) = col.as_any().downcast_ref::<Int64Array>() {
-        Some(a.value(i) as u64)
-    } else if let Some(a) = col.as_any().downcast_ref::<Int32Array>() {
-        Some((a.value(i) as u32) as u64)
-    } else {
-        None
-    }
-}
-
 /// Get uint64 value from a weight column at row index.
 ///
 /// A size is unsigned by the catalog, so a negative one is a corrupt chunk. Read
@@ -389,17 +388,16 @@ pub(crate) fn get_block_number(col: &dyn arrow::array::Array, i: usize) -> Optio
 /// it appears in — or wraps the accumulator and drops the budget instead. It
 /// weighs nothing here: a model that under-counts one row emits a slightly large
 /// response, and a model that over-counts it by 2⁶⁴ emits nothing (INV-B9).
+///
+/// A width this cannot read weighs nothing for the same reason, and that is the
+/// one to watch: `*_size` companions are narrowed like any other integer, and a
+/// weight model blind to `UInt16` charges a whole chunk's rows their fixed part
+/// alone.
 pub(crate) fn get_weight_value(col: &dyn arrow::array::Array, i: usize) -> u64 {
-    if let Some(a) = col.as_any().downcast_ref::<UInt64Array>() {
-        a.value(i)
-    } else if let Some(a) = col.as_any().downcast_ref::<UInt32Array>() {
-        a.value(i) as u64
-    } else if let Some(a) = col.as_any().downcast_ref::<Int64Array>() {
-        a.value(i).try_into().unwrap_or(0)
-    } else if let Some(a) = col.as_any().downcast_ref::<Int32Array>() {
-        a.value(i).try_into().unwrap_or(0)
-    } else {
-        0
+    match IntColumn::resolve(col) {
+        Some(column) if column.is_null(i) => 0,
+        Some(column) => column.value(i).try_into().unwrap_or(0),
+        None => 0,
     }
 }
 
@@ -422,15 +420,24 @@ pub(crate) fn accumulate_block_weights(
             .map(|name| batch.column_by_name(name).map(|c| c.as_ref()))
             .collect();
 
+        // The scan resolves the block-number column on every batch it hands
+        // out, so a batch arriving here without a readable one did not come from
+        // one. Weighing nothing for it runs the response large rather than short,
+        // which is the direction INV-B9 tolerates.
+        let Ok(blocks) = BlockNumbers::resolve(bn_col.as_ref(), bn_column) else {
+            continue;
+        };
+
         for i in 0..batch.num_rows() {
-            if let Some(block_num) = get_block_number(bn_col.as_ref(), i) {
-                let mut row_weight = fixed_weight_per_row;
-                for arr in wc_arrays.iter().flatten() {
-                    row_weight = row_weight.saturating_add(get_weight_value(*arr, i));
-                }
-                let entry = weights.entry(block_num).or_default();
-                *entry = entry.saturating_add(row_weight);
+            let block_num = blocks.at(i);
+
+            let mut row_weight = fixed_weight_per_row;
+            for arr in wc_arrays.iter().flatten() {
+                row_weight = row_weight.saturating_add(get_weight_value(*arr, i));
             }
+
+            let entry = weights.entry(block_num).or_default();
+            *entry = entry.saturating_add(row_weight);
         }
     }
 }
@@ -463,21 +470,29 @@ fn accumulate_block_weights_dedup(
             .map(|name| batch.column_by_name(name).map(|c| c.as_ref()))
             .collect();
 
+        // The scan resolves the block-number column on every batch it hands
+        // out, so a batch arriving here without a readable one did not come from
+        // one. Weighing nothing for it runs the response large rather than short,
+        // which is the direction INV-B9 tolerates.
+        let Ok(blocks) = BlockNumbers::resolve(bn_col.as_ref(), bn_column) else {
+            continue;
+        };
+
         for i in 0..batch.num_rows() {
-            if let Some(block_num) = get_block_number(bn_col.as_ref(), i) {
-                let row_hash = compute_row_key_hash(&key_arrays, i);
+            let block_num = blocks.at(i);
+            let row_hash = compute_row_key_hash(&key_arrays, i);
 
-                if !seen.insert((block_num, row_hash)) {
-                    continue; // Duplicate row, skip.
-                }
-
-                let mut row_weight = fixed_weight_per_row;
-                for arr in wc_arrays.iter().flatten() {
-                    row_weight = row_weight.saturating_add(get_weight_value(*arr, i));
-                }
-                let entry = weights.entry(block_num).or_default();
-                *entry = entry.saturating_add(row_weight);
+            if !seen.insert((block_num, row_hash)) {
+                continue; // Duplicate row, skip.
             }
+
+            let mut row_weight = fixed_weight_per_row;
+            for arr in wc_arrays.iter().flatten() {
+                row_weight = row_weight.saturating_add(get_weight_value(*arr, i));
+            }
+
+            let entry = weights.entry(block_num).or_default();
+            *entry = entry.saturating_add(row_weight);
         }
     }
 }
