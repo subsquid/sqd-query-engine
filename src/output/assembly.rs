@@ -19,7 +19,6 @@ use crate::output::row_writer::{
 use crate::output::weight::{
     accumulate_block_weights, apply_weight_limit, block_scan_columns, get_weight_value,
     primary_weight_params, weight_cutoff_block, weight_scan_columns, TableOutput,
-    MAX_RESPONSE_BYTES,
 };
 use crate::output::writer::QueryOutput;
 use crate::query::{Plan, RelationKind};
@@ -170,6 +169,46 @@ fn request_name_positions(metadata: &DatasetDescription) -> HashMap<&str, usize>
         .collect()
 }
 
+/// The knobs production leaves alone and a test has to move.
+///
+/// Both fields hold one value in the field — `P-WEIGHT-BUDGET`, and a budget
+/// walk that is always allowed — and exist because a test that cannot move them
+/// has to reach past the pipeline to say anything about them. A budget test that
+/// cannot lower the budget runs against the scanner alone, where the estimate
+/// and the exact trim never meet; a differential test that cannot switch the walk
+/// off has to model what the walk does in order to check it, and a model of the
+/// thing under test agrees with its bugs.
+#[derive(Debug, Clone, Copy)]
+pub struct ExecOptions {
+    /// Print stage timings to stderr.
+    pub profile: bool,
+    /// The cumulative block weight a response may carry (`P-WEIGHT-BUDGET`).
+    pub weight_budget: u64,
+    /// Whether a block-sorted scan may stop early once the budget walk has read
+    /// enough. Off reads every table whole, which is the answer the walk exists
+    /// to reach sooner and must not change.
+    pub budget_walk: bool,
+}
+
+impl Default for ExecOptions {
+    fn default() -> Self {
+        Self {
+            profile: false,
+            weight_budget: crate::output::weight::MAX_RESPONSE_BYTES,
+            budget_walk: true,
+        }
+    }
+}
+
+impl ExecOptions {
+    pub fn profiled(profile: bool) -> Self {
+        Self {
+            profile,
+            ..Self::default()
+        }
+    }
+}
+
 pub fn execute_plan(
     plan: &Plan,
     metadata: &DatasetDescription,
@@ -177,6 +216,20 @@ pub fn execute_plan(
 ) -> Result<Option<QueryOutput>> {
     let chunk = ParquetChunkReader::open(chunk_dir)?;
     execute_chunk(plan, metadata, &chunk, false)
+}
+
+/// Execute a plan against any ChunkReader, with the engine's knobs given
+/// explicitly. See [`ExecOptions`].
+pub fn execute_chunk_with(
+    plan: &Plan,
+    metadata: &DatasetDescription,
+    chunk: &dyn ChunkReader,
+    options: ExecOptions,
+) -> Result<Option<QueryOutput>> {
+    match execute_chunk_fmt(plan, metadata, chunk, options, OutputFormat::Json)? {
+        FmtOutput::Json(blocks) => Ok(blocks.map(|b| *b)),
+        FmtOutput::Arrow(_) => unreachable!(),
+    }
 }
 
 /// Execute a plan with timing instrumentation printed to stderr.
@@ -210,7 +263,13 @@ pub fn execute_chunk(
     chunk: &dyn ChunkReader,
     profile: bool,
 ) -> Result<Option<QueryOutput>> {
-    match execute_chunk_fmt(plan, metadata, chunk, profile, OutputFormat::Json)? {
+    match execute_chunk_fmt(
+        plan,
+        metadata,
+        chunk,
+        ExecOptions::profiled(profile),
+        OutputFormat::Json,
+    )? {
         FmtOutput::Json(blocks) => Ok(blocks.map(|b| *b)),
         FmtOutput::Arrow(_) => unreachable!(),
     }
@@ -229,7 +288,7 @@ pub fn execute_chunk_arrow(
         plan,
         metadata,
         chunk,
-        false,
+        ExecOptions::default(),
         OutputFormat::Arrow { compress, binary },
     )? {
         FmtOutput::Arrow(output) => Ok(output),
@@ -271,10 +330,12 @@ fn execute_chunk_fmt(
     plan: &Plan,
     metadata: &DatasetDescription,
     chunk: &dyn ChunkReader,
-    profile: bool,
+    options: ExecOptions,
     format: OutputFormat,
 ) -> Result<FmtOutput> {
     use std::time::Instant;
+
+    let profile = options.profile;
 
     macro_rules! timer {
         () => {
@@ -400,9 +461,12 @@ fn execute_chunk_fmt(
 
             let t_phase1 = timer!();
             let narrow_batches = chunk.scan(&table_plan.table, &narrow_req)?;
-            if let Some(cutoff) =
-                weight_cutoff_block(&narrow_batches, &table_plan.output_columns, table_desc)
-            {
+            if let Some(cutoff) = weight_cutoff_block(
+                &narrow_batches,
+                &table_plan.output_columns,
+                table_desc,
+                options.weight_budget,
+            ) {
                 effective_to_block = Some(match plan.to_block {
                     Some(tb) => tb.min(cutoff),
                     None => cutoff,
@@ -422,8 +486,10 @@ fn execute_chunk_fmt(
         // these a `to_block` cap prunes whole row groups, so reading row groups in
         // block order and stopping at the budget avoids decoding wide columns for
         // blocks that can't be emitted.
-        let wave_eligible =
-            is_block_sorted(table_desc) && !plan.include_all_blocks && !single_full_scan;
+        let wave_eligible = options.budget_walk
+            && is_block_sorted(table_desc)
+            && !plan.include_all_blocks
+            && !single_full_scan;
 
         let mut request = ScanRequest::new(output_col_refs);
         request.predicates = pred_refs;
@@ -459,7 +525,7 @@ fn execute_chunk_fmt(
                 &table_plan.table,
                 &request,
                 wave_size,
-                MAX_RESPONSE_BYTES,
+                options.weight_budget,
                 &mut settled_weight,
             )?;
 
@@ -873,17 +939,47 @@ fn execute_chunk_fmt(
     // scan's contract rather than the trim's backstop: the two agree only while
     // the walk's estimate stays under the exact model, and a block whose header
     // the chunk is missing is already outside that.
+    #[cfg(debug_assertions)]
+    let before_cut = sorted_blocks.clone();
+
     if let Some(cut) = complete_through {
         sorted_blocks.retain(|&block| block <= cut);
     }
 
     let selected_blocks = apply_weight_limit(
+        options.weight_budget,
         &sorted_blocks,
         &table_outputs,
         &block_batches,
         metadata,
         plan,
     );
+
+    // The paragraph above is a claim, so it is checked rather than believed.
+    //
+    // A cut above where the trim stops cannot change an answer, which is exactly
+    // why a test that compares responses cannot see one drawn wrong until it
+    // drops below — by then the response is already short of the budget the
+    // client was promised, and the walk's estimate has already stopped being a
+    // lower bound. Comparing the two selections says so at the moment it happens,
+    // in whichever test happens to run the walk, rather than in the one somebody
+    // wrote for it.
+    #[cfg(debug_assertions)]
+    if complete_through.is_some() {
+        let uncut = apply_weight_limit(
+            options.weight_budget,
+            &before_cut,
+            &table_outputs,
+            &block_batches,
+            metadata,
+            plan,
+        );
+
+        debug_assert_eq!(
+            selected_blocks, uncut,
+            "the budget walk cut below the trim: it stopped at {complete_through:?}"
+        );
+    }
 
     if selected_blocks.is_empty() {
         return Ok(match format {

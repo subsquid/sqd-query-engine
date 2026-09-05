@@ -274,6 +274,24 @@ suite cannot assert `lastBlock` equality against the reference. The engine's
 answer is a prefix of the reference's on every shape the review ran, so a
 paging client loses nothing; only the page boundary moves.
 
+The collision reaches further than the arithmetic. `apply_weight_limit` dedups
+only where a target table has more than one source — a direct request plus a
+relation onto it — and there it can count two distinct rows as one. The budget
+walk's estimate counts raw rows and does not dedup at all, so on such a target
+the estimate can come out *above* the exact model, which is the one direction
+that makes the walk's cut land below where the trim would have stopped. The
+response then ends short of the budget, at a block that depends on the wave
+width, which is the pool size ([INV-O13](07-invariants.md#inv-o13)). The shapes
+that can reach it are `evm.statediffs`, `bitcoin.transactions` and
+`substrate.extrinsics`: block-sorted, so the walk runs, and a relation target, so
+the dedup does.
+
+Nothing has been observed doing it. A debug assertion now compares the trim's
+selection against what it would have selected without the cut, and the whole
+suite — the fixture chunks included — passes with it armed, so on the corpus
+served today the estimate stays under the exact model. The assertion is what
+turns the next case into a failure rather than a short response.
+
 *First test:* pin the reference's per-block weights for the real chunk and diff.
 
 ### 31. A block number above 2³¹ stored in `Int32` reads as negative

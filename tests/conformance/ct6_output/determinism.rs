@@ -18,8 +18,10 @@ use crate::harness::chunk::{
 };
 use crate::harness::evm_like;
 use crate::harness::fixtures::{answers_the_same, fixture_chunk, fixture_tree_is_present, meta};
-use crate::harness::json::assert_same_response;
+use crate::harness::generator::{Generator, ItemRequest, Rng, TableCorpus};
+use crate::harness::json::{assert_same_response, block_numbers, parse_response};
 use crate::harness::synthetic::{catalog, paged_at, part_blocks, partitioned_chunk, MB};
+use sqd_query_engine::output::ExecOptions;
 
 // ---------------------------------------------------------------------------
 // INV-D7 — physical width
@@ -389,6 +391,9 @@ const EVM_QUERY: &str = r#"{"type":"evm","fromBlock":125800020,"toBlock":1258000
 /// decide where to stop would page a chunk differently on a four-core worker and
 /// a sixteen-core one — the same query, the same chunk, two answers.
 ///
+/// This one is a single hand-written shape; `every_generated_query_pages_the_same`
+/// below asserts the same property over the query surface.
+///
 /// Covers CT-6 · INV-O13
 #[test]
 fn the_pool_size_does_not_move_a_page_boundary() {
@@ -406,4 +411,94 @@ fn the_pool_size_does_not_move_a_page_boundary() {
         );
         assert_eq!(logs, single_logs, "{threads} threads returned other logs");
     }
+}
+
+// ---------------------------------------------------------------------------
+// INV-O13 — the pool size, over generated queries
+// ---------------------------------------------------------------------------
+
+/// Recorded, so a failure replays. Changing it is changing the test.
+const DETERMINISM_SEED: u64 = 0x5EED_0006;
+
+const DETERMINISM_CASES: usize = 32;
+
+/// Budgets straddling what this chunk's queries actually weigh — a response here
+/// runs from about 200 bytes to about 14 KiB — so the trim lands at every depth
+/// from the first block to the last. At the production 20 MiB nothing on a chunk
+/// this size is trimmed, and every comparison below would be between two full
+/// reads.
+const DETERMINISM_BUDGETS: [u64; 6] = [1, 256, 1024, 2048, 4096, 8192];
+
+fn paged_in_pool(generator: &Generator, query: &str, budget: u64, threads: usize) -> Vec<u8> {
+    let options = ExecOptions {
+        weight_budget: budget,
+        ..ExecOptions::default()
+    };
+
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .unwrap()
+        .install(|| generator.run_with(query, options))
+}
+
+/// The machine the query ran on is not part of the answer.
+///
+/// A worker fleet is not uniform, and the wave is as wide as the pool, so a
+/// response that depends on the pool is a response that depends on which worker
+/// served it: two clients paging the same range get different `lastBlock`s and
+/// neither can tell. One hand-written shape cannot establish that — it
+/// establishes it for one shape — so the property is asserted over the query
+/// surface the generator covers, at budgets where the walk actually stops.
+///
+/// Covers CT-6 · INV-O13
+#[test]
+fn every_generated_query_pages_the_same() {
+    let chunk = evm_like::partitioned_chunk();
+    let generator = Generator::new(evm_like::catalog(), chunk.path());
+    let mut rng = Rng::new(DETERMINISM_SEED);
+
+    let mut trimmed = 0usize;
+
+    for _ in 0..DETERMINISM_CASES {
+        let tables = generator.tables();
+        let mut chosen: Vec<&TableCorpus> = rng.subset(tables);
+        if chosen.is_empty() {
+            chosen.push(rng.pick(tables));
+        }
+
+        let range = generator.range(&mut rng);
+        let requests: Vec<(&TableCorpus, Vec<ItemRequest>)> = chosen
+            .into_iter()
+            .map(|table| (table, vec![generator.item_request(table, &mut rng)]))
+            .collect();
+        let query = generator.query(range, &requests);
+
+        for budget in DETERMINISM_BUDGETS {
+            let single = paged_in_pool(&generator, &query, budget, 1);
+
+            for threads in [2, 5, 17] {
+                assert_same_response(
+                    &single,
+                    &paged_in_pool(&generator, &query, budget, threads),
+                    &format!(
+                        "{threads} threads answered differently from one at a \
+                         budget of {budget}: {query}"
+                    ),
+                );
+            }
+
+            let blocks = block_numbers(&parse_response(&single));
+            if blocks.last().is_some_and(|&last| last < range.1) {
+                trimmed += 1;
+            }
+        }
+    }
+
+    assert!(
+        trimmed > 0,
+        "the law ran {DETERMINISM_CASES} queries at {} budgets and none was trimmed, \
+         so no comparison reached the walk at all",
+        DETERMINISM_BUDGETS.len()
+    );
 }

@@ -8,8 +8,9 @@
 pub use crate::harness::guard::{fixture_chunk, fixture_tree_has, fixture_tree_is_present};
 
 use sqd_query_engine::metadata::{load_dataset_description, DatasetDescription};
-use sqd_query_engine::output::execute_plan;
+use sqd_query_engine::output::{execute_chunk_with, execute_plan, ExecOptions};
 use sqd_query_engine::query::{compile, parse_query};
+use sqd_query_engine::scan::ParquetChunkReader;
 use std::path::Path;
 
 pub fn meta(name: &str) -> DatasetDescription {
@@ -33,6 +34,22 @@ pub fn run_against(
     query: &str,
 ) -> anyhow::Result<Vec<u8>> {
     run_against_bytes(catalog, chunk, query.as_bytes())
+}
+
+/// The same, with the engine's knobs given explicitly rather than defaulted.
+pub fn run_against_with(
+    catalog: &DatasetDescription,
+    chunk: &Path,
+    query: &str,
+    options: ExecOptions,
+) -> anyhow::Result<Vec<u8>> {
+    let parsed = parse_query(query.as_bytes(), catalog)?;
+    let plan = compile(&parsed, catalog)?;
+    let reader = ParquetChunkReader::open(chunk)?;
+
+    Ok(execute_chunk_with(&plan, catalog, &reader, options)?
+        .map(|out| out.into_json_lines())
+        .unwrap_or_default())
 }
 
 fn run_against_bytes(

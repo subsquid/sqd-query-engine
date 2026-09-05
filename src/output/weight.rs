@@ -8,6 +8,10 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 /// Maximum response size in bytes (20 MB).
+/// `P-WEIGHT-BUDGET` of `spec/09-parameters.md`: the default every caller gets.
+/// The value in force is [`crate::output::ExecOptions::weight_budget`] — reading
+/// the constant instead of the field is how a stage comes to enforce a budget
+/// the rest of the query is not using.
 pub(crate) const MAX_RESPONSE_BYTES: u64 = 20 * 1024 * 1024;
 
 /// Default weight per row when no weight column is specified.
@@ -37,6 +41,7 @@ struct WeightContribution<'a> {
 /// - Direct scan results and relation results targeting the same table are merged
 /// - Duplicate rows (same block_number + item_order_keys) are counted only once
 pub(crate) fn apply_weight_limit(
+    budget: u64,
     sorted_blocks: &[u64],
     table_outputs: &HashMap<String, TableOutput>,
     block_batches: &[RecordBatch],
@@ -201,7 +206,7 @@ pub(crate) fn apply_weight_limit(
         let block_weight = block_weights.get(&block_num).copied().unwrap_or(0);
         cumulative_weight = cumulative_weight.saturating_add(block_weight);
 
-        if selected.is_empty() || cumulative_weight <= MAX_RESPONSE_BYTES {
+        if selected.is_empty() || cumulative_weight <= budget {
             selected.push(block_num);
         } else {
             break;
@@ -263,6 +268,7 @@ pub(crate) fn weight_cutoff_block(
     narrow_batches: &[RecordBatch],
     output_columns: &[String],
     table_desc: &TableDescription,
+    budget: u64,
 ) -> Option<u64> {
     let (fixed_weight, weight_cols) = compute_weight_params(output_columns, Some(table_desc));
     let bn_col = table_desc.block_number_column.as_str();
@@ -285,7 +291,7 @@ pub(crate) fn weight_cutoff_block(
     let mut cutoff: Option<u64> = None;
     for (i, &bn) in sorted_blocks.iter().enumerate() {
         cumulative = cumulative.saturating_add(block_weights.get(&bn).copied().unwrap_or(0));
-        if i == 0 || cumulative <= MAX_RESPONSE_BYTES {
+        if i == 0 || cumulative <= budget {
             cutoff = Some(bn);
         } else {
             // Budget exceeded — blocks beyond `cutoff` won't be emitted.
