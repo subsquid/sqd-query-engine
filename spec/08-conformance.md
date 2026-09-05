@@ -365,10 +365,10 @@ renamed out from under a comment inside it.
 | [INV-B1](07-invariants.md#inv-b1) | CT-5 | **C** | `test_scan_with_block_range`, `test_scan_with_predicate_and_block_range` |
 | [INV-B2](07-invariants.md#inv-b2) | CT-5 | **C** | `untrimmed_scan_includes_all_blocks` |
 | [INV-B3](07-invariants.md#inv-b3) | CT-5 | **C** | `boundary_blocks_emitted_without_items`, `budget_trim_excludes_range_end_boundary_block`, and `a_split_adds_only_boundary_headers`, which bounds at two the headers a split may add |
-| [INV-B4](07-invariants.md#inv-b4) | CT-5 | **P** | implied by the budget suite; no block-larger-than-budget case |
+| [INV-B4](07-invariants.md#inv-b4) | CT-5 | **C** | `paging_a_partitioned_chunk_loses_no_block` pages a chunk whose row groups share their boundary block and whose shared blocks each weigh twice the budget: every one of them comes back whole, in a page of its own, and the walk that stopped short of it emitted none of it. `a_budget_stop_never_emits_a_partial_block` and `no_budget_or_wave_size_makes_a_block_partial` make the same assertion of the scan rather than the response, over a fixture chunk at every budget and wave width |
 | [INV-B5](07-invariants.md#inv-b5) | CT-5 | **P** | the weight unit tests cover the components, not the block sum |
 | [INV-B6](07-invariants.md#inv-b6) | CT-5 | **P** | `multi_table_trim_reports_true_last_block`; the keep-at-least-one rule is untested |
-| [INV-B7](07-invariants.md#inv-b7) | CT-5 | **P** | same test; no end-to-end paging run |
+| [INV-B7](07-invariants.md#inv-b7) | CT-5 | **C** | `paging_a_partitioned_chunk_loses_no_block` pages a block-partitioned chunk end to end from `lastBlock + 1`, at three pool sizes, and asserts the concatenation is the chunk — every log once, none skipped. The budget walk reads one table and stops; the pool sizes its waves, so the narrow pools are the ones that reach the stop |
 | [INV-B8](07-invariants.md#inv-b8) | CT-5 | **C** | `splitting_the_range_returns_the_same_items` splits at every block boundary of a sixteen-block chunk and concatenates the halves back, per table, in response order — for seven item-request shapes, since composability is a claim about how a filter and a relation meet a range boundary and a query carrying neither says nothing about either. `splitting_a_fixture_range_returns_the_same_items` does it over forty blocks an archiver wrote, and `splitting_a_hierarchical_range_returns_the_same_items` over a relation that matches an address *prefix* rather than an equal key, which is where locality is least obvious. A half the weight budget trimmed is a failure rather than a difference to explain away, so the comparison cannot be satisfied by two short responses |
 | [INV-B9](07-invariants.md#inv-b9) | CT-5 | **P** | the arithmetic is checked — `a_negative_size_weighs_nothing`, `block_weight_saturates_rather_than_wrapping`. That it is the *same* function twice over one chunk is not asserted |
 | [INV-B10](07-invariants.md#inv-b10) | CT-5 | **C** | four weight-projection cases |
@@ -384,7 +384,7 @@ renamed out from under a comment inside it.
 | [INV-O10](07-invariants.md#inv-o10) | CT-6 | **C** | `test_encode_roll`, `test_encode_roll_with_list_spread` |
 | [INV-O11](07-invariants.md#inv-o11) | CT-6 | **P** | variants are exercised; an unknown variant is not, and that is the case archives outliving catalogs produce |
 | [INV-O12](07-invariants.md#inv-o12) | CT-6 | **C** | `the_same_chunk_and_query_give_the_same_bytes`, and every case of INV-D7 and INV-D8 is a second assertion of it |
-| [INV-O13](07-invariants.md#inv-o13) | CT-6 | **C** | `thread_count_does_not_reach_the_answer` runs seven item-request shapes in pools of 1, 2, 4 and 16 and compares bytes; the rest of what the invariant names — row-group and page boundaries, compression, physical row order, physical widths, statistics and dictionaries — is INV-D7's and INV-D8's equality runs, which are the same assertion made of the chunk instead of the pool |
+| [INV-O13](07-invariants.md#inv-o13) | CT-6 | **C** | `thread_count_does_not_reach_the_answer` runs seven item-request shapes in pools of 1, 2, 4 and 16 and compares bytes; the rest of what the invariant names — row-group and page boundaries, compression, physical row order, physical widths, statistics and dictionaries — is INV-D7's and INV-D8's equality runs, which are the same assertion made of the chunk instead of the pool. `the_pool_size_does_not_move_a_page_boundary` adds the case a single response cannot show: the pool sizes the budget walk's wave, so it pages a chunk at three pool sizes and asserts the page boundaries land in the same places |
 | [INV-O14](07-invariants.md#inv-o14) | CT-6 | **C** | six Arrow-parity cases |
 | [INV-E1](07-invariants.md#inv-e1) | CT-9 | **P** | the request half is fuzzed under CT-9, and `a_chunk_that_disagrees_with_the_catalog_does_not_panic` pins the encoders against a chunk written to disagree. The chunk-type *sweep* the invariant asks for needs HC-3, and two existing tests still assert a panic rather than forbid one |
 | [INV-E2](07-invariants.md#inv-e2) | CT-2 | **P** | validation precedes scanning by construction; nothing asserts that no output precedes an error |
@@ -397,17 +397,17 @@ renamed out from under a comment inside it.
 | [INV-X2](07-invariants.md#inv-x2) | CT-8 | **C** | `an_ignored_nullable_column_does_not_change_output` |
 | [INV-X3](07-invariants.md#inv-x3) | CT-8 | **C** | `filtering_an_absent_column_is_an_error` on both scan entry points, `filtering_a_present_column_still_works` for the other direction, `one_unanswerable_item_rejects_the_whole_request` for a filter one item request of several carries, and `an_alias_filter_on_a_column_the_chunk_lacks_is_an_error` for one reached through an alias's extraction column |
 
-**Totals: 60 C, 25 P, 0 U** of 85. Property coverage is therefore 0.71
+**Totals: 62 C, 23 P, 0 U** of 85. Property coverage is therefore 0.73
 (`P-COV-PROPERTY` in [09-parameters.md](09-parameters.md)).
 
-Of the 85 rows at **C** or **P**, 68 are backed by a tagged test and 17 rest on
-prose alone. Those 17 are the rows whose note says "fixtures only" or describes a
+Of the 85 rows at **C** or **P**, 70 are backed by a tagged test and 15 rest on
+prose alone. Those 15 are the rows whose note says "fixtures only" or describes a
 group of cases without naming one, and they are the ones nothing recomputes: the
 status is what somebody believed on the day they typed it. Shrinking that number
 is what turns MG-1's ratchet from an intention into an arithmetic fact, so the
 checker recomputes all three numbers in this paragraph rather than trusting them.
 
-A tag is not the same as a gate. 4 of the 68 are backed only by tests marked
+A tag is not the same as a gate. 4 of the 70 are backed only by tests marked
 `#[ignore]`, which MG-3's portable job does not run: the test would fail if the
 invariant broke, but only on a machine that has the chunks. The checker reports
 those rows on every run too, because a status that no job can falsify is a status

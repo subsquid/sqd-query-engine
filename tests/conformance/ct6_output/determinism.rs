@@ -19,6 +19,7 @@ use crate::harness::chunk::{
 use crate::harness::evm_like;
 use crate::harness::fixtures::{answers_the_same, fixture_chunk, fixture_tree_is_present, meta};
 use crate::harness::json::assert_same_response;
+use crate::harness::synthetic::{catalog, paged_at, part_blocks, partitioned_chunk, MB};
 
 // ---------------------------------------------------------------------------
 // INV-D7 — physical width
@@ -383,3 +384,26 @@ const EVM_QUERY: &str = r#"{"type":"evm","fromBlock":125800020,"toBlock":1258000
               "transaction":{"from":true,"to":true,"value":true}},
     "logs":[{"topic0":["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"],
              "transaction":true}]}"#;
+
+/// The wave is as wide as the rayon pool, so a walk that let the wave boundary
+/// decide where to stop would page a chunk differently on a four-core worker and
+/// a sixteen-core one — the same query, the same chunk, two answers.
+///
+/// Covers CT-6 · INV-O13
+#[test]
+fn the_pool_size_does_not_move_a_page_boundary() {
+    let meta = catalog();
+    let chunk = partitioned_chunk(MB);
+    let to = *part_blocks().last().unwrap();
+
+    let (single_logs, single_pages) = paged_at(&meta, &chunk, to, 1);
+
+    for threads in [2, 17] {
+        let (logs, pages) = paged_at(&meta, &chunk, to, threads);
+        assert_eq!(
+            pages, single_pages,
+            "{threads} threads paged the chunk at {pages:?}, one thread at {single_pages:?}"
+        );
+        assert_eq!(logs, single_logs, "{threads} threads returned other logs");
+    }
+}

@@ -8,7 +8,10 @@ use sqd_query_engine::query::{compile, parse_query};
 use sqd_query_engine::scan::ParquetChunkReader;
 
 use crate::harness::json::{block_numbers, parse_response};
-use crate::harness::synthetic::{catalog, logs_query, run, uniform, weighted_chunk, BLOCKS, MB};
+use crate::harness::synthetic::{
+    catalog, logs_query, narrow_weighted_chunk, paged_at, part_blocks, part_log_rows,
+    partitioned_chunk, run, uniform, weighted_chunk, BLOCKS, MB,
+};
 
 /// Regression test for the phase-1 cutoff bug: a single-table full scan whose
 /// budget cutoff falls below `toBlock` must not include the range-end boundary
@@ -126,4 +129,112 @@ fn arrow_json_parity_on_trim() {
     assert_eq!(arrow.first_block(), json.first_block());
     assert_eq!(arrow.last_block(), json.last_block());
     assert!(!arrow.data().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Paging over a block-partitioned chunk
+// ---------------------------------------------------------------------------
+//
+// The budget walk reads one table in block order and stops where its weight
+// crosses the budget. Every other table was read for the whole range, so a
+// response assembled without carrying that stop point out to block selection
+// ends past it: the blocks above the cut come back with the other tables' rows
+// and none of the walked table's, and `lastBlock` names the top of them. The
+// client resumes above that and the rows below are gone, with a 200 and nothing
+// to notice.
+//
+// This runs the walk through the whole response, which is what the scanner tests
+// in `scan.rs` cannot see: they assert on the rows the walk returns, and the rows
+// the walk returns were never the wrong part. The pool-size half of the property
+// sits with the other determinism tests, in `ct6_output::determinism`.
+
+/// INV-B7's own test, run on a table that takes the budget walk: the pages
+/// concatenate back into the whole chunk, with no block skipped and none served
+/// twice.
+///
+/// Run at three pool sizes because the pool sizes the wave: at one row group a
+/// wave the walk stops on the first, at seventeen it reads the chunk in one go
+/// and never stops at all. Only the narrow pools reach the cut, and the answer
+/// has to be the same either way.
+///
+/// Covers CT-5 · INV-B4, INV-B7
+#[test]
+fn paging_a_partitioned_chunk_loses_no_block() {
+    let meta = catalog();
+    // A megabyte a log: a plain block costs that, the block two row groups share
+    // costs forty, and the budget holds twenty. The walk crosses the budget on
+    // the half of the shared block it reads first, while the blocks it can serve
+    // still add up to five.
+    let chunk = partitioned_chunk(MB);
+    let to = *part_blocks().last().unwrap();
+
+    for threads in [1, 2, 17] {
+        let (paged, last_blocks) = paged_at(&meta, &chunk, to, threads);
+
+        assert!(
+            last_blocks.len() > 3,
+            "at {threads} threads the budget did not split this chunk, so the test proves \
+             nothing: {last_blocks:?}"
+        );
+        assert_eq!(
+            paged,
+            part_log_rows(),
+            "at {threads} threads the pages ended at {last_blocks:?} and did not add back up \
+             to the chunk"
+        );
+    }
+}
+
+/// A chunk whose integers are narrowed to sixteen bits still weighs what it
+/// weighs.
+///
+/// The weight model reads two columns by hand — the block number, to know whose
+/// weight a row is, and the `*_size` companion, to know how much. A width either
+/// read cannot resolve does not raise anything: the row weighs its fixed part, or
+/// belongs to no block at all, and the response the budget was meant to cap goes
+/// out whole. Both readers now resolve through the one list of widths, so this
+/// asserts the trim happens at sixteen bits exactly as it does at sixty-four.
+///
+/// Covers CT-5 · INV-B9
+#[test]
+fn a_narrow_size_column_still_reaches_the_budget() {
+    // 65 535 is all a `UInt16` size can claim, so the budget is crossed by row
+    // count: 480 logs over 8 blocks is about 31 MB against a 20 MB cap.
+    const SIZE: u64 = u16::MAX as u64;
+    const LOGS_PER_BLOCK: usize = 60;
+
+    let blocks: Vec<u64> = (10..18).collect();
+    let logs: Vec<(u64, u64)> = blocks
+        .iter()
+        .flat_map(|&b| std::iter::repeat_n((b, SIZE), LOGS_PER_BLOCK))
+        .collect();
+
+    let chunk = narrow_weighted_chunk(&blocks, &logs);
+    let meta = catalog();
+    let query = serde_json::json!({
+        "type": "test",
+        "fromBlock": 10,
+        "toBlock": 17,
+        "logs": [{}],
+        "fields": {"block": {"number": true}, "log": {"data": true}}
+    });
+    let out = run(&meta, &chunk, query).unwrap();
+
+    assert!(
+        out.last_block() < 17,
+        "the whole chunk weighs about {} MB against a 20 MB budget, yet every block \
+         came back: a size stored at a width the weight model cannot read weighs nothing",
+        logs.len() as u64 * SIZE / MB
+    );
+
+    let lines = parse_response(&out.into_json_lines());
+    let emitted: usize = lines
+        .iter()
+        .map(|b| b.get("logs").and_then(|l| l.as_array()).map_or(0, Vec::len))
+        .sum();
+    assert_eq!(
+        emitted,
+        block_numbers(&lines).len() * LOGS_PER_BLOCK,
+        "a block that is emitted is emitted whole"
+    );
 }

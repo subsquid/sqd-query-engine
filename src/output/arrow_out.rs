@@ -35,8 +35,8 @@
 //! [u32 LE name_len][name utf8][u32 LE payload_len][arrow ipc stream bytes] ...
 //! ```
 
+use crate::integers::BlockNumbers;
 use crate::metadata::{JsonEncoding, TableDescription};
-use crate::output::weight::get_block_number;
 use anyhow::Result;
 use arrow::array::{Array, ArrayRef, BinaryBuilder, BooleanArray, StringArray};
 use arrow::compute::filter_record_batch;
@@ -130,14 +130,10 @@ pub fn filter_to_blocks(
     let Some(col) = batch.column_by_name(bn_col) else {
         return Ok(batch.clone());
     };
-    let mask: BooleanArray = (0..batch.num_rows())
-        .map(|i| {
-            Some(
-                get_block_number(col.as_ref(), i)
-                    .map(&keep)
-                    .unwrap_or(false),
-            )
-        })
+
+    let blocks = BlockNumbers::resolve(col.as_ref(), bn_col)?;
+    let mask: BooleanArray = (0..blocks.len())
+        .map(|i| Some(keep(blocks.at(i))))
         .collect();
     Ok(filter_record_batch(batch, &mask)?)
 }

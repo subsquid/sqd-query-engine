@@ -117,6 +117,58 @@ int_column!(
     Int8(Int8Array, u8),
 );
 
+/// The block-number column of a batch: resolved once, and checked once.
+///
+/// A block number is what every layer places a row by — which row group can
+/// still own it, what it weighs, which block it is emitted under. So a value no
+/// reader can resolve is not something the reader that happened to notice gets
+/// to decide about alone. Read through [`IntColumn`] a null returns the slot's
+/// placeholder and the row quietly becomes block 0's; a column stored at no
+/// integer width returns nothing at all. Both are corrupt input, and INV-E1 asks
+/// for an error rather than an answer built on them.
+///
+/// The scan resolves this on every batch it hands out, so the readers behind it
+/// work on a column already known to be whole.
+pub struct BlockNumbers<'a>(IntColumn<'a>);
+
+impl<'a> BlockNumbers<'a> {
+    pub fn resolve(column: &'a dyn Array, name: &str) -> anyhow::Result<Self> {
+        let Some(reader) = IntColumn::resolve(column) else {
+            crate::engine_bail!(
+                crate::error::ErrorKind::MalformedChunkData,
+                "block-number column '{}' is stored as {}, which is not an integer",
+                name,
+                column.data_type()
+            );
+        };
+
+        if column.null_count() > 0 {
+            crate::engine_bail!(
+                crate::error::ErrorKind::MalformedChunkData,
+                "block-number column '{}' leaves {} of {} rows without a block",
+                name,
+                column.null_count(),
+                column.len()
+            );
+        }
+
+        Ok(Self(reader))
+    }
+
+    #[inline]
+    pub fn at(&self, row: usize) -> u64 {
+        self.0.block_number(row)
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.len() == 0
+    }
+}
+
 /// An owned reader, for the sites that keep one alive past the batch borrow.
 ///
 /// Arrow arrays are `Arc`-backed, so the clone is a refcount bump.

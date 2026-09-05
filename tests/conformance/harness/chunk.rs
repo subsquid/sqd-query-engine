@@ -50,6 +50,28 @@ pub fn write_table(dir: &Path, table: &str, fields: Vec<Field>, columns: Vec<Arr
     write_parquet(&dir.join(format!("{table}.parquet")), &batch);
 }
 
+/// The same, one row group per entry: the writer is flushed after each, which is
+/// what puts a block shared by two groups in both of them.
+pub fn write_table_row_groups(
+    dir: &Path,
+    table: &str,
+    fields: Vec<Field>,
+    groups: Vec<Vec<ArrayRef>>,
+) {
+    let schema = Arc::new(Schema::new(fields));
+    let file = File::create(dir.join(format!("{table}.parquet"))).unwrap();
+    let mut writer = ArrowWriter::try_new(file, schema.clone(), None).unwrap();
+
+    for columns in groups {
+        writer
+            .write(&RecordBatch::try_new(schema.clone(), columns).unwrap())
+            .unwrap();
+        writer.flush().unwrap();
+    }
+
+    writer.close().unwrap();
+}
+
 /// A blocks table carrying nothing but the numbers, under the column name the
 /// minimal catalogs in these tests declare.
 pub fn blocks_parquet(dir: &Path, numbers: &[u64]) {

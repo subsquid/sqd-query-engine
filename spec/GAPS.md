@@ -26,7 +26,6 @@ Compared against the reference implementation, as of 2026-09-05.
 
 | # | Gap | Invariant | Sev |
 |---|---|---|---|
-| 33 | The budget early-stop on a block-sorted table drops whole blocks, and `lastBlock` jumps past them | [INV-B7](07-invariants.md#inv-b7) | **S1** |
 | 40 | A filter on a column stored at a physical type outside the predicate's downcast matrix matches nothing | [INV-D7](07-invariants.md#inv-d7) | **S1** |
 | 41 | A roll field tolerates absent source columns and emits a misaligned list | [INV-E3](07-invariants.md#inv-e3) | **S1** |
 | 35 | The catalogs lag the reference by thirteen fields, and one of them cannot be expressed | [INV-X1](07-invariants.md#inv-x1) | **S2** |
@@ -53,9 +52,9 @@ below says are deliberate, plus gap 35, which is not. Outside that case gaps 37
 to 39 refuse as well: a missing target table, an unreadable file beside the ones
 the query reads, and two physical types that panic.
 
-Gaps 33 to 44 come from one review, done before the engine goes to a fleet of
-workers that nobody can patch quickly. The number 34 was never assigned; the
-register carries eleven new entries, not twelve. The review ran the reference
+Gaps 33 to 44 came from one review, done before the engine goes to a fleet of
+workers that nobody can patch quickly. The number 34 was never assigned, and 33
+is closed, so ten of those entries are left. The review ran the reference
 and this engine side by side: every filter, relation, alias and field of all
 seven datasets diffed against the reference's request macros; about 330
 request probes and about 700 response runs on the real chunks and every
@@ -72,11 +71,13 @@ older than its catalog. Two archiver generations wrote the chunks in the field.
 The Python one wrote every Substrate dataset and most EVM datasets, including
 ethereum-mainnet in 2026: `Int32` block numbers, `Int64` sizes, and a column set
 that stops at the 2024 additions. The Rust one wrote Solana, bitcoin,
-hyperliquid, tempo and some EVM datasets, with `UInt16` indices and — the fact
-gap 33 turns on — state diffs sorted by address rather than block. The catalog
-declares the Rust layout for widths and columns, but its `statediffs`
-`sort_key` is block-led, which is the Python one; most chunks have the Python
-layout throughout. Where the engine
+hyperliquid, tempo and some EVM datasets, with `UInt16` indices and state diffs
+sorted by address rather than block. The catalog declares the Rust layout for
+widths and columns, but its `statediffs` `sort_key` is block-led, which is the
+Python one; most chunks have the Python layout throughout. The budget walk no
+longer takes that declaration at its word — it reads the row-group statistics
+and falls back to reading the table whole when they disagree — but every other
+reader still does. Where the engine
 meets a column that is absent or retyped, it now mostly errors as
 [INV-E3](07-invariants.md#inv-e3) and [INV-X3](07-invariants.md#inv-x3) require.
 Gaps 40 to 43 are the places it still does not.
@@ -90,62 +91,6 @@ field macros against the catalogs on every build would have.
 ---
 
 ## S1 — Wrong results that look right
-
-### 33. The budget early-stop on a block-sorted table drops whole blocks, and `lastBlock` jumps past them
-
-A table whose sort key starts with the block column — `evm.statediffs`,
-`bitcoin.transactions`, `substrate.extrinsics` — is scanned in waves that stop
-once the cumulative weight crosses the budget, keeping only the rows of blocks
-below the first unread row group (`scan_waves_until_budget` and
-`retain_blocks_below` in `src/scan/scanner.rs`). That cut never reaches block
-selection. The other item tables were already scanned for the whole range, the
-range-end boundary block of [INV-B3](07-invariants.md#inv-b3) stays a candidate,
-and `apply_weight_limit` sees only the rows the walk kept. When the retained
-weight sits under the budget — which on block-partitioned layouts happens
-whenever the wave's overshoot is smaller than the shared boundary block, and on
-address-sorted layouts happens nearly always — selection runs past the cut. The
-response then either ends with a header-only block at `toBlock`, or carries
-blocks with every table's rows but this one's. The client resumes from
-`lastBlock + 1` and never asks for the missing blocks again, which is exactly
-what [INV-B7](07-invariants.md#inv-b7) forbids.
-
-The wave is `rayon::current_num_threads()` row groups wide, so the same query on
-the same chunk answers differently on workers with different core counts,
-against [INV-O13](07-invariants.md#inv-o13). The reference reads every selected
-row group before weighing and has no such cut.
-
-Measured on the real EVM chunk with `stateDiffs: [{kind: […]}]`, fields
-`{transactionIndex, key}`, range 24550605–24550820: the reference returns
-`lastBlock = 24550676` and 72 blocks; this engine at one thread and at seventeen
-returns the same 72 blocks, then `{"header":{"number":24550820}}`, and
-`lastBlock = 24550820` — 143 blocks of state diffs gone. At two to sixteen
-threads it matches the reference. On the Rust-written `ethereum` fixture chunk,
-`stateDiffs: [{}]` with `logs: [{topic0: […]}]` returns 326 blocks with 868 state
-diffs in total, 325 of the blocks with no `stateDiffs` array at all; the
-reference returns 73 blocks and 71 472 diffs.
-
-The address-sorted layout is a second fault under the first: the catalog's
-`sort_key` for `statediffs` describes the Python archiver's layout, and the wave
-path trusts it. Row-group statistics on the block column say which layout a file
-has; the path should read them before assuming order.
-
-Introduced on the first of September. Revisions before it have the previous
-fault on the same path instead: on the address-sorted layout
-it emits a block with 197 of its 868 diffs, against
-[INV-B4](07-invariants.md#inv-b4).
-
-*Why the suite missed it:* the five tests of the cut assert on the scanner's
-rows, not on the response, and no fixture query truncates on a block-sorted
-table. Of the three `stateDiffs` fixtures only
-`state_diffs_no_predicate_with_transaction` is a single block; the other two
-reach the wave path and do not truncate on it.
-
-*First test:* an R2-layout synthetic chunk whose overshoot lands inside the block
-two row groups share; page it end to end at one, two and seventeen threads and
-assert the concatenation equals the reference's single-shot answer
-([INV-B7](07-invariants.md#inv-b7)'s own test, run on a table that takes this
-path). Then the fix: return the cut from the walk and cap block selection and
-`header_to_block` at `unread_min - 1`, as the two-phase path already does.
 
 ### 40. A filter on a column stored at a physical type outside the predicate's downcast matrix matches nothing
 
@@ -220,7 +165,8 @@ catalog lacks a field the reference serves — the transcription, recomputed.
 ### 36. Relation expansion materialises every target table before the weight budget is applied
 
 The budget is applied before rows are materialised on two paths only: the
-single-table pre-scan, and the wave walk of gap 33. Every other plan scans each
+single-table pre-scan, and the budget walk over a block-partitioned table. Every
+other plan scans each
 item table for the whole range, then scans each relation target with a key
 filter built from *all* primary rows, and only then selects the weighted prefix
 of [INV-B6](07-invariants.md#inv-b6). The wire answer honours the invariant; the
@@ -324,7 +270,9 @@ blocks weigh zero here and their header weight there; the key columns weighed
 when not selected differ; the header's `number` is weighed only when selected;
 Substrate `digest` weighs 32 here and 128 there. Items are equal when each engine
 pages independently, so none of this is wrong, but until it is closed the parity
-suite cannot assert `lastBlock` equality, which is the assertion gap 33 needed.
+suite cannot assert `lastBlock` equality against the reference. The engine's
+answer is a prefix of the reference's on every shape the review ran, so a
+paging client loses nothing; only the page boundary moves.
 
 *First test:* pin the reference's per-block weights for the real chunk and diff.
 
@@ -341,23 +289,83 @@ The visible effect is a response of zero bytes for a range the chunk covers. Not
 "the wrong rows" — no rows, and no error, which is indistinguishable from a chunk
 that ends before the range starts.
 
+The same widening reaches the row-group statistics. A writer comparing wrapped
+values signed records the block above the wrap as the group's minimum and the
+highest block below it as the maximum, so widened back the pair reads `min > max`:
+a range starting above where the group ends. Three readers act on it — the budget
+walk orders row groups on it, the block-range pruner skips on it, and the relation
+pruner tests it for overlap with the key set — and the pruners are the ones that
+lose rows. The relation pruner loses them unconditionally: every key at or above
+an inverted minimum is above the inverted maximum by construction, so the overlap
+test cannot pass and the group is dropped whatever the query asked for.
+
+All three now read bounds through one function, `block_bounds`, which returns
+nothing for a pair that reads back inverted; a statistic no reader can trust is
+refused for all of them or for none. That is not a fix for this entry, only a
+refusal to make it worse — and, having been split across three sites once
+already, one place it cannot be forgotten in again.
+
 [INV-D7](07-invariants.md#inv-d7) says any integer width and *signedness*, so the
 engine is wrong and the spec is right. It is **S4** rather than **S1** because
 reaching it needs a writer that keeps `Int32` past 2³¹ instead of widening — the
 `UInt32` arm, which any sane writer would pick, is already correct — and because
 the chains served are between one and two orders of magnitude below that number.
 
-The fix is not a one-line reinterpretation: a `[from, to]` range that straddles
-2³¹ is two disjoint intervals in the signed domain, so the arm needs the straddle
-case rather than a different scalar. Writing it as a scalar loop the way
-`block_below_mask` does would work and would give up the SIMD kernel on a path
-that runs over every row of every block-filtered scan.
+The fix is not a one-line reinterpretation. A `[from, to]` range that straddles
+2³¹ is two disjoint intervals in the signed domain, so `block_range_mask` needs
+the straddle case rather than a different scalar, and writing it as a scalar loop
+the way `block_below_mask` does would give up the SIMD kernel on a path that runs
+over every row of every block-filtered scan. Below it sits a second rule already
+in the way: `from_block` of zero is treated as no lower bound, which is true for
+an unsigned column and false for this one — the wrapped rows are negative there,
+and nothing excludes them.
+
+So serving such a chunk correctly means three readers that know about the wrap,
+plus a fourth reader whose statistics cannot be repaired at all: a straddling row
+group's bounds do not say where it starts, because the writer recorded its largest
+block as the minimum. That much is not a bug to fix but information the file does
+not carry.
+
+Refuse the chunk instead. `MalformedChunkData` says what is true — the catalog
+declares `uint64` and the column stores a number its physical type cannot hold —
+and a signed block number below zero is exactly that, detectable from one
+statistic per row group. Refusing turns this entry from silent into loud, **S4**
+into **S3**, and replaces three straddle-aware readers with one check.
+
+It costs something, and the cost should be stated: the rows themselves widen
+correctly, so a fully straddle-aware engine would answer this chunk and this one
+refuses it. That is a divergence from the reference, which answers, and belongs in
+the table above when it lands. It is a trade worth making while the layouts that
+can reach it — those keeping block numbers in a signed 32-bit column — are eight
+centuries from 2³¹ at twelve seconds a block. Solana is the closest chain to the
+number, five times below it, and cannot reach this entry at all: it is written
+`UInt32`, so its statistics are sorted unsigned and every reader here widens them
+correctly.
+
+The check belongs where the block-number column is resolved, once per scan, not
+where each reader happens to notice. The same chunk failing on one query and
+answering on another — which is what a per-reader check gives, since a plan that
+takes a different path never looks — is the *terminal* case the divergence table
+describes.
+
+That resolution point now exists: `BlockNumbers` in `src/integers.rs`, run by the
+scan on every batch it hands out. It refuses a block-number column stored at no
+integer width, and one carrying a null — a row the width-tolerant reader would
+have placed under block 0, differently in each of the five readers that used to
+widen the column themselves. What it does not yet refuse is the value this entry
+is about, because a wrapped block is a legal `Int32` and only the catalog's
+declared `uint64` says otherwise. Adding that check is the remaining work, and it
+is now one line in one place rather than a straddle case in three readers. The
+statistic refusals stay either way: a corrupt statistic needs no wrapped block to
+arrive.
 
 *First test:* a chunk whose block numbers start at 2 200 000 000 stored as
-`Int32`, queried over its own range, must return the same response as the same
-chunk stored as `UInt64`. `physical_width_does_not_reach_the_answer` sweeps every
-width already; what it cannot reach is a value that does not fit the width it is
-stored at, which needs a writer that wraps rather than widens.
+`Int32` must be refused with `MalformedChunkData`, on every query shape — a
+bounded range, an unbounded one, a filtered scan, a relation pull — rather than
+answered by one and dropped by another.
+`physical_width_does_not_reach_the_answer` sweeps every width already; what it
+cannot reach is a value that does not fit the width it is stored at, which needs a
+writer that wraps rather than widens.
 
 ### 32. The bloom's hash function is not pinned, and today's version drops the seed above 240 bytes
 
