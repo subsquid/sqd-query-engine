@@ -1,3 +1,4 @@
+version: v2
 name: tron
 
 # Tron writes hex without the `0x` prefix, so its addresses, topics and sighashes

@@ -1,4 +1,4 @@
-use crate::metadata::{DatasetDescription, SpecialFilter, MAX_DISCRIMINATOR_BYTES};
+use crate::{DatasetDescription, SpecialFilter, MAX_DISCRIMINATOR_BYTES, SCHEMA_VERSION};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::Path;
@@ -48,10 +48,8 @@ fn walk_tagged_entries<'a>(node: &'a serde_yaml::Value, trail: &mut Vec<&'a str>
         let Some(key) = key.as_str() else { continue };
 
         let allowed = match key {
-            "special_filters" => {
-                Some(crate::metadata::SpecialFilter::allowed_keys as fn(&str) -> _)
-            }
-            "virtual_fields" => Some(crate::metadata::VirtualField::allowed_keys as fn(&str) -> _),
+            "special_filters" => Some(crate::SpecialFilter::allowed_keys as fn(&str) -> _),
+            "virtual_fields" => Some(crate::VirtualField::allowed_keys as fn(&str) -> _),
             _ => None,
         };
 
@@ -109,6 +107,15 @@ fn check_entry_keys(
 }
 
 fn validate(desc: &DatasetDescription) -> Result<()> {
+    // The version comes first: nothing below means what it says for a catalog
+    // written to another schema.
+    anyhow::ensure!(
+        desc.version == SCHEMA_VERSION,
+        "catalog schema version '{}' is not supported; this loader reads '{}'",
+        desc.version,
+        SCHEMA_VERSION
+    );
+
     for (table_name, table) in &desc.tables {
         // Validate block_number_column exists in columns
         anyhow::ensure!(
@@ -140,7 +147,7 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
 
         // Validate weight column references
         for (col_name, col) in &table.columns {
-            if let Some(crate::metadata::WeightSource::Column(weight_col)) = &col.weight {
+            if let Some(crate::WeightSource::Column(weight_col)) = &col.weight {
                 anyhow::ensure!(
                     table.columns.contains_key(weight_col.as_str()),
                     "table '{}': weight column '{}' for '{}' not found in columns",
@@ -155,14 +162,14 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
         // physical width, which only means anything for an unsigned integer. The
         // encoder assumes this check exists.
         for (col_name, col) in &table.columns {
-            if col.encoding == Some(crate::metadata::JsonEncoding::HexNumber) {
+            if col.encoding == Some(crate::JsonEncoding::HexNumber) {
                 anyhow::ensure!(
                     matches!(
                         col.data_type,
-                        crate::metadata::ColumnType::UInt8
-                            | crate::metadata::ColumnType::UInt16
-                            | crate::metadata::ColumnType::UInt32
-                            | crate::metadata::ColumnType::UInt64
+                        crate::ColumnType::UInt8
+                            | crate::ColumnType::UInt16
+                            | crate::ColumnType::UInt32
+                            | crate::ColumnType::UInt64
                     ),
                     "table '{}': column '{}' declares encoding hex_number, \
                      which needs an unsigned integer column, not {:?}",
@@ -242,7 +249,7 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
             // disagree describes a bloom nobody wrote.
             if let SpecialFilter::Bloom { column, bytes, .. } = special {
                 let data_type = &table.columns[column].data_type;
-                let crate::metadata::ColumnType::FixedBinary(width) = data_type else {
+                let crate::ColumnType::FixedBinary(width) = data_type else {
                     anyhow::bail!(
                         "table '{}': special filter '{}' probes column '{}' as a bloom, \
                          but it is {:?}, not fixed-size binary",
@@ -306,7 +313,7 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
         // null. A name that resolves to nothing is not an error at query time —
         // it shortens the array, on every row, quietly.
         for (field_name, virtual_field) in &table.output.virtual_fields {
-            let crate::metadata::VirtualField::Roll { columns } = virtual_field;
+            let crate::VirtualField::Roll { columns } = virtual_field;
             for column in columns {
                 anyhow::ensure!(
                     table.columns.contains_key(column),
@@ -611,7 +618,7 @@ fn check_filter_surface(
     filters: &[String],
     special: &[&str],
     table_name: &str,
-    table: &crate::metadata::TableDescription,
+    table: &crate::TableDescription,
 ) -> Result<()> {
     for filter in filters {
         if special.contains(&filter.as_str()) {
@@ -645,7 +652,7 @@ fn check_filter_surface(
 /// declare a list. An absent one reads as "nothing is selectable", which answers
 /// every field a client asks of it with `UnknownField` and looks, from outside,
 /// exactly like a dataset that carries no such columns.
-fn check_field_surface(table_name: &str, table: &crate::metadata::TableDescription) -> Result<()> {
+fn check_field_surface(table_name: &str, table: &crate::TableDescription) -> Result<()> {
     let output = &table.output;
 
     anyhow::ensure!(
@@ -668,9 +675,7 @@ fn check_field_surface(table_name: &str, table: &crate::metadata::TableDescripti
             continue;
         }
 
-        if let Some(crate::metadata::VirtualField::Roll { columns }) =
-            output.virtual_fields.get(field)
-        {
+        if let Some(crate::VirtualField::Roll { columns }) = output.virtual_fields.get(field) {
             for physical in columns {
                 check_public_field_source(table_name, field, physical, table)?;
             }
@@ -698,10 +703,7 @@ fn check_field_surface(table_name: &str, table: &crate::metadata::TableDescripti
 /// A mapping says three things: the column it reads, the `output.fields` key
 /// that selects it, and the name it renders under. Each of the three can be
 /// written so that the catalog means one thing and the engine does another.
-fn check_variant_mappings(
-    table_name: &str,
-    table: &crate::metadata::TableDescription,
-) -> Result<()> {
+fn check_variant_mappings(table_name: &str, table: &crate::TableDescription) -> Result<()> {
     // Columns that say which row this is. A mapping over one of them moves it
     // out of the top level for every row and off the rows of every variant that
     // does not repeat it — the field vanishes from the shapes that need it most.
@@ -794,7 +796,7 @@ fn check_public_field_source(
     table_name: &str,
     field: &str,
     physical: &str,
-    table: &crate::metadata::TableDescription,
+    table: &crate::TableDescription,
 ) -> Result<()> {
     let column = table.columns.get(physical).ok_or_else(|| {
         anyhow::anyhow!(
@@ -822,9 +824,9 @@ fn check_public_field_source(
 fn check_relation(
     owner: &str,
     relation_name: &str,
-    relation: &crate::metadata::RelationDef,
+    relation: &crate::RelationDef,
     source_name: &str,
-    source: &crate::metadata::TableDescription,
+    source: &crate::TableDescription,
     desc: &DatasetDescription,
 ) -> Result<()> {
     let target = desc.tables.get(&relation.table).ok_or_else(|| {
@@ -901,7 +903,7 @@ fn check_relation(
     // nothing.
     if matches!(
         relation.kind,
-        crate::metadata::RelationKind::Children | crate::metadata::RelationKind::Parents
+        crate::RelationKind::Children | crate::RelationKind::Parents
     ) {
         for (side, table_name, table) in [
             ("source", source_name, source),
@@ -927,9 +929,16 @@ fn check_relation(
 mod tests {
     use super::*;
 
+    /// The catalogs the engine ships, kept at the repository root beside the
+    /// engine's own tests and benches rather than inside this crate.
+    fn catalog_dir() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../metadata")
+    }
+
     #[test]
     fn test_parse_minimal() {
         let yaml = r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -951,9 +960,48 @@ tables:
         assert!(blocks.output.name.is_none());
     }
 
+    /// A catalog declares the schema it is written to, and a loader reads one.
+    #[test]
+    fn test_rejects_a_missing_or_foreign_schema_version() {
+        let catalog = |header: &str| {
+            format!(
+                r#"
+{header}
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    sort_key: [number]
+    columns:
+      number: {{ type: uint64 }}
+"#
+            )
+        };
+
+        // `{:#}` prints the whole chain; the outermost context alone names the file.
+        let err = format!("{:#}", parse_dataset_description(&catalog("")).unwrap_err());
+        assert!(err.contains("missing field `version`"), "{err}");
+
+        let err = format!(
+            "{:#}",
+            parse_dataset_description(&catalog("version: v3")).unwrap_err()
+        );
+        assert!(
+            err.contains("schema version 'v3' is not supported"),
+            "{err}"
+        );
+
+        // A number is not a version string, and serde says so before the loader.
+        assert!(parse_dataset_description(&catalog("version: 2")).is_err());
+
+        let desc = parse_dataset_description(&catalog("version: v2")).unwrap();
+        assert_eq!(desc.version, SCHEMA_VERSION);
+    }
+
     #[test]
     fn test_default_block_number_column() {
         let yaml = r#"
+version: v2
 name: test
 tables:
   transactions:
@@ -969,6 +1017,7 @@ tables:
     #[test]
     fn test_column_encoding() {
         let yaml = r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -986,14 +1035,11 @@ tables:
         let desc = parse_dataset_description(yaml).unwrap();
         let blocks = desc.table("blocks").unwrap();
         let hash = blocks.column("hash").unwrap();
-        assert_eq!(hash.data_type, crate::metadata::ColumnType::String);
-        assert_eq!(hash.encoding, Some(crate::metadata::JsonEncoding::HexBytes));
+        assert_eq!(hash.data_type, crate::ColumnType::String);
+        assert_eq!(hash.encoding, Some(crate::JsonEncoding::HexBytes));
         let fee = blocks.column("fee").unwrap();
-        assert_eq!(fee.data_type, crate::metadata::ColumnType::UInt64);
-        assert_eq!(
-            fee.encoding,
-            Some(crate::metadata::JsonEncoding::DecimalString)
-        );
+        assert_eq!(fee.data_type, crate::ColumnType::UInt64);
+        assert_eq!(fee.encoding, Some(crate::JsonEncoding::DecimalString));
         let number = blocks.column("number").unwrap();
         assert_eq!(number.encoding, None);
     }
@@ -1002,6 +1048,7 @@ tables:
     #[test]
     fn test_validation_bad_block_number_column() {
         let yaml = r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1019,7 +1066,7 @@ tables:
 
     #[test]
     fn test_load_solana_metadata() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("metadata/solana.yaml");
+        let path = catalog_dir().join("solana.yaml");
         let desc = load_dataset_description(&path).unwrap();
         assert_eq!(desc.name, "solana");
         assert_eq!(desc.tables.len(), 7);
@@ -1044,17 +1091,17 @@ tables:
         assert_eq!(instructions.output.name.as_deref(), Some("instruction"));
         assert_eq!(
             instructions.column("d8").unwrap().data_type,
-            crate::metadata::ColumnType::UInt64
+            crate::ColumnType::UInt64
         );
         assert_eq!(
             instructions.column("accounts_bloom").unwrap().data_type,
-            crate::metadata::ColumnType::FixedBinary(64)
+            crate::ColumnType::FixedBinary(64)
         );
     }
 
     #[test]
     fn test_load_evm_metadata() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("metadata/evm.yaml");
+        let path = catalog_dir().join("evm.yaml");
         let desc = load_dataset_description(&path).unwrap();
         assert_eq!(desc.name, "evm");
         assert_eq!(desc.tables.len(), 5);
@@ -1080,6 +1127,7 @@ tables:
     #[test]
     fn test_validate_rejects_unknown_filter_column() {
         let yaml = r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1105,6 +1153,7 @@ tables:
         for column in ["parent_hash_column", "parent_number_column"] {
             let yaml = format!(
                 r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1123,6 +1172,7 @@ tables:
     #[test]
     fn test_validate_rejects_broken_alias_references() {
         let bad_table = r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1140,6 +1190,7 @@ aliases:
         let catalog = |alias: &str| {
             format!(
                 r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1207,6 +1258,7 @@ aliases:
         let catalog = |request: &str| {
             format!(
                 r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1245,6 +1297,7 @@ tables:
         let catalog = |variants: &str| {
             format!(
                 r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1334,6 +1387,7 @@ tables:
         let catalog = |column: &str, bytes: usize| {
             format!(
                 r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1384,6 +1438,7 @@ tables:
         let catalog = |bloom: &str, roll: &str| {
             format!(
                 r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1438,6 +1493,7 @@ tables:
         let catalog = |defect: &str| {
             format!(
                 r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1526,6 +1582,7 @@ tables:
         let catalog = |table: &str, right_key: &str| {
             format!(
                 r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1586,6 +1643,7 @@ tables:
         let catalog = |relation: &str| {
             format!(
                 r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1663,6 +1721,7 @@ tables:
     #[test]
     fn test_validate_rejects_a_request_without_a_filter_surface() {
         let yaml = r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1685,6 +1744,7 @@ tables:
     #[test]
     fn test_validate_rejects_a_filter_on_a_system_column() {
         let yaml = r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1708,6 +1768,7 @@ tables:
     #[test]
     fn test_validate_rejects_a_special_filter_on_a_missing_column() {
         let yaml = r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1734,6 +1795,7 @@ tables:
     #[test]
     fn test_validate_rejects_hex_number_on_a_non_integer_column() {
         let yaml = r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1759,6 +1821,7 @@ tables:
     #[test]
     fn test_validate_rejects_unresolvable_references() {
         const HEAD: &str = r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1916,6 +1979,7 @@ tables:
         let catalog = |fields: &str| {
             format!(
                 r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1966,7 +2030,7 @@ tables:
     /// Covers CT-1 · INV-D3
     #[test]
     fn test_validate_requires_exactly_one_block_table() {
-        let catalog = |tables: &str| format!("name: test\ntables:\n{tables}");
+        let catalog = |tables: &str| format!("version: v2\nname: test\ntables:\n{tables}");
 
         let blocks = "  blocks:\n\
                       \x20   block_number_column: number\n\
@@ -2039,6 +2103,7 @@ tables:
         let catalog = |request_name: &str, output_name: &str| {
             format!(
                 r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -2107,7 +2172,7 @@ aliases:
     /// Every catalog shipped with the engine must load.
     #[test]
     fn test_bundled_catalogs_validate() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("metadata");
+        let dir = catalog_dir();
         let mut loaded: Vec<String> = Vec::new();
         for entry in std::fs::read_dir(&dir).unwrap() {
             let path = entry.unwrap().path();

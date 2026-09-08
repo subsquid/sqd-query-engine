@@ -6,10 +6,27 @@ everything it knows about EVM or Solana it reads from a catalog at load time.
 Adding a chain means writing a YAML file, not a module.
 
 The catalogs live in this directory, one per dataset. They load into the types
-in [`src/metadata/types.rs`](../src/metadata/types.rs) and must pass the checks
-in [`src/metadata/loader.rs`](../src/metadata/loader.rs). A key the types do
+in [`crates/metadata/src/types.rs`](../crates/metadata/src/types.rs) and must pass
+the checks in [`crates/metadata/src/loader.rs`](../crates/metadata/src/loader.rs). A key the types do
 not know is an error, not a warning: a misspelled key would otherwise silently
 do nothing.
+
+A catalog opens with the schema it is written to and the dataset it describes:
+
+| Key | Required | Meaning |
+|---|---|---|
+| `version` | yes | The catalog schema, as a string. This is `v2`; the loader refuses any other, so a catalog written for a later schema fails at load rather than being read as this one. |
+| `name` | yes | The dataset (`evm`, `solana`). |
+| `tables` | yes | The tables, in the order their arrays appear in a response block. |
+| `aliases` | no | Further request surfaces over the tables; see [Aliases](#aliases). |
+
+A new schema version must stay backwards compatible with `v2`. A catalog is
+published once by its provider (the network scheduler, for one) and read by
+several consumers on their own release cycles; a version a `v2` reader cannot
+accept obliges the provider to publish one catalog per version in use. Prefer
+additive changes under `v2` — a new optional key, a new `kind`, a new encoding
+— and reserve a bump for a change that alters the meaning of what `v2` already
+accepts.
 
 ## The shape of a table
 
@@ -333,6 +350,7 @@ same array, deduplicated.
 A catalog is validated when it is loaded, and one that fails is not used. The
 checks need no chunk:
 
+- `version` is `v2`, the one schema this loader reads;
 - exactly one block table — the one whose `item_order_keys` is empty and which
   has no `address_column` — and it is declared first, and every other table
   declares a `request` block;
@@ -364,6 +382,7 @@ checks need no chunk:
 ## A minimal catalog
 
 ```yaml
+version: v2
 name: my_chain
 
 tables:

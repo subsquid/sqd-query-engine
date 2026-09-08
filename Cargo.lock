@@ -2437,6 +2437,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sqd-metadata"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "indexmap",
+ "serde",
+ "serde_yaml",
+]
+
+[[package]]
 name = "sqd-polars"
 version = "0.1.0"
 dependencies = [
@@ -2496,6 +2506,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sqd-metadata",
  "sqd-query",
  "tempfile",
  "tikv-jemallocator",

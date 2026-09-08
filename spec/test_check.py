@@ -104,7 +104,7 @@ class Suite:
         # here it happens to be a symlink, and a checkout that materialises it
         # would copy it once per case, before the gate has run at all.
         skip = shutil.ignore_patterns("fixtures")
-        for tree in ("src", "tests"):
+        for tree in check.TREE_ROOTS:
             source = SPEC.parent / tree
             if source.is_dir():
                 shutil.copytree(source, repo / tree, symlinks=True, ignore=skip)
@@ -443,7 +443,7 @@ def test_a_tag_on_something_that_is_not_a_test_is_caught(s):
 
 @case
 def test_a_test_the_matrix_names_but_nothing_tags_is_caught(s):
-    s.rust_edit("src/metadata/loader.rs", "    /// Covers CT-1 · INV-D10\n", "")
+    s.rust_edit("crates/metadata/src/loader.rs", "    /// Covers CT-1 · INV-D10\n", "")
     assert "tag-missing" in checks_in(run(s.root)[1])
 
 
@@ -514,7 +514,7 @@ def test_an_attribute_above_the_doc_comment_is_still_a_test(s):
 @case
 def test_a_matrix_note_naming_a_deleted_test_is_caught(s):
     """The direction that mattered: a row still claiming evidence that is gone."""
-    s.rust_edit("src/metadata/loader.rs",
+    s.rust_edit("crates/metadata/src/loader.rs",
                 "fn test_validate_rejects_duplicate_names(", "fn renamed_away(")
     assert "note-stale" in checks_in(run(s.root)[1])
 
@@ -522,7 +522,7 @@ def test_a_matrix_note_naming_a_deleted_test_is_caught(s):
 @case
 def test_a_tag_retargeted_at_another_invariant_is_caught(s):
     """A tag proves coverage of the invariant it names, not of any invariant."""
-    s.rust_edit("src/metadata/loader.rs",
+    s.rust_edit("crates/metadata/src/loader.rs",
                 "/// Covers CT-1 · INV-D10", "/// Covers CT-1 · INV-D2")
     assert "tag-missing" in checks_in(run(s.root)[1])
 
@@ -572,7 +572,7 @@ def test_a_covered_row_backed_only_by_prose_is_reported(s):
     stands: written the second way it goes red on the day §8.11 reaches the goal
     it sets, which is the one outcome a self-test must not punish.
     """
-    s.rust_edit("src/metadata/loader.rs", "    /// Covers CT-1 · INV-D3\n", "")
+    s.rust_edit("crates/metadata/src/loader.rs", "    /// Covers CT-1 · INV-D3\n", "")
     found = [f for f in run(s.root)[1] if f["check"] == "tag-unbacked"]
     assert any("INV-D3" in f["message"] for f in found), found
 

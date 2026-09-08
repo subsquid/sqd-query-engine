@@ -1,7 +1,7 @@
 //! CT-1 — catalog validation.
 //!
 //! Static, no chunk, milliseconds. Most of the class lives with the validator in
-//! `src/metadata/loader.rs`, because those cases construct catalogs that violate
+//! `crates/metadata/src/loader.rs`, because those cases construct catalogs that violate
 //! one rule each and assert the loader rejects them — which needs the loader's
 //! private surface, not the engine's public one. They carry the same `CT-1` tag
 //! as everything here, so the coverage report finds them wherever they live.
@@ -37,6 +37,7 @@ use crate::harness::synthetic::run_json;
 /// that also carries an unrelated column named `block_number` — the archive's
 /// note of which block a receipt *refers to*, not the block it is in.
 const HEIGHT_CHAIN: &str = r#"
+version: v2
 name: test
 
 tables:

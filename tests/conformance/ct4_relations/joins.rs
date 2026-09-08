@@ -30,6 +30,7 @@ use crate::harness::synthetic::run_json as run_chunk;
 /// A table whose rows are identified by more than `item_order_keys`: a trace is a
 /// transaction index *and* an address within it.
 const TRACES: &str = r#"
+version: v2
 name: test
 
 tables:
@@ -149,6 +150,7 @@ fn traces_of_one_transaction_are_weighed_separately() {
 // ---------------------------------------------------------------------------
 
 const LOGS_AND_TXS: &str = r#"
+version: v2
 name: test
 
 tables:

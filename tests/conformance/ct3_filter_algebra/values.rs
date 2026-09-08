@@ -487,6 +487,7 @@ fn signed_dataset() -> (DatasetDescription, tempfile::TempDir) {
 
     let catalog = parse_dataset_description(
         r#"
+version: v2
 name: signed
 
 tables:

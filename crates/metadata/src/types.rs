@@ -3,10 +3,25 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
+/// The catalog schema version this crate reads. A catalog declares its own
+/// under `version`, and the loader refuses any other, so a catalog written
+/// for a later schema fails at load rather than being read as this one.
+///
+/// Bump this only for a change a `v2` reader cannot accept. A catalog is
+/// published once by its provider (the network scheduler, for one) and read
+/// by several consumers on their own release cycles, so a new version that
+/// is not backwards compatible with `v2` obliges the provider to publish one
+/// catalog per version in circulation. Prefer additive changes under `v2`.
+pub const SCHEMA_VERSION: &str = "v2";
+
 /// Top-level dataset description. One per chain type (evm, solana, etc.).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DatasetDescription {
+    /// The schema this catalog is written to, as a string (`v2`). Required:
+    /// a version that could be omitted would tell a reader nothing. Must
+    /// equal [`SCHEMA_VERSION`].
+    pub version: String,
     /// Dataset name (e.g., "solana", "evm")
     pub name: String,
     /// Table definitions keyed by table name.
@@ -568,7 +583,7 @@ impl SpecialFilter {
     /// other shape in a catalog refuses a stray key, and [`check_stale_keys`]
     /// gives these two the same answer by reading the list below.
     ///
-    /// [`check_stale_keys`]: crate::metadata::loader
+    /// [`check_stale_keys`]: crate::parse_dataset_description
     pub fn allowed_keys(kind: &str) -> Option<&'static [&'static str]> {
         Some(match kind {
             "discriminator" => &["kind", "by_length"],

@@ -569,6 +569,7 @@ fn a_false_positive_is_not_filtered_away() {
     use crate::harness::fixtures::run_against;
 
     const CATALOG: &str = r#"
+version: v2
 name: overapprox
 
 tables:
@@ -710,6 +711,7 @@ fn the_hash_count_is_the_one_the_catalog_declares() {
     use crate::harness::json::count_items;
 
     const CATALOG: &str = r#"
+version: v2
 name: bloomed
 
 tables:

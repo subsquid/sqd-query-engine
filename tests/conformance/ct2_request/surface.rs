@@ -280,6 +280,7 @@ fn an_alias_relation_resolves_through_the_alias_it_was_asked_of() {
     // `later` sorts after `earlier`, so a lookup that takes whichever alias it
     // finds first answers both with `earlier`'s.
     const CATALOG: &str = r#"
+version: v2
 name: test
 
 tables:

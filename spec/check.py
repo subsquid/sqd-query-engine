@@ -179,7 +179,7 @@ class Finding:
         self.path = path
         self.line = line
         self.message = message
-        # A finding against `src/` or `tests/` names a path relative to the
+        # A finding against `src/`, `crates/` or `tests/` names a path relative to the
         # repository, not to the spec directory. Prefixing it with the spec
         # directory names a file that does not exist, and GitHub silently drops
         # an annotation whose file it cannot find — so the only two rules that
@@ -623,7 +623,7 @@ EVIDENCE_RE = re.compile(
 # claims but no job the gate runs would falsify.
 DATA_BACKED_RE = re.compile(r"(\d+) of the (\d+) are backed only by tests marked")
 
-TREE_ROOTS = ("src", "tests")
+TREE_ROOTS = ("src", "crates", "tests")
 CONFORMANCE_DIR = "tests/conformance/"
 
 
