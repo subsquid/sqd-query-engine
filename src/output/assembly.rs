@@ -16,9 +16,8 @@ use crate::output::row_writer::{
     resolve_sort_columns, resolve_writers, IndexedBatches,
 };
 use crate::output::weight::{
-    accumulate_block_weights, apply_weight_limit, block_scan_columns, get_block_number,
-    get_weight_value, primary_weight_params, weight_cutoff_block, weight_scan_columns, TableOutput,
-    MAX_RESPONSE_BYTES,
+    block_scan_columns, compute_block_weights, weight_range_end, weight_scan_columns,
+    BlockSelection, TableOutput,
 };
 use crate::output::writer::QueryOutput;
 use crate::query::{Plan, RelationKind};
@@ -29,73 +28,10 @@ use crate::scan::{
 use anyhow::Result;
 use arrow::record_batch::RecordBatch;
 use rayon::prelude::*;
-use rustc_hash::{FxHashMap, FxHashSet as HashSet};
+use rustc_hash::FxHashSet as HashSet;
 use std::collections::HashMap;
 use std::path::Path;
 
-/// A table is block-sorted when its physical sort key leads with the block
-/// number column. Only then does a `to_block` cap prune whole row groups, which
-/// is what makes the budget early-stop scan worthwhile (see `scan_budget`).
-fn is_block_sorted(table_desc: &crate::metadata::TableDescription) -> bool {
-    table_desc
-        .sort_key
-        .first()
-        .map(|s| s == &table_desc.block_number_column)
-        .unwrap_or(false)
-}
-
-/// Fold one parallel wave's batches into the running budget weight: each row adds
-/// this table's own per-row weight, and the first time a block is seen it also
-/// adds that block's `external` weight (other tables already scanned) plus the
-/// block-header weight. Returns the updated cumulative. Counting the full wave
-/// (rather than stopping mid-wave) only over-estimates, which is safe — the exact
-/// `apply_weight_limit` trims afterwards.
-#[allow(clippy::too_many_arguments)]
-fn accumulate_wave_weight(
-    batches: &[RecordBatch],
-    bn_col: &str,
-    fixed: u64,
-    weight_cols: &[String],
-    external: &FxHashMap<u64, u64>,
-    header_fixed: u64,
-    seen: &mut HashSet<u64>,
-    cumulative: &mut u64,
-) -> u64 {
-    for batch in batches {
-        let bn = match batch.column_by_name(bn_col) {
-            Some(c) => c,
-            None => continue,
-        };
-        let wc_arrays: Vec<Option<&dyn arrow::array::Array>> = weight_cols
-            .iter()
-            .map(|name| batch.column_by_name(name).map(|c| c.as_ref()))
-            .collect();
-        for i in 0..batch.num_rows() {
-            if let Some(block) = get_block_number(bn.as_ref(), i) {
-                let mut row_weight = fixed;
-                for arr in wc_arrays.iter().flatten() {
-                    row_weight = row_weight.saturating_add(get_weight_value(*arr, i));
-                }
-                *cumulative = cumulative.saturating_add(row_weight);
-                if seen.insert(block) {
-                    let block_total = external
-                        .get(&block)
-                        .copied()
-                        .unwrap_or(0)
-                        .saturating_add(header_fixed);
-                    *cumulative = cumulative.saturating_add(block_total);
-                }
-            }
-        }
-    }
-    *cumulative
-}
-
-/// Execute a plan against a chunk directory. Returns `None` if the output
-/// contains no blocks, which only happens when the queried block range doesn't
-/// intersect the chunk's data — a query whose filters match nothing still
-/// yields the boundary blocks of the range as header-only entries. See
-/// [`QueryOutput`] for the block range metadata and lazy block encoding.
 /// Request name → the position its table holds in the catalog, which is the
 /// order item arrays appear in a response block.
 fn request_name_positions(metadata: &DatasetDescription) -> HashMap<&str, usize> {
@@ -107,6 +43,42 @@ fn request_name_positions(metadata: &DatasetDescription) -> HashMap<&str, usize>
         .collect()
 }
 
+/// Execution controls. Disabling range reads provides a full-read reference.
+#[derive(Debug, Clone, Copy)]
+pub struct ExecOptions {
+    /// Print stage timings to stderr.
+    pub profile: bool,
+    /// The cumulative block weight a response may carry (`P-WEIGHT-BUDGET`).
+    pub weight_budget: u64,
+    /// Read complete block ranges until the response budget is exhausted.
+    /// When disabled, read the whole requested range before selecting blocks.
+    pub range_reads: bool,
+}
+
+impl Default for ExecOptions {
+    fn default() -> Self {
+        Self {
+            profile: false,
+            weight_budget: crate::output::weight::MAX_RESPONSE_BYTES,
+            range_reads: true,
+        }
+    }
+}
+
+impl ExecOptions {
+    pub fn profiled(profile: bool) -> Self {
+        Self {
+            profile,
+            ..Self::default()
+        }
+    }
+}
+
+/// Execute a plan against a chunk directory. Returns `None` if the output
+/// contains no blocks, which only happens when the queried block range doesn't
+/// intersect the chunk's data — a query whose filters match nothing still
+/// yields the boundary blocks of the range as header-only entries. See
+/// [`QueryOutput`] for the block range metadata and lazy block encoding.
 pub fn execute_plan(
     plan: &Plan,
     metadata: &DatasetDescription,
@@ -114,6 +86,20 @@ pub fn execute_plan(
 ) -> Result<Option<QueryOutput>> {
     let chunk = ParquetChunkReader::open(chunk_dir)?;
     execute_chunk(plan, metadata, &chunk, false)
+}
+
+/// Execute a plan against any ChunkReader, with the engine's knobs given
+/// explicitly. See [`ExecOptions`].
+pub fn execute_chunk_with(
+    plan: &Plan,
+    metadata: &DatasetDescription,
+    chunk: &dyn ChunkReader,
+    options: ExecOptions,
+) -> Result<Option<QueryOutput>> {
+    match execute_chunk_fmt(plan, metadata, chunk, options, OutputFormat::Json)? {
+        FmtOutput::Json(blocks) => Ok(blocks.map(|b| *b)),
+        FmtOutput::Arrow(_) => unreachable!(),
+    }
 }
 
 /// Execute a plan with timing instrumentation printed to stderr.
@@ -147,7 +133,13 @@ pub fn execute_chunk(
     chunk: &dyn ChunkReader,
     profile: bool,
 ) -> Result<Option<QueryOutput>> {
-    match execute_chunk_fmt(plan, metadata, chunk, profile, OutputFormat::Json)? {
+    match execute_chunk_fmt(
+        plan,
+        metadata,
+        chunk,
+        ExecOptions::profiled(profile),
+        OutputFormat::Json,
+    )? {
         FmtOutput::Json(blocks) => Ok(blocks.map(|b| *b)),
         FmtOutput::Arrow(_) => unreachable!(),
     }
@@ -166,7 +158,7 @@ pub fn execute_chunk_arrow(
         plan,
         metadata,
         chunk,
-        false,
+        ExecOptions::default(),
         OutputFormat::Arrow { compress, binary },
     )? {
         FmtOutput::Arrow(output) => Ok(output),
@@ -201,18 +193,77 @@ fn ensure_required_tables_present(plan: &Plan, chunk: &dyn ChunkReader) -> Resul
     Ok(())
 }
 
-/// Core execution: scan → block selection → output assembly. The `format`
-/// selects the back half: nested JSON block encoding or flat Arrow IPC streams.
-/// The expensive front half (scan, joins, weight limit) is shared.
-fn execute_chunk_fmt(
+/// Suggest a range large enough to cover a batch of row groups in every table.
+/// Missing statistics select a full read; overlapping groups produce larger ranges.
+fn next_range_end(
     plan: &Plan,
     metadata: &DatasetDescription,
     chunk: &dyn ChunkReader,
-    profile: bool,
-    format: OutputFormat,
-) -> Result<FmtOutput> {
-    use std::time::Instant;
+    from_block: u64,
+) -> Option<u64> {
+    let mut tables = HashSet::default();
+    for table in &plan.table_plans {
+        tables.insert(table.table.as_str());
+        tables.extend(table.relations.iter().map(|r| r.target_table.as_str()));
+    }
+    let mut end = None;
+    for table in tables {
+        let desc = metadata.table(table)?;
+        let hint = chunk.next_block_range_end(table, &desc.block_number_column, from_block)?;
+        end = Some(end.map_or(hint, |end: u64| end.max(hint)));
+    }
+    end
+}
 
+/// A narrow size scan avoids decoding wide columns for a large unfiltered query.
+/// Its estimate only chooses the first read range; exact selection can read on.
+fn initial_range_end(
+    plan: &Plan,
+    metadata: &DatasetDescription,
+    chunk: &dyn ChunkReader,
+    budget: u64,
+) -> Result<Option<u64>> {
+    let [table] = plan.table_plans.as_slice() else {
+        return Ok(next_range_end(plan, metadata, chunk, plan.from_block));
+    };
+    if plan.include_all_blocks
+        || !table.relations.is_empty()
+        || table.predicates.iter().any(|p| !p.columns.is_empty())
+    {
+        return Ok(next_range_end(plan, metadata, chunk, plan.from_block));
+    }
+    let desc = metadata.table(&table.table).ok_or_else(|| {
+        crate::engine_err!(
+            crate::error::ErrorKind::TableNotFound,
+            "table '{}' not found",
+            table.table
+        )
+    })?;
+    let columns = weight_scan_columns(&table.output_columns, desc);
+    let mut request = ScanRequest::new(columns.iter().map(String::as_str).collect());
+    request.predicates = table.predicates.iter().collect();
+    request.from_block = Some(plan.from_block);
+    request.to_block = plan.to_block;
+    request.block_number_column = Some(&desc.block_number_column);
+    let batches = chunk.scan(&table.table, &request)?;
+    Ok(weight_range_end(
+        &batches,
+        &table.output_columns,
+        desc,
+        budget,
+    ))
+}
+
+/// Read all primary and relation rows for one complete block range.
+fn scan_tables(
+    plan: &Plan,
+    metadata: &DatasetDescription,
+    chunk: &dyn ChunkReader,
+    from_block: u64,
+    to_block: Option<u64>,
+    profile: bool,
+) -> Result<HashMap<String, TableOutput>> {
+    use std::time::Instant;
     macro_rules! timer {
         () => {
             if profile {
@@ -231,61 +282,8 @@ fn execute_chunk_fmt(
         };
     }
 
-    let t_total = timer!();
-
-    // 0. A missing table is an incompatible chunk, not an empty table. Check
-    //    every table the plan names before a zero-row primary scan can hide a
-    //    missing relation target (INV-E4).
-    ensure_required_tables_present(plan, chunk)?;
-
-    // 1. A reorg between two pages must be reported, not paved over with data
-    //    from the branch the client did not ask about.
-    crate::output::fork::check_parent_block(plan, metadata, chunk)?;
-
-    // 2. Scan all tables specified in the plan
-    let mut table_outputs: HashMap<String, TableOutput> = HashMap::new();
-
-    // Process block-sorted tables LAST so the budget early-stop scan can weigh
-    // them against the (already known) per-block weight of the other tables.
-    // sort is stable, so non-block-sorted tables keep their original order.
-    let mut proc_order: Vec<usize> = (0..plan.table_plans.len()).collect();
-    proc_order.sort_by_key(|&i| {
-        metadata
-            .table(&plan.table_plans[i].table)
-            .map(is_block_sorted)
-            .unwrap_or(false)
-    });
-
-    // Per-block weight contributed by already-scanned non-block-sorted tables,
-    // seeding the early-stop budget walk. Deliberately under-counts (primary rows
-    // only, no relations) so the cutoff can only over-include → byte-identical.
-    // Only worth seeding when a block-sorted table coexists with another table;
-    // otherwise the early-stop walk has no external weight to add, so skip the
-    // extra accumulation pass entirely (keeps single-table / logs-only queries
-    // on their original cost).
-    let mut external_block_weight: FxHashMap<u64, u64> = FxHashMap::default();
-    let seed_external = plan.table_plans.len() > 1
-        && !plan.include_all_blocks
-        && proc_order.iter().any(|&i| {
-            metadata
-                .table(&plan.table_plans[i].table)
-                .map(is_block_sorted)
-                .unwrap_or(false)
-        });
-    let header_fixed = crate::output::weight::header_weight_params(
-        &plan.block_output_columns,
-        metadata.table(&plan.block_table),
-    )
-    .0;
-
-    // The block header scan must be capped to the phase-1 cutoff (when engaged):
-    // otherwise the range-end boundary block enters block selection with only its
-    // header weight (its item rows were never scanned) and wrongly survives the
-    // budget trim, unlike in the exact path.
-    let mut header_to_block = plan.to_block;
-
-    for &tp_idx in &proc_order {
-        let table_plan = &plan.table_plans[tp_idx];
+    let mut table_outputs = HashMap::new();
+    for table_plan in &plan.table_plans {
         let table_desc = metadata.table(&table_plan.table).ok_or_else(|| {
             crate::engine_err!(
                 crate::error::ErrorKind::TableNotFound,
@@ -301,122 +299,17 @@ fn execute_chunk_fmt(
         let req_col_refs: Vec<&str> = req_cols.iter().map(|s| s.as_str()).collect();
         let pred_refs: Vec<&RowPredicate> = table_plan.predicates.iter().collect();
 
-        // Two-phase scan for large single-table full scans: a cheap narrow scan
-        // (block number + weight columns) finds the response-budget block cutoff,
-        // so the real scan below decodes wide data columns only for rows that will
-        // actually be emitted. Restricted to the single-source, unfiltered,
-        // non-include-all-blocks case where the cutoff depends solely on this
-        // table; the exact, header-aware `apply_weight_limit` still runs later and
-        // performs the precise trim, so the output is byte-for-byte unchanged.
-        let mut effective_to_block = plan.to_block;
-        // Engage the two-phase scan only for a genuine single-table full scan:
-        // one table, no relations, not include-all-blocks, and no *real* row
-        // filter (an empty selector `{}` compiles to a trivial predicate with no
-        // columns). Selective queries are left on the original path — their
-        // result rarely hits the budget, so a phase-1 pre-scan would be pure
-        // overhead.
-        let single_full_scan = plan.table_plans.len() == 1
-            && table_plan.relations.is_empty()
-            && !plan.include_all_blocks
-            && table_plan.predicates.iter().all(|p| p.columns.is_empty());
-        if single_full_scan {
-            // Narrow projection = block number + data-dependent weight columns
-            // (the `*_size` companions) — never the wide data columns.
-            let wcols = weight_scan_columns(&table_plan.output_columns, table_desc);
-            let wcol_refs: Vec<&str> = wcols.iter().map(|s| s.as_str()).collect();
-            let mut narrow_req = ScanRequest::new(wcol_refs);
-            narrow_req.predicates = pred_refs.clone();
-            narrow_req.from_block = Some(plan.from_block);
-            narrow_req.to_block = plan.to_block;
-            narrow_req.block_number_column = Some(table_desc.block_number_column.as_str());
-
-            let t_phase1 = timer!();
-            let narrow_batches = chunk.scan(&table_plan.table, &narrow_req)?;
-            if let Some(cutoff) =
-                weight_cutoff_block(&narrow_batches, &table_plan.output_columns, table_desc)
-            {
-                effective_to_block = Some(match plan.to_block {
-                    Some(tb) => tb.min(cutoff),
-                    None => cutoff,
-                });
-                header_to_block = effective_to_block;
-            }
-            elapsed!(
-                t_phase1,
-                "weight pre-scan",
-                "cutoff -> {:?}",
-                effective_to_block
-            );
-        }
-
-        // Budget early-stop applies to block-sorted, non-include-all-blocks tables
-        // that aren't already on the cheap single-table narrow pre-scan path. For
-        // these a `to_block` cap prunes whole row groups, so reading row groups in
-        // block order and stopping at the budget avoids decoding wide columns for
-        // blocks that can't be emitted.
-        let wave_eligible =
-            is_block_sorted(table_desc) && !plan.include_all_blocks && !single_full_scan;
-
         let mut request = ScanRequest::new(output_col_refs);
         request.predicates = pred_refs;
-        request.from_block = Some(plan.from_block);
-        request.to_block = effective_to_block;
+        request.from_block = Some(from_block);
+        request.to_block = to_block;
         request.block_number_column = Some(table_desc.block_number_column.as_str());
         request.required_columns = req_col_refs;
 
         let t_primary = timer!();
-        let batches = if wave_eligible {
-            // Stop once cumulative weight (this table + already-scanned tables +
-            // header) crosses the budget. Over-reads ≤ one wave; the exact
-            // `apply_weight_limit` trims afterwards, so output is byte-identical.
-            let (fixed, weight_cols) =
-                primary_weight_params(&table_plan.output_columns, Some(table_desc));
-            let bn_col = table_desc.block_number_column.to_string();
-            let ext = &external_block_weight;
-            let mut seen: HashSet<u64> = HashSet::default();
-            let mut cumulative: u64 = 0;
-            // Wave width = the rayon pool size: each wave saturates all cores in
-            // one parallel shot, and the budget is re-checked at every wave
-            // boundary (over-read ≤ one wave).
-            let wave_size = rayon::current_num_threads().max(1);
-            let mut weight_of = |wave: &[RecordBatch]| {
-                accumulate_wave_weight(
-                    wave,
-                    &bn_col,
-                    fixed,
-                    &weight_cols,
-                    ext,
-                    header_fixed,
-                    &mut seen,
-                    &mut cumulative,
-                )
-            };
-            chunk.scan_budget(
-                &table_plan.table,
-                &request,
-                wave_size,
-                MAX_RESPONSE_BYTES,
-                &mut weight_of,
-            )?
-        } else {
-            chunk.scan(&table_plan.table, &request)?
-        };
+        let batches = chunk.scan(&table_plan.table, &request)?;
         let primary_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         elapsed!(t_primary, "primary scan", "{} rows", primary_rows);
-
-        // Seed external weight for any block-sorted table processed later (only
-        // non-block-sorted tables contribute; their full primary scan is done).
-        if seed_external && !wave_eligible {
-            let (fixed, weight_cols) =
-                primary_weight_params(&table_plan.output_columns, Some(table_desc));
-            accumulate_block_weights(
-                &batches,
-                table_desc.block_number_column.as_str(),
-                fixed,
-                &weight_cols,
-                &mut external_block_weight,
-            );
-        }
 
         // Compute actual block range from primary scan for cross-table pruning
         let bn_col_name = table_desc.block_number_column.as_str();
@@ -709,7 +602,53 @@ fn execute_chunk_fmt(
         );
     }
 
-    // 3. Read blocks table header
+    Ok(table_outputs)
+}
+
+/// Core execution: scan → block selection → output assembly. The `format`
+/// selects the back half: nested JSON block encoding or flat Arrow IPC streams.
+/// The expensive front half (scan, joins, weight limit) is shared.
+fn execute_chunk_fmt(
+    plan: &Plan,
+    metadata: &DatasetDescription,
+    chunk: &dyn ChunkReader,
+    options: ExecOptions,
+    format: OutputFormat,
+) -> Result<FmtOutput> {
+    use std::time::Instant;
+
+    let profile = options.profile;
+
+    macro_rules! timer {
+        () => {
+            if profile {
+                Some(Instant::now())
+            } else {
+                None
+            }
+        };
+    }
+    macro_rules! elapsed {
+        ($t:expr, $label:expr) => {
+            if let Some(t) = $t { eprintln!("  {}: {:.2?}", $label, t.elapsed()); }
+        };
+        ($t:expr, $label:expr, $($arg:tt)*) => {
+            if let Some(t) = $t { eprintln!("  {}: {:.2?} ({})", $label, t.elapsed(), format!($($arg)*)); }
+        };
+    }
+
+    let t_total = timer!();
+
+    // 0. A missing table is an incompatible chunk, not an empty table. Check
+    //    every table the plan names before a zero-row primary scan can hide a
+    //    missing relation target (INV-E4).
+    ensure_required_tables_present(plan, chunk)?;
+
+    // 1. A reorg between two pages must be reported, not paved over with data
+    //    from the branch the client did not ask about.
+    crate::output::fork::check_parent_block(plan, metadata, chunk)?;
+
+    // Read headers once so internal range boundaries never add header-only blocks.
     let t_blocks = timer!();
     let block_table_desc = metadata.table(&plan.block_table);
     let readable_block_table = block_table_desc.filter(|_| chunk.has_table(&plan.block_table));
@@ -724,7 +663,7 @@ fn execute_chunk_fmt(
 
         let mut request = ScanRequest::new(block_col_vec);
         request.from_block = Some(plan.from_block);
-        request.to_block = header_to_block;
+        request.to_block = plan.to_block;
         request.block_number_column = Some(bn_col);
         request.required_columns = block_req_refs;
 
@@ -733,61 +672,125 @@ fn execute_chunk_fmt(
         Vec::new()
     };
 
-    // 4. Collect all block numbers that have data
-    let mut block_numbers: HashSet<u64> = HashSet::default();
+    let bn_column = block_table_desc
+        .map(|d| d.block_number_column.as_str())
+        .unwrap_or("number");
+    let mut boundary_blocks = HashSet::default();
+    collect_boundary_blocks(&block_batches, bn_column, &mut boundary_blocks)?;
 
-    // From table outputs
-    for (table_name, output) in &table_outputs {
-        let table_desc = metadata.table(table_name).unwrap();
-        let bn_col = table_desc.block_number_column.as_str();
-        collect_block_numbers(&output.batches, bn_col, &mut block_numbers)?;
+    let mut table_outputs: HashMap<String, TableOutput> = HashMap::new();
+    let mut selection = BlockSelection::new(options.weight_budget);
+    let mut from_block = plan.from_block;
+    let mut read_through = None;
+    let mut first_range = true;
+    let request_end = boundary_blocks
+        .iter()
+        .copied()
+        .max()
+        .map(|last| plan.to_block.map_or(last, |end| end.min(last)))
+        .or(plan.to_block);
 
-        // A relation's target is a different table, and it names its own block
-        // number column. Reading one literal name here would drop every row of
-        // a table that calls it something else — out of block selection and out
-        // of the weight model both (INV-X1).
-        let plan_relations = plan
-            .table_plans
-            .iter()
-            .find(|p| &p.table == table_name)
-            .map(|p| p.relations.as_slice())
-            .unwrap_or_default();
-
-        for (rel_idx, rel_batches) in &output.relation_batches {
-            let Some(rel) = plan_relations.get(*rel_idx) else {
-                continue;
-            };
-            let rel_bn_col = metadata
-                .table(&rel.target_table)
-                .map(|d| d.block_number_column.as_str())
-                .unwrap_or(bn_col);
-            collect_block_numbers(rel_batches, rel_bn_col, &mut block_numbers)?;
-        }
-    }
-
-    // Always include boundary blocks (first/last in range) from the block table
-    {
-        let bn_col = block_table_desc
-            .map(|d| d.block_number_column.as_str())
-            .unwrap_or("number");
-        if plan.include_all_blocks {
-            collect_block_numbers(&block_batches, bn_col, &mut block_numbers)?;
+    loop {
+        let hint = if options.range_reads {
+            if first_range {
+                initial_range_end(plan, metadata, chunk, options.weight_budget)?
+            } else {
+                next_range_end(plan, metadata, chunk, from_block)
+            }
         } else {
-            collect_boundary_blocks(&block_batches, bn_col, &mut block_numbers)?;
+            None
+        };
+        // A hint covering the whole request needs no extra block filter. Keep
+        // the original bounds so a selective predicate can run first.
+        let hint = hint.filter(|&end| request_end.is_none_or(|last| end < last));
+        let to_block = match (hint, request_end) {
+            (Some(hint), Some(end)) => Some(hint.max(from_block).min(end)),
+            (Some(hint), None) => Some(hint.max(from_block)),
+            (None, _) => plan.to_block,
+        };
+        let range_outputs = scan_tables(plan, metadata, chunk, from_block, to_block, profile)?;
+        let in_range = |block: u64| block >= from_block && to_block.is_none_or(|end| block <= end);
+        let range_headers = if first_range && (hint.is_none() || to_block == request_end) {
+            block_batches.clone()
+        } else {
+            block_batches
+                .iter()
+                .map(|batch| filter_to_blocks(batch, bn_column, in_range))
+                .collect::<Result<Vec<_>>>()?
+        };
+        let mut block_numbers: HashSet<u64> = HashSet::default();
+        // From table outputs
+        for (table_name, output) in &range_outputs {
+            let table_desc = metadata.table(table_name).unwrap();
+            let bn_col = table_desc.block_number_column.as_str();
+            collect_block_numbers(&output.batches, bn_col, &mut block_numbers)?;
+
+            // A relation's target is a different table, and it names its own block
+            // number column. Reading one literal name here would drop every row of
+            // a table that calls it something else — out of block selection and out
+            // of the weight model both (INV-X1).
+            let plan_relations = plan
+                .table_plans
+                .iter()
+                .find(|p| &p.table == table_name)
+                .map(|p| p.relations.as_slice())
+                .unwrap_or_default();
+
+            for (rel_idx, rel_batches) in &output.relation_batches {
+                let Some(rel) = plan_relations.get(*rel_idx) else {
+                    continue;
+                };
+                let rel_bn_col = metadata
+                    .table(&rel.target_table)
+                    .map(|d| d.block_number_column.as_str())
+                    .unwrap_or(bn_col);
+                collect_block_numbers(rel_batches, rel_bn_col, &mut block_numbers)?;
+            }
         }
+
+        if plan.include_all_blocks {
+            collect_block_numbers(&range_headers, bn_column, &mut block_numbers)?;
+        } else {
+            block_numbers.extend(boundary_blocks.iter().copied().filter(|&b| in_range(b)));
+        }
+        let mut sorted_blocks: Vec<_> = block_numbers.into_iter().collect();
+        sorted_blocks.sort_unstable();
+        let exhausted = if sorted_blocks.is_empty() {
+            false
+        } else {
+            let weights = compute_block_weights(&range_outputs, &range_headers, metadata, plan);
+            selection.extend(&sorted_blocks, &weights)
+        };
+
+        for (table, output) in range_outputs {
+            let accumulated = table_outputs.entry(table).or_insert_with(|| TableOutput {
+                batches: Vec::new(),
+                relation_batches: HashMap::new(),
+            });
+            accumulated.batches.extend(output.batches);
+            for (relation, batches) in output.relation_batches {
+                accumulated
+                    .relation_batches
+                    .entry(relation)
+                    .or_default()
+                    .extend(batches);
+            }
+        }
+
+        let finished = hint.is_none() || to_block == request_end;
+        if exhausted || finished {
+            if exhausted && !finished {
+                read_through = to_block;
+            }
+            break;
+        }
+        let Some(next) = to_block.and_then(|end| end.checked_add(1)) else {
+            break;
+        };
+        from_block = next;
+        first_range = false;
     }
-
-    // 5. Sort block numbers and apply weight-based limit
-    let mut sorted_blocks: Vec<u64> = block_numbers.into_iter().collect();
-    sorted_blocks.sort_unstable();
-
-    let selected_blocks = apply_weight_limit(
-        &sorted_blocks,
-        &table_outputs,
-        &block_batches,
-        metadata,
-        plan,
-    );
+    let selected_blocks = selection.into_blocks();
 
     if selected_blocks.is_empty() {
         return Ok(match format {
@@ -1114,6 +1117,7 @@ fn execute_chunk_fmt(
         table_json_prefixes,
         sort_scratch: Vec::new(),
         merge_scratch: Vec::new(),
+        read_through,
     }))))
 }
 

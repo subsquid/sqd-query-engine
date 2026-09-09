@@ -195,7 +195,7 @@ fn filtering_a_present_column_still_works() {
 /// Which of the two scan entry points a query lands on is decided by the table's
 /// declared sort key, which no client can see. `transactions` leads with
 /// `sighash` and takes the plain scan; `statediffs` leads with the block number
-/// and takes the budget walk. The guarantee has to hold on both.
+/// and can use range reads. The guarantee has to hold on both.
 #[test]
 #[ignore = "requires external fixture data"]
 fn filtering_an_absent_column_is_an_error_on_a_block_sorted_table() {

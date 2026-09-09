@@ -1,5 +1,5 @@
 pub mod error;
-pub(crate) mod integers;
+pub mod integers;
 pub mod join;
 pub mod metadata;
 pub mod output;

@@ -690,6 +690,99 @@ where
 /// relation's join key is as load-bearing as a predicate, and an unresolvable
 /// one makes the pushdown drop itself while assembly still skips the join that
 /// would have corrected it.
+/// Refuse a chunk whose block-number column cannot place a row, before anything
+/// reads it.
+///
+/// This runs once per scan, at the entry both scan paths share, off metadata
+/// where the metadata answers and off the column where it does not. Later is not
+/// good enough, and the reason is the shape of the bug rather than an ordering
+/// detail: a check that sits where the rows are produced misses the rows a
+/// predicate excluded, misses the hierarchical scan that returns before reaching
+/// it, and finds an absent column only in the batches that happened to project
+/// it. What a per-reader check gives is one chunk erroring on a direct scan and
+/// answering, short, on a relation pull — the divergence
+/// [gap 31](../../spec/GAPS.md) calls terminal, arrived at from the other
+/// direction.
+///
+/// Every row group is checked, not the ones this query selects, for the same
+/// reason: a narrow range must not answer where a wide one fails.
+fn ensure_block_numbers_readable(table: &ParquetTable, request: &ScanRequest) -> Result<()> {
+    let Some(bn_column) = request.block_number_column else {
+        return Ok(());
+    };
+
+    let Some(index) = table.column_index(bn_column) else {
+        crate::engine_bail!(
+            crate::error::ErrorKind::ColumnNotFound,
+            "block-number column '{}' is not found in '{}'",
+            bn_column,
+            table.name()
+        );
+    };
+
+    let field = table.schema().field(index);
+    crate::engine_ensure!(
+        crate::integers::is_integer(field.data_type()),
+        crate::error::ErrorKind::MalformedChunkData,
+        "block-number column '{}' of '{}' is stored as {}, which is not an integer",
+        bn_column,
+        table.name(),
+        field.data_type()
+    );
+
+    // A column parquet marks REQUIRED cannot hold a null, whatever its
+    // statistics say or fail to say.
+    if !field.is_nullable() {
+        return Ok(());
+    }
+
+    let mut unstated: Vec<usize> = Vec::new();
+
+    for rg in 0..table.num_row_groups() {
+        match table.column_stats(rg, bn_column).and_then(|s| s.null_count) {
+            Some(nulls) => crate::engine_ensure!(
+                nulls <= 0,
+                crate::error::ErrorKind::MalformedChunkData,
+                "block-number column '{}' of '{}' leaves {} row(s) of row group {} without a block",
+                bn_column,
+                table.name(),
+                nulls,
+                rg
+            ),
+            None => unstated.push(rg),
+        }
+    }
+
+    if unstated.is_empty() {
+        return Ok(());
+    }
+
+    // A file that states no null count has not said there are none, and this is
+    // the only place that can tell the two apart before a row is acted on.
+    // Reading the column costs one narrow column of the groups that were silent,
+    // and buys the promise the paragraphs above make: the same chunk answers, or
+    // refuses, whatever the query. Left to the readers behind here it would
+    // depend on the query — on the rows a predicate leaves, and on whether the
+    // plan takes the hierarchical path, which returns before reaching any of
+    // them.
+    for batch in table.read(&[bn_column], Some(&unstated), 8192)? {
+        let column = batch.column(0);
+
+        crate::engine_ensure!(
+            column.null_count() == 0,
+            crate::error::ErrorKind::MalformedChunkData,
+            "block-number column '{}' of '{}' leaves {} of {} rows without a block, \
+             and the file states no null count",
+            bn_column,
+            table.name(),
+            column.null_count(),
+            column.len()
+        );
+    }
+
+    Ok(())
+}
+
 fn ensure_columns_present(table: &ParquetTable, request: &ScanRequest) -> Result<()> {
     let mut required: Vec<&str> = request.required_columns.clone();
 
@@ -725,6 +818,7 @@ fn ensure_columns_present(table: &ParquetTable, request: &ScanRequest) -> Result
 /// Returns filtered RecordBatches with only the output columns.
 pub fn scan(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<RecordBatch>> {
     ensure_columns_present(table, request)?;
+    ensure_block_numbers_readable(table, request)?;
 
     // 1. Determine all columns we need to read (output + predicate + block range)
     let all_columns = collect_read_columns(table, request);
@@ -763,192 +857,67 @@ pub fn scan(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<RecordBat
     Ok(all_batches)
 }
 
-/// Scan a block-sorted table's matching row groups in ascending block order, in
-/// parallel waves of `wave_size`. After each wave the freshly read batches are
-/// passed to `weight_of`, which returns the *cumulative* response weight seen so
-/// far; once that exceeds `budget` scanning stops — the wave that tripped the
-/// budget is kept, so the result over-reads by at most one wave (a safe
-/// over-estimate: the exact `apply_weight_limit` trims precisely afterwards).
-///
-/// For a block-sorted table the budget cutoff prunes every later row group, so
-/// wide data columns decode only for blocks that can actually be emitted, while
-/// intra-wave parallelism preserves throughput (a fully sequential scan was
-/// measured 3–4x slower).
-pub fn scan_waves_until_budget<F>(
+/// Decode block bounds using the column's physical width. Wrapped signed
+/// statistics can invert the bounds; such a pair must not prune any rows.
+fn block_bounds(table: &ParquetTable, rg: usize, bn_column: &str) -> Option<(u64, u64)> {
+    let width = table
+        .schema()
+        .field(table.column_index(bn_column)?)
+        .data_type();
+    let stats = table.column_stats(rg, bn_column)?;
+
+    let min = crate::integers::block_number_at(width, stat_scalar(&stats.min?)?)?;
+    let max = crate::integers::block_number_at(width, stat_scalar(&stats.max?)?)?;
+
+    (min <= max).then_some((min, max))
+}
+
+/// Suggest up to four row-group ranges, merging strict overlaps to avoid
+/// repeatedly decoding the same groups. Shared boundary blocks remain separate.
+pub(crate) fn next_block_range_end(
     table: &ParquetTable,
-    request: &ScanRequest,
-    wave_size: usize,
-    budget: u64,
-    mut weight_of: F,
-) -> Result<Vec<RecordBatch>>
-where
-    F: FnMut(&[RecordBatch]) -> u64,
-{
-    ensure_columns_present(table, request)?;
-
-    let mut row_groups = select_row_groups(table, request)?;
-    if row_groups.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Visit row groups in ascending block-number order. For a block-sorted table
-    // the row-group index already follows block order; sort by min block_number
-    // defensively so the budget walk is monotonic regardless of file layout.
-    if let Some(bn_col) = request.block_number_column {
-        row_groups.sort_by_key(|&rg| {
-            table
-                .column_stats(rg, bn_col)
-                .and_then(|s| s.min)
-                .and_then(|m| stat_value_to_u64(&m))
-                .unwrap_or(u64::MAX)
-        });
-    }
-
-    let all_columns = collect_read_columns(table, request);
-    let output_schema = build_output_schema(table.schema(), &request.output_columns);
-
-    // The block bounds of one row group, or None when the file carries no usable
-    // statistic — in which case nothing below may assume anything about layout.
-    let block_bound = |rg: usize, upper: bool| -> Option<u64> {
-        let bn_col = request.block_number_column?;
-        let stats = table.column_stats(rg, bn_col)?;
-        let bound = if upper { stats.max } else { stats.min };
-        stat_value_to_u64(&bound?)
-    };
-
-    let wave_size = wave_size.max(1);
-    let mut all_batches = Vec::new();
-    // How far into `row_groups` the walk has got.
-    let mut scanned = 0usize;
-
-    for wave in row_groups.chunks(wave_size) {
-        let wave_batches: Vec<RecordBatch> = if wave.len() == 1 {
-            scan_row_groups(table, wave, &all_columns, request, &output_schema)?
-        } else {
-            let results: Vec<Result<Vec<RecordBatch>>> = wave
-                .par_iter()
-                .map(|&rg| scan_row_groups(table, &[rg], &all_columns, request, &output_schema))
-                .collect();
-            let mut v = Vec::new();
-            for r in results {
-                v.extend(r?);
-            }
-            v
-        };
-
-        let cumulative = weight_of(&wave_batches);
-        all_batches.extend(wave_batches);
-        scanned += wave.len();
-
-        if cumulative <= budget {
-            continue;
+    block_column: &str,
+    from_block: u64,
+) -> Option<u64> {
+    let mut bounds = Vec::new();
+    for group in 0..table.num_row_groups() {
+        let (start, end) = block_bounds(table, group, block_column)?;
+        if end >= from_block {
+            bounds.push((start, end));
         }
-
-        // Stopping here is only sound once every block kept is whole. Row groups
-        // overlap in block range far more often than a declared block-leading
-        // sort key suggests — chunks written today share the boundary block
-        // between neighbouring row groups, and in the fixture chunks every row
-        // group of every table spans the whole chunk — and a block that loses
-        // rows to an unread row group is indistinguishable, to the client, from a
-        // block that genuinely had fewer rows.
-        //
-        // So the cut is not "is there a gap between the row groups" (there never
-        // is, which made this walk a full scan) but "which blocks can no unread
-        // row group still add to": those below every unread group's first block.
-        // The block straddling that line is dropped along with everything after
-        // it. When that leaves nothing the walk reads on, and the budget is
-        // enforced by the exact `apply_weight_limit` instead.
-        let unread = &row_groups[scanned..];
-        if unread.is_empty() {
-            break;
-        }
-
-        let unread_min = unread
-            .iter()
-            .try_fold(u64::MAX, |acc, &rg| Some(acc.min(block_bound(rg, false)?)));
-
-        let (Some(unread_min), Some(bn_col)) = (unread_min, request.block_number_column) else {
-            continue;
-        };
-
-        if let Some(whole) = retain_blocks_below(&all_batches, bn_col, unread_min) {
-            if !whole.is_empty() {
-                return Ok(whole);
+    }
+    bounds.sort_unstable();
+    let mut ends: Vec<u64> = Vec::new();
+    for (start, end) in bounds {
+        if let Some(previous) = ends.last_mut() {
+            if start < *previous {
+                *previous = (*previous).max(end);
+                continue;
             }
         }
+        ends.push(end);
     }
-
-    Ok(all_batches)
+    ends.get(ends.len().min(4).checked_sub(1)?).copied()
 }
 
-/// Keep only the rows whose block number is strictly below `limit`, dropping the
-/// batches that end up empty.
-///
-/// `None` when a batch does not carry the block-number column, or carries it in a
-/// physical type this cannot read. No cut is justified then, and answering with
-/// a guess is exactly the partial block the caller is avoiding.
-fn retain_blocks_below(
-    batches: &[RecordBatch],
-    bn_column: &str,
-    limit: u64,
-) -> Option<Vec<RecordBatch>> {
-    let mut kept = Vec::with_capacity(batches.len());
-
-    for batch in batches {
-        let column = batch.column_by_name(bn_column)?;
-        let mask = block_below_mask(column.as_ref(), limit)?;
-        let filtered = arrow::compute::filter_record_batch(batch, &mask).ok()?;
-
-        if filtered.num_rows() > 0 {
-            kept.push(filtered);
-        }
-    }
-
-    Some(kept)
-}
-
-/// Mask of the rows whose block number is strictly below `limit`, or `None` when
-/// no cut can be justified: a physical type this does not recognise, or a null
-/// block number, which is neither below the limit nor above it.
-///
-/// The type is resolved once per batch, and signed widths are read as unsigned
-/// the way `IntColumn::as_u64` explains.
-fn block_below_mask(column: &dyn Array, limit: u64) -> Option<BooleanArray> {
-    if column.null_count() > 0 {
-        return None;
-    }
-
-    let reader = IntColumn::resolve(column)?;
-    let below: Vec<bool> = (0..reader.len())
-        .map(|row| reader.block_number(row) < limit)
-        .collect();
-
-    Some(BooleanArray::from(below))
-}
-
-/// Select which row groups need to be scanned, skipping those that
-/// can be eliminated via statistics.
 fn select_row_groups(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<usize>> {
     let mut row_groups = Vec::new();
 
     for rg_idx in 0..table.num_row_groups() {
         // Check block range filter
+        // Bounds the file does not state, or states in a way no reader can
+        // trust, prune nothing: reading the group costs time, skipping it costs
+        // the rows, and it costs them silently.
         if let Some(bn_col) = request.block_number_column {
-            if let Some(stats) = table.column_stats(rg_idx, bn_col) {
-                if let (Some(ref min), Some(ref max)) = (stats.min, stats.max) {
-                    let rg_min = stat_value_to_u64(min);
-                    let rg_max = stat_value_to_u64(max);
-                    if let (Some(rg_min), Some(rg_max)) = (rg_min, rg_max) {
-                        if let Some(from_block) = request.from_block {
-                            if rg_max < from_block {
-                                continue; // Entire row group is before our range
-                            }
-                        }
-                        if let Some(to_block) = request.to_block {
-                            if rg_min > to_block {
-                                continue; // Entire row group is after our range
-                            }
-                        }
+            if let Some((rg_min, rg_max)) = block_bounds(table, rg_idx, bn_col) {
+                if let Some(from_block) = request.from_block {
+                    if rg_max < from_block {
+                        continue; // Entire row group is before our range
+                    }
+                }
+                if let Some(to_block) = request.to_block {
+                    if rg_min > to_block {
+                        continue; // Entire row group is after our range
                     }
                 }
             }
@@ -970,18 +939,11 @@ fn select_row_groups(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<
 
         // Key filter: skip row groups whose block_number range has no overlap with key set
         if let Some(kf) = &request.key_filter {
-            let bn_col = &kf.block_number_column;
-            if let Some(stats) = table.column_stats(rg_idx, bn_col) {
-                if let (Some(ref min), Some(ref max)) = (stats.min, stats.max) {
-                    if let (Some(rg_min), Some(rg_max)) =
-                        (stat_value_to_u64(min), stat_value_to_u64(max))
-                    {
-                        // Binary search: any key block number in [rg_min, rg_max]?
-                        let first = kf.sorted_blocks.partition_point(|&bn| bn < rg_min);
-                        if first >= kf.sorted_blocks.len() || kf.sorted_blocks[first] > rg_max {
-                            continue; // No matching block numbers in this row group
-                        }
-                    }
+            if let Some((rg_min, rg_max)) = block_bounds(table, rg_idx, &kf.block_number_column) {
+                // Binary search: any key block number in [rg_min, rg_max]?
+                let first = kf.sorted_blocks.partition_point(|&bn| bn < rg_min);
+                if first >= kf.sorted_blocks.len() || kf.sorted_blocks[first] > rg_max {
+                    continue; // No matching block numbers in this row group
                 }
             }
         }
@@ -1210,6 +1172,7 @@ fn scan_row_groups(
 
         // Project to output columns only
         let projected = project_batch(&batch, output_schema)?;
+
         output_batches.push(projected);
     }
 
@@ -1415,14 +1378,16 @@ fn build_output_schema(table_schema: &SchemaRef, columns: &[&str]) -> SchemaRef 
 }
 
 /// Convert a StatValue to u64 (for block range comparisons).
-fn stat_value_to_u64(value: &crate::scan::chunk::StatValue) -> Option<u64> {
+/// The scalar an integer column's row-group statistic carries.
+///
+/// Parquet has no physical integer narrower than 32 bits, so this is where a
+/// `UInt16` column's statistic arrives too, sign-extended. What the bits mean is
+/// the column's width to say, and the caller asks it.
+fn stat_scalar(value: &crate::scan::chunk::StatValue) -> Option<i64> {
     use crate::scan::chunk::StatValue;
     match value {
-        // Reinterpret bit pattern as unsigned. Parquet stores UInt32/UInt64 column
-        // statistics as Int32/Int64 physical values, so we must treat the bits as
-        // unsigned to get correct comparisons for block_number range pruning.
-        StatValue::Int32(v) => Some((*v as u32) as u64),
-        StatValue::Int64(v) => Some(*v as u64),
+        StatValue::Int32(v) => Some(*v as i64),
+        StatValue::Int64(v) => Some(*v),
         _ => None,
     }
 }
