@@ -138,12 +138,23 @@ New engine is faster on **every** RPC call at every concurrency level
 ```bash
 cargo bench --bench latency               # latency (divan)
 cargo bench --bench throughput -- --all    # throughput (all CPU levels)
+cargo bench --bench throughput -- --filter sol/whirlpool_swap --cpu 4 --seconds 8 --warmup-seconds 2 --json
 
 # A/B vs the legacy engine on the same chunk (requires sibling ../data repo):
 cargo bench --bench latency    --features legacy-query
 cargo bench --bench throughput --features legacy-query -- --all
 cargo bench --bench profile    --features legacy-query -- rpc/getLogs --compare
 ```
+
+The throughput benchmark uses closed-loop clients: each worker starts its next
+request after the previous one completes. `--cpu` sets client concurrency;
+`RAYON_NUM_THREADS` sets the engine's shared worker count. `--json` emits request
+counts, elapsed time, throughput, p50/p95/p99, and sorted per-request wall times.
+CPU time covers the whole process during measurement (when supported), including
+worker threads. Warmup uses the selected case and concurrency. Requests started
+before the deadline are drained and included in both elapsed time and samples.
+These timings cover the engine call, serialization and output disposal; queueing
+before the call and network time are outside the measurement.
 
 ## Supported Datasets
 

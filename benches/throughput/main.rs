@@ -1,8 +1,8 @@
-#[path = "../queries.rs"]
-mod queries;
 #[cfg(feature = "legacy-query")]
 #[path = "../legacy.rs"]
 mod legacy;
+#[path = "../queries.rs"]
+mod queries;
 
 use queries::*;
 use sqd_query_engine::metadata::load_dataset_description;
@@ -10,8 +10,7 @@ use sqd_query_engine::output::execute_chunk;
 use sqd_query_engine::query::{compile, parse_query};
 use sqd_query_engine::scan::ParquetChunkReader;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, Barrier, LazyLock, OnceLock};
 use std::time::{Duration, Instant};
 
 #[cfg(not(target_env = "msvc"))]
@@ -51,30 +50,102 @@ struct BenchCase {
     chunk_dir: String,
 }
 
-/// Drive `run_once` from `concurrency` threads for `duration`, return req/sec.
-fn measure<F: Fn() + Sync>(run_once: F, concurrency: usize, duration: Duration) -> f64 {
-    let stop = AtomicBool::new(false);
-    let total = AtomicUsize::new(0);
-
-    let start = Instant::now();
-    std::thread::scope(|s| {
-        for _ in 0..concurrency {
-            s.spawn(|| {
-                while !stop.load(Ordering::Relaxed) {
-                    run_once();
-                    total.fetch_add(1, Ordering::Relaxed);
-                }
-            });
-        }
-        std::thread::sleep(duration);
-        stop.store(true, Ordering::Relaxed);
-    });
-
-    let elapsed = start.elapsed().as_secs_f64();
-    total.load(Ordering::Relaxed) as f64 / elapsed
+#[derive(serde::Serialize)]
+struct Measurement {
+    requests: usize,
+    elapsed_seconds: f64,
+    rps: f64,
+    cpu_seconds: Option<f64>,
+    cpu_ms_per_query: Option<f64>,
+    p50_ms: f64,
+    p95_ms: f64,
+    p99_ms: f64,
+    /// Sorted wall times, including execution, serialization and output drop.
+    latency_ms: Vec<f64>,
 }
 
-fn measure_new(case: &BenchCase, concurrency: usize, duration: Duration) -> f64 {
+#[cfg(unix)]
+fn process_cpu_seconds() -> Option<f64> {
+    let mut time = std::mem::MaybeUninit::<libc::timespec>::uninit();
+    // SAFETY: time points to writable, correctly aligned storage. On success
+    // clock_gettime initializes it; on failure we never read the storage.
+    let status = unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, time.as_mut_ptr()) };
+    if status != 0 {
+        return None;
+    }
+    // SAFETY: the successful call above initialized both timespec fields.
+    let time = unsafe { time.assume_init() };
+    Some(time.tv_sec as f64 + time.tv_nsec as f64 / 1e9)
+}
+
+#[cfg(not(unix))]
+fn process_cpu_seconds() -> Option<f64> {
+    None
+}
+
+/// Closed-loop load: each worker starts its next request after the previous
+/// one finishes. This excludes any queue before the request enters the engine.
+fn measure<F: Fn() + Sync>(run_once: F, concurrency: usize, duration: Duration) -> Measurement {
+    assert!(concurrency > 0 && !duration.is_zero());
+    let ready = Barrier::new(concurrency + 1);
+    let begin = Barrier::new(concurrency + 1);
+    let deadline = OnceLock::new();
+
+    let (elapsed_seconds, cpu_seconds, mut latency_ms) = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..concurrency)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut samples = Vec::with_capacity(4096);
+                    ready.wait();
+                    begin.wait();
+                    let deadline = *deadline.get().expect("deadline set before start barrier");
+                    loop {
+                        let start = Instant::now();
+                        if start >= deadline {
+                            break;
+                        }
+                        run_once();
+                        samples.push(start.elapsed().as_secs_f64() * 1000.0);
+                    }
+                    samples
+                })
+            })
+            .collect();
+        ready.wait();
+        let cpu_start = process_cpu_seconds();
+        let start = Instant::now();
+        deadline.set(start + duration).expect("deadline set once");
+        begin.wait();
+        // Drain all requests started before the deadline. Include that drain
+        // in elapsed time and CPU, but exclude sorting and JSON reporting.
+        let worker_samples: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("benchmark worker panicked"))
+            .collect();
+        let elapsed_seconds = start.elapsed().as_secs_f64();
+        let cpu_seconds = cpu_start.zip(process_cpu_seconds()).map(|(a, b)| b - a);
+        let samples: Vec<f64> = worker_samples.into_iter().flatten().collect();
+        (elapsed_seconds, cpu_seconds, samples)
+    });
+    latency_ms.sort_unstable_by(f64::total_cmp);
+    let requests = latency_ms.len();
+    assert!(requests > 0, "measurement completed no requests");
+    // Nearest-rank quantiles over every completed request, including drain.
+    let percentile = |p: f64| latency_ms[(p * requests as f64).ceil() as usize - 1];
+    Measurement {
+        requests,
+        elapsed_seconds,
+        rps: requests as f64 / elapsed_seconds,
+        cpu_seconds,
+        cpu_ms_per_query: cpu_seconds.map(|s| s * 1000.0 / requests as f64),
+        p50_ms: percentile(0.50),
+        p95_ms: percentile(0.95),
+        p99_ms: percentile(0.99),
+        latency_ms,
+    }
+}
+
+fn measure_new(case: &BenchCase, concurrency: usize, duration: Duration) -> Measurement {
     measure(
         || {
             std::hint::black_box(run_query(case.query_json, case.meta, &case.chunk));
@@ -91,13 +162,16 @@ fn measure_legacy(case: &BenchCase, concurrency: usize, duration: Duration) -> O
     let chunk = legacy::open_chunk(Path::new(&case.chunk_dir));
     // Warm the lazily-populated per-table reader cache before timing.
     std::hint::black_box(legacy::run_query(case.query_json, &chunk));
-    Some(measure(
-        || {
-            std::hint::black_box(legacy::run_query(case.query_json, &chunk));
-        },
-        concurrency,
-        duration,
-    ))
+    Some(
+        measure(
+            || {
+                std::hint::black_box(legacy::run_query(case.query_json, &chunk));
+            },
+            concurrency,
+            duration,
+        )
+        .rps,
+    )
 }
 
 #[cfg(not(feature = "legacy-query"))]
@@ -135,6 +209,23 @@ fn build_cases(
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    let seconds = |flag: &str, default: f64| {
+        args.iter().position(|a| a == flag).map_or(default, |i| {
+            let value: f64 = args
+                .get(i + 1)
+                .expect("missing duration")
+                .parse()
+                .expect("invalid duration");
+            assert!(
+                value.is_finite() && value > 0.0,
+                "duration must be finite and positive"
+            );
+            value
+        })
+    };
+    let duration = Duration::from_secs_f64(seconds("--seconds", 5.0));
+    let warmup = Duration::from_secs_f64(seconds("--warmup-seconds", 1.0));
+    let json = args.iter().any(|a| a == "--json");
 
     // Default: only test at CPU=8. Pass "--all" for full sweep (1,2,4,8,...,max).
     let all_levels = args.iter().any(|a| a == "--all");
@@ -153,13 +244,26 @@ fn main() {
         cases.extend(build_cases(EVM_FULLSCAN_QUERIES, &EVM_META, label, &path));
     }
     // RPC queries are block-pinned to the small chunk; Solana has one chunk.
-    cases.extend(build_cases(EVM_RPC_QUERIES, &EVM_META, "", &evm_chunk_path("small")));
-    cases.extend(build_cases(SOL_QUERIES, &SOLANA_META, "", &sol_chunk_path()));
+    cases.extend(build_cases(
+        EVM_RPC_QUERIES,
+        &EVM_META,
+        "",
+        &evm_chunk_path("small"),
+    ));
+    cases.extend(build_cases(
+        SOL_QUERIES,
+        &SOLANA_META,
+        "",
+        &sol_chunk_path(),
+    ));
 
-    if cases.is_empty() {
-        eprintln!("No chunk data found. Expected data/{{evm,solana}}/chunk/");
-        return;
+    if let Some(filter) = &filter {
+        cases.retain(|case| case.name.contains(filter));
     }
+    assert!(
+        !cases.is_empty(),
+        "no benchmark cases matched available chunk data"
+    );
 
     let concurrency_levels: Vec<usize> = if all_levels {
         let cpus = std::thread::available_parallelism()
@@ -176,42 +280,56 @@ fn main() {
         }
         levels
     } else if let Some(pos) = args.iter().position(|a| a == "--cpu") {
-        args.get(pos + 1)
-            .and_then(|v| v.parse::<usize>().ok())
-            .map(|c| vec![c])
-            .unwrap_or(vec![8])
+        let c = args
+            .get(pos + 1)
+            .expect("missing concurrency")
+            .parse::<usize>()
+            .expect("invalid concurrency");
+        assert!(c > 0, "concurrency must be positive");
+        vec![c]
     } else {
         vec![8]
     };
 
-    let duration = Duration::from_secs(5);
-
-    // Warmup (new engine; legacy warms its own cache inside measure_legacy)
-    eprintln!("Warming up...");
-    for case in &cases {
-        std::hint::black_box(run_query(case.query_json, case.meta, &case.chunk));
-    }
-
-    println!();
-    println!("=== Throughput (rps, 5s per level) ===");
-    if legacy_enabled {
-        println!("{:<40}{:>6}{:>11}{:>11}{:>9}", "Benchmark", "CPU", "New", "Legacy", "New/Leg");
-        println!("{}", "-".repeat(77));
-    } else {
-        println!("{:<40}{:>6}{:>11}", "Benchmark", "CPU", "New");
-        println!("{}", "-".repeat(57));
-    }
-
-    for case in &cases {
-        if let Some(f) = &filter {
-            if !case.name.contains(f.as_str()) {
-                continue;
-            }
+    if !json {
+        println!();
+        println!(
+            "=== Throughput (rps, {}s per level) ===",
+            duration.as_secs_f64()
+        );
+        if legacy_enabled {
+            println!(
+                "{:<40}{:>6}{:>11}{:>11}{:>9}",
+                "Benchmark", "CPU", "New", "Legacy", "New/Leg"
+            );
+            println!("{}", "-".repeat(77));
+        } else {
+            println!("{:<40}{:>6}{:>11}", "Benchmark", "CPU", "New");
+            println!("{}", "-".repeat(57));
         }
+    }
+
+    for case in &cases {
         for &cpu in &concurrency_levels {
             eprint!("\r  {:<40} CPU={cpu:<4}", case.name);
-            let new_rps = measure_new(case, cpu, duration);
-            if legacy_enabled {
+            // Warm the selected case at the same concurrency as measurement.
+            std::hint::black_box(measure_new(case, cpu, warmup));
+            let measurement = measure_new(case, cpu, duration);
+            let new_rps = measurement.rps;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "case": case.name,
+                        "concurrency": cpu,
+                        "rayon_threads": rayon::current_num_threads(),
+                        "warmup_seconds": warmup.as_secs_f64(),
+                        "requested_seconds": duration.as_secs_f64(),
+                        "measurement": measurement,
+                        "legacy_rps": measure_legacy(case, cpu, duration),
+                    })
+                );
+            } else if legacy_enabled {
                 let leg = measure_legacy(case, cpu, duration).unwrap_or(0.0);
                 let ratio = if leg > 0.0 { new_rps / leg } else { f64::NAN };
                 println!(
@@ -223,6 +341,8 @@ fn main() {
             }
         }
         eprint!("\r{:<40}\r", "");
-        println!();
+        if !json {
+            println!();
+        }
     }
 }
