@@ -63,7 +63,10 @@ Both engines use `memmap2::Mmap` for I/O. The OS manages page faults, prefetchin
 
 The new engine uses **arrow-rs RowFilter** with multi-stage cascading. Each stage has its own `ProjectionMask`, meaning it decodes only the columns it needs. Rows eliminated by early stages **avoid column decoding in all subsequent stages**, including output columns.
 
-This is a single-pass approach: one `ParquetRecordBatchReader` per row group handles filtering and output column reading in one scan.
+Each scan uses a `ParquetRecordBatchReader` per row group. Queries with relations
+separate page selection from reading output values: the first phase reads row
+identities, relation inputs and size columns; the second reads output fields for
+the selected rows. Queries without relations retain their existing scan path.
 
 ### Execution Flow
 
@@ -79,21 +82,37 @@ compile()     --> Plan { table_plans, block_table, block_output_columns, ... }
     v
 execute_chunk()
     |
-    +---> 1. Primary table scans (parallel per table)
-    |         scan() --> Vec<RecordBatch>
+    +---> 1. Read header numbers and sizes
     |
-    +---> 2. Relation scans (parallel per relation)
-    |         KeyFilter/HierarchicalFilter build
-    |         scan() with pushdown filters
-    |         lookup_join / find_children / find_parents
+    +---> 2. For each complete block range:
+    |         scan relation inputs and sizes, applying predicates
+    |         expand relations on keys and sizes
+    |         compute deduplicated weights and select the block prefix
+    |         retain selected row positions; stop when the budget is exhausted
     |
-    +---> 3. Block header scan
+    +---> 3. Merge selected sources with the same table and projection
+    +---> 4. Read output fields for selected rows and headers
+    |         use physical row selections to avoid repeating filters
+    |         fall back to predicates or complete item keys for other readers
     |
-    +---> 4. Collect block numbers (HashSet)
-    +---> 5. Sort blocks, apply weight limit (20MB cap)
-    +---> 6. Build block indexes (block_number -> batch positions)
-    +---> 7. Return QueryOutput (blocks encode lazily, one per write_next_block)
+    +---> 5. Build block indexes (block_number -> batch positions)
+    +---> 6. Return QueryOutput (blocks encode lazily, one per write_next_block)
 ```
+
+Selection ranges are bounded independently of row-group overlap and missing
+statistics, using actual header numbers so gaps in numbering do not cause empty
+scans. These are read boundaries, not response boundaries: the cumulative weight,
+complete-block rule and pagination semantics remain the same. An oversized first
+block is still returned; there is no new memory-limit error. This reduces working
+memory but does not impose an absolute byte limit on an individual block or its
+keys. Readers without a complete item-key schema retain the existing scan path.
+
+The Parquet reader records the masks produced by its existing predicate pipeline
+and composes them into physical row positions. The output pass uses these positions
+directly, so it does not decode predicate columns or rebuild relation-key filters.
+Selection reads item keys only when relations or weight deduplication need them;
+a table with one source can defer its other item-key columns to the output pass.
+Readers that do not advertise position support use the complete-key fallback.
 
 ### scan() Internals
 

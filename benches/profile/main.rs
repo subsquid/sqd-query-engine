@@ -6,7 +6,7 @@ mod legacy;
 
 use queries::*;
 use sqd_query_engine::metadata::load_dataset_description;
-use sqd_query_engine::output::execute_chunk;
+use sqd_query_engine::output::{execute_chunk, execute_chunk_with, ExecOptions};
 use sqd_query_engine::query::{compile, parse_query};
 use sqd_query_engine::scan::ParquetChunkReader;
 use std::path::Path;
@@ -54,6 +54,8 @@ fn main() {
     let compare_mode = args.iter().any(|a| a == "--compare");
 
     let all_queries: Vec<(&str, &[u8], &sqd_query_engine::metadata::DatasetDescription, &str)> = vec![
+        ("evm/all_relations", EVM_ALL_RELATIONS, &EVM_META, EVM_CHUNK.as_str()),
+        ("evm/logs+transaction", EVM_LOGS_WITH_TRANSACTION, &EVM_META, EVM_CHUNK.as_str()),
         ("evm/usdc_transfers", EVM_USDC_TRANSFERS, &EVM_META, EVM_CHUNK.as_str()),
         ("evm/contract_calls+logs", EVM_CONTRACT_CALLS_WITH_LOGS, &EVM_META, EVM_CHUNK.as_str()),
         ("evm/usdc_traces+diffs", EVM_USDC_TRACES_AND_STATEDIFFS, &EVM_META, EVM_CHUNK.as_str()),
@@ -103,6 +105,19 @@ fn main() {
     }
 
     let chunk = ParquetChunkReader::open(chunk_path).unwrap();
+
+    if args.iter().any(|arg| arg == "--check-full-read") {
+        let parsed = parse_query(query_json, meta).unwrap();
+        let plan = compile(&parsed, meta).unwrap();
+        let full = execute_chunk_with(&plan, meta, &chunk, ExecOptions {
+            range_reads: false,
+            ..ExecOptions::default()
+        }).unwrap().map(|blocks| blocks.into_json_lines()).unwrap_or_default();
+        let selected = run_query(query_json, meta, &chunk, false);
+        assert!(selected == full, "page selection differs from a full read for {name}");
+        eprintln!("Full-read parity verified: {name}, {} bytes", selected.len());
+        return;
+    }
 
     // Warmup
     eprintln!("Warming up {} ...", name);

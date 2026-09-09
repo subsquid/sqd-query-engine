@@ -11,6 +11,9 @@ use crate::output::columns::{
     resolve_output_columns, resolve_relation_output_columns,
 };
 use crate::output::encoder::{encode_json_string, snake_to_camel};
+use crate::output::materialize::{
+    materialize_tables, read_rows, retain_blocks, retain_selected_keys, SelectionReader,
+};
 use crate::output::row_writer::{
     build_field_writers, build_full_sort_columns, build_grouped_writers, resolve_grouped_writers,
     resolve_sort_columns, resolve_writers, IndexedBatches,
@@ -648,11 +651,23 @@ fn execute_chunk_fmt(
     //    from the branch the client did not ask about.
     crate::output::fork::check_parent_block(plan, metadata, chunk)?;
 
-    // Read headers once so internal range boundaries never add header-only blocks.
+    // Keep the existing one-pass path for queries without relation expansion.
+    let selection_reader = (options.range_reads
+        && plan
+            .table_plans
+            .iter()
+            .any(|table| !table.relations.is_empty()))
+    .then(|| SelectionReader::new(chunk, plan, metadata))
+    .flatten();
+    let scan_reader: &dyn ChunkReader = selection_reader
+        .as_ref()
+        .map_or(chunk, |reader| reader as &dyn ChunkReader);
+
+    // Read header identities once so internal ranges never add boundary blocks.
     let t_blocks = timer!();
     let block_table_desc = metadata.table(&plan.block_table);
     let readable_block_table = block_table_desc.filter(|_| chunk.has_table(&plan.block_table));
-    let block_batches = if let Some(block_desc) = readable_block_table {
+    let mut block_batches = if let Some(block_desc) = readable_block_table {
         // Block number + requested output columns + the weight companions those
         // columns declare (see `block_scan_columns`).
         let bn_col = block_desc.block_number_column.as_str();
@@ -667,7 +682,7 @@ fn execute_chunk_fmt(
         request.block_number_column = Some(bn_col);
         request.required_columns = block_req_refs;
 
-        chunk.scan(&plan.block_table, &request)?
+        scan_reader.scan(&plan.block_table, &request)?
     } else {
         Vec::new()
     };
@@ -677,6 +692,13 @@ fn execute_chunk_fmt(
         .unwrap_or("number");
     let mut boundary_blocks = HashSet::default();
     collect_boundary_blocks(&block_batches, bn_column, &mut boundary_blocks)?;
+
+    let mut header_numbers = HashSet::default();
+    if selection_reader.is_some() {
+        collect_block_numbers(&block_batches, bn_column, &mut header_numbers)?;
+    }
+    let mut header_numbers: Vec<_> = header_numbers.into_iter().collect();
+    header_numbers.sort_unstable();
 
     let mut table_outputs: HashMap<String, TableOutput> = HashMap::new();
     let mut selection = BlockSelection::new(options.weight_budget);
@@ -691,7 +713,7 @@ fn execute_chunk_fmt(
         .or(plan.to_block);
 
     loop {
-        let hint = if options.range_reads {
+        let mut hint = if options.range_reads {
             if first_range {
                 initial_range_end(plan, metadata, chunk, options.weight_budget)?
             } else {
@@ -700,6 +722,27 @@ fn execute_chunk_fmt(
         } else {
             None
         };
+        if selection_reader.is_some() {
+            // Bound each key/size pass even when row groups overlap or have no
+            // statistics. Count actual headers so sparse block numbers do not
+            // turn into empty scans across numeric gaps.
+            // Unfiltered scans fill a page quickly; selective scans use larger
+            // ranges to amortize predicate decoding over overlapping row groups.
+            let blocks_per_selection = if plan.table_plans.iter().any(|table| {
+                table
+                    .predicates
+                    .iter()
+                    .any(|predicate| predicate.columns.is_empty())
+            }) {
+                16
+            } else {
+                256
+            };
+            let first = header_numbers.partition_point(|&block| block < from_block);
+            if let Some(&end) = header_numbers.get(first + blocks_per_selection - 1) {
+                hint = Some(hint.map_or(end, |hint| hint.min(end)));
+            }
+        }
         // A hint covering the whole request needs no extra block filter. Keep
         // the original bounds so a selective predicate can run first.
         let hint = hint.filter(|&end| request_end.is_none_or(|last| end < last));
@@ -708,7 +751,8 @@ fn execute_chunk_fmt(
             (Some(hint), None) => Some(hint.max(from_block)),
             (None, _) => plan.to_block,
         };
-        let range_outputs = scan_tables(plan, metadata, chunk, from_block, to_block, profile)?;
+        let mut range_outputs =
+            scan_tables(plan, metadata, scan_reader, from_block, to_block, profile)?;
         let in_range = |block: u64| block >= from_block && to_block.is_none_or(|end| block <= end);
         let range_headers = if first_range && (hint.is_none() || to_block == request_end) {
             block_batches.clone()
@@ -762,6 +806,10 @@ fn execute_chunk_fmt(
             selection.extend(&sorted_blocks, &weights)
         };
 
+        if selection_reader.is_some() {
+            retain_selected_keys(&mut range_outputs, plan, metadata, selection.blocks())?;
+        }
+
         for (table, output) in range_outputs {
             let accumulated = table_outputs.entry(table).or_insert_with(|| TableOutput {
                 batches: Vec::new(),
@@ -797,6 +845,22 @@ fn execute_chunk_fmt(
             OutputFormat::Json => FmtOutput::Json(None),
             OutputFormat::Arrow { .. } => FmtOutput::Arrow(None),
         });
+    }
+
+    if selection_reader.is_some() {
+        let t_materialize = timer!();
+        materialize_tables(&mut table_outputs, plan, metadata, chunk)?;
+        if let Some(desc) = block_table_desc {
+            block_batches = retain_blocks(block_batches, bn_column, &selected_blocks)?;
+            block_batches = read_rows(
+                chunk,
+                &plan.block_table,
+                desc,
+                &block_batches,
+                &block_scan_columns(&plan.block_output_columns, desc),
+            )?;
+        }
+        elapsed!(t_materialize, "materialize selected rows");
     }
 
     // Arrow branch: emit flat per-table IPC streams straight from the post-scan

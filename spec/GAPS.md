@@ -29,7 +29,6 @@ Compared against the reference implementation, as of 2026-09-05.
 | 40 | A filter on a column stored at a physical type outside the predicate's downcast matrix matches nothing | [INV-D7](07-invariants.md#inv-d7) | **S1** |
 | 41 | A roll field tolerates absent source columns and emits a misaligned list | [INV-E3](07-invariants.md#inv-e3) | **S1** |
 | 35 | The catalogs lag the reference by thirteen fields, and one of them cannot be expressed | [INV-X1](07-invariants.md#inv-x1) | **S2** |
-| 36 | Relation expansion materialises every target table before the weight budget is applied | [INV-B6](07-invariants.md#inv-b6) | **S3** |
 | 37 | A relation onto a table the chunk lacks is an error even when the primary scan is empty | [INV-E4](07-invariants.md#inv-e4) | **S3** |
 | 38 | Every parquet file in the chunk directory is opened for every query | [INV-E4](07-invariants.md#inv-e4) | **S3** |
 | 39 | Two predicate downcasts panic instead of returning `UnsupportedKeyType` | [INV-E7](07-invariants.md#inv-e7) | **S3** |
@@ -54,7 +53,7 @@ the query reads, and two physical types that panic.
 
 Gaps 33 to 44 came from one review, done before the engine goes to a fleet of
 workers that nobody can patch quickly. The number 34 was never assigned, and 33
-is closed, so ten of those entries are left. The review ran the reference
+and 36 are closed, so nine of those entries are left. The review ran the reference
 and this engine side by side: every filter, relation, alias and field of all
 seven datasets diffed against the reference's request macros; about 330
 request probes and about 700 response runs on the real chunks and every
@@ -161,36 +160,6 @@ catalog lacks a field the reference serves — the transcription, recomputed.
 ---
 
 ## S3 — Loud
-
-### 36. Relation expansion materialises every target table before the weight budget is applied
-
-Range reads now apply the budget after each complete block range, including
-relation expansion. A range suggested by overlapping row groups may still cover
-the whole query; all relation rows in that range are materialised before the
-weighted prefix of [INV-B6](07-invariants.md#inv-b6) is selected. The wire answer
-honours the invariant; the
-process does not. The reference reads key columns first and data columns after
-the join.
-
-Measured on the real EVM chunk (73 MB), release build, JSON output, identical
-responses on both engines:
-
-| Query shape | Reference | This engine |
-|---|---|---|
-| `includeAllBlocks`, `{}` on all four tables, every field, every relation | 203 MB, 196 ms | 3 134 MB, 2 369 ms |
-| same, no relations | 199 MB, 158 ms | 771 MB, 234 ms |
-| `traces {transaction, transactionLogs}` + `stateDiffs {transaction}` | 267 MB, 243 ms | 704 MB, 271 ms |
-| `logs {transaction}` | 121 MB, 86 ms | 238 MB, 106 ms |
-| `logs: [{}]` (two-phase path) | 99 MB, 66 ms | 85 MB, 56 ms |
-
-A worker runs many such queries at once, on chunks larger than this one, and an
-out-of-memory kill is not a panic anyone catches: it ends every query on the
-box. No invariant bounds working memory, which is a gap in the spec as much as in
-the engine; the perf gate of [§8.12](08-conformance.md#812-merge-gates) measures
-time, not space.
-
-*First test:* a memory bench with a counting allocator, gated on a ratio to the
-chunk size, run over the shapes above.
 
 ### 37. A relation onto a table the chunk lacks is an error even when the primary scan is empty
 

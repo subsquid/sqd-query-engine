@@ -10,6 +10,7 @@ use arrow::compute::kernels::boolean::and;
 use arrow::compute::kernels::cmp::{gt_eq, lt_eq};
 use arrow::datatypes::{Schema, SchemaRef};
 use arrow::error::ArrowError;
+use arrow::row::{RowConverter, SortField};
 use parquet::arrow::arrow_reader::{ArrowPredicateFn, ParquetRecordBatchReaderBuilder, RowFilter};
 use parquet::arrow::ProjectionMask;
 use rayon::prelude::*;
@@ -18,6 +19,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// A scan request: which columns to read, what predicates to apply.
+#[derive(Clone)]
 pub struct ScanRequest<'a> {
     /// Columns to include in the output.
     pub output_columns: Vec<&'a str>,
@@ -40,6 +42,12 @@ pub struct ScanRequest<'a> {
     /// `ColumnDoesNotExist`), as opposed to engine-internal columns that are
     /// tolerated when absent.
     pub required_columns: Vec<&'a str>,
+    /// Append absolute physical row positions under this synthetic column name.
+    /// Readers that support this must also support `row_indices` on later scans.
+    pub row_index_column: Option<&'a str>,
+    /// Read these physical rows directly. Positions must be sorted and unique;
+    /// predicates and block bounds must already have been applied by the caller.
+    pub row_indices: Option<&'a [u64]>,
 }
 
 impl<'a> ScanRequest<'a> {
@@ -54,6 +62,8 @@ impl<'a> ScanRequest<'a> {
             key_filter: None,
             hierarchical_filter: None,
             required_columns: Vec::new(),
+            row_index_column: None,
+            row_indices: None,
         }
     }
 }
@@ -67,6 +77,11 @@ enum CompositeKeySet {
     Fixed16(HashSet<u128>),
     /// Arbitrary key: serialized bytes (see `TypedKeyColumn::append_to`).
     Wide(HashSet<Vec<u8>>),
+    /// Row identity during materialization, including null key components.
+    Rows {
+        converter: RowConverter,
+        values: HashSet<Vec<u8>>,
+    },
 }
 
 impl CompositeKeySet {
@@ -75,6 +90,7 @@ impl CompositeKeySet {
         match self {
             Self::Fixed16(s) => s.is_empty(),
             Self::Wide(s) => s.is_empty(),
+            Self::Rows { values, .. } => values.is_empty(),
         }
     }
 }
@@ -98,9 +114,74 @@ pub struct KeyFilter {
     sorted_blocks: Vec<u64>,
     /// Block number column name in the target table.
     block_number_column: String,
+    /// Apply the cheap block predicate before decoding a complete row identity.
+    materialization: bool,
 }
 
 impl KeyFilter {
+    /// Select rows from the same physical table. Unlike a relation join, null
+    /// components are part of a row's identity and must match themselves.
+    pub(crate) fn for_rows(
+        batches: &[RecordBatch],
+        columns: &[String],
+        block_column: &str,
+    ) -> Result<Self> {
+        let first = batches.first().ok_or_else(|| {
+            engine_err!(ErrorKind::MalformedChunkData, "row selection has no schema")
+        })?;
+        let indices = columns
+            .iter()
+            .map(|name| first.schema().index_of(name))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if batches.iter().all(|batch| {
+            columns.iter().all(|name| {
+                batch.column_by_name(name).is_some_and(|column| {
+                    column.null_count() == 0
+                        && (crate::integers::is_integer(column.data_type())
+                            || matches!(column.data_type(), arrow::datatypes::DataType::Utf8))
+                })
+            })
+        }) {
+            let keys: Vec<_> = columns.iter().map(String::as_str).collect();
+            let mut filter = Self::build(batches, &keys, &keys, block_column, block_column);
+            filter.materialization = true;
+            return Ok(filter);
+        }
+        let converter = RowConverter::new(
+            indices
+                .iter()
+                .map(|&i| SortField::new(first.column(i).data_type().clone()))
+                .collect(),
+        )?;
+        let mut values = HashSet::default();
+        let mut blocks = HashSet::default();
+        for batch in batches {
+            let arrays: Vec<_> = columns
+                .iter()
+                .map(|name| {
+                    batch
+                        .schema()
+                        .index_of(name)
+                        .map(|i| batch.column(i).clone())
+                })
+                .collect::<std::result::Result<_, _>>()?;
+            let rows = converter.convert_columns(&arrays)?;
+            values.extend(rows.iter().map(|row| row.as_ref().to_vec()));
+            if let Some(column) = batch.column_by_name(block_column) {
+                extract_block_numbers(column.as_ref(), &mut blocks);
+            }
+        }
+        let mut sorted_blocks: Vec<_> = blocks.into_iter().collect();
+        sorted_blocks.sort_unstable();
+        Ok(Self {
+            columns: columns.to_vec(),
+            key_set: Arc::new(CompositeKeySet::Rows { converter, values }),
+            sorted_blocks,
+            block_number_column: block_column.to_owned(),
+            materialization: true,
+        })
+    }
+
     /// Build a key filter from primary scan results.
     ///
     /// - `primary_batches`: results from the primary table scan
@@ -199,6 +280,7 @@ impl KeyFilter {
             key_set: Arc::new(key_set),
             sorted_blocks,
             block_number_column: target_bn_col.to_string(),
+            materialization: false,
         }
     }
 
@@ -595,8 +677,23 @@ fn composite_key_in_set_mask(
     batch: &RecordBatch,
     key_columns: &[String],
     key_set: &CompositeKeySet,
-) -> BooleanArray {
+) -> std::result::Result<BooleanArray, ArrowError> {
     let len = batch.num_rows();
+    if let CompositeKeySet::Rows { converter, values } = key_set {
+        let arrays: Vec<_> = key_columns
+            .iter()
+            .map(|name| {
+                batch
+                    .schema()
+                    .index_of(name)
+                    .map(|i| batch.column(i).clone())
+            })
+            .collect::<std::result::Result<_, _>>()?;
+        let rows = converter.convert_columns(&arrays)?;
+        return Ok(BooleanArray::from_iter(
+            rows.iter().map(|row| Some(values.contains(row.as_ref()))),
+        ));
+    }
     let mut builder = BooleanBufferBuilder::new(len);
 
     // Resolve column types once (avoids per-row type dispatch)
@@ -635,9 +732,10 @@ fn composite_key_in_set_mask(
                 builder.append(complete && set.contains(key_buf.as_slice()));
             }
         }
+        CompositeKeySet::Rows { .. } => unreachable!(),
     }
 
-    BooleanArray::new(builder.finish(), None)
+    Ok(BooleanArray::new(builder.finish(), None))
 }
 
 /// Determine all columns a scan must read: requested output, predicate columns,
@@ -820,6 +918,10 @@ pub fn scan(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<RecordBat
     ensure_columns_present(table, request)?;
     ensure_block_numbers_readable(table, request)?;
 
+    if let Some(rows) = request.row_indices {
+        return super::positions::read_rows(table, request, rows);
+    }
+
     // 1. Determine all columns we need to read (output + predicate + block range)
     let all_columns = collect_read_columns(table, request);
 
@@ -990,13 +1092,16 @@ fn scan_row_groups(
     // avoid column decoding in later stages.
     let has_predicates = !request.predicates.is_empty();
     let effective_from = request.from_block.filter(|&b| b > 0);
-    // Skip block range RowFilter when KeyFilter is present — KF already does RG-level
-    // block pruning and row-level key matching, making block range redundant.
-    let has_block_filter = request.key_filter.is_none()
+    // Relation keys already restrict blocks. Materialization keys can include
+    // wide strings or lists, so reject blocks before decoding those components.
+    let has_block_filter = request.key_filter.is_none_or(|key| key.materialization)
         && request.block_number_column.is_some()
         && (effective_from.is_some() || request.to_block.is_some());
     let has_key_filter = request.key_filter.is_some();
     let has_hierarchical_filter = request.hierarchical_filter.is_some();
+    let mut tracked = request
+        .row_index_column
+        .map(|_| super::positions::TrackedRows::default());
 
     if has_predicates || has_block_filter || has_key_filter || has_hierarchical_filter {
         let mut filter_stages: Vec<Box<dyn parquet::arrow::arrow_reader::ArrowPredicate>> =
@@ -1064,7 +1169,7 @@ fn scan_row_groups(
                 filter_stages.push(Box::new(ArrowPredicateFn::new(
                     key_proj,
                     move |batch: RecordBatch| {
-                        Ok(composite_key_in_set_mask(&batch, &key_columns, &key_set))
+                        composite_key_in_set_mask(&batch, &key_columns, &key_set)
                     },
                 )));
             }
@@ -1155,11 +1260,16 @@ fn scan_row_groups(
         }
 
         if !filter_stages.is_empty() {
+            if let Some(tracked) = &mut tracked {
+                filter_stages = tracked.wrap(filter_stages);
+            }
             builder = builder.with_row_filter(RowFilter::new(filter_stages));
         }
     }
 
     let reader = builder.build().context("building parquet reader")?;
+    let positions = tracked.map(|tracked| tracked.finish(table, row_groups));
+    let mut position_offset = 0;
 
     let mut output_batches = Vec::new();
 
@@ -1171,7 +1281,15 @@ fn scan_row_groups(
         }
 
         // Project to output columns only
-        let projected = project_batch(&batch, output_schema)?;
+        let mut projected = project_batch(&batch, output_schema)?;
+        if let (Some(name), Some(positions)) = (request.row_index_column, &positions) {
+            projected = super::positions::append_positions(
+                &projected,
+                name,
+                positions.slice(position_offset, batch.num_rows()),
+            )?;
+            position_offset += batch.num_rows();
+        }
 
         output_batches.push(projected);
     }
@@ -1252,6 +1370,13 @@ fn scan_hierarchical_two_pass(
         },
     ));
 
+    let mut tracked = request
+        .row_index_column
+        .map(|_| super::positions::TrackedRows::default());
+    let stages: Vec<Box<dyn parquet::arrow::arrow_reader::ArrowPredicate>> = match &mut tracked {
+        Some(tracked) => tracked.wrap(vec![filter_stage]),
+        None => vec![filter_stage],
+    };
     let reader = ParquetRecordBatchReaderBuilder::new_with_metadata(
         table.data(),
         table.arrow_metadata().clone(),
@@ -1259,16 +1384,27 @@ fn scan_hierarchical_two_pass(
     .with_projection(main_mask)
     .with_batch_size(request.batch_size)
     .with_row_groups(row_groups.to_vec())
-    .with_row_filter(RowFilter::new(vec![filter_stage]))
+    .with_row_filter(RowFilter::new(stages))
     .build()
     .context("building hierarchical reader")?;
+    let positions = tracked.map(|tracked| tracked.finish(table, row_groups));
+    let mut position_offset = 0;
 
     let mut output_batches = Vec::new();
 
     for batch_result in reader {
-        let batch = batch_result.context("reading hierarchical batch")?;
+        let mut batch = batch_result.context("reading hierarchical batch")?;
         if batch.num_rows() == 0 {
             continue;
+        }
+        if let (Some(name), Some(positions)) = (request.row_index_column, &positions) {
+            let count = batch.num_rows();
+            batch = super::positions::append_positions(
+                &batch,
+                name,
+                positions.slice(position_offset, count),
+            )?;
+            position_offset += count;
         }
 
         // Apply block range filter if needed
@@ -1289,7 +1425,17 @@ fn scan_hierarchical_two_pass(
             continue;
         }
 
-        let projected = project_batch(&batch, output_schema)?;
+        let mut projected = project_batch(&batch, output_schema)?;
+        if let Some(name) = request.row_index_column {
+            let positions = batch
+                .column_by_name(name)
+                .expect("tracked rows have positions");
+            let positions = positions
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .expect("physical positions are u64");
+            projected = super::positions::append_positions(&projected, name, positions.clone())?;
+        }
         output_batches.push(projected);
     }
 
@@ -1353,7 +1499,7 @@ fn block_range_mask(
 }
 
 /// Project a RecordBatch to only include the given output columns.
-fn project_batch(batch: &RecordBatch, output_schema: &SchemaRef) -> Result<RecordBatch> {
+pub(super) fn project_batch(batch: &RecordBatch, output_schema: &SchemaRef) -> Result<RecordBatch> {
     let columns: Vec<Arc<dyn Array>> = output_schema
         .fields()
         .iter()
@@ -1369,7 +1515,7 @@ fn project_batch(batch: &RecordBatch, output_schema: &SchemaRef) -> Result<Recor
 }
 
 /// Build the output Arrow schema from requested column names.
-fn build_output_schema(table_schema: &SchemaRef, columns: &[&str]) -> SchemaRef {
+pub(super) fn build_output_schema(table_schema: &SchemaRef, columns: &[&str]) -> SchemaRef {
     let fields: Vec<_> = columns
         .iter()
         .filter_map(|name| table_schema.field_with_name(name).ok().cloned())
@@ -1420,6 +1566,34 @@ mod tests {
     use super::*;
     use crate::scan::predicate::InListPredicate;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn materialization_keys_preserve_nulls_and_list_components() {
+        use arrow::datatypes::UInt32Type;
+        let identities: Vec<ArrayRef> = vec![
+            Arc::new(UInt32Array::from(vec![Some(0), None, Some(2), Some(3)])),
+            Arc::new(ListArray::from_iter_primitive::<UInt32Type, _, _>(vec![
+                Some(vec![Some(0)]),
+                None,
+                Some(vec![None, Some(2)]),
+                Some(vec![Some(3)]),
+            ])),
+        ];
+        for identity in identities {
+            let batch = RecordBatch::try_from_iter(vec![
+                (
+                    "number",
+                    Arc::new(UInt64Array::from(vec![7; 4])) as ArrayRef,
+                ),
+                ("identity", identity),
+            ])
+            .unwrap();
+            let columns = vec!["number".to_owned(), "identity".to_owned()];
+            let selected = KeyFilter::for_rows(&[batch.slice(1, 2)], &columns, "number").unwrap();
+            let mask = composite_key_in_set_mask(&batch, &columns, &selected.key_set).unwrap();
+            assert_eq!(mask, BooleanArray::from(vec![false, true, true, false]));
+        }
+    }
 
     fn solana_chunk_path() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/chunk")

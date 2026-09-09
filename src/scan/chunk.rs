@@ -122,6 +122,10 @@ impl ParquetChunkReader {
 }
 
 impl ChunkReader for ParquetChunkReader {
+    fn supports_row_positions(&self) -> bool {
+        true
+    }
+
     fn scan(&self, table: &str, request: &ScanRequest) -> Result<Vec<RecordBatch>> {
         let parquet_table = match self.cache.get(table) {
             Some(t) => t,

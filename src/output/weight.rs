@@ -217,6 +217,10 @@ impl BlockSelection {
     pub(crate) fn into_blocks(self) -> Vec<u64> {
         self.blocks
     }
+
+    pub(crate) fn blocks(&self) -> &[u64] {
+        &self.blocks
+    }
 }
 
 /// Columns needed to compute the response-budget weight *cheaply*, without
@@ -522,7 +526,7 @@ fn equal_key_value(a: &dyn Array, ai: usize, b: &dyn Array, bi: usize) -> bool {
 /// - Join key columns (for relations)
 /// - Source predicate columns (e.g., is_committed)
 /// - Tag columns (for field groups)
-fn weight_projection(
+pub(crate) fn weight_projection(
     user_output_columns: &[String],
     table_desc: Option<&TableDescription>,
 ) -> Vec<String> {
