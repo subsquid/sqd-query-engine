@@ -736,7 +736,7 @@ fn execute_chunk_fmt(
             }) {
                 16
             } else {
-                256
+                1024
             };
             let first = header_numbers.partition_point(|&block| block < from_block);
             if let Some(&end) = header_numbers.get(first + blocks_per_selection - 1) {
