@@ -294,3 +294,158 @@ tables:
             .expect("a response the encoders wrote must still be JSON");
     }
 }
+
+// ---------------------------------------------------------------------------
+// A block number nothing can place, reached from every scan path
+// ---------------------------------------------------------------------------
+
+/// A chunk whose block-number column cannot place a row is refused, whatever
+/// query reaches it.
+///
+/// The value is what every layer puts a row somewhere by: which row group can
+/// still own it, what it weighs, which block it is emitted under. Read through
+/// the width-tolerant reader a null returns the slot's placeholder, so the row
+/// quietly becomes block 0's — a wrong answer, and a different wrong answer in
+/// each reader.
+///
+/// The shapes are the point. A check placed where the rows come out sees only
+/// the rows a predicate left, and the hierarchical scan returns before reaching
+/// it at all, so the same chunk would error on a direct scan and answer, short,
+/// on a relation pull. That is worse than either — a client cannot tell a chunk
+/// the engine refuses from one it silently under-answers — so the check runs
+/// once, on entry, over every row group rather than the selected ones.
+///
+/// The same chunk is written twice, because what the check reads is the file's
+/// null count and a file need not state one. Stated, `Some(0)` and "not stated"
+/// are the same value to a reader that defaults the absent one to zero, and the
+/// chunk goes on to answer with the null read as block zero. So where the
+/// metadata says nothing the column is read instead, and the row group that says
+/// nothing is the one this second chunk is made of.
+///
+/// Covers CT-9 · INV-E1
+#[test]
+fn a_block_number_nothing_can_place_is_refused_on_every_path() {
+    use parquet::file::properties::{EnabledStatistics, WriterProperties};
+
+    for (stated, props) in [
+        ("stating a null count", None),
+        (
+            "stating none",
+            Some(
+                WriterProperties::builder()
+                    .set_statistics_enabled(EnabledStatistics::None)
+                    .build(),
+            ),
+        ),
+    ] {
+        refuses_every_path(stated, props);
+    }
+}
+
+/// One writing of that chunk, read back along every path.
+fn refuses_every_path(stated: &str, props: Option<parquet::file::properties::WriterProperties>) {
+    use arrow::array::{ArrayRef, ListArray, UInt32Array, UInt64Array};
+    use arrow::buffer::OffsetBuffer;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use parquet::arrow::ArrowWriter;
+    use sqd_query_engine::error::{error_kind, ErrorKind};
+    use sqd_query_engine::scan::{
+        ChunkReader, HierarchicalFilter, HierarchicalMode, KeyFilter, ParquetChunkReader,
+        ScanRequest,
+    };
+    use std::fs::File;
+    use std::sync::Arc;
+
+    const BN: &str = "block_number";
+
+    let dir = tempfile::tempdir().unwrap();
+    let address_field = Arc::new(Field::new("item", DataType::UInt32, true));
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(BN, DataType::UInt64, true),
+        Field::new("transaction_index", DataType::UInt32, false),
+        Field::new(
+            "instruction_address",
+            DataType::List(address_field.clone()),
+            false,
+        ),
+    ]));
+
+    // Four rows over three blocks, the third of them carrying no block at all.
+    let blocks = vec![Some(100u64), Some(101), None, Some(102)];
+    let addresses = ListArray::new(
+        address_field,
+        OffsetBuffer::from_lengths([1usize, 1, 1, 1]),
+        Arc::new(UInt32Array::from(vec![0u32, 1, 2, 3])) as ArrayRef,
+        None,
+    );
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(blocks)) as ArrayRef,
+            Arc::new(UInt32Array::from(vec![0u32, 0, 0, 0])) as ArrayRef,
+            Arc::new(addresses) as ArrayRef,
+        ],
+    )
+    .unwrap();
+
+    let file = File::create(dir.path().join("items.parquet")).unwrap();
+    let mut writer = ArrowWriter::try_new(file, schema.clone(), props).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+
+    let reader = ParquetChunkReader::open(dir.path()).unwrap();
+
+    let request = || {
+        let mut request = ScanRequest::new(vec![BN, "transaction_index"]);
+        request.block_number_column = Some(BN);
+        request
+    };
+
+    // A relation pull, and a hierarchical one: both built from no source rows,
+    // since what is under test is the path taken, not what the filter selects.
+    let key_filter = KeyFilter::build(&[], &[BN], &[BN], BN, BN);
+    let hierarchical = HierarchicalFilter::build(
+        &[],
+        &[BN, "transaction_index"],
+        "instruction_address",
+        "instruction_address",
+        HierarchicalMode::Children,
+        true,
+    );
+
+    let mut bounded = request();
+    bounded.from_block = Some(100);
+    bounded.to_block = Some(101);
+
+    let mut pulled = request();
+    pulled.key_filter = Some(&key_filter);
+
+    let mut descended = request();
+    descended.hierarchical_filter = Some(&hierarchical);
+
+    // A range that excludes the offending row: the chunk is still the chunk.
+    let mut past_it = request();
+    past_it.from_block = Some(102);
+
+    for (shape, request) in [
+        ("an unbounded scan", request()),
+        ("a bounded range", bounded),
+        ("a relation pull", pulled),
+        ("a hierarchical pull", descended),
+        ("a range past the unplaceable row", past_it),
+    ] {
+        let err = reader.scan("items", &request).expect_err(&format!(
+            "{shape} answered from a chunk it cannot place every row against, \
+             written {stated}"
+        ));
+
+        assert_eq!(
+            error_kind(&err),
+            Some(ErrorKind::MalformedChunkData),
+            "{shape} failed with something other than a malformed chunk \
+             on a chunk written {stated}: {err:#}"
+        );
+    }
+}

@@ -35,11 +35,17 @@ pub struct QueryOutput {
     // Reusable per-block row-ref scratch buffers (sort + multi-source merge).
     pub(crate) sort_scratch: Vec<(usize, usize)>,
     pub(crate) merge_scratch: Vec<(usize, usize, usize)>,
+    pub(crate) read_through: Option<u64>,
 }
 
 impl QueryOutput {
     pub fn num_blocks(&self) -> usize {
         self.selected_blocks.len()
+    }
+
+    /// Last fully read block when range reads stopped before the requested end.
+    pub fn read_through(&self) -> Option<u64> {
+        self.read_through
     }
 
     pub fn first_block(&self) -> u64 {

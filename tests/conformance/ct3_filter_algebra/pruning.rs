@@ -14,7 +14,7 @@
 //! filters: one that matches, one that matches nothing, and one whose empty list
 //! matches nothing by construction.
 
-use crate::harness::chunk::{chunk_relaid, Layout};
+use crate::harness::chunk::{chunk_relaid, chunk_with_two_leaves_before, Layout};
 use crate::harness::evm_like;
 use crate::harness::fixtures::answers_the_same;
 
@@ -74,5 +74,54 @@ fn a_filter_returns_the_same_rows_with_nothing_to_prune_on() {
                 &format!("{what_filter} {what_layout}"),
             );
         }
+    }
+}
+
+/// A statistic belongs to a column, and it has to be the column asked for.
+///
+/// Arrow counts a file's columns in top-level fields and parquet counts them in
+/// leaves, and the two agree only while every field is a primitive. One
+/// `List<Struct<…>>` earlier in the schema — `access_list` on an EVM
+/// transaction, `address_table_lookups` on a Solana one — and a bound read by
+/// the schema's count belongs to some other column. The filter then skips the
+/// row group holding its own rows, and nothing says so: a dropped match looks
+/// exactly like a row that was never there (INV-P16).
+///
+/// The inserted column carries a string above every address in the chunk, so a
+/// reader taking it for the address column concludes no address can match and
+/// declines to read the group. Put anywhere else it would be a column the query
+/// never mentions, which is what makes the placement the whole test: it sits one
+/// field ahead of `address`, so its second leaf is where `address` is counted to
+/// be.
+///
+/// Covers CT-3 · INV-P16
+#[test]
+fn a_nested_column_earlier_in_the_schema_does_not_reach_the_answer() {
+    let catalog = evm_like::catalog();
+    let source = evm_like::chunk();
+    let nested = chunk_with_two_leaves_before(source.path(), "logs", "address", "zzzz");
+
+    let present = evm_like::address(evm_like::PRESENT_ADDRESS);
+    let topic = evm_like::word(evm_like::PRESENT_TOPIC);
+
+    for (what, item_request) in [
+        (
+            "a matching address",
+            format!(r#"{{"address":["{present}"]}}"#),
+        ),
+        (
+            "an address and a topic together",
+            format!(r#"{{"address":["{present}"],"topic0":["{topic}"]}}"#),
+        ),
+        ("a matching topic", format!(r#"{{"topic0":["{topic}"]}}"#)),
+        ("no filter at all", "{}".to_string()),
+    ] {
+        answers_the_same(
+            &catalog,
+            &evm_like::query_with(103, 113, &item_request),
+            source.path(),
+            nested.path(),
+            &format!("{what} against a chunk carrying a two-leaf column before `address`"),
+        );
     }
 }

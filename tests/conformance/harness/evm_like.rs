@@ -233,6 +233,18 @@ pub fn chunk() -> TempDir {
     dir
 }
 
+/// The same chunk with small row groups on block-ordered tables.
+pub fn partitioned_chunk() -> TempDir {
+    let dir = chunk();
+
+    // Three rows per group splits blocks across neighbouring groups.
+    crate::harness::chunk::repartition(dir.path(), "blocks", 2);
+    crate::harness::chunk::repartition(dir.path(), "transactions", 3);
+    crate::harness::chunk::repartition(dir.path(), "traces", 3);
+
+    dir
+}
+
 /// The two values `traces.kind` takes.
 pub const TRACE_KINDS: [&str; 2] = ["call", "create"];
 

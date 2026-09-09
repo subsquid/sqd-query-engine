@@ -12,10 +12,11 @@
 //! order.
 
 use arrow::array::{
-    new_null_array, Array, ArrayRef, ListArray, StringArray, UInt32Array, UInt64Array,
+    new_null_array, Array, ArrayRef, ListArray, StringArray, StructArray, UInt32Array, UInt64Array,
 };
+use arrow::buffer::OffsetBuffer;
 use arrow::compute::{cast, concat_batches, take};
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
@@ -48,6 +49,63 @@ fn write_parquet_file(
 pub fn write_table(dir: &Path, table: &str, fields: Vec<Field>, columns: Vec<ArrayRef>) {
     let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
     write_parquet(&dir.join(format!("{table}.parquet")), &batch);
+}
+
+/// The same, one row group per entry: the writer is flushed after each, which is
+/// what puts a block shared by two groups in both of them.
+pub fn write_table_row_groups(
+    dir: &Path,
+    table: &str,
+    fields: Vec<Field>,
+    groups: Vec<Vec<ArrayRef>>,
+) {
+    let schema = Arc::new(Schema::new(fields));
+    let file = File::create(dir.join(format!("{table}.parquet"))).unwrap();
+    let mut writer = ArrowWriter::try_new(file, schema.clone(), None).unwrap();
+
+    for columns in groups {
+        writer
+            .write(&RecordBatch::try_new(schema.clone(), columns).unwrap())
+            .unwrap();
+        writer.flush().unwrap();
+    }
+
+    writer.close().unwrap();
+}
+
+/// Rewrite a table's parquet with its rows split into row groups of
+/// `rows_per_group`, in the order they are already stored.
+///
+/// The existing row order is preserved, including overlaps between block ranges.
+pub fn repartition(dir: &Path, table: &str, rows_per_group: usize) {
+    let path = dir.join(format!("{table}.parquet"));
+    let reader = ParquetRecordBatchReaderBuilder::try_new(File::open(&path).unwrap())
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let batches: Vec<RecordBatch> = reader.map(Result::unwrap).collect();
+    let schema = batches
+        .first()
+        .map(RecordBatch::schema)
+        .expect("a table has at least one batch");
+    let all = concat_batches(&schema, &batches).unwrap();
+
+    let mut groups = Vec::new();
+    let mut offset = 0;
+    while offset < all.num_rows() {
+        let len = rows_per_group.min(all.num_rows() - offset);
+        groups.push(all.slice(offset, len));
+        offset += len;
+    }
+
+    let file = File::create(&path).unwrap();
+    let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+    for group in groups {
+        writer.write(&group).unwrap();
+        writer.flush().unwrap();
+    }
+    writer.close().unwrap();
 }
 
 /// A blocks table carrying nothing but the numbers, under the column name the
@@ -186,6 +244,64 @@ pub fn chunk_with_nullable_column(
             .map(|batch| {
                 let mut columns = batch.columns().to_vec();
                 columns.push(new_null_array(&data_type, batch.num_rows()));
+                RecordBatch::try_new(extended.clone(), columns).unwrap()
+            })
+            .collect();
+
+        (extended, rewritten)
+    })
+}
+
+/// Copy a chunk, putting a column of two parquet leaves immediately before one
+/// of the table's own columns.
+///
+/// Arrow counts a `List<Struct<a, b>>` as one field and parquet counts it as two
+/// columns, so from there on every field sits further along in the file than in
+/// the schema. It is the shape `access_list` gives an EVM transaction and
+/// `address_table_lookups` a Solana one, and the column landing on this one's
+/// second leaf is the one whose statistics a reader confusing the two counts
+/// will read. Both struct fields hold `element` in every row, so what that
+/// reader finds is a bound the test chose.
+pub fn chunk_with_two_leaves_before(
+    src: &Path,
+    table: &str,
+    column: &str,
+    element: &str,
+) -> tempfile::TempDir {
+    rewrite_table(src, table, |schema, batches| {
+        let at = schema
+            .index_of(column)
+            .unwrap_or_else(|_| panic!("'{column}' must be present in {table}"));
+
+        let members = Fields::from(vec![
+            Field::new("a", DataType::Utf8, true),
+            Field::new("b", DataType::Utf8, true),
+        ]);
+        let item = Arc::new(Field::new("item", DataType::Struct(members.clone()), true));
+
+        let mut fields: Vec<Field> = schema
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone())
+            .collect();
+        fields.insert(at, Field::new("nested", DataType::List(item.clone()), true));
+        let extended = Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()));
+
+        let rewritten = batches
+            .iter()
+            .map(|batch| {
+                let rows = batch.num_rows();
+                let constant = || Arc::new(StringArray::from(vec![element; rows])) as ArrayRef;
+                let members = StructArray::new(members.clone(), vec![constant(), constant()], None);
+                let nested = ListArray::new(
+                    item.clone(),
+                    OffsetBuffer::from_lengths(vec![1usize; rows]),
+                    Arc::new(members),
+                    None,
+                );
+
+                let mut columns = batch.columns().to_vec();
+                columns.insert(at, Arc::new(nested) as ArrayRef);
                 RecordBatch::try_new(extended.clone(), columns).unwrap()
             })
             .collect();

@@ -1,3 +1,4 @@
+use crate::integers::{BlockNumbers, IntColumn};
 use crate::metadata::{DatasetDescription, TableDescription, VirtualField, WeightSource};
 use crate::query::Plan;
 use arrow::array::*;
@@ -7,6 +8,10 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 /// Maximum response size in bytes (20 MB).
+/// `P-WEIGHT-BUDGET` of `spec/09-parameters.md`: the default every caller gets.
+/// The value in force is [`crate::output::ExecOptions::weight_budget`] — reading
+/// the constant instead of the field is how a stage comes to enforce a budget
+/// the rest of the query is not using.
 pub(crate) const MAX_RESPONSE_BYTES: u64 = 20 * 1024 * 1024;
 
 /// Default weight per row when no weight column is specified.
@@ -30,22 +35,17 @@ struct WeightContribution<'a> {
     weight_cols: Vec<String>,
 }
 
-/// Apply weight-based limit: select blocks until cumulative weight exceeds MAX_RESPONSE_BYTES.
+/// Compute exact per-block weights after merging all table contributions.
 ///
 /// Weight is computed per target table with row deduplication, matching legacy behavior:
 /// - Direct scan results and relation results targeting the same table are merged
 /// - Duplicate rows (same block_number + item_order_keys) are counted only once
-pub(crate) fn apply_weight_limit(
-    sorted_blocks: &[u64],
+pub(crate) fn compute_block_weights(
     table_outputs: &HashMap<String, TableOutput>,
     block_batches: &[RecordBatch],
     metadata: &DatasetDescription,
     plan: &Plan,
-) -> Vec<u64> {
-    if sorted_blocks.is_empty() {
-        return Vec::new();
-    }
-
+) -> FxHashMap<u64, u64> {
     // 1. Group all batch contributions by TARGET table name.
     // Direct batches → target is the table_plan's own table.
     // Relation batches → target is the relation's target_table.
@@ -71,21 +71,21 @@ pub(crate) fn apply_weight_limit(
             });
 
         for (rel_idx, rel) in table_plan.relations.iter().enumerate() {
-            if let Some(rel_batches) = output.relation_batches.get(&rel_idx) {
-                let rel_desc = metadata.table(&rel.target_table);
-                let rel_weight_cols = weight_projection(&rel.output_columns, rel_desc);
-                let (rel_fixed, rel_weight_col_names) =
-                    compute_weight_params(&rel_weight_cols, rel_desc);
-
-                target_contribs
-                    .entry(&rel.target_table)
-                    .or_default()
-                    .push(WeightContribution {
-                        batches: rel_batches,
-                        fixed_weight: rel_fixed,
-                        weight_cols: rel_weight_col_names,
-                    });
-            }
+            let rel_desc = metadata.table(&rel.target_table);
+            let columns = weight_projection(&rel.output_columns, rel_desc);
+            let (fixed_weight, weight_cols) = compute_weight_params(&columns, rel_desc);
+            target_contribs
+                .entry(&rel.target_table)
+                .or_default()
+                .push(WeightContribution {
+                    batches: output
+                        .relation_batches
+                        .get(&rel_idx)
+                        .map(Vec::as_slice)
+                        .unwrap_or_default(),
+                    fixed_weight,
+                    weight_cols,
+                });
         }
     }
 
@@ -117,20 +117,7 @@ pub(crate) fn apply_weight_limit(
                 &mut block_weights,
             );
         } else {
-            // Multiple sources — deduplicate by (block_number, item_order_key_hash).
-            let mut seen: FxHashSet<(u64, u64)> = FxHashSet::default();
-
-            for contrib in contribs {
-                accumulate_block_weights_dedup(
-                    contrib.batches,
-                    bn_col_name,
-                    &dedup_keys,
-                    contrib.fixed_weight,
-                    &contrib.weight_cols,
-                    &mut block_weights,
-                    &mut seen,
-                );
-            }
+            accumulate_dedup_contributions(contribs, bn_col_name, &dedup_keys, &mut block_weights);
         }
     }
 
@@ -166,37 +153,70 @@ pub(crate) fn apply_weight_limit(
                 .filter_map(|c| batch.column_by_name(c))
                 .collect();
 
+            // The scan refuses a chunk whose block-number column cannot place a
+            // row, so a batch arriving here without a readable one did not come
+            // from one. Weighing nothing for it runs the response large rather
+            // than short, which is the direction INV-B9 tolerates.
+            let Ok(blocks) = BlockNumbers::resolve(bn_col.as_ref(), header_bn_col) else {
+                continue;
+            };
+
             for i in 0..batch.num_rows() {
-                if let Some(block_num) = get_block_number(bn_col.as_ref(), i) {
-                    if blocks_with_items.contains(&block_num) {
-                        let dynamic: u64 = weight_arrays
-                            .iter()
-                            .map(|col| get_weight_value(col.as_ref(), i))
-                            .fold(0u64, u64::saturating_add);
-                        let entry = block_weights.entry(block_num).or_default();
-                        *entry = entry.saturating_add(header_fixed.saturating_add(dynamic));
-                    }
+                let block_num = blocks.at(i);
+
+                if !blocks_with_items.contains(&block_num) {
+                    continue;
                 }
+
+                let dynamic: u64 = weight_arrays
+                    .iter()
+                    .map(|col| get_weight_value(col.as_ref(), i))
+                    .fold(0u64, u64::saturating_add);
+
+                let entry = block_weights.entry(block_num).or_default();
+                *entry = entry.saturating_add(header_fixed.saturating_add(dynamic));
             }
         }
     }
 
-    // 4. Select blocks by cumulative weight.
-    let mut cumulative_weight: u64 = 0;
-    let mut selected = Vec::new();
+    block_weights
+}
 
-    for &block_num in sorted_blocks {
-        let block_weight = block_weights.get(&block_num).copied().unwrap_or(0);
-        cumulative_weight = cumulative_weight.saturating_add(block_weight);
+/// Select a weighted prefix across disjoint, complete ranges of blocks.
+pub(crate) struct BlockSelection {
+    budget: u64,
+    cumulative: u64,
+    blocks: Vec<u64>,
+}
 
-        if selected.is_empty() || cumulative_weight <= MAX_RESPONSE_BYTES {
-            selected.push(block_num);
-        } else {
-            break;
+impl BlockSelection {
+    pub(crate) fn new(budget: u64) -> Self {
+        Self {
+            budget,
+            cumulative: 0,
+            blocks: Vec::new(),
         }
     }
 
-    selected
+    /// Returns true once the budget is exceeded, including by the first block.
+    pub(crate) fn extend(&mut self, blocks: &[u64], weights: &FxHashMap<u64, u64>) -> bool {
+        for &block in blocks {
+            self.cumulative = self
+                .cumulative
+                .saturating_add(weights.get(&block).copied().unwrap_or(0));
+            if self.blocks.is_empty() || self.cumulative <= self.budget {
+                self.blocks.push(block);
+            }
+            if self.cumulative > self.budget {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub(crate) fn into_blocks(self) -> Vec<u64> {
+        self.blocks
+    }
 }
 
 /// Columns needed to compute the response-budget weight *cheaply*, without
@@ -239,48 +259,32 @@ pub(crate) fn block_scan_columns(
     cols
 }
 
-/// Given a narrow scan (block number + weight columns) of a single table with no
-/// relations, return the highest block number that still fits within the
-/// response budget, or `None` if every block fits (no trimming needed).
-///
-/// This intentionally ignores block-header weight, so the cutoff is a safe upper
-/// bound: the exact, header-aware [`apply_weight_limit`] runs later on the
-/// (smaller) phase-2 scan and performs the precise trim. Over-including a few
-/// blocks only costs a little extra decode — it never changes the output.
-pub(crate) fn weight_cutoff_block(
+/// Suggest the first range through the block that crosses the estimated budget.
+/// Including that block lets exact selection observe the overflow in this read.
+pub(crate) fn weight_range_end(
     narrow_batches: &[RecordBatch],
     output_columns: &[String],
     table_desc: &TableDescription,
+    budget: u64,
 ) -> Option<u64> {
-    let (fixed_weight, weight_cols) = compute_weight_params(output_columns, Some(table_desc));
-    let bn_col = table_desc.block_number_column.as_str();
-
-    let mut block_weights: FxHashMap<u64, u64> = FxHashMap::default();
+    let (fixed, columns) = compute_weight_params(output_columns, Some(table_desc));
+    let mut weights = FxHashMap::default();
     accumulate_block_weights(
         narrow_batches,
-        bn_col,
-        fixed_weight,
-        &weight_cols,
-        &mut block_weights,
+        &table_desc.block_number_column,
+        fixed,
+        &columns,
+        &mut weights,
     );
-
-    let mut sorted_blocks: Vec<u64> = block_weights.keys().copied().collect();
-    sorted_blocks.sort_unstable();
-
-    // Mirror the selection loop in `apply_weight_limit`: always keep the first
-    // block, then keep blocks while cumulative weight stays within budget.
-    let mut cumulative: u64 = 0;
-    let mut cutoff: Option<u64> = None;
-    for (i, &bn) in sorted_blocks.iter().enumerate() {
-        cumulative = cumulative.saturating_add(block_weights.get(&bn).copied().unwrap_or(0));
-        if i == 0 || cumulative <= MAX_RESPONSE_BYTES {
-            cutoff = Some(bn);
-        } else {
-            // Budget exceeded — blocks beyond `cutoff` won't be emitted.
-            return cutoff;
+    let mut blocks: Vec<_> = weights.into_iter().collect();
+    blocks.sort_unstable_by_key(|&(block, _)| block);
+    let mut cumulative = 0u64;
+    for (block, weight) in blocks {
+        cumulative = cumulative.saturating_add(weight);
+        if cumulative > budget {
+            return Some(block);
         }
     }
-    // Everything fit within budget: no trimming, scan the full range as before.
     None
 }
 
@@ -340,48 +344,6 @@ fn compute_weight_params(
     (fixed_weight, weight_cols)
 }
 
-/// Per-block response weight contributed by a primary table's own rows, matching
-/// the primary-table computation in [`apply_weight_limit`] (weight projection =
-/// primary key + user output columns; no relations, no dedup). Used to seed the
-/// "external" weight that the budget early-stop scan adds on top of the
-/// block-sorted table it is capping.
-pub(crate) fn primary_weight_params(
-    output_columns: &[String],
-    table_desc: Option<&TableDescription>,
-) -> (u64, Vec<String>) {
-    let cols = weight_projection(output_columns, table_desc);
-    compute_weight_params(&cols, table_desc)
-}
-
-/// Per-block-header weight params, matching the header computation in
-/// [`apply_weight_limit`] (no weight projection — the requested block columns
-/// are used directly). The fixed component seeds the budget early-stop walk.
-pub(crate) fn header_weight_params(
-    block_output_columns: &[String],
-    block_desc: Option<&TableDescription>,
-) -> (u64, Vec<String>) {
-    compute_weight_params(block_output_columns, block_desc)
-}
-
-/// Get block number from an array at row index.
-///
-/// One arm per physical width, read as a table. `manual_map` would fold the last
-/// one into a `.map()` and leave the four no longer looking alike.
-#[allow(clippy::manual_map)]
-pub(crate) fn get_block_number(col: &dyn arrow::array::Array, i: usize) -> Option<u64> {
-    if let Some(a) = col.as_any().downcast_ref::<UInt64Array>() {
-        Some(a.value(i))
-    } else if let Some(a) = col.as_any().downcast_ref::<UInt32Array>() {
-        Some(a.value(i) as u64)
-    } else if let Some(a) = col.as_any().downcast_ref::<Int64Array>() {
-        Some(a.value(i) as u64)
-    } else if let Some(a) = col.as_any().downcast_ref::<Int32Array>() {
-        Some((a.value(i) as u32) as u64)
-    } else {
-        None
-    }
-}
-
 /// Get uint64 value from a weight column at row index.
 ///
 /// A size is unsigned by the catalog, so a negative one is a corrupt chunk. Read
@@ -389,17 +351,16 @@ pub(crate) fn get_block_number(col: &dyn arrow::array::Array, i: usize) -> Optio
 /// it appears in — or wraps the accumulator and drops the budget instead. It
 /// weighs nothing here: a model that under-counts one row emits a slightly large
 /// response, and a model that over-counts it by 2⁶⁴ emits nothing (INV-B9).
+///
+/// A width this cannot read weighs nothing for the same reason, and that is the
+/// one to watch: `*_size` companions are narrowed like any other integer, and a
+/// weight model blind to `UInt16` charges a whole chunk's rows their fixed part
+/// alone.
 pub(crate) fn get_weight_value(col: &dyn arrow::array::Array, i: usize) -> u64 {
-    if let Some(a) = col.as_any().downcast_ref::<UInt64Array>() {
-        a.value(i)
-    } else if let Some(a) = col.as_any().downcast_ref::<UInt32Array>() {
-        a.value(i) as u64
-    } else if let Some(a) = col.as_any().downcast_ref::<Int64Array>() {
-        a.value(i).try_into().unwrap_or(0)
-    } else if let Some(a) = col.as_any().downcast_ref::<Int32Array>() {
-        a.value(i).try_into().unwrap_or(0)
-    } else {
-        0
+    match IntColumn::resolve(col) {
+        Some(column) if column.is_null(i) => 0,
+        Some(column) => column.value(i).try_into().unwrap_or(0),
+        None => 0,
     }
 }
 
@@ -422,76 +383,134 @@ pub(crate) fn accumulate_block_weights(
             .map(|name| batch.column_by_name(name).map(|c| c.as_ref()))
             .collect();
 
+        // The scan refuses a chunk whose block-number column cannot place a row,
+        // so a batch arriving here without a readable one did not come from one.
+        // Weighing nothing for it runs the response large rather than short, which
+        // is the direction INV-B9 tolerates.
+        let Ok(blocks) = BlockNumbers::resolve(bn_col.as_ref(), bn_column) else {
+            continue;
+        };
+
         for i in 0..batch.num_rows() {
-            if let Some(block_num) = get_block_number(bn_col.as_ref(), i) {
-                let mut row_weight = fixed_weight_per_row;
-                for arr in wc_arrays.iter().flatten() {
-                    row_weight = row_weight.saturating_add(get_weight_value(*arr, i));
-                }
-                let entry = weights.entry(block_num).or_default();
-                *entry = entry.saturating_add(row_weight);
+            let block_num = blocks.at(i);
+
+            let mut row_weight = fixed_weight_per_row;
+            for arr in wc_arrays.iter().flatten() {
+                row_weight = row_weight.saturating_add(get_weight_value(*arr, i));
             }
+
+            let entry = weights.entry(block_num).or_default();
+            *entry = entry.saturating_add(row_weight);
         }
     }
 }
 
 /// Accumulate per-block weights with row deduplication.
-/// Rows are identified by (block_number, hash of item_order_key columns).
-/// Duplicate rows (already in `seen`) are skipped.
-fn accumulate_block_weights_dedup(
-    batches: &[RecordBatch],
+/// Rows are identified by block number and item-key values.
+fn accumulate_dedup_contributions(
+    contributions: &[WeightContribution<'_>],
     bn_column: &str,
-    dedup_key_columns: &[&str],
-    fixed_weight_per_row: u64,
-    weight_columns: &[String],
+    key_columns: &[&str],
     weights: &mut FxHashMap<u64, u64>,
-    seen: &mut FxHashSet<(u64, u64)>,
 ) {
-    for batch in batches {
-        let bn_col = match batch.column_by_name(bn_column) {
-            Some(c) => c,
-            None => continue,
+    let batches: Vec<_> = contributions
+        .iter()
+        .flat_map(|source| source.batches.iter().map(move |batch| (source, batch)))
+        .collect();
+    let keys: Vec<Vec<Option<&dyn Array>>> = batches
+        .iter()
+        .map(|(_, batch)| {
+            key_columns
+                .iter()
+                .map(|name| batch.column_by_name(name).map(|c| c.as_ref()))
+                .collect()
+        })
+        .collect();
+    let mut seen = FxHashSet::default();
+    for ((source, batch), columns) in batches.iter().zip(&keys) {
+        let Some(numbers) = batch.column_by_name(bn_column) else {
+            continue;
         };
-
-        let wc_arrays: Vec<Option<&dyn arrow::array::Array>> = weight_columns
+        let Ok(blocks) = BlockNumbers::resolve(numbers.as_ref(), bn_column) else {
+            continue;
+        };
+        let weight_columns: Vec<_> = source
+            .weight_cols
             .iter()
-            .map(|name| batch.column_by_name(name).map(|c| c.as_ref()))
+            .filter_map(|name| batch.column_by_name(name))
             .collect();
+        for row in 0..batch.num_rows() {
+            let block = blocks.at(row);
+            if !seen.insert((block, WeightRow { columns, row })) {
+                continue;
+            }
+            let weight = weight_columns
+                .iter()
+                .fold(source.fixed_weight, |sum, column| {
+                    sum.saturating_add(get_weight_value(column.as_ref(), row))
+                });
+            let total = weights.entry(block).or_default();
+            *total = total.saturating_add(weight);
+        }
+    }
+}
 
-        let key_arrays: Vec<Option<&dyn arrow::array::Array>> = dedup_key_columns
-            .iter()
-            .map(|name| batch.column_by_name(name).map(|c| c.as_ref()))
-            .collect();
+/// Hash collisions must not change a block's weight or its page boundary.
+struct WeightRow<'a> {
+    columns: &'a [Option<&'a dyn Array>],
+    row: usize,
+}
 
-        for i in 0..batch.num_rows() {
-            if let Some(block_num) = get_block_number(bn_col.as_ref(), i) {
-                let row_hash = compute_row_key_hash(&key_arrays, i);
-
-                if !seen.insert((block_num, row_hash)) {
-                    continue; // Duplicate row, skip.
-                }
-
-                let mut row_weight = fixed_weight_per_row;
-                for arr in wc_arrays.iter().flatten() {
-                    row_weight = row_weight.saturating_add(get_weight_value(*arr, i));
-                }
-                let entry = weights.entry(block_num).or_default();
-                *entry = entry.saturating_add(row_weight);
+impl Hash for WeightRow<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        for column in self.columns {
+            match column {
+                Some(column) => hash_array_value(*column, self.row, state),
+                None => 0u8.hash(state),
             }
         }
     }
 }
 
-/// Compute a hash of the dedup key columns for a given row.
-fn compute_row_key_hash(key_arrays: &[Option<&dyn arrow::array::Array>], row: usize) -> u64 {
-    let mut hasher = rustc_hash::FxHasher::default();
-    for col in key_arrays {
-        match col {
-            Some(arr) => hash_array_value(*arr, row, &mut hasher),
-            None => 0u8.hash(&mut hasher),
-        }
+impl PartialEq for WeightRow<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.columns.len() == other.columns.len()
+            && self
+                .columns
+                .iter()
+                .zip(other.columns)
+                .all(|(a, b)| match (a, b) {
+                    (Some(a), Some(b)) => equal_key_value(*a, self.row, *b, other.row),
+                    (None, None) => true,
+                    _ => false,
+                })
     }
-    hasher.finish()
+}
+impl Eq for WeightRow<'_> {}
+
+fn equal_key_value(a: &dyn Array, ai: usize, b: &dyn Array, bi: usize) -> bool {
+    if a.is_null(ai) || b.is_null(bi) {
+        return a.is_null(ai) && b.is_null(bi);
+    }
+    if let (Some(a), Some(b)) = (IntColumn::resolve(a), IntColumn::resolve(b)) {
+        return a.value(ai) == b.value(bi);
+    }
+    if let (Some(a), Some(b)) = (
+        a.as_any().downcast_ref::<StringArray>(),
+        b.as_any().downcast_ref::<StringArray>(),
+    ) {
+        return a.value(ai) == b.value(bi);
+    }
+    if let (Some(a), Some(b)) = (
+        a.as_any().downcast_ref::<GenericListArray<i32>>(),
+        b.as_any().downcast_ref::<GenericListArray<i32>>(),
+    ) {
+        let a = a.value(ai);
+        let b = b.value(bi);
+        return a.len() == b.len()
+            && (0..a.len()).all(|i| equal_key_value(a.as_ref(), i, b.as_ref(), i));
+    }
+    a.slice(ai, 1).to_data() == b.slice(bi, 1).to_data()
 }
 
 /// Compute the column set used for weight calculation.
@@ -581,6 +600,97 @@ mod tests {
     use super::*;
     use crate::metadata::parse_dataset_description;
     use crate::output::columns::resolve_output_columns;
+
+    /// Two rows the key hash cannot tell apart are still two rows.
+    ///
+    /// `(tx = 0, trace_address = [0])` and `(tx = 1, trace_address = [])` hash
+    /// equal: FxHash starts at zero and absorbs a leading zero word, so the first
+    /// row's `tx` leaves the state where it found it and the two write the same
+    /// sequence from there. Whether a *set* of them merges is a second question —
+    /// the key it hashes is `(block, row)`, and the block number ahead of the
+    /// columns seeds the state, which is what pulls this pair apart today. That is
+    /// masking, not distinguishing: it holds for this pair and says nothing about
+    /// the next one. What separates two rows is comparing them, so that is what
+    /// is asserted, on a pair whose hashes are equal by construction.
+    #[test]
+    fn a_row_the_key_hash_cannot_tell_apart_is_still_a_row() {
+        use arrow::datatypes::Int32Type;
+        use rustc_hash::FxHasher;
+
+        let addresses =
+            ListArray::from_iter_primitive::<Int32Type, _, _>([Some(vec![Some(0)]), Some(vec![])]);
+        let indexes = UInt32Array::from(vec![0u32, 1]);
+        let columns: Vec<Option<&dyn arrow::array::Array>> = vec![Some(&indexes), Some(&addresses)];
+        let row = |row| WeightRow {
+            columns: &columns,
+            row,
+        };
+
+        let hash_of = |r: WeightRow| {
+            let mut hasher = FxHasher::default();
+            r.hash(&mut hasher);
+            hasher.finish()
+        };
+
+        assert_eq!(
+            hash_of(row(0)),
+            hash_of(row(1)),
+            "the pair this is about no longer collides, so it no longer asks \
+             anything — find one that does before deleting the comparison"
+        );
+        assert!(
+            row(0) != row(1),
+            "two distinct rows compared equal, so a set of them counts one weight \
+             for two rows and the response overshoots the budget it was cut to"
+        );
+    }
+
+    #[test]
+    fn colliding_keys_are_charged_separately_and_duplicate_rows_once() {
+        use arrow::datatypes::{DataType, Field, Int32Type, Schema};
+        use std::sync::Arc;
+
+        let addresses =
+            ListArray::from_iter_primitive::<Int32Type, _, _>([Some(vec![Some(0)]), Some(vec![])]);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("block_number", DataType::UInt64, false),
+            Field::new("transaction_index", DataType::UInt32, false),
+            Field::new("trace_address", addresses.data_type().clone(), true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(UInt64Array::from(vec![100, 100])),
+                Arc::new(UInt32Array::from(vec![0, 1])),
+                Arc::new(addresses),
+            ],
+        )
+        .unwrap();
+        let primary = [batch.clone()];
+        let duplicate = [batch];
+        for related in [&[][..], duplicate.as_slice()] {
+            let contributions = [
+                WeightContribution {
+                    batches: &primary,
+                    fixed_weight: 100,
+                    weight_cols: vec![],
+                },
+                WeightContribution {
+                    batches: related,
+                    fixed_weight: 100,
+                    weight_cols: vec![],
+                },
+            ];
+            let mut weights = FxHashMap::default();
+            accumulate_dedup_contributions(
+                &contributions,
+                "block_number",
+                &["transaction_index", "trace_address"],
+                &mut weights,
+            );
+            assert_eq!(weights[&100], 200);
+        }
+    }
 
     /// Load the solana metadata for tests.
     fn solana_meta() -> DatasetDescription {

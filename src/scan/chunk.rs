@@ -31,6 +31,7 @@ pub struct ParquetTable {
     metadata: Arc<ParquetMetaData>,
     schema: SchemaRef,
     arrow_metadata: ArrowReaderMetadata,
+    statistics_leaves: HashMap<String, usize>,
 }
 
 /// Statistics for a single column within a row group.
@@ -129,19 +130,13 @@ impl ChunkReader for ParquetChunkReader {
         scanner::scan(parquet_table, request)
     }
 
-    fn scan_budget(
+    fn next_block_range_end(
         &self,
         table: &str,
-        request: &ScanRequest,
-        wave_size: usize,
-        budget: u64,
-        weight_of: &mut dyn FnMut(&[RecordBatch]) -> u64,
-    ) -> Result<Vec<RecordBatch>> {
-        let parquet_table = match self.cache.get(table) {
-            Some(t) => t,
-            None => return Ok(Vec::new()),
-        };
-        scanner::scan_waves_until_budget(parquet_table, request, wave_size, budget, weight_of)
+        block_column: &str,
+        from_block: u64,
+    ) -> Option<u64> {
+        scanner::next_block_range_end(self.cache.get(table)?, block_column, from_block)
     }
 
     fn has_table(&self, table: &str) -> bool {
@@ -170,12 +165,15 @@ impl ParquetTable {
         let metadata = arrow_metadata.metadata().clone();
         let schema = arrow_metadata.schema().clone();
 
+        let statistics_leaves = statistics_leaves(&metadata);
+
         Ok(Self {
             path: path.to_path_buf(),
             data,
             metadata,
             schema,
             arrow_metadata,
+            statistics_leaves,
         })
     }
 
@@ -227,17 +225,18 @@ impl ParquetTable {
         self.metadata.row_group(index)
     }
 
-    /// Get the column index for a column name. Returns None if not found.
+    /// The column's position in the *Arrow* schema, which is what a projection
+    /// is built from. It is not where the column's statistics live — see
+    /// [`statistics_leaves`].
     pub fn column_index(&self, name: &str) -> Option<usize> {
         self.schema.index_of(name).ok()
     }
 
-    /// Get column statistics for a specific column in a specific row group.
+    /// What one row group's statistics say about one column, when the file
+    /// states something this can act on.
     pub fn column_stats(&self, row_group: usize, column_name: &str) -> Option<ColumnStats> {
-        let col_idx = self.column_index(column_name)?;
-        let rg = self.row_group(row_group);
-        let col_meta = rg.column(col_idx);
-        let stats = col_meta.statistics()?;
+        let leaf = *self.statistics_leaves.get(column_name)?;
+        let stats = self.row_group(row_group).column(leaf).statistics()?;
         Some(convert_stats(stats))
     }
 
@@ -296,6 +295,37 @@ impl ParquetTable {
 
         Ok(batches)
     }
+}
+
+/// Column name → the parquet column chunk its statistics live in.
+///
+/// Arrow counts a file's columns in top-level fields and parquet counts them in
+/// leaves, and the two agree only while every field is a primitive. One
+/// `List<Struct<…>>` — `access_list` on an EVM transaction, `address_table_lookups`
+/// on a Solana one — and every field after it sits further along in the file than
+/// in the schema, so an index taken from the schema reads another column's
+/// minimum and maximum. On a real Solana chunk that put `fee_payer`, the table's
+/// leading sort key, on the bounds of `loaded_addresses.readonly`: a filter then
+/// skips the row group holding its own rows, and a dropped match looks exactly
+/// like a row that was never there.
+///
+/// A nested field has no one statistic to be read as a bound, so it is left out
+/// and never pruned on — a reader that cannot interpret a statistic declines
+/// rather than guesses (INV-P16). Nothing is lost by it: the predicates that
+/// apply to a list column decline to prune anyway.
+fn statistics_leaves(metadata: &ParquetMetaData) -> HashMap<String, usize> {
+    let columns = metadata.file_metadata().schema_descr();
+
+    (0..columns.num_columns())
+        .filter_map(|leaf| {
+            let column = columns.column(leaf);
+
+            match column.path().parts() {
+                [name] => Some((name.clone(), leaf)),
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 fn convert_stats(stats: &Statistics) -> ColumnStats {
