@@ -11,6 +11,7 @@ use anyhow::Result;
 use arrow::array::UInt64Array;
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
+use rayon::prelude::*;
 use std::collections::HashMap;
 
 /// Read only row identities, relation inputs and size columns while selecting a
@@ -311,33 +312,40 @@ pub(super) fn materialize_tables(
             source.batches.extend(batches);
         }
     }
-    for source in sources {
-        let desc = metadata
-            .table(&source.table)
-            .expect("planned table has a catalog");
-        let columns = resolve_relation_output_columns(&source.projection, Some(desc));
-        let batches = if let Some(rows) = physical_rows(&source.batches) {
-            let mut request = ScanRequest::new(columns.iter().map(String::as_str).collect());
-            request.block_number_column = Some(&desc.block_number_column);
-            request.row_indices = Some(&rows);
-            chunk.scan(&source.table, &request)?
-        } else if let Some(predicates) = source.primary_predicates {
-            // A primary source can reproduce its selected rows with the original
-            // predicates and the page bounds. This retains predicate-statistics
-            // pruning and avoids decoding a wide item key just to select it again.
-            let mut request = ScanRequest::new(columns.iter().map(String::as_str).collect());
-            request.predicates = predicates.iter().collect();
-            request.block_number_column = Some(&desc.block_number_column);
-            (request.from_block, request.to_block) =
-                compute_block_range(&source.batches, &desc.block_number_column)?;
-            chunk.scan(&source.table, &request)?
-        } else {
-            read_rows(chunk, &source.table, desc, &source.batches, &columns)?
-        };
-        let output = outputs
-            .get_mut(&source.owner)
-            .expect("source has an output slot");
-        match source.relation {
+    // Independent output groups share the existing Rayon pool. Collect results
+    // in source order before propagating errors or updating output slots.
+    let materialized: Vec<Result<_>> = sources
+        .into_par_iter()
+        .map(|source| {
+            let desc = metadata
+                .table(&source.table)
+                .expect("planned table has a catalog");
+            let columns = resolve_relation_output_columns(&source.projection, Some(desc));
+            let batches = if let Some(rows) = physical_rows(&source.batches) {
+                let mut request = ScanRequest::new(columns.iter().map(String::as_str).collect());
+                request.block_number_column = Some(&desc.block_number_column);
+                request.row_indices = Some(&rows);
+                chunk.scan(&source.table, &request)?
+            } else if let Some(predicates) = source.primary_predicates {
+                // A primary source can reproduce its selected rows with the original
+                // predicates and the page bounds. This retains predicate-statistics
+                // pruning and avoids decoding a wide item key just to select it again.
+                let mut request = ScanRequest::new(columns.iter().map(String::as_str).collect());
+                request.predicates = predicates.iter().collect();
+                request.block_number_column = Some(&desc.block_number_column);
+                (request.from_block, request.to_block) =
+                    compute_block_range(&source.batches, &desc.block_number_column)?;
+                chunk.scan(&source.table, &request)?
+            } else {
+                read_rows(chunk, &source.table, desc, &source.batches, &columns)?
+            };
+            Ok((source.owner, source.relation, batches))
+        })
+        .collect();
+    for result in materialized {
+        let (owner, relation, batches) = result?;
+        let output = outputs.get_mut(&owner).expect("source has an output slot");
+        match relation {
             None => output.batches = batches,
             Some(index) => {
                 output.relation_batches.insert(index, batches);

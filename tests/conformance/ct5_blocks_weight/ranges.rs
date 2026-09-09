@@ -26,6 +26,7 @@ struct ObservedReader {
     inner: ParquetChunkReader,
     span: Option<u64>,
     reads: Mutex<Vec<Read>>,
+    fail_payload: bool,
 }
 
 impl ObservedReader {
@@ -34,6 +35,7 @@ impl ObservedReader {
             inner: ParquetChunkReader::open(path).unwrap(),
             span,
             reads: Mutex::new(Vec::new()),
+            fail_payload: false,
         }
     }
 }
@@ -44,6 +46,12 @@ impl ChunkReader for ObservedReader {
     }
 
     fn scan(&self, table: &str, request: &ScanRequest) -> anyhow::Result<Vec<RecordBatch>> {
+        if self.fail_payload && request.row_indices.is_some() {
+            if table == "transactions" {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            anyhow::bail!("payload failure for {table}");
+        }
         let batches = self.inner.scan(table, request)?;
         self.reads.lock().unwrap().push(Read {
             table: table.into(),
@@ -387,5 +395,36 @@ fn materialization_does_not_fetch_other_rows_of_selected_blocks() {
             .iter()
             .all(|read| !read.columns.iter().any(|c| c == "log_index")),
         "a single source needs no item key for weight deduplication"
+    );
+}
+
+#[test]
+fn payload_errors_follow_source_order_instead_of_completion_order() {
+    let chunk = evm_like::chunk();
+    let meta = evm_like::catalog();
+    let query = serde_json::json!({
+        "type": "test", "fromBlock": 100, "toBlock": 115,
+        "transactions": [{"transactionIndex": [0], "transactionLogs": true}],
+        "fields": {"log": {"logIndex": true, "data": true},
+                   "transaction": {"transactionIndex": true, "gasUsed": true}}
+    })
+    .to_string();
+    let plan = compile(&parse_query(query.as_bytes(), &meta).unwrap(), &meta).unwrap();
+    let mut reader = ObservedReader::new(chunk.path(), None);
+    reader.fail_payload = true;
+    let error = rayon::ThreadPoolBuilder::new()
+        .num_threads(2)
+        .build()
+        .unwrap()
+        .install(|| {
+            execute_chunk_with(&plan, &meta, &reader, ExecOptions::default())
+                .err()
+                .expect("both payload reads fail")
+        });
+    assert!(
+        error
+            .to_string()
+            .contains("payload failure for transactions"),
+        "{error:#}"
     );
 }
