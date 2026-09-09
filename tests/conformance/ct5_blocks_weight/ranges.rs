@@ -18,6 +18,8 @@ struct Read {
     to: Option<u64>,
     rows: usize,
     columns: Vec<String>,
+    physical_rows: bool,
+    filters: bool,
 }
 
 struct ObservedReader {
@@ -37,6 +39,10 @@ impl ObservedReader {
 }
 
 impl ChunkReader for ObservedReader {
+    fn supports_row_positions(&self) -> bool {
+        self.inner.supports_row_positions()
+    }
+
     fn scan(&self, table: &str, request: &ScanRequest) -> anyhow::Result<Vec<RecordBatch>> {
         let batches = self.inner.scan(table, request)?;
         self.reads.lock().unwrap().push(Read {
@@ -44,6 +50,10 @@ impl ChunkReader for ObservedReader {
             from: request.from_block,
             to: request.to_block,
             rows: batches.iter().map(RecordBatch::num_rows).sum(),
+            physical_rows: request.row_indices.is_some(),
+            filters: !request.predicates.is_empty()
+                || request.key_filter.is_some()
+                || request.hierarchical_filter.is_some(),
             columns: request
                 .output_columns
                 .iter()
@@ -276,4 +286,106 @@ fn overlapping_groups_and_missing_statistics_do_not_cause_repeated_reads() {
             assert_eq!(table_reads[0].to, None, "a full read added a block filter");
         }
     }
+}
+
+#[test]
+fn relations_select_the_page_before_reading_payloads() {
+    // Sparse numbers exercise range progress without relying on numeric distance.
+    let blocks: Vec<_> = (0..600).map(|i| 10 + i * 1_000_000).collect();
+    let logs: Vec<_> = blocks.iter().map(|&b| (b, 1)).collect();
+    let transactions: Vec<_> = blocks.iter().map(|&b| (b, MB)).collect();
+    let chunk = weighted_chunk(&blocks, &logs, &transactions);
+    let without_stats = chunk_relaid(chunk.path(), &Layout::without_statistics());
+    let meta = catalog();
+    let mut query: serde_json::Value = serde_json::from_str(&query(10, blocks[599])).unwrap();
+    query["logs"][0]["transaction"] = true.into();
+    query["includeAllBlocks"] = true.into();
+    query.as_object_mut().unwrap().remove("toBlock");
+
+    for path in [chunk.path(), without_stats.path()] {
+        for budget in [0, 2 * MB + 512, 300 * MB + 100_000] {
+            let full = run(
+                &meta,
+                &ParquetChunkReader::open(path).unwrap(),
+                &query.to_string(),
+                budget,
+                false,
+            );
+            let reader = ObservedReader::new(path, None);
+            let selected = run(&meta, &reader, &query.to_string(), budget, true);
+            assert_same_response(&full, &selected, "relations must keep the weighted prefix");
+            let count = block_numbers(&parse_response(&selected)).len();
+            assert!(count < blocks.len());
+            let reads = reader.reads.lock().unwrap();
+            for (table, payload) in [("logs", "data"), ("transactions", "input")] {
+                let wide: Vec<_> = reads
+                    .iter()
+                    .filter(|read| read.table == table && read.columns.iter().any(|c| c == payload))
+                    .collect();
+                assert_eq!(
+                    wide.len(),
+                    1,
+                    "{table}: duplicate payload read through a relation"
+                );
+                assert_eq!(
+                    wide[0].rows, count,
+                    "{table}: decoded rows outside the page"
+                );
+                for narrow in reads.iter().filter(|read| {
+                    read.table == table && !read.columns.iter().any(|c| c == payload)
+                }) {
+                    assert!(narrow.rows <= 256, "{table}: unbounded selection scan");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn materialization_does_not_fetch_other_rows_of_selected_blocks() {
+    let chunk = evm_like::chunk();
+    let meta = evm_like::catalog();
+    let query = serde_json::json!({
+        "type": "test", "fromBlock": 100, "toBlock": 115,
+        "transactions": [{"transactionIndex": [0], "transactionLogs": true}],
+        "fields": {"log": {"logIndex": true, "data": true},
+                   "transaction": {"transactionIndex": true, "gasUsed": true}}
+    })
+    .to_string();
+    let reader = ObservedReader::new(chunk.path(), None);
+    let selected = run(&meta, &reader, &query, 512, true);
+    let full = run(
+        &meta,
+        &ParquetChunkReader::open(chunk.path()).unwrap(),
+        &query,
+        512,
+        false,
+    );
+    assert_same_response(&full, &selected, "materialize exact item keys");
+    let expected: usize = parse_response(&selected)
+        .iter()
+        .filter_map(|block| block["logs"].as_array())
+        .map(Vec::len)
+        .sum();
+    assert!(expected > 0);
+    let reads = reader.reads.lock().unwrap();
+    let wide: Vec<_> = reads
+        .iter()
+        .filter(|read| read.table == "logs" && read.columns.iter().any(|column| column == "data"))
+        .collect();
+    assert_eq!(wide.len(), 1);
+    assert_eq!(wide[0].rows, expected);
+    assert!(wide[0].physical_rows);
+    assert!(!wide[0].filters, "output pass repeated selection filters");
+    let narrow: Vec<_> = reads
+        .iter()
+        .filter(|read| read.table == "logs" && !read.columns.iter().any(|c| c == "data"))
+        .collect();
+    assert!(!narrow.is_empty());
+    assert!(
+        narrow
+            .iter()
+            .all(|read| !read.columns.iter().any(|c| c == "log_index")),
+        "a single source needs no item key for weight deduplication"
+    );
 }

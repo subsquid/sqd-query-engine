@@ -4,6 +4,7 @@ mod block_index;
 pub(crate) mod columns;
 mod encoder;
 mod fork;
+mod materialize;
 mod row_writer;
 mod weight;
 mod writer;

@@ -29,6 +29,116 @@ fn rows_per_block(batches: &[RecordBatch], bn_col: &str) -> BTreeMap<u64, usize>
     counts
 }
 
+#[test]
+fn physical_positions_survive_pruning_cascaded_filters_and_batches() {
+    use crate::harness::chunk::write_table_row_groups;
+    use arrow::array::{BooleanArray, StringArray, UInt64Array};
+    use sqd_query_engine::scan::predicate::{col_eq, col_in_list, RowPredicate, ScalarValue};
+
+    let dir = TempDir::new().unwrap();
+    let groups = [100, 200, 300]
+        .into_iter()
+        .map(|start| {
+            vec![
+                Arc::new(UInt64Array::from((start..start + 6).collect::<Vec<_>>())) as ArrayRef,
+                Arc::new(UInt32Array::from((0..6).collect::<Vec<_>>())) as ArrayRef,
+                Arc::new(BooleanArray::from(vec![
+                    Some(false),
+                    Some(true),
+                    Some(false),
+                    None,
+                    Some(false),
+                    Some(true),
+                ])) as ArrayRef,
+                Arc::new(StringArray::from(
+                    (start..start + 6)
+                        .map(|block| format!("value-{block}"))
+                        .collect::<Vec<_>>(),
+                )) as ArrayRef,
+            ]
+        })
+        .collect();
+    write_table_row_groups(
+        dir.path(),
+        "items",
+        vec![
+            Field::new(BN, DataType::UInt64, false),
+            Field::new("index", DataType::UInt32, false),
+            Field::new("flag", DataType::Boolean, true),
+            Field::new("payload", DataType::Utf8, false),
+        ],
+        groups,
+    );
+    let reader = ParquetChunkReader::open(dir.path()).unwrap();
+    let predicate = RowPredicate::new(vec![
+        col_eq("flag", ScalarValue::Boolean(true)),
+        col_in_list("index", Arc::new(UInt32Array::from(vec![1, 3, 5]))),
+    ]);
+    for batch_size in [1, 2, usize::MAX] {
+        let mut request = ScanRequest::new(vec![BN, "index"]);
+        request.from_block = Some(201);
+        request.to_block = Some(304);
+        request.block_number_column = Some(BN);
+        request.predicates = vec![&predicate];
+        request.batch_size = batch_size;
+        request.row_index_column = Some("position");
+        let selected = reader.scan("items", &request).unwrap();
+        let positions: Vec<_> = selected
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column_by_name("position")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .unwrap()
+                    .values()
+                    .to_vec()
+            })
+            .collect();
+        assert_eq!(positions, [7, 11, 13]);
+
+        let mut fetch = ScanRequest::new(vec!["payload"]);
+        fetch.row_indices = Some(&[7, 13]);
+        fetch.row_index_column = Some("position");
+        fetch.batch_size = batch_size;
+        let batches = reader.scan("items", &fetch).unwrap();
+        let payloads: Vec<_> = batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column_by_name("payload")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap()
+                    .iter()
+                    .map(|value| value.unwrap().to_owned())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(payloads, ["value-201", "value-301"]);
+        let fetched_positions: Vec<_> = batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column_by_name("position")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .unwrap()
+                    .values()
+                    .to_vec()
+            })
+            .collect();
+        assert_eq!(fetched_positions, [7, 13]);
+        for invalid in [&[13, 7][..], &[7, 7], &[18]] {
+            fetch.row_indices = Some(invalid);
+            assert!(reader.scan("items", &fetch).is_err());
+        }
+    }
+}
+
 fn synthetic_request<'a>() -> ScanRequest<'a> {
     let mut request = ScanRequest::new(vec![BN, "row_index"]);
     request.block_number_column = Some(BN);

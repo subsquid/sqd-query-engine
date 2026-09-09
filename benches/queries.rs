@@ -134,6 +134,32 @@ pub static EVM_USDC_TRACES_AND_STATEDIFFS: &[u8] = br#"{
     }]
 }"#;
 
+/// Wide relation expansion with overlapping primary and relation sources.
+pub static EVM_ALL_RELATIONS: &[u8] = br#"{
+    "type": "evm", "fromBlock": 0, "includeAllBlocks": true,
+    "fields": {
+        "block": {"number": true, "hash": true, "timestamp": true},
+        "transaction": {"transactionIndex": true, "hash": true, "from": true, "to": true, "input": true, "value": true},
+        "log": {"logIndex": true, "transactionIndex": true, "address": true, "topics": true, "data": true},
+        "trace": {"transactionIndex": true, "traceAddress": true, "type": true, "callFrom": true, "callTo": true, "callInput": true, "callValue": true},
+        "stateDiff": {"transactionIndex": true, "address": true, "key": true, "kind": true, "prev": true, "next": true}
+    },
+    "transactions": [{"logs": true, "traces": true, "stateDiffs": true}],
+    "logs": [{"transaction": true, "transactionLogs": true, "transactionTraces": true, "transactionStateDiffs": true}],
+    "traces": [{"transaction": true, "transactionLogs": true, "transactionTraces": true}],
+    "stateDiffs": [{"transaction": true}]
+}"#;
+
+pub static EVM_LOGS_WITH_TRANSACTION: &[u8] = br#"{
+    "type": "evm", "fromBlock": 0,
+    "fields": {
+        "block": {"number": true},
+        "log": {"logIndex": true, "address": true, "topics": true, "data": true},
+        "transaction": {"transactionIndex": true, "hash": true, "input": true}
+    },
+    "logs": [{"transaction": true}]
+}"#;
+
 // ---------------------------------------------------------------------------
 // RPC-compatible EVM queries
 //
@@ -388,6 +414,8 @@ pub static EVM_QUERIES: &[(&str, &[u8])] = &[
 /// Full-scan family: unfiltered per-table scans that exercise the two-phase
 /// response-budget path. Run across the chunk matrix (small + big).
 pub static EVM_FULLSCAN_QUERIES: &[(&str, &[u8])] = &[
+    ("evm/all_relations", EVM_ALL_RELATIONS),
+    ("evm/logs+transaction", EVM_LOGS_WITH_TRANSACTION),
     ("evm/all_blocks", EVM_ALL_BLOCKS),
     ("evm/all_txs", EVM_ALL_TXS),
     ("evm/all_logs", EVM_ALL_LOGS),

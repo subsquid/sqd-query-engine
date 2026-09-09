@@ -1,4 +1,5 @@
 mod chunk;
+mod positions;
 pub mod predicate;
 mod scanner;
 
@@ -15,6 +16,12 @@ use arrow::record_batch::RecordBatch;
 pub trait ChunkReader: Sync {
     /// Scan a table: apply projection, predicates, block range, and key/hierarchical filters.
     fn scan(&self, table: &str, request: &ScanRequest) -> Result<Vec<RecordBatch>>;
+
+    /// Whether scans can return physical row positions and read those positions
+    /// back through `ScanRequest::row_indices` on this immutable chunk.
+    fn supports_row_positions(&self) -> bool {
+        false
+    }
 
     /// Suggest the end of the next block range from storage layout.
     /// This is a cost hint: callers must read every matching row through it.
