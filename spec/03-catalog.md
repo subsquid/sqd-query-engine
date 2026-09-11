@@ -117,7 +117,9 @@ not a mistake; both keys exist in the wire format.
 
 `blocks.timestamp`: `timestampSecond`. `blocks.logsBloom`: weight 512.
 `transactions.authorizationList`: `list<struct>` whose `nonce` member renders as
-`decimalString`. All address/hash/data columns: `hexBytes`.
+`decimalString`. All address/hash/data columns: `hexBytes`, including the
+twelve Avalanche header fields, of which `blockExtraData` weighs
+`block_extra_data_size`.
 
 ### Selectable fields
 
@@ -126,7 +128,9 @@ stateRoot, logsBloom, sha3Uncles, extraData, miner, nonce, mixHash, size,
 gasLimit, gasUsed, difficulty, totalDifficulty, baseFeePerGas, uncles,
 withdrawals, withdrawalsRoot, blobGasUsed, excessBlobGas, parentBeaconBlockRoot,
 requestsHash, l1BlockNumber, mainBlockGeneralGasLimit, sharedGasLimit,
-timestampMillisPart`
+timestampMillisPart, blockExtraData, blockGasCost, extDataGasUsed, extDataHash,
+minDelayExcess, timestampMilliseconds, targetExponent, minPriceExponent,
+settledHeight, settledGasUnix, settledGasNumerator, settledExcess`
 
 `transactions`: `transactionIndex, hash, nonce, from, to, input, value, gas,
 gasPrice, maxFeePerGas, maxPriorityFeePerGas, v, r, s, yParity, accessList,
@@ -223,7 +227,10 @@ spread.
 `transactions.err`, `instructions.error`: `jsonVerbatim`.
 `transactions.fee`, `computeUnitsConsumed`, `balances.pre`/`post`,
 `token_balances.preAmount`/`postAmount`, `rewards.lamports`/`postBalance`:
-`decimalString`. `blocks.timestamp`: `timestampSecond`.
+`decimalString`. `transactions.transactionConfig`: a struct of
+`computeUnitLimit`, `heapSize`, `loadedAccountsDataSizeLimit` as numbers and
+`priorityFee` as `decimalString`; `null` where the transaction set none.
+`blocks.timestamp`: `timestampSecond`.
 
 **`instructions.d1`, `d2`, `d4`, `d8` are selectable output fields** encoded as
 `hexNumber` — zero-padded to the column's width, so a `uint16` `d2` of 1600
@@ -237,7 +244,7 @@ used by a filter does not make it a `system` column.
 `transactions`: `transactionIndex, version, accountKeys, addressTableLookups,
 numReadonlySignedAccounts, numReadonlyUnsignedAccounts, numRequiredSignatures,
 recentBlockhash, signatures, err, fee, computeUnitsConsumed, loadedAddresses,
-feePayer, hasDroppedLogMessages`
+feePayer, hasDroppedLogMessages, transactionConfig`
 
 `instructions`: `transactionIndex, instructionAddress, programId, accounts, data,
 d1, d2, d4, d8, error, computeUnitsConsumed, isCommitted, hasDroppedLogMessages`

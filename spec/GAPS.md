@@ -26,7 +26,6 @@ Compared against the reference implementation, as of 2026-09-05.
 
 | # | Gap | Invariant | Sev |
 |---|---|---|---|
-| 35 | The catalogs lag the reference by thirteen fields, and one of them cannot be expressed | [INV-X1](07-invariants.md#inv-x1) | **S2** |
 | 37 | A relation onto a table the chunk lacks is an error even when the primary scan is empty | [INV-E4](07-invariants.md#inv-e4) | **S3** |
 | 38 | Every parquet file in the chunk directory is opened for every query | [INV-E4](07-invariants.md#inv-e4) | **S3** |
 | 44 | The weight model differs from the reference in four places | [INV-B5](07-invariants.md#inv-b5) | **S4** |
@@ -37,13 +36,12 @@ Every dataset [chapter 3](03-catalog.md) names is served except `fuel`, which is
 out of scope ([ADR-10](decisions/ADR-10-fuel-is-out-of-scope.md)). On a
 well-formed chunk carrying every table the query names, the only requests the
 reference answers and this engine refuses are the ones the divergence table
-below says are deliberate, plus gap 35, which is not. Outside that case gaps 37
-and 38 refuse as well: a missing target table, and an unreadable file beside the
-ones the query reads.
+below says are deliberate. Outside that case gaps 37 and 38 refuse as well: a
+missing target table, and an unreadable file beside the ones the query reads.
 
 Gaps 33 to 44 came from one review, done before the engine goes to a fleet of
 workers that nobody can patch quickly. The number 34 was never assigned, and 33,
-36 and 39 to 43 are closed, so four of those entries are left. The review ran the reference
+35, 36 and 39 to 43 are closed, so three of those entries are left. The review ran the reference
 and this engine side by side: every filter, relation, alias and field of all
 seven datasets diffed against the reference's request macros; about 330
 request probes and about 700 response runs on the real chunks and every
@@ -74,37 +72,12 @@ another type, it reads every integer width and every text type, and errors as
 render. What is left of that family is gap 44's weight model.
 
 The reference moved while this was written. Twelve Avalanche block-header fields
-and Solana's `transactionConfig` landed there in the first days of September; gap 35
-is that lag, and the test that pins the field surface did not notice because it
-is a hand transcription of the older revision. A check that diffs the reference's
-field macros against the catalogs on every build would have.
-
----
-
-## S2 — Missing capability
-
-### 35. The catalogs lag the reference by thirteen fields, and one of them cannot be expressed
-
-The reference at its current revision serves twelve Avalanche
-block-header fields — `blockExtraData`, `blockGasCost`, `extDataGasUsed`,
-`extDataHash`, `minDelayExcess`, `timestampMilliseconds`, `targetExponent`,
-`minPriceExponent`, `settledHeight`, `settledGasUnix`, `settledGasNumerator`,
-`settledExcess`, with `blockExtraData` weighed by `block_extra_data_size` — and
-Solana `transactionConfig`. Neither the catalogs nor [chapter 3](03-catalog.md)
-has them, so a client selecting any of them gets `UnknownField`, which the worker
-reports as a request error and the portal does not retry.
-
-Twelve are plain hex-bytes columns and a catalog edit. `transactionConfig` is a
-struct whose `priorityFee` the reference renders as a decimal string; the catalog
-has a `struct` type but no per-member encoding, so the closest catalog expresses
-it with a JSON number. By [INV-X1](07-invariants.md#inv-x1) that is a spec bug:
-the catalog format needs member encodings.
-
-The test that pins the field surface, `the_field_surface_is_exactly_the_declared_one`,
-is green because its reference list is a transcription of the older revision.
-
-*First test:* a check that reads the reference's field macros and fails when a
-catalog lacks a field the reference serves — the transcription, recomputed.
+and Solana's `transactionConfig` landed there in the first days of September,
+and the test that pins the field surface did not notice because it is a hand
+transcription of the older revision. The lag is closed, and
+`the_catalogs_serve_every_field_the_reference_serves` now reads the reference's
+field macros off the checkout the fixture tree comes from, so the next such
+move fails a test rather than waiting for a review.
 
 ---
 
@@ -401,6 +374,8 @@ The three rows that overstated their evidence — [INV-D6](07-invariants.md#inv-
 read against the tests they name and lowered to **P**, which took
 `P-COV-PROPERTY` from 0.73 to 0.69. The number a ratchet starts from has to be one
 the tests earn, so it was moved down once rather than locked in. What each row is
-missing is now written in the row. [ADR-4](decisions/ADR-4-closed-field-surface.md)
+missing is now written in the row; INV-Q14 has since earned **C** back with a test
+that recomputes the field surface from the reference's own source.
+[ADR-4](decisions/ADR-4-closed-field-surface.md)
 and [ADR-9](decisions/ADR-9-reject-undecidable-fork-checks.md) are still `Proposed`
 while their MUST text is implemented.

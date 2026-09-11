@@ -252,6 +252,7 @@ fn ensure_columns_renderable(
                 field.data_type(),
                 declared.and_then(|c| c.encoding.as_ref()),
                 declared.map(|c| &c.data_type),
+                declared.and_then(|c| c.members.as_ref()),
             ) {
                 crate::engine_bail!(
                     crate::error::ErrorKind::MalformedChunkData,
