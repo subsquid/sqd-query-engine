@@ -42,8 +42,7 @@ pub fn parse_dataset_description(yaml: &str) -> Result<DatasetDescription> {
 pub fn parse_dataset_description_strict(yaml: &str) -> Result<DatasetDescription> {
     let desc = parse_dataset_description(yaml)?;
 
-    let document: serde_yaml::Value =
-        serde_yaml::from_str(yaml).context("re-reading the catalog")?;
+    let document: CatalogKeys = serde_yaml::from_str(yaml).context("re-reading the catalog")?;
     let unknown = unknown_keys(&document, &desc);
     anyhow::ensure!(
         unknown.is_empty(),
@@ -54,26 +53,114 @@ pub fn parse_dataset_description_strict(yaml: &str) -> Result<DatasetDescription
     Ok(desc)
 }
 
-/// The keys of a catalog document the parse skipped, as dotted paths:
-/// `tables.blocks.parent_hash_colum`.
-///
-/// Found by comparing the document with the description written back out.
-/// Serde writes every field it read back under the same name, so a key with no
-/// counterpart there is one it skipped — inside the internally tagged
-/// `special_filters` and `virtual_fields` too, which it reads through a buffer.
-/// That holds while no catalog field reads an alias spelling, or skips
-/// serializing anything but a `None`.
-fn unknown_keys(document: &serde_yaml::Value, desc: &DatasetDescription) -> Vec<String> {
-    let known = serde_yaml::to_value(desc).expect("a catalog description serializes");
+/// Only the structure is needed for the strict check. Read map keys as strings,
+/// just as the catalog types do: parsing through `Value` first would normalize
+/// `0x10` to `16` and lose the spelling that the typed loader actually read.
+/// YAML tags do not change which fields a struct reads, so unwrap them here.
+enum CatalogKeys {
+    Mapping(Vec<(String, CatalogKeys)>),
+    Sequence(Vec<CatalogKeys>),
+    Scalar,
+}
+
+impl<'de> serde::Deserialize<'de> for CatalogKeys {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = CatalogKeys;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a catalog value")
+            }
+
+            fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
+                Ok(CatalogKeys::Scalar)
+            }
+
+            fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
+                Ok(CatalogKeys::Scalar)
+            }
+
+            fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
+                Ok(CatalogKeys::Scalar)
+            }
+
+            fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(CatalogKeys::Scalar)
+            }
+
+            fn visit_str<E>(self, _: &str) -> Result<Self::Value, E> {
+                Ok(CatalogKeys::Scalar)
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(CatalogKeys::Scalar)
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut entries = Vec::new();
+                while let Some(entry) = map.next_entry()? {
+                    entries.push(entry);
+                }
+                Ok(CatalogKeys::Mapping(entries))
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut sequence: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut items = Vec::new();
+                while let Some(item) = sequence.next_element()? {
+                    items.push(item);
+                }
+                Ok(CatalogKeys::Sequence(items))
+            }
+
+            fn visit_enum<A: serde::de::EnumAccess<'de>>(
+                self,
+                tagged: A,
+            ) -> Result<Self::Value, A::Error> {
+                use serde::de::VariantAccess;
+                let (_, value) = tagged.variant::<String>()?;
+                value.newtype_variant()
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
+/// Find skipped keys by comparing the document with the description written
+/// back out. This relies on catalog fields having no deserialization aliases.
+fn unknown_keys(document: &CatalogKeys, desc: &DatasetDescription) -> Vec<String> {
+    use serde_yaml::Value;
+
+    let mut known = serde_yaml::to_value(desc).expect("a catalog description serializes");
+    // These are the only fields with `skip_serializing_if`. Restore their keys
+    // even when absent, so explicit nulls are accepted only for known fields.
+    for (table_name, table) in &desc.tables {
+        for column_name in table.columns.keys() {
+            let column = known["tables"][table_name.as_str()]["columns"][column_name.as_str()]
+                .as_mapping_mut()
+                .expect("a column description serializes as a mapping");
+            for field in ["encoding", "weight"] {
+                column.entry(Value::from(field)).or_insert(Value::Null);
+            }
+        }
+    }
     let mut unknown = Vec::new();
     collect_unknown_keys(document, &known, &mut Vec::new(), &mut unknown);
     unknown
 }
 
-/// Walk `document` beside `known`, recording each key of the first that the
-/// second lacks. `path` is the way down, for a key a reader can find in the file.
+/// Walk the document beside its serialized counterpart, retaining paths for
+/// diagnostics even inside tagged enums and variant field sequences.
 fn collect_unknown_keys(
-    document: &serde_yaml::Value,
+    document: &CatalogKeys,
     known: &serde_yaml::Value,
     path: &mut Vec<String>,
     unknown: &mut Vec<String>,
@@ -81,34 +168,17 @@ fn collect_unknown_keys(
     use serde_yaml::Value;
 
     match (document, known) {
-        (Value::Mapping(document), Value::Mapping(known)) => {
-            for (key, value) in document {
-                // A key set to null sets nothing, known or not, and a known one
-                // may not be written back out: `encoding: ~` reads as `None`.
-                if value.is_null() {
-                    continue;
-                }
-
-                // Serde reads a plain scalar key into a string map as its text —
-                // `0:`, a variant of an integer variant column, is "0" — and
-                // writes it back out as that string.
-                let name = match key {
-                    Value::String(s) => s.clone(),
-                    Value::Number(n) => n.to_string(),
-                    Value::Bool(b) => b.to_string(),
-                    other => format!("{other:?}"),
-                };
-
-                let counterpart = known.get(name.as_str());
-                path.push(name);
-                match counterpart {
+        (CatalogKeys::Mapping(document), Value::Mapping(known)) => {
+            for (name, value) in document {
+                path.push(name.clone());
+                match known.get(name.as_str()) {
                     Some(counterpart) => collect_unknown_keys(value, counterpart, path, unknown),
                     None => unknown.push(path.join(".")),
                 }
                 path.pop();
             }
         }
-        (Value::Sequence(document), Value::Sequence(known)) => {
+        (CatalogKeys::Sequence(document), Value::Sequence(known)) => {
             for (index, (item, counterpart)) in document.iter().zip(known).enumerate() {
                 path.push(index.to_string());
                 collect_unknown_keys(item, counterpart, path, unknown);
@@ -1558,8 +1628,96 @@ tables:
       kind: { type: uint8 }
       payload: { type: string, encoding: ~ }
 "#;
-        parse_dataset_description_strict(read)
-            .expect("a key the parse read is not an unknown key, however it is written");
+        for spelling in ["0", "0x10", "01", "1.0", "true", "TRUE"] {
+            let yaml = read.replace("0: { action:", &format!("{spelling}: {{ action:"));
+            let desc = parse_dataset_description_strict(&yaml)
+                .expect("strict loading preserves scalar map key spellings");
+            assert!(desc.tables["items"].output.variants.contains_key(spelling));
+        }
+    }
+
+    #[test]
+    fn test_strict_parse_checks_tagged_documents_and_nested_values() {
+        let clean = LATER_RELEASE
+            .replace(", added_later: 1", "")
+            .lines()
+            .filter(|line| !line.contains("added_later:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for (from, to) in [
+            ("version: v2", "!catalog\nversion: v2"),
+            ("  blocks:", "  blocks: !table"),
+            ("      number: {", "      number: !column {"),
+            ("    output:", "    output: !output"),
+            ("action: [", "action: !fields ["),
+            (
+                "{ column: payload, as: payload",
+                "!field { column: payload, as: payload",
+            ),
+        ] {
+            parse_dataset_description_strict(&clean.replace(from, to))
+                .expect("tags on valid catalog structures are accepted");
+            let yaml = LATER_RELEASE.replace(from, to);
+            parse_dataset_description(&yaml).expect("the permissive loader still skips extensions");
+            let err = format!("{:#}", parse_dataset_description_strict(&yaml).unwrap_err());
+            for path in [
+                "tables.blocks.added_later",
+                "tables.blocks.columns.number.added_later",
+                "tables.items.output.added_later",
+                "tables.items.output.variants.call.action.0.added_later",
+            ] {
+                assert!(err.contains(path), "{to}: missing {path} in {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_strict_parse_refuses_unknown_null_keys() {
+        for null in ["null", "~", ""] {
+            let yaml = LATER_RELEASE
+                .replace("added_later: 1", &format!("added_later: {null}"))
+                .replace(
+                    "added_later: { nested: [ 1, 2 ] }",
+                    &format!("added_later: {null}"),
+                );
+            let desc =
+                parse_dataset_description(&yaml).expect("unknown nulls are skipped by readers");
+            let document = serde_yaml::from_str(&yaml).unwrap();
+            assert_eq!(unknown_keys(&document, &desc).len(), 10);
+            assert!(parse_dataset_description_strict(&yaml).is_err());
+        }
+        let yaml = "version: v2\nname: test\ntables:\n  blocks:\n    block_number_column: number\n    parent_hash_column: null\n    columns:\n      number: { type: uint64, encoding: null, weight: ~ }\n";
+        parse_dataset_description_strict(yaml).expect("known optional null fields are accepted");
+        for field in ["encoding", "weight"] {
+            let typo = yaml.replace(field, &format!("{field}_typo"));
+            let err = format!("{:#}", parse_dataset_description_strict(&typo).unwrap_err());
+            assert!(
+                err.contains(&format!("tables.blocks.columns.number.{field}_typo")),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_strict_parse_preserves_numeric_table_and_column_names() {
+        let yaml = "version: v2\nname: test\ntables:\n  0x10:\n    block_number_column: '01'\n    columns:\n      01: { type: uint64 }\n";
+        let desc = parse_dataset_description_strict(yaml).unwrap();
+        assert!(desc.tables["0x10"].columns.contains_key("01"));
+    }
+
+    #[test]
+    fn test_unknown_enum_values_require_reader_support() {
+        for (from, to) in [
+            ("type: string", "type: future_type"),
+            ("type: string", "type: string, encoding: future_encoding"),
+            ("kind: bloom", "kind: future_filter"),
+            ("kind: roll", "kind: future_field"),
+        ] {
+            let yaml = LATER_RELEASE.replacen(from, to, 1);
+            let err = format!("{:#}", parse_dataset_description(&yaml).unwrap_err());
+            assert!(err.contains("unknown"), "{err}");
+            assert!(parse_dataset_description_strict(&yaml).is_err());
+        }
     }
 
     /// A catalog is written by hand and read by nothing else. Each check below

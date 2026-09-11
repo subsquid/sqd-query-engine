@@ -24,13 +24,14 @@ A catalog opens with the schema it is written to and the dataset it describes:
 | `tables` | yes | The tables, in the order their arrays appear in a response block. |
 | `aliases` | no | Further request surfaces over the tables; see [Aliases](#aliases). |
 
-A new schema version must stay backwards compatible with `v2`. A catalog is
-published once by its provider (the network scheduler, for one) and read by
-several consumers on their own release cycles; a version a `v2` reader cannot
-accept obliges the provider to publish one catalog per version in use. Prefer
-additive changes under `v2` — a new optional key, a new `kind`, a new encoding
-— and reserve a bump for a change that alters the meaning of what `v2` already
-accepts.
+A catalog is published once by its provider (the network scheduler, for one)
+and read by consumers on their own release cycles. Prefer additions under
+`v2` that older readers can safely ignore: optional keys whose absence
+preserves existing behavior. New `kind` values, encodings, and column types
+are rejected by older readers, even under `v2`; using them requires upgrading
+all readers or publishing a separate catalog for older consumers. Changes
+that alter existing meanings or require a new schema version likewise need
+catalogs for each version still in use; a `v2` reader rejects other versions.
 
 ## The shape of a table
 

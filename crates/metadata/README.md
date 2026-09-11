@@ -16,13 +16,15 @@ A catalog opens with `version`, a string, and this crate reads exactly one:
 `v2`, the `SCHEMA_VERSION` constant. The loader refuses any other, so a
 catalog written for a later schema fails at load rather than being misread.
 
-Before introducing a new version, make sure it stays backwards compatible
-with `v2`. A catalog is published once by its provider (the network
-scheduler, for one) and read by several consumers, each on its own release
-cycle. A version a `v2` reader cannot accept obliges the provider to publish
-one catalog per version still in use, so prefer additive changes under `v2`:
-a new optional key, a new `kind`, a new encoding. Reserve a bump for a change
-that alters the meaning of what a `v2` reader already accepts.
+A catalog is published once by its provider (the network scheduler, for one)
+and read by consumers on their own release cycles. Prefer additions under
+`v2` that older readers can safely ignore, such as optional keys whose absence
+preserves existing behavior. Adding a new `kind`, encoding, or column type
+is not forward compatible: older readers reject unknown enum values even
+when the catalog still declares `v2`. Using those values requires upgrading
+all readers or publishing a separate catalog for older consumers. Changes
+that alter existing meanings or require a new schema version likewise need
+catalogs for each version still in use; a `v2` reader rejects other versions.
 
 A reader skips a key it does not know, which is what lets a catalog gain an
 optional key without breaking readers that predate it. A misspelled optional
