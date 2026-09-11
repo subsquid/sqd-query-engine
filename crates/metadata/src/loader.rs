@@ -10,15 +10,113 @@ pub fn load_dataset_description(path: &Path) -> Result<DatasetDescription> {
     parse_dataset_description(&content).with_context(|| format!("parsing {}", path.display()))
 }
 
+/// Load a dataset description from a YAML file, refusing keys this release does
+/// not know; see [`parse_dataset_description_strict`].
+pub fn load_dataset_description_strict(path: &Path) -> Result<DatasetDescription> {
+    let content =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    parse_dataset_description_strict(&content)
+        .with_context(|| format!("parsing {}", path.display()))
+}
+
 /// Load a dataset description from a YAML string.
 ///
 /// A key the catalog types do not know is skipped, so a catalog that gained an
-/// optional key still loads in a release that predates it.
+/// optional key still loads in a release that predates it. A misspelled optional
+/// key is skipped the same way, and changes what the engine does —
+/// `parent_hash_colum` turns fork detection off — so a catalog is checked with
+/// [`parse_dataset_description_strict`] before it is published.
 pub fn parse_dataset_description(yaml: &str) -> Result<DatasetDescription> {
     let desc: DatasetDescription =
         serde_yaml::from_str(yaml).context("parsing dataset description")?;
     validate(&desc)?;
     Ok(desc)
+}
+
+/// Load a dataset description from a YAML string, as
+/// [`parse_dataset_description`] does, and refuse any key it would skip.
+///
+/// The check for whoever writes or publishes a catalog. A reader cannot tell a
+/// misspelled key from one a later release added; only the release a catalog is
+/// written for knows which keys it should not have.
+pub fn parse_dataset_description_strict(yaml: &str) -> Result<DatasetDescription> {
+    let desc = parse_dataset_description(yaml)?;
+
+    let document: serde_yaml::Value =
+        serde_yaml::from_str(yaml).context("re-reading the catalog")?;
+    let unknown = unknown_keys(&document, &desc);
+    anyhow::ensure!(
+        unknown.is_empty(),
+        "keys this release does not know, misspelled or from a later one: {}",
+        unknown.join(", ")
+    );
+
+    Ok(desc)
+}
+
+/// The keys of a catalog document the parse skipped, as dotted paths:
+/// `tables.blocks.parent_hash_colum`.
+///
+/// Found by comparing the document with the description written back out.
+/// Serde writes every field it read back under the same name, so a key with no
+/// counterpart there is one it skipped — inside the internally tagged
+/// `special_filters` and `virtual_fields` too, which it reads through a buffer.
+/// That holds while no catalog field reads an alias spelling, or skips
+/// serializing anything but a `None`.
+fn unknown_keys(document: &serde_yaml::Value, desc: &DatasetDescription) -> Vec<String> {
+    let known = serde_yaml::to_value(desc).expect("a catalog description serializes");
+    let mut unknown = Vec::new();
+    collect_unknown_keys(document, &known, &mut Vec::new(), &mut unknown);
+    unknown
+}
+
+/// Walk `document` beside `known`, recording each key of the first that the
+/// second lacks. `path` is the way down, for a key a reader can find in the file.
+fn collect_unknown_keys(
+    document: &serde_yaml::Value,
+    known: &serde_yaml::Value,
+    path: &mut Vec<String>,
+    unknown: &mut Vec<String>,
+) {
+    use serde_yaml::Value;
+
+    match (document, known) {
+        (Value::Mapping(document), Value::Mapping(known)) => {
+            for (key, value) in document {
+                // A key set to null sets nothing, known or not, and a known one
+                // may not be written back out: `encoding: ~` reads as `None`.
+                if value.is_null() {
+                    continue;
+                }
+
+                // Serde reads a plain scalar key into a string map as its text —
+                // `0:`, a variant of an integer variant column, is "0" — and
+                // writes it back out as that string.
+                let name = match key {
+                    Value::String(s) => s.clone(),
+                    Value::Number(n) => n.to_string(),
+                    Value::Bool(b) => b.to_string(),
+                    other => format!("{other:?}"),
+                };
+
+                let counterpart = known.get(name.as_str());
+                path.push(name);
+                match counterpart {
+                    Some(counterpart) => collect_unknown_keys(value, counterpart, path, unknown),
+                    None => unknown.push(path.join(".")),
+                }
+                path.pop();
+            }
+        }
+        (Value::Sequence(document), Value::Sequence(known)) => {
+            for (index, (item, counterpart)) in document.iter().zip(known).enumerate() {
+                path.push(index.to_string());
+                collect_unknown_keys(item, counterpart, path, unknown);
+                path.pop();
+            }
+        }
+        _ => {}
+    }
 }
 
 fn validate(desc: &DatasetDescription) -> Result<()> {
@@ -1342,13 +1440,9 @@ tables:
         assert!(err.contains("8-byte bloom over a 64-byte"), "got: {err}");
     }
 
-    /// A catalog is published once and read by consumers on their own release
-    /// cycles, so a key added under `v2` reaches readers that predate it. Such a
-    /// reader skips the key rather than refusing the catalog, wherever the key
-    /// sits: `added_later` below appears once in every shape a catalog has.
-    #[test]
-    fn test_keys_from_a_later_release_are_skipped() {
-        let yaml = r#"
+    /// A catalog as a later release might publish it: `added_later` appears once
+    /// in every shape a catalog has.
+    const LATER_RELEASE: &str = r#"
 version: v2
 name: test
 added_later: { nested: [ 1, 2 ] }
@@ -1390,7 +1484,82 @@ aliases:
     filters: [ user ]
     added_later: 1
 "#;
-        parse_dataset_description(yaml).expect("keys from a later release must be skipped");
+
+    /// A catalog is published once and read by consumers on their own release
+    /// cycles, so a key added under `v2` reaches readers that predate it. Such a
+    /// reader skips the key rather than refusing the catalog, wherever it sits.
+    #[test]
+    fn test_keys_from_a_later_release_are_skipped() {
+        parse_dataset_description(LATER_RELEASE)
+            .expect("keys from a later release must be skipped");
+    }
+
+    /// A misspelled optional key is skipped like a key from a later release, and
+    /// changes what the engine does: fork detection is off below, and nothing
+    /// fails. The strict parse is the author's check, and refuses every key the
+    /// parse skipped, at any depth, by its path.
+    #[test]
+    fn test_strict_parse_refuses_unknown_keys() {
+        let evm = std::fs::read_to_string(catalog_dir().join("evm.yaml")).unwrap();
+        let typo = evm.replacen("parent_hash_column:", "parent_hash_colum:", 1);
+
+        let desc = parse_dataset_description(&typo).expect("the reader skips the typo");
+        assert_eq!(desc.tables["blocks"].parent_hash_column, None);
+
+        let err = format!("{:#}", parse_dataset_description_strict(&typo).unwrap_err());
+        assert!(
+            err.contains("tables.blocks.parent_hash_colum"),
+            "got: {err}"
+        );
+
+        // Inside the internally tagged `special_filters` and `virtual_fields`
+        // too, where serde drops a key before any attribute could see it.
+        let document = serde_yaml::from_str(LATER_RELEASE).unwrap();
+        let desc = parse_dataset_description(LATER_RELEASE).unwrap();
+        assert_eq!(
+            unknown_keys(&document, &desc),
+            [
+                "added_later",
+                "tables.blocks.added_later",
+                "tables.blocks.columns.number.added_later",
+                "tables.items.request.added_later",
+                "tables.items.request.special_filters.mentions.added_later",
+                "tables.items.request.relations.block.added_later",
+                "tables.items.output.added_later",
+                "tables.items.output.virtual_fields.parts.added_later",
+                "tables.items.output.variants.call.action.0.added_later",
+                "aliases.view.added_later",
+            ]
+        );
+
+        // Two keys the parse did read, written so that a comparison of the
+        // document with the description could mistake them for skipped ones:
+        // `0:` is read as the variant "0", and `encoding: ~` as no encoding,
+        // which is not written back out.
+        let read = r#"
+version: v2
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    columns:
+      number: { type: uint64 }
+  items:
+    request:
+      filters: []
+    output:
+      variant_column: kind
+      variants:
+        0: { action: [ { column: payload, as: payload } ] }
+    item_order_keys: [ seq ]
+    columns:
+      block_number: { type: uint64 }
+      seq: { type: uint32 }
+      kind: { type: uint8 }
+      payload: { type: string, encoding: ~ }
+"#;
+        parse_dataset_description_strict(read)
+            .expect("a key the parse read is not an unknown key, however it is written");
     }
 
     /// A catalog is written by hand and read by nothing else. Each check below
@@ -2071,7 +2240,8 @@ aliases:
         }
     }
 
-    /// Every catalog shipped with the engine must load.
+    /// Every catalog shipped with the engine must load, strictly: a misspelled
+    /// key in one would otherwise load as though it were absent.
     #[test]
     fn test_bundled_catalogs_validate() {
         let dir = catalog_dir();
@@ -2081,7 +2251,8 @@ aliases:
             if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
                 continue;
             }
-            load_dataset_description(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            load_dataset_description_strict(&path)
+                .unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
             loaded.push(path.file_stem().unwrap().to_string_lossy().to_string());
         }
         loaded.sort();

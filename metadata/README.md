@@ -9,7 +9,11 @@ The catalogs live in this directory, one per dataset. They load into the types
 in [`crates/metadata/src/types.rs`](../crates/metadata/src/types.rs) and must pass
 the checks in [`crates/metadata/src/loader.rs`](../crates/metadata/src/loader.rs). A key the types do
 not know is skipped, so that a catalog written for a later release still loads
-in an earlier one. A misspelled optional key is skipped the same way.
+in an earlier one. A misspelled optional key is skipped the same way, and
+changes what the engine does — `parent_hash_colum` turns fork detection off —
+so a catalog is checked with the strict loader before it is published. That
+loader refuses every key it does not know, by its path, and the catalogs here
+are checked with it.
 
 A catalog opens with the schema it is written to and the dataset it describes:
 

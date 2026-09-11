@@ -24,6 +24,13 @@ one catalog per version still in use, so prefer additive changes under `v2`:
 a new optional key, a new `kind`, a new encoding. Reserve a bump for a change
 that alters the meaning of what a `v2` reader already accepts.
 
+A reader skips a key it does not know, which is what lets a catalog gain an
+optional key without breaking readers that predate it. A misspelled optional
+key is skipped the same way and changes query results, so a provider checks a
+catalog with `parse_dataset_description_strict` (or
+`load_dataset_description_strict`) before publishing it: it refuses every key
+the release does not know and names each by its path.
+
 The catalog format itself — the request, output and storage blocks of a table,
 special filters, relations, variants, aliases — is documented next to the
 catalogs, in [`metadata/README.md`](../../metadata/README.md). The catalogs stay
