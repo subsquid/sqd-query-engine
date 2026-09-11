@@ -1,5 +1,6 @@
 use crate::{DatasetDescription, SpecialFilter, MAX_DISCRIMINATOR_BYTES, SCHEMA_VERSION};
 use anyhow::{Context, Result};
+use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -42,8 +43,7 @@ pub fn parse_dataset_description(yaml: &str) -> Result<DatasetDescription> {
 pub fn parse_dataset_description_strict(yaml: &str) -> Result<DatasetDescription> {
     let desc = parse_dataset_description(yaml)?;
 
-    let document: CatalogKeys = serde_yaml::from_str(yaml).context("re-reading the catalog")?;
-    let unknown = unknown_keys(&document, &desc);
+    let unknown = unknown_keys(yaml, &desc)?;
     anyhow::ensure!(
         unknown.is_empty(),
         "keys this release does not know, misspelled or from a later one: {}",
@@ -53,90 +53,9 @@ pub fn parse_dataset_description_strict(yaml: &str) -> Result<DatasetDescription
     Ok(desc)
 }
 
-/// Only the structure is needed for the strict check. Read map keys as strings,
-/// just as the catalog types do: parsing through `Value` first would normalize
-/// `0x10` to `16` and lose the spelling that the typed loader actually read.
-/// YAML tags do not change which fields a struct reads, so unwrap them here.
-enum CatalogKeys {
-    Mapping(Vec<(String, CatalogKeys)>),
-    Sequence(Vec<CatalogKeys>),
-    Scalar,
-}
-
-impl<'de> serde::Deserialize<'de> for CatalogKeys {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct Visitor;
-
-        impl<'de> serde::de::Visitor<'de> for Visitor {
-            type Value = CatalogKeys;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("a catalog value")
-            }
-
-            fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
-                Ok(CatalogKeys::Scalar)
-            }
-
-            fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
-                Ok(CatalogKeys::Scalar)
-            }
-
-            fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
-                Ok(CatalogKeys::Scalar)
-            }
-
-            fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
-                Ok(CatalogKeys::Scalar)
-            }
-
-            fn visit_str<E>(self, _: &str) -> Result<Self::Value, E> {
-                Ok(CatalogKeys::Scalar)
-            }
-
-            fn visit_unit<E>(self) -> Result<Self::Value, E> {
-                Ok(CatalogKeys::Scalar)
-            }
-
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                mut map: A,
-            ) -> Result<Self::Value, A::Error> {
-                let mut entries = Vec::new();
-                while let Some(entry) = map.next_entry()? {
-                    entries.push(entry);
-                }
-                Ok(CatalogKeys::Mapping(entries))
-            }
-
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(
-                self,
-                mut sequence: A,
-            ) -> Result<Self::Value, A::Error> {
-                let mut items = Vec::new();
-                while let Some(item) = sequence.next_element()? {
-                    items.push(item);
-                }
-                Ok(CatalogKeys::Sequence(items))
-            }
-
-            fn visit_enum<A: serde::de::EnumAccess<'de>>(
-                self,
-                tagged: A,
-            ) -> Result<Self::Value, A::Error> {
-                use serde::de::VariantAccess;
-                let (_, value) = tagged.variant::<String>()?;
-                value.newtype_variant()
-            }
-        }
-
-        deserializer.deserialize_any(Visitor)
-    }
-}
-
 /// Find skipped keys by comparing the document with the description written
 /// back out. This relies on catalog fields having no deserialization aliases.
-fn unknown_keys(document: &CatalogKeys, desc: &DatasetDescription) -> Vec<String> {
+fn unknown_keys(yaml: &str, desc: &DatasetDescription) -> Result<Vec<String>> {
     use serde_yaml::Value;
 
     let mut known = serde_yaml::to_value(desc).expect("a catalog description serializes");
@@ -153,39 +72,80 @@ fn unknown_keys(document: &CatalogKeys, desc: &DatasetDescription) -> Vec<String
         }
     }
     let mut unknown = Vec::new();
-    collect_unknown_keys(document, &known, &mut Vec::new(), &mut unknown);
-    unknown
+    KeyCheck {
+        known: &known,
+        path: String::new(),
+        unknown: &mut unknown,
+    }
+    .deserialize(serde_yaml::Deserializer::from_str(yaml))
+    .context("checking catalog keys")?;
+    Ok(unknown)
 }
 
-/// Walk the document beside its serialized counterpart, retaining paths for
-/// diagnostics even inside tagged enums and variant field sequences.
-fn collect_unknown_keys(
-    document: &CatalogKeys,
-    known: &serde_yaml::Value,
-    path: &mut Vec<String>,
-    unknown: &mut Vec<String>,
-) {
-    use serde_yaml::Value;
+/// Read keys as strings, exactly as the catalog does, without first normalizing
+/// scalar spellings through `Value` (`0x10` must not become `16`). Asking for a
+/// map or sequence also unwraps YAML tags, just as typed deserialization does.
+struct KeyCheck<'a> {
+    known: &'a serde_yaml::Value,
+    path: String,
+    unknown: &'a mut Vec<String>,
+}
 
-    match (document, known) {
-        (CatalogKeys::Mapping(document), Value::Mapping(known)) => {
-            for (name, value) in document {
-                path.push(name.clone());
-                match known.get(name.as_str()) {
-                    Some(counterpart) => collect_unknown_keys(value, counterpart, path, unknown),
-                    None => unknown.push(path.join(".")),
-                }
-                path.pop();
+impl<'de> DeserializeSeed<'de> for KeyCheck<'_> {
+    type Value = ();
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
+        match self.known {
+            serde_yaml::Value::Mapping(_) => deserializer.deserialize_map(self),
+            serde_yaml::Value::Sequence(_) => deserializer.deserialize_seq(self),
+            _ => deserializer.deserialize_ignored_any(IgnoredAny).map(|_| ()),
+        }
+    }
+}
+
+impl<'de> Visitor<'de> for KeyCheck<'_> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("the structure of the parsed catalog")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+        while let Some(key) = map.next_key::<String>()? {
+            let path = if self.path.is_empty() {
+                key.clone()
+            } else {
+                format!("{}.{key}", self.path)
+            };
+            if let Some(known) = self.known.get(&key) {
+                map.next_value_seed(KeyCheck {
+                    known,
+                    path,
+                    unknown: self.unknown,
+                })?;
+            } else {
+                self.unknown.push(path);
+                map.next_value::<IgnoredAny>()?;
             }
         }
-        (CatalogKeys::Sequence(document), Value::Sequence(known)) => {
-            for (index, (item, counterpart)) in document.iter().zip(known).enumerate() {
-                path.push(index.to_string());
-                collect_unknown_keys(item, counterpart, path, unknown);
-                path.pop();
-            }
+        Ok(())
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<(), A::Error> {
+        for (index, known) in self
+            .known
+            .as_sequence()
+            .expect("a serialized sequence")
+            .iter()
+            .enumerate()
+        {
+            sequence.next_element_seed(KeyCheck {
+                known,
+                path: format!("{}.{index}", self.path),
+                unknown: self.unknown,
+            })?;
         }
-        _ => {}
+        Ok(())
     }
 }
 
@@ -1584,10 +1544,9 @@ aliases:
 
         // Inside the internally tagged `special_filters` and `virtual_fields`
         // too, where serde drops a key before any attribute could see it.
-        let document = serde_yaml::from_str(LATER_RELEASE).unwrap();
         let desc = parse_dataset_description(LATER_RELEASE).unwrap();
         assert_eq!(
-            unknown_keys(&document, &desc),
+            unknown_keys(LATER_RELEASE, &desc).unwrap(),
             [
                 "added_later",
                 "tables.blocks.added_later",
@@ -1682,8 +1641,7 @@ tables:
                 );
             let desc =
                 parse_dataset_description(&yaml).expect("unknown nulls are skipped by readers");
-            let document = serde_yaml::from_str(&yaml).unwrap();
-            assert_eq!(unknown_keys(&document, &desc).len(), 10);
+            assert_eq!(unknown_keys(&yaml, &desc).unwrap().len(), 10);
             assert!(parse_dataset_description_strict(&yaml).is_err());
         }
         let yaml = "version: v2\nname: test\ntables:\n  blocks:\n    block_number_column: number\n    parent_hash_column: null\n    columns:\n      number: { type: uint64, encoding: null, weight: ~ }\n";
