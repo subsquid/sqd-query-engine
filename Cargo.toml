@@ -1,3 +1,9 @@
+# The engine is the workspace root; `crates/` holds the parts other projects
+# can fetch on their own. `cargo test` here runs the engine only, so the
+# Makefile targets pass `--workspace`.
+[workspace]
+members = ["crates/metadata"]
+
 [package]
 name = "sqd-query-engine"
 version = "0.1.0"
@@ -7,6 +13,7 @@ edition = "2021"
 autobenches = false
 
 [dependencies]
+sqd-metadata = { path = "crates/metadata" }
 arrow = { version = "54", features = ["ffi", "ipc_compression"] }
 parquet = { version = "54", features = ["arrow"] }
 rayon = "1"

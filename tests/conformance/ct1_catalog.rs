@@ -1,7 +1,7 @@
 //! CT-1 — catalog validation.
 //!
 //! Static, no chunk, milliseconds. Most of the class lives with the validator in
-//! `src/metadata/loader.rs`, because those cases construct catalogs that violate
+//! `crates/metadata/src/loader.rs`, because those cases construct catalogs that violate
 //! one rule each and assert the loader rejects them — which needs the loader's
 //! private surface, not the engine's public one. They carry the same `CT-1` tag
 //! as everything here, so the coverage report finds them wherever they live.
@@ -20,7 +20,7 @@ use arrow::array::{ArrayRef, StringArray, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field};
 use arrow::record_batch::RecordBatch;
 use arrow::row::{RowConverter, SortField};
-use sqd_query_engine::metadata::parse_dataset_description;
+use sqd_query_engine::metadata::{parse_dataset_description, parse_dataset_description_strict};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -37,6 +37,7 @@ use crate::harness::synthetic::run_json;
 /// that also carries an unrelated column named `block_number` — the archive's
 /// note of which block a receipt *refers to*, not the block it is in.
 const HEIGHT_CHAIN: &str = r#"
+version: v2
 name: test
 
 tables:
@@ -315,7 +316,7 @@ fn a_duplicated_item_key_is_caught() {
 /// `filters` list is the whole request surface, so every name in it has to
 /// resolve, and its relation joins two tables that key their rows differently.
 /// Checked by splicing it over the real `substrate` aliases, which is what
-/// copying it amounts to.
+/// copying it amounts to, and strictly, as an author's catalog is.
 ///
 /// Covers CT-1 · INV-D1
 #[test]
@@ -332,7 +333,7 @@ fn the_alias_example_in_the_format_doc_loads() {
         .find("\naliases:\n")
         .expect("substrate declares aliases")];
 
-    parse_dataset_description(&format!("{tables}\n{example}"))
+    parse_dataset_description_strict(&format!("{tables}\n{example}"))
         .expect("the aliases example in metadata/README.md must load");
 }
 

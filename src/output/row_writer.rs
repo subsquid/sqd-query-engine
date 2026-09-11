@@ -777,6 +777,7 @@ mod tests {
     fn variant_catalog() -> crate::metadata::DatasetDescription {
         crate::metadata::parse_dataset_description(
             r#"
+version: v2
 name: test
 tables:
   blocks:

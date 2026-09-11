@@ -3,10 +3,24 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
+/// The catalog schema version this crate reads. A catalog declares its own
+/// under `version`, and the loader refuses any other, so a catalog written
+/// for a later schema fails at load rather than being read as this one.
+///
+/// Bump this only for a change a `v2` reader cannot accept. A catalog is
+/// published once by its provider (the network scheduler, for one) and read
+/// by several consumers on their own release cycles, so a new version that
+/// is not backwards compatible with `v2` obliges the provider to publish one
+/// catalog per version in circulation. Prefer additive changes under `v2`.
+pub const SCHEMA_VERSION: &str = "v2";
+
 /// Top-level dataset description. One per chain type (evm, solana, etc.).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct DatasetDescription {
+    /// The schema this catalog is written to, as a string (`v2`). Required:
+    /// a version that could be omitted would tell a reader nothing. Must
+    /// equal [`SCHEMA_VERSION`].
+    pub version: String,
     /// Dataset name (e.g., "solana", "evm")
     pub name: String,
     /// Table definitions keyed by table name.
@@ -21,7 +35,6 @@ pub struct DatasetDescription {
 /// A request surface over an existing table: the same shape as a table's own
 /// [`RequestSurface`], plus the filters that make it a narrower view.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Alias {
     /// The table the alias reads.
     pub table: String,
@@ -54,7 +67,6 @@ pub struct Alias {
 /// may send for the table (`request`), what it may ask to see (`output`), and
 /// what the parquet actually holds (the rest).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct TableDescription {
     /// What an item request on this table may say. Absent only for the block
     /// table, which has no filters and no relations and is still addressed by
@@ -113,7 +125,6 @@ pub struct TableDescription {
 /// The request side of a table: how a client addresses it and what an item
 /// request on it may contain.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RequestSurface {
     /// The key of this table's item requests in a query (`logs: [ ... ]`), and
     /// of its array in every response block. Defaults to the table's own name;
@@ -129,9 +140,8 @@ pub struct RequestSurface {
     ///
     /// Required, with no default, once a `request` block is present, for the
     /// reason [`Alias::filters`] is: an omitted key would accept no filters at
-    /// all and 400 every client filter on the table, and `deny_unknown_fields`
-    /// does not catch an absent key the way it catches a misspelled one.
-    /// `filters: []` says it on purpose.
+    /// all and 400 every client filter on the table. `filters: []` says it on
+    /// purpose.
     pub filters: Vec<String>,
 
     /// Filters that are not a column of the same name: a dispatch, a bloom
@@ -147,7 +157,6 @@ pub struct RequestSurface {
 /// The output side of a table: how a client selects its fields and what each
 /// field renders as.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct OutputSurface {
     /// The key of this table's selection under a query's `fields`
     /// (`fields: { log: { ... } }`). No default: a table that declares none is
@@ -278,7 +287,6 @@ pub enum WeightSource {
 
 /// Description of a single column in a table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ColumnDescription {
     /// Arrow/parquet data type
     #[serde(rename = "type")]
@@ -447,7 +455,6 @@ pub enum JsonEncoding {
 
 /// Description of a relation available in query items.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RelationDef {
     /// Target table name.
     pub table: String,
@@ -533,7 +540,6 @@ pub enum SpecialFilter {
 /// One field of a variant group: the column it reads, the name a selection
 /// picks it by, and the name it renders under.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct FieldMapping {
     /// Physical column name in parquet.
     pub column: String,
@@ -559,27 +565,6 @@ impl FieldMapping {
     }
 }
 
-impl SpecialFilter {
-    /// The keys a catalog may write under each `kind`, the tag itself included.
-    ///
-    /// Serde cannot apply `deny_unknown_fields` to an internally tagged enum: a
-    /// key it does not know is buffered and dropped, so a filter still carrying
-    /// a spelling from an older catalog would load and quietly do nothing. Every
-    /// other shape in a catalog refuses a stray key, and [`check_stale_keys`]
-    /// gives these two the same answer by reading the list below.
-    ///
-    /// [`check_stale_keys`]: crate::metadata::loader
-    pub fn allowed_keys(kind: &str) -> Option<&'static [&'static str]> {
-        Some(match kind {
-            "discriminator" => &["kind", "by_length"],
-            "bloom" => &["kind", "column", "bytes", "hashes"],
-            "range_gte" | "range_lte" | "column_alias" => &["kind", "column"],
-            "gte_const" => &["kind", "column", "value"],
-            _ => return None,
-        })
-    }
-}
-
 /// A virtual field that combines multiple physical columns into one output value.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -588,17 +573,6 @@ pub enum VirtualField {
     /// Non-nullable columns come first, then nullable (stops at first null),
     /// then an optional trailing list column (spread into array).
     Roll { columns: Vec<String> },
-}
-
-impl VirtualField {
-    /// The keys a catalog may write under each `kind`, for the reason
-    /// [`SpecialFilter::allowed_keys`] exists.
-    pub fn allowed_keys(kind: &str) -> Option<&'static [&'static str]> {
-        Some(match kind {
-            "roll" => &["kind", "columns"],
-            _ => return None,
-        })
-    }
 }
 
 impl DatasetDescription {

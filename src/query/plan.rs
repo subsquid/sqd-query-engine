@@ -1489,6 +1489,7 @@ mod tests {
         use crate::metadata::parse_dataset_description;
 
         let yaml = r#"
+version: v2
 name: test
 tables:
   blocks:

@@ -22,7 +22,7 @@ spec-check-strict:
 # gain by holding it back, and running it here is worth more than the tidiness of
 # the split.
 test:
-	cargo test
+	cargo test --workspace
 
 # MG-3 and MG-4 own disjoint sets of classes, so each gate needs a command that
 # selects its own. The class prefix is the module name, which is why every class
@@ -30,7 +30,7 @@ test:
 NIGHTLY_CLASSES = ct7_ ct8_ ct9_
 
 test-pr:
-	cargo test --lib
+	cargo test --workspace --lib
 	cargo test --test conformance -- $(addprefix --skip ,$(NIGHTLY_CLASSES))
 
 # MG-4's classes. CT-7 needs the reference engine and CT-8 external chunks, so
@@ -42,21 +42,23 @@ test-nightly:
 # The data-backed suite. The guards turn missing inputs into failures, and
 # `--ignored` selects the tests omitted from the portable gate.
 test-data:
-	SQD_REQUIRE_CHUNKS=1 SQD_REQUIRE_FIXTURES=1 cargo test -- --ignored
+	SQD_REQUIRE_CHUNKS=1 SQD_REQUIRE_FIXTURES=1 cargo test --workspace -- --ignored
 
-# MG-8, over the engine and its tests. `benches/` and `examples/` are outside
+# MG-8, over the engine, its crates and its tests. `benches/` and `examples/` are outside
 # both static gates: they are not the engine, and bringing them under the
 # formatter is a change of its own.
-# rustfmt follows `mod` declarations, so the library root covers all of `src/`
-# and the conformance crate's root covers all of its classes. Integration tests
+# rustfmt follows `mod` declarations, so the library root covers all of `src/`,
+# each crate root under `crates/` covers that crate, and the conformance crate's
+# root covers all of its classes. Integration tests
 # are separate crates, so each root is named. Expanded by `make` rather than by
 # `git ls-files`: a gate that quietly checks fewer files where git is unavailable
 # is worse than one that fails.
 ENGINE_SOURCES = src/lib.rs src/bin/generate_fixtures.rs \
+                 $(wildcard crates/*/src/lib.rs) \
                  tests/conformance/main.rs $(wildcard tests/*.rs)
 
 fmt:
 	rustfmt --check --edition 2021 $(ENGINE_SOURCES)
 
 lint:
-	cargo clippy --lib --tests -- -D warnings
+	cargo clippy --workspace --lib --tests -- -D warnings

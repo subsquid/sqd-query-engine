@@ -31,6 +31,7 @@ use crate::harness::chunk::write_table;
 ///
 /// [INV-R2]: ../../../spec/07-invariants.md#inv-r2
 const CHAIN: &str = r#"
+version: v2
 name: test
 
 tables:

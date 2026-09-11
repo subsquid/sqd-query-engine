@@ -164,6 +164,7 @@ fn an_unanswerable_reserved_key_carries_its_kind() {
 
     let silent = parse_dataset_description(
         r#"
+version: v2
 name: test
 
 tables:

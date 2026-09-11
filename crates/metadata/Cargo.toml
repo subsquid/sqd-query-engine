@@ -1,0 +1,12 @@
+[package]
+name = "sqd-metadata"
+version = "0.1.0"
+edition = "2021"
+description = "Dataset catalog types for the sqd query engine, and the checks a catalog must pass before the engine will use it"
+repository = "https://github.com/subsquid/sqd-query-engine"
+
+[dependencies]
+anyhow = "1"
+indexmap = { version = "2", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"

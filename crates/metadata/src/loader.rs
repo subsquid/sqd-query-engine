@@ -1,5 +1,6 @@
-use crate::metadata::{DatasetDescription, SpecialFilter, MAX_DISCRIMINATOR_BYTES};
+use crate::{DatasetDescription, SpecialFilter, MAX_DISCRIMINATOR_BYTES, SCHEMA_VERSION};
 use anyhow::{Context, Result};
+use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -10,105 +11,154 @@ pub fn load_dataset_description(path: &Path) -> Result<DatasetDescription> {
     parse_dataset_description(&content).with_context(|| format!("parsing {}", path.display()))
 }
 
+/// Load a dataset description from a YAML file, refusing keys this release does
+/// not know; see [`parse_dataset_description_strict`].
+pub fn load_dataset_description_strict(path: &Path) -> Result<DatasetDescription> {
+    let content =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    parse_dataset_description_strict(&content)
+        .with_context(|| format!("parsing {}", path.display()))
+}
+
 /// Load a dataset description from a YAML string.
+///
+/// A key the catalog types do not know is skipped, so a catalog that gained an
+/// optional key still loads in a release that predates it. A misspelled optional
+/// key is skipped the same way, and changes what the engine does —
+/// `parent_hash_colum` turns fork detection off — so a catalog is checked with
+/// [`parse_dataset_description_strict`] before it is published.
 pub fn parse_dataset_description(yaml: &str) -> Result<DatasetDescription> {
     let desc: DatasetDescription =
         serde_yaml::from_str(yaml).context("parsing dataset description")?;
-    check_stale_keys(yaml)?;
     validate(&desc)?;
     Ok(desc)
 }
 
-/// Refuse a key serde would drop in silence.
+/// Load a dataset description from a YAML string, as
+/// [`parse_dataset_description`] does, and refuse any key it would skip.
 ///
-/// `special_filters` and `virtual_fields` hold internally tagged enums, the one
-/// shape `deny_unknown_fields` cannot be applied to: serde buffers the entry,
-/// takes the keys the variant declares and discards the rest. Every other part
-/// of a catalog fails loudly on a stray key, and a catalog is written by hand,
-/// so a filter left half-renamed would otherwise load and do nothing the author
-/// asked for.
-///
-/// Reads the raw document rather than the parsed description, which by then has
-/// forgotten the keys it dropped. Runs after the parse, so an unknown `kind` is
-/// already refused and every entry here has a key list to check against.
-fn check_stale_keys(yaml: &str) -> Result<()> {
-    let doc: serde_yaml::Value = serde_yaml::from_str(yaml).context("re-reading the catalog")?;
-    let mut trail = Vec::new();
-    walk_tagged_entries(&doc, &mut trail)
+/// The check for whoever writes or publishes a catalog. A reader cannot tell a
+/// misspelled key from one a later release added; only the release a catalog is
+/// written for knows which keys it should not have.
+pub fn parse_dataset_description_strict(yaml: &str) -> Result<DatasetDescription> {
+    let desc = parse_dataset_description(yaml)?;
+
+    let unknown = unknown_keys(yaml, &desc)?;
+    anyhow::ensure!(
+        unknown.is_empty(),
+        "keys this release does not know, misspelled or from a later one: {}",
+        unknown.join(", ")
+    );
+
+    Ok(desc)
 }
 
-/// Walk every mapping, checking the entries of the two blocks that hold a tagged
-/// enum. `trail` is the path taken, for an error a reader can find in the file.
-fn walk_tagged_entries<'a>(node: &'a serde_yaml::Value, trail: &mut Vec<&'a str>) -> Result<()> {
-    let serde_yaml::Value::Mapping(map) = node else {
-        return Ok(());
-    };
+/// Find skipped keys by comparing the document with the description written
+/// back out. This relies on catalog fields having no deserialization aliases.
+fn unknown_keys(yaml: &str, desc: &DatasetDescription) -> Result<Vec<String>> {
+    use serde_yaml::Value;
 
-    for (key, value) in map {
-        let Some(key) = key.as_str() else { continue };
-
-        let allowed = match key {
-            "special_filters" => {
-                Some(crate::metadata::SpecialFilter::allowed_keys as fn(&str) -> _)
-            }
-            "virtual_fields" => Some(crate::metadata::VirtualField::allowed_keys as fn(&str) -> _),
-            _ => None,
-        };
-
-        trail.push(key);
-
-        if let Some(allowed) = allowed {
-            if let serde_yaml::Value::Mapping(entries) = value {
-                for (name, entry) in entries {
-                    let name = name.as_str().unwrap_or_default();
-                    check_entry_keys(&trail.join("."), name, entry, allowed)?;
-                }
+    let mut known = serde_yaml::to_value(desc).expect("a catalog description serializes");
+    // These are the only fields with `skip_serializing_if`. Restore their keys
+    // even when absent, so explicit nulls are accepted only for known fields.
+    for (table_name, table) in &desc.tables {
+        for column_name in table.columns.keys() {
+            let column = known["tables"][table_name.as_str()]["columns"][column_name.as_str()]
+                .as_mapping_mut()
+                .expect("a column description serializes as a mapping");
+            for field in ["encoding", "weight"] {
+                column.entry(Value::from(field)).or_insert(Value::Null);
             }
         }
-
-        walk_tagged_entries(value, trail)?;
-        trail.pop();
     }
-
-    Ok(())
+    let mut unknown = Vec::new();
+    KeyCheck {
+        known: &known,
+        path: String::new(),
+        unknown: &mut unknown,
+    }
+    .deserialize(serde_yaml::Deserializer::from_str(yaml))
+    .context("checking catalog keys")?;
+    Ok(unknown)
 }
 
-/// Every key of one tagged entry must be one its `kind` declares.
-fn check_entry_keys(
-    where_: &str,
-    name: &str,
-    entry: &serde_yaml::Value,
-    allowed: fn(&str) -> Option<&'static [&'static str]>,
-) -> Result<()> {
-    let serde_yaml::Value::Mapping(fields) = entry else {
-        return Ok(());
-    };
+/// Read keys as strings, exactly as the catalog does, without first normalizing
+/// scalar spellings through `Value` (`0x10` must not become `16`). Asking for a
+/// map or sequence also unwraps YAML tags, just as typed deserialization does.
+struct KeyCheck<'a> {
+    known: &'a serde_yaml::Value,
+    path: String,
+    unknown: &'a mut Vec<String>,
+}
 
-    let kind = fields
-        .get(serde_yaml::Value::from("kind"))
-        .and_then(serde_yaml::Value::as_str)
-        .unwrap_or_default();
+impl<'de> DeserializeSeed<'de> for KeyCheck<'_> {
+    type Value = ();
 
-    let Some(allowed) = allowed(kind) else {
-        return Ok(());
-    };
+    fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
+        match self.known {
+            serde_yaml::Value::Mapping(_) => deserializer.deserialize_map(self),
+            serde_yaml::Value::Sequence(_) => deserializer.deserialize_seq(self),
+            _ => deserializer.deserialize_ignored_any(IgnoredAny).map(|_| ()),
+        }
+    }
+}
 
-    for key in fields.keys().filter_map(serde_yaml::Value::as_str) {
-        anyhow::ensure!(
-            allowed.contains(&key),
-            "{}: '{}' is a {} and carries no '{}'; it takes {:?}",
-            where_,
-            name,
-            kind,
-            key,
-            allowed
-        );
+impl<'de> Visitor<'de> for KeyCheck<'_> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("the structure of the parsed catalog")
     }
 
-    Ok(())
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+        while let Some(key) = map.next_key::<String>()? {
+            let path = if self.path.is_empty() {
+                key.clone()
+            } else {
+                format!("{}.{key}", self.path)
+            };
+            if let Some(known) = self.known.get(&key) {
+                map.next_value_seed(KeyCheck {
+                    known,
+                    path,
+                    unknown: self.unknown,
+                })?;
+            } else {
+                self.unknown.push(path);
+                map.next_value::<IgnoredAny>()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<(), A::Error> {
+        for (index, known) in self
+            .known
+            .as_sequence()
+            .expect("a serialized sequence")
+            .iter()
+            .enumerate()
+        {
+            sequence.next_element_seed(KeyCheck {
+                known,
+                path: format!("{}.{index}", self.path),
+                unknown: self.unknown,
+            })?;
+        }
+        Ok(())
+    }
 }
 
 fn validate(desc: &DatasetDescription) -> Result<()> {
+    // The version comes first: nothing below means what it says for a catalog
+    // written to another schema.
+    anyhow::ensure!(
+        desc.version == SCHEMA_VERSION,
+        "catalog schema version '{}' is not supported; this loader reads '{}'",
+        desc.version,
+        SCHEMA_VERSION
+    );
+
     for (table_name, table) in &desc.tables {
         // Validate block_number_column exists in columns
         anyhow::ensure!(
@@ -140,7 +190,7 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
 
         // Validate weight column references
         for (col_name, col) in &table.columns {
-            if let Some(crate::metadata::WeightSource::Column(weight_col)) = &col.weight {
+            if let Some(crate::WeightSource::Column(weight_col)) = &col.weight {
                 anyhow::ensure!(
                     table.columns.contains_key(weight_col.as_str()),
                     "table '{}': weight column '{}' for '{}' not found in columns",
@@ -155,14 +205,14 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
         // physical width, which only means anything for an unsigned integer. The
         // encoder assumes this check exists.
         for (col_name, col) in &table.columns {
-            if col.encoding == Some(crate::metadata::JsonEncoding::HexNumber) {
+            if col.encoding == Some(crate::JsonEncoding::HexNumber) {
                 anyhow::ensure!(
                     matches!(
                         col.data_type,
-                        crate::metadata::ColumnType::UInt8
-                            | crate::metadata::ColumnType::UInt16
-                            | crate::metadata::ColumnType::UInt32
-                            | crate::metadata::ColumnType::UInt64
+                        crate::ColumnType::UInt8
+                            | crate::ColumnType::UInt16
+                            | crate::ColumnType::UInt32
+                            | crate::ColumnType::UInt64
                     ),
                     "table '{}': column '{}' declares encoding hex_number, \
                      which needs an unsigned integer column, not {:?}",
@@ -177,9 +227,9 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
         // and answers every one a client sends with a 400 that reads, from
         // outside, like a dataset missing those columns. `filters` is required
         // for that reason, and an absent block would step around the
-        // requirement one level up: `deny_unknown_fields` no more sees a missing
-        // `request:` than it saw a missing `filters:`. Only the block table has
-        // nothing to say here.
+        // requirement one level up: the block is optional to serde, so nothing
+        // there sees a missing `request:`. Only the block table has nothing to
+        // say here.
         anyhow::ensure!(
             table.is_block_table() || table.request_surface.is_some(),
             "table '{}': no request block, so it would take no filters and no \
@@ -242,7 +292,7 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
             // disagree describes a bloom nobody wrote.
             if let SpecialFilter::Bloom { column, bytes, .. } = special {
                 let data_type = &table.columns[column].data_type;
-                let crate::metadata::ColumnType::FixedBinary(width) = data_type else {
+                let crate::ColumnType::FixedBinary(width) = data_type else {
                     anyhow::bail!(
                         "table '{}': special filter '{}' probes column '{}' as a bloom, \
                          but it is {:?}, not fixed-size binary",
@@ -306,7 +356,7 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
         // null. A name that resolves to nothing is not an error at query time —
         // it shortens the array, on every row, quietly.
         for (field_name, virtual_field) in &table.output.virtual_fields {
-            let crate::metadata::VirtualField::Roll { columns } = virtual_field;
+            let crate::VirtualField::Roll { columns } = virtual_field;
             for column in columns {
                 anyhow::ensure!(
                     table.columns.contains_key(column),
@@ -611,7 +661,7 @@ fn check_filter_surface(
     filters: &[String],
     special: &[&str],
     table_name: &str,
-    table: &crate::metadata::TableDescription,
+    table: &crate::TableDescription,
 ) -> Result<()> {
     for filter in filters {
         if special.contains(&filter.as_str()) {
@@ -645,7 +695,7 @@ fn check_filter_surface(
 /// declare a list. An absent one reads as "nothing is selectable", which answers
 /// every field a client asks of it with `UnknownField` and looks, from outside,
 /// exactly like a dataset that carries no such columns.
-fn check_field_surface(table_name: &str, table: &crate::metadata::TableDescription) -> Result<()> {
+fn check_field_surface(table_name: &str, table: &crate::TableDescription) -> Result<()> {
     let output = &table.output;
 
     anyhow::ensure!(
@@ -668,9 +718,7 @@ fn check_field_surface(table_name: &str, table: &crate::metadata::TableDescripti
             continue;
         }
 
-        if let Some(crate::metadata::VirtualField::Roll { columns }) =
-            output.virtual_fields.get(field)
-        {
+        if let Some(crate::VirtualField::Roll { columns }) = output.virtual_fields.get(field) {
             for physical in columns {
                 check_public_field_source(table_name, field, physical, table)?;
             }
@@ -698,10 +746,7 @@ fn check_field_surface(table_name: &str, table: &crate::metadata::TableDescripti
 /// A mapping says three things: the column it reads, the `output.fields` key
 /// that selects it, and the name it renders under. Each of the three can be
 /// written so that the catalog means one thing and the engine does another.
-fn check_variant_mappings(
-    table_name: &str,
-    table: &crate::metadata::TableDescription,
-) -> Result<()> {
+fn check_variant_mappings(table_name: &str, table: &crate::TableDescription) -> Result<()> {
     // Columns that say which row this is. A mapping over one of them moves it
     // out of the top level for every row and off the rows of every variant that
     // does not repeat it — the field vanishes from the shapes that need it most.
@@ -794,7 +839,7 @@ fn check_public_field_source(
     table_name: &str,
     field: &str,
     physical: &str,
-    table: &crate::metadata::TableDescription,
+    table: &crate::TableDescription,
 ) -> Result<()> {
     let column = table.columns.get(physical).ok_or_else(|| {
         anyhow::anyhow!(
@@ -822,9 +867,9 @@ fn check_public_field_source(
 fn check_relation(
     owner: &str,
     relation_name: &str,
-    relation: &crate::metadata::RelationDef,
+    relation: &crate::RelationDef,
     source_name: &str,
-    source: &crate::metadata::TableDescription,
+    source: &crate::TableDescription,
     desc: &DatasetDescription,
 ) -> Result<()> {
     let target = desc.tables.get(&relation.table).ok_or_else(|| {
@@ -901,7 +946,7 @@ fn check_relation(
     // nothing.
     if matches!(
         relation.kind,
-        crate::metadata::RelationKind::Children | crate::metadata::RelationKind::Parents
+        crate::RelationKind::Children | crate::RelationKind::Parents
     ) {
         for (side, table_name, table) in [
             ("source", source_name, source),
@@ -927,9 +972,16 @@ fn check_relation(
 mod tests {
     use super::*;
 
+    /// The catalogs the engine ships, kept at the repository root beside the
+    /// engine's own tests and benches rather than inside this crate.
+    fn catalog_dir() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../metadata")
+    }
+
     #[test]
     fn test_parse_minimal() {
         let yaml = r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -951,9 +1003,48 @@ tables:
         assert!(blocks.output.name.is_none());
     }
 
+    /// A catalog declares the schema it is written to, and a loader reads one.
+    #[test]
+    fn test_rejects_a_missing_or_foreign_schema_version() {
+        let catalog = |header: &str| {
+            format!(
+                r#"
+{header}
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    sort_key: [number]
+    columns:
+      number: {{ type: uint64 }}
+"#
+            )
+        };
+
+        // `{:#}` prints the whole chain; the outermost context alone names the file.
+        let err = format!("{:#}", parse_dataset_description(&catalog("")).unwrap_err());
+        assert!(err.contains("missing field `version`"), "{err}");
+
+        let err = format!(
+            "{:#}",
+            parse_dataset_description(&catalog("version: v3")).unwrap_err()
+        );
+        assert!(
+            err.contains("schema version 'v3' is not supported"),
+            "{err}"
+        );
+
+        // A number is not a version string, and serde says so before the loader.
+        assert!(parse_dataset_description(&catalog("version: 2")).is_err());
+
+        let desc = parse_dataset_description(&catalog("version: v2")).unwrap();
+        assert_eq!(desc.version, SCHEMA_VERSION);
+    }
+
     #[test]
     fn test_default_block_number_column() {
         let yaml = r#"
+version: v2
 name: test
 tables:
   transactions:
@@ -969,6 +1060,7 @@ tables:
     #[test]
     fn test_column_encoding() {
         let yaml = r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -986,14 +1078,11 @@ tables:
         let desc = parse_dataset_description(yaml).unwrap();
         let blocks = desc.table("blocks").unwrap();
         let hash = blocks.column("hash").unwrap();
-        assert_eq!(hash.data_type, crate::metadata::ColumnType::String);
-        assert_eq!(hash.encoding, Some(crate::metadata::JsonEncoding::HexBytes));
+        assert_eq!(hash.data_type, crate::ColumnType::String);
+        assert_eq!(hash.encoding, Some(crate::JsonEncoding::HexBytes));
         let fee = blocks.column("fee").unwrap();
-        assert_eq!(fee.data_type, crate::metadata::ColumnType::UInt64);
-        assert_eq!(
-            fee.encoding,
-            Some(crate::metadata::JsonEncoding::DecimalString)
-        );
+        assert_eq!(fee.data_type, crate::ColumnType::UInt64);
+        assert_eq!(fee.encoding, Some(crate::JsonEncoding::DecimalString));
         let number = blocks.column("number").unwrap();
         assert_eq!(number.encoding, None);
     }
@@ -1002,6 +1091,7 @@ tables:
     #[test]
     fn test_validation_bad_block_number_column() {
         let yaml = r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1019,7 +1109,7 @@ tables:
 
     #[test]
     fn test_load_solana_metadata() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("metadata/solana.yaml");
+        let path = catalog_dir().join("solana.yaml");
         let desc = load_dataset_description(&path).unwrap();
         assert_eq!(desc.name, "solana");
         assert_eq!(desc.tables.len(), 7);
@@ -1044,17 +1134,17 @@ tables:
         assert_eq!(instructions.output.name.as_deref(), Some("instruction"));
         assert_eq!(
             instructions.column("d8").unwrap().data_type,
-            crate::metadata::ColumnType::UInt64
+            crate::ColumnType::UInt64
         );
         assert_eq!(
             instructions.column("accounts_bloom").unwrap().data_type,
-            crate::metadata::ColumnType::FixedBinary(64)
+            crate::ColumnType::FixedBinary(64)
         );
     }
 
     #[test]
     fn test_load_evm_metadata() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("metadata/evm.yaml");
+        let path = catalog_dir().join("evm.yaml");
         let desc = load_dataset_description(&path).unwrap();
         assert_eq!(desc.name, "evm");
         assert_eq!(desc.tables.len(), 5);
@@ -1080,6 +1170,7 @@ tables:
     #[test]
     fn test_validate_rejects_unknown_filter_column() {
         let yaml = r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1105,6 +1196,7 @@ tables:
         for column in ["parent_hash_column", "parent_number_column"] {
             let yaml = format!(
                 r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1123,6 +1215,7 @@ tables:
     #[test]
     fn test_validate_rejects_broken_alias_references() {
         let bad_table = r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1140,6 +1233,7 @@ aliases:
         let catalog = |alias: &str| {
             format!(
                 r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1207,6 +1301,7 @@ aliases:
         let catalog = |request: &str| {
             format!(
                 r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1245,6 +1340,7 @@ tables:
         let catalog = |variants: &str| {
             format!(
                 r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1334,6 +1430,7 @@ tables:
         let catalog = |column: &str, bytes: usize| {
             format!(
                 r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1373,61 +1470,212 @@ tables:
         assert!(err.contains("8-byte bloom over a 64-byte"), "got: {err}");
     }
 
-    /// `special_filters` and `virtual_fields` hold internally tagged enums, the
-    /// one shape serde cannot apply `deny_unknown_fields` to: a key it does not
-    /// know is buffered and dropped. A catalog left half-renamed would otherwise
-    /// load and do nothing the author asked for (INV-D1).
-    ///
-    /// Covers CT-1 · INV-D1
+    /// A catalog as a later release might publish it: `added_later` appears once
+    /// in every shape a catalog has.
+    const LATER_RELEASE: &str = r#"
+version: v2
+name: test
+added_later: { nested: [ 1, 2 ] }
+tables:
+  blocks:
+    added_later: 1
+    block_number_column: number
+    columns:
+      number: { type: uint64, added_later: 1 }
+  items:
+    request:
+      added_later: 1
+      filters: [ user, mentions ]
+      special_filters:
+        mentions: { kind: bloom, column: user_bloom, bytes: 64, hashes: 7, added_later: 1 }
+      relations:
+        block: { table: blocks, left_key: [ block_number ], right_key: [ number ], added_later: 1 }
+    output:
+      added_later: 1
+      name: item
+      fields: [ seq, user, parts ]
+      virtual_fields:
+        parts: { kind: roll, columns: [ user, payload ], added_later: 1 }
+      variant_column: kind
+      variants:
+        call:
+          action: [ { column: payload, as: payload, added_later: 1 } ]
+    item_order_keys: [ seq ]
+    columns:
+      block_number: { type: uint64 }
+      seq: { type: uint32 }
+      kind: { type: string }
+      user: { type: string }
+      payload: { type: string }
+      user_bloom: { type: fixed_binary_64, system: true }
+aliases:
+  view:
+    table: items
+    filters: [ user ]
+    added_later: 1
+"#;
+
+    /// A catalog is published once and read by consumers on their own release
+    /// cycles, so a key added under `v2` reaches readers that predate it. Such a
+    /// reader skips the key rather than refusing the catalog, wherever it sits.
     #[test]
-    fn test_validate_rejects_stale_keys_in_tagged_blocks() {
-        let catalog = |bloom: &str, roll: &str| {
-            format!(
-                r#"
+    fn test_keys_from_a_later_release_are_skipped() {
+        parse_dataset_description(LATER_RELEASE)
+            .expect("keys from a later release must be skipped");
+    }
+
+    /// A misspelled optional key is skipped like a key from a later release, and
+    /// changes what the engine does: fork detection is off below, and nothing
+    /// fails. The strict parse is the author's check, and refuses every key the
+    /// parse skipped, at any depth, by its path.
+    #[test]
+    fn test_strict_parse_refuses_unknown_keys() {
+        let evm = std::fs::read_to_string(catalog_dir().join("evm.yaml")).unwrap();
+        let typo = evm.replacen("parent_hash_column:", "parent_hash_colum:", 1);
+
+        let desc = parse_dataset_description(&typo).expect("the reader skips the typo");
+        assert_eq!(desc.tables["blocks"].parent_hash_column, None);
+
+        let err = format!("{:#}", parse_dataset_description_strict(&typo).unwrap_err());
+        assert!(
+            err.contains("tables.blocks.parent_hash_colum"),
+            "got: {err}"
+        );
+
+        // Inside the internally tagged `special_filters` and `virtual_fields`
+        // too, where serde drops a key before any attribute could see it.
+        let desc = parse_dataset_description(LATER_RELEASE).unwrap();
+        assert_eq!(
+            unknown_keys(LATER_RELEASE, &desc).unwrap(),
+            [
+                "added_later",
+                "tables.blocks.added_later",
+                "tables.blocks.columns.number.added_later",
+                "tables.items.request.added_later",
+                "tables.items.request.special_filters.mentions.added_later",
+                "tables.items.request.relations.block.added_later",
+                "tables.items.output.added_later",
+                "tables.items.output.virtual_fields.parts.added_later",
+                "tables.items.output.variants.call.action.0.added_later",
+                "aliases.view.added_later",
+            ]
+        );
+
+        // Two keys the parse did read, written so that a comparison of the
+        // document with the description could mistake them for skipped ones:
+        // `0:` is read as the variant "0", and `encoding: ~` as no encoding,
+        // which is not written back out.
+        let read = r#"
+version: v2
 name: test
 tables:
   blocks:
     block_number_column: number
-    sort_key: [number]
     columns:
-      number: {{ type: uint64 }}
+      number: { type: uint64 }
   items:
     request:
-      filters: [ mentions ]
-      special_filters:
-        mentions: {{ kind: bloom, column: accounts_bloom, bytes: 64, hashes: 7{bloom} }}
+      filters: []
     output:
-      name: item
-      fields: [ topics ]
-      virtual_fields:
-        topics: {{ kind: roll, columns: [ topic0 ]{roll} }}
+      variant_column: kind
+      variants:
+        0: { action: [ { column: payload, as: payload } ] }
     item_order_keys: [ seq ]
     columns:
-      block_number: {{ type: uint64 }}
-      seq: {{ type: uint32 }}
-      topic0: {{ type: string }}
-      accounts_bloom: {{ type: fixed_binary_64, system: true }}
-"#
-            )
-        };
+      block_number: { type: uint64 }
+      seq: { type: uint32 }
+      kind: { type: uint8 }
+      payload: { type: string, encoding: ~ }
+"#;
+        for spelling in ["0", "0x10", "01", "1.0", "true", "TRUE"] {
+            let yaml = read.replace("0: { action:", &format!("{spelling}: {{ action:"));
+            let desc = parse_dataset_description_strict(&yaml)
+                .expect("strict loading preserves scalar map key spellings");
+            assert!(desc.tables["items"].output.variants.contains_key(spelling));
+        }
+    }
 
-        parse_dataset_description(&catalog("", "")).expect("the catalog without stale keys loads");
+    #[test]
+    fn test_strict_parse_checks_tagged_documents_and_nested_values() {
+        let clean = LATER_RELEASE
+            .replace(", added_later: 1", "")
+            .lines()
+            .filter(|line| !line.contains("added_later:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for (from, to) in [
+            ("version: v2", "!catalog\nversion: v2"),
+            ("  blocks:", "  blocks: !table"),
+            ("      number: {", "      number: !column {"),
+            ("    output:", "    output: !output"),
+            ("action: [", "action: !fields ["),
+            (
+                "{ column: payload, as: payload",
+                "!field { column: payload, as: payload",
+            ),
+        ] {
+            parse_dataset_description_strict(&clean.replace(from, to))
+                .expect("tags on valid catalog structures are accepted");
+            let yaml = LATER_RELEASE.replace(from, to);
+            parse_dataset_description(&yaml).expect("the permissive loader still skips extensions");
+            let err = format!("{:#}", parse_dataset_description_strict(&yaml).unwrap_err());
+            for path in [
+                "tables.blocks.added_later",
+                "tables.blocks.columns.number.added_later",
+                "tables.items.output.added_later",
+                "tables.items.output.variants.call.action.0.added_later",
+            ] {
+                assert!(err.contains(path), "{to}: missing {path} in {err}");
+            }
+        }
+    }
 
-        // The spelling `hashes` replaced. Serde takes `hashes`, drops this, and
-        // the author believes the edit took effect.
-        let err = format!(
-            "{:#}",
-            parse_dataset_description(&catalog(", num_hashes: 3", ""))
-                .expect_err("a stale special-filter key")
-        );
-        assert!(err.contains("num_hashes"), "got: {err}");
+    #[test]
+    fn test_strict_parse_refuses_unknown_null_keys() {
+        for null in ["null", "~", ""] {
+            let yaml = LATER_RELEASE
+                .replace("added_later: 1", &format!("added_later: {null}"))
+                .replace(
+                    "added_later: { nested: [ 1, 2 ] }",
+                    &format!("added_later: {null}"),
+                );
+            let desc =
+                parse_dataset_description(&yaml).expect("unknown nulls are skipped by readers");
+            assert_eq!(unknown_keys(&yaml, &desc).unwrap().len(), 10);
+            assert!(parse_dataset_description_strict(&yaml).is_err());
+        }
+        let yaml = "version: v2\nname: test\ntables:\n  blocks:\n    block_number_column: number\n    parent_hash_column: null\n    columns:\n      number: { type: uint64, encoding: null, weight: ~ }\n";
+        parse_dataset_description_strict(yaml).expect("known optional null fields are accepted");
+        for field in ["encoding", "weight"] {
+            let typo = yaml.replace(field, &format!("{field}_typo"));
+            let err = format!("{:#}", parse_dataset_description_strict(&typo).unwrap_err());
+            assert!(
+                err.contains(&format!("tables.blocks.columns.number.{field}_typo")),
+                "{err}"
+            );
+        }
+    }
 
-        let err = format!(
-            "{:#}",
-            parse_dataset_description(&catalog("", ", type: roll"))
-                .expect_err("a stale virtual-field key")
-        );
-        assert!(err.contains("'topics'"), "got: {err}");
+    #[test]
+    fn test_strict_parse_preserves_numeric_table_and_column_names() {
+        let yaml = "version: v2\nname: test\ntables:\n  0x10:\n    block_number_column: '01'\n    columns:\n      01: { type: uint64 }\n";
+        let desc = parse_dataset_description_strict(yaml).unwrap();
+        assert!(desc.tables["0x10"].columns.contains_key("01"));
+    }
+
+    #[test]
+    fn test_unknown_enum_values_require_reader_support() {
+        for (from, to) in [
+            ("type: string", "type: future_type"),
+            ("type: string", "type: string, encoding: future_encoding"),
+            ("kind: bloom", "kind: future_filter"),
+            ("kind: roll", "kind: future_field"),
+        ] {
+            let yaml = LATER_RELEASE.replacen(from, to, 1);
+            let err = format!("{:#}", parse_dataset_description(&yaml).unwrap_err());
+            assert!(err.contains("unknown"), "{err}");
+            assert!(parse_dataset_description_strict(&yaml).is_err());
+        }
     }
 
     /// A catalog is written by hand and read by nothing else. Each check below
@@ -1438,6 +1686,7 @@ tables:
         let catalog = |defect: &str| {
             format!(
                 r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1470,11 +1719,6 @@ tables:
                 "an alias that omits its filter surface",
                 "aliases:\n  view:\n    table: items",
                 "missing field `filters`",
-            ),
-            (
-                "a misspelled alias key",
-                "aliases:\n  view:\n    table: items\n    filters: []\n    filter: [ user ]",
-                "unknown field `filter`",
             ),
             (
                 "an implicit filter on a column that is not there",
@@ -1526,6 +1770,7 @@ tables:
         let catalog = |table: &str, right_key: &str| {
             format!(
                 r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1586,6 +1831,7 @@ tables:
         let catalog = |relation: &str| {
             format!(
                 r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1658,11 +1904,11 @@ tables:
     }
 
     /// A request block that omits `filters` accepts no filters at all and 400s
-    /// every one a client sends, which `deny_unknown_fields` cannot catch — it
-    /// sees an absent key, not a misspelled one.
+    /// every one a client sends, so the key is required rather than defaulted.
     #[test]
     fn test_validate_rejects_a_request_without_a_filter_surface() {
         let yaml = r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1685,6 +1931,7 @@ tables:
     #[test]
     fn test_validate_rejects_a_filter_on_a_system_column() {
         let yaml = r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1708,6 +1955,7 @@ tables:
     #[test]
     fn test_validate_rejects_a_special_filter_on_a_missing_column() {
         let yaml = r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1734,6 +1982,7 @@ tables:
     #[test]
     fn test_validate_rejects_hex_number_on_a_non_integer_column() {
         let yaml = r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1759,6 +2008,7 @@ tables:
     #[test]
     fn test_validate_rejects_unresolvable_references() {
         const HEAD: &str = r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1916,6 +2166,7 @@ tables:
         let catalog = |fields: &str| {
             format!(
                 r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -1966,7 +2217,7 @@ tables:
     /// Covers CT-1 · INV-D3
     #[test]
     fn test_validate_requires_exactly_one_block_table() {
-        let catalog = |tables: &str| format!("name: test\ntables:\n{tables}");
+        let catalog = |tables: &str| format!("version: v2\nname: test\ntables:\n{tables}");
 
         let blocks = "  blocks:\n\
                       \x20   block_number_column: number\n\
@@ -2039,6 +2290,7 @@ tables:
         let catalog = |request_name: &str, output_name: &str| {
             format!(
                 r#"
+version: v2
 name: test
 tables:
   blocks:
@@ -2104,17 +2356,19 @@ aliases:
         }
     }
 
-    /// Every catalog shipped with the engine must load.
+    /// Every catalog shipped with the engine must load, strictly: a misspelled
+    /// key in one would otherwise load as though it were absent.
     #[test]
     fn test_bundled_catalogs_validate() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("metadata");
+        let dir = catalog_dir();
         let mut loaded: Vec<String> = Vec::new();
         for entry in std::fs::read_dir(&dir).unwrap() {
             let path = entry.unwrap().path();
             if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
                 continue;
             }
-            load_dataset_description(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            load_dataset_description_strict(&path)
+                .unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
             loaded.push(path.file_stem().unwrap().to_string_lossy().to_string());
         }
         loaded.sort();

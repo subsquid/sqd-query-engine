@@ -6,10 +6,32 @@ everything it knows about EVM or Solana it reads from a catalog at load time.
 Adding a chain means writing a YAML file, not a module.
 
 The catalogs live in this directory, one per dataset. They load into the types
-in [`src/metadata/types.rs`](../src/metadata/types.rs) and must pass the checks
-in [`src/metadata/loader.rs`](../src/metadata/loader.rs). A key the types do
-not know is an error, not a warning: a misspelled key would otherwise silently
-do nothing.
+in [`crates/metadata/src/types.rs`](../crates/metadata/src/types.rs) and must pass
+the checks in [`crates/metadata/src/loader.rs`](../crates/metadata/src/loader.rs). A key the types do
+not know is skipped, so that a catalog written for a later release still loads
+in an earlier one. A misspelled optional key is skipped the same way, and
+changes what the engine does — `parent_hash_colum` turns fork detection off —
+so a catalog is checked with the strict loader before it is published. That
+loader refuses every key it does not know, by its path, and the catalogs here
+are checked with it.
+
+A catalog opens with the schema it is written to and the dataset it describes:
+
+| Key | Required | Meaning |
+|---|---|---|
+| `version` | yes | The catalog schema, as a string. This is `v2`; the loader refuses any other, so a catalog written for a later schema fails at load rather than being read as this one. |
+| `name` | yes | The dataset (`evm`, `solana`). |
+| `tables` | yes | The tables, in the order their arrays appear in a response block. |
+| `aliases` | no | Further request surfaces over the tables; see [Aliases](#aliases). |
+
+A catalog is published once by its provider (the network scheduler, for one)
+and read by consumers on their own release cycles. Prefer additions under
+`v2` that older readers can safely ignore: optional keys whose absence
+preserves existing behavior. New `kind` values, encodings, and column types
+are rejected by older readers, even under `v2`; using them requires upgrading
+all readers or publishing a separate catalog for older consumers. Changes
+that alter existing meanings or require a new schema version likewise need
+catalogs for each version still in use; a `v2` reader rejects other versions.
 
 ## The shape of a table
 
@@ -333,6 +355,7 @@ same array, deduplicated.
 A catalog is validated when it is loaded, and one that fails is not used. The
 checks need no chunk:
 
+- `version` is `v2`, the one schema this loader reads;
 - exactly one block table — the one whose `item_order_keys` is empty and which
   has no `address_column` — and it is declared first, and every other table
   declares a `request` block;
@@ -352,8 +375,6 @@ checks need no chunk:
   no column's, two mappings answering to one field key read one column, no two
   mappings in a group share an `as`, and none claims a column that identifies a
   row;
-- no `special_filters` or `virtual_fields` entry carries a key its `kind` does
-  not take — the one place serde would drop it in silence rather than complain;
 - every relation targets a real table, both keys have equal length and begin
   with the block number column, and `children`/`parents` relations have an
   `address_column` on both sides;
@@ -364,6 +385,7 @@ checks need no chunk:
 ## A minimal catalog
 
 ```yaml
+version: v2
 name: my_chain
 
 tables:

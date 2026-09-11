@@ -20,6 +20,7 @@ use crate::harness::json::items_of;
 /// `data`/`input` declare their weight through a system column, so a test can
 /// state what a row costs without writing a row that large.
 const CATALOG: &str = r#"
+version: v2
 name: test
 
 tables:

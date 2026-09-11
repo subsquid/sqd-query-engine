@@ -19,6 +19,7 @@ use crate::harness::json::{items_in, parse_response};
 /// `≥ 0x9` filter — which is the point: the invariant is about the comparison,
 /// not about the one constant the bundled catalogs happen to carry.
 const CATALOG: &str = r#"
+version: v2
 name: gte
 
 tables:

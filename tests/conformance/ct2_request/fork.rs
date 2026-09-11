@@ -206,6 +206,7 @@ fn a_chunk_with_no_block_table_cannot_clear_the_fork_check() {
 
     let catalog = parse_dataset_description(
         r#"
+version: v2
 name: test
 
 tables:
@@ -286,6 +287,7 @@ fn a_chunk_below_the_lookback_window_is_not_asked_for_the_parent_hash() {
 
     let catalog = parse_dataset_description(
         r#"
+version: v2
 name: test
 
 tables:
@@ -521,6 +523,7 @@ fn a_numbering_gap_wider_than_the_window_still_settles_the_parent() {
 
     let catalog = parse_dataset_description(
         r#"
+version: v2
 name: test
 
 tables:
@@ -607,6 +610,7 @@ fn parent_block_hash_is_refused_where_the_catalog_cannot_answer_it() {
     use sqd_query_engine::query::{compile, parse_query};
 
     let without_parent_hash = r#"
+version: v2
 name: test
 
 tables:

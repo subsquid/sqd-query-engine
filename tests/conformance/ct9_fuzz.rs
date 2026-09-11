@@ -190,6 +190,7 @@ fn a_chunk_that_disagrees_with_the_catalog_does_not_panic() {
 
     let catalog = parse_dataset_description(
         r#"
+version: v2
 name: test
 
 tables:
