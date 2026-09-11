@@ -8,8 +8,8 @@ Adding a chain means writing a YAML file, not a module.
 The catalogs live in this directory, one per dataset. They load into the types
 in [`crates/metadata/src/types.rs`](../crates/metadata/src/types.rs) and must pass
 the checks in [`crates/metadata/src/loader.rs`](../crates/metadata/src/loader.rs). A key the types do
-not know is an error, not a warning: a misspelled key would otherwise silently
-do nothing.
+not know is skipped, so that a catalog written for a later release still loads
+in an earlier one. A misspelled optional key is skipped the same way.
 
 A catalog opens with the schema it is written to and the dataset it describes:
 
@@ -370,8 +370,6 @@ checks need no chunk:
   no column's, two mappings answering to one field key read one column, no two
   mappings in a group share an `as`, and none claims a column that identifies a
   row;
-- no `special_filters` or `virtual_fields` entry carries a key its `kind` does
-  not take — the one place serde would drop it in silence rather than complain;
 - every relation targets a real table, both keys have equal length and begin
   with the block number column, and `children`/`parents` relations have an
   `address_column` on both sides;

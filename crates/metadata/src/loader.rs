@@ -11,99 +11,14 @@ pub fn load_dataset_description(path: &Path) -> Result<DatasetDescription> {
 }
 
 /// Load a dataset description from a YAML string.
+///
+/// A key the catalog types do not know is skipped, so a catalog that gained an
+/// optional key still loads in a release that predates it.
 pub fn parse_dataset_description(yaml: &str) -> Result<DatasetDescription> {
     let desc: DatasetDescription =
         serde_yaml::from_str(yaml).context("parsing dataset description")?;
-    check_stale_keys(yaml)?;
     validate(&desc)?;
     Ok(desc)
-}
-
-/// Refuse a key serde would drop in silence.
-///
-/// `special_filters` and `virtual_fields` hold internally tagged enums, the one
-/// shape `deny_unknown_fields` cannot be applied to: serde buffers the entry,
-/// takes the keys the variant declares and discards the rest. Every other part
-/// of a catalog fails loudly on a stray key, and a catalog is written by hand,
-/// so a filter left half-renamed would otherwise load and do nothing the author
-/// asked for.
-///
-/// Reads the raw document rather than the parsed description, which by then has
-/// forgotten the keys it dropped. Runs after the parse, so an unknown `kind` is
-/// already refused and every entry here has a key list to check against.
-fn check_stale_keys(yaml: &str) -> Result<()> {
-    let doc: serde_yaml::Value = serde_yaml::from_str(yaml).context("re-reading the catalog")?;
-    let mut trail = Vec::new();
-    walk_tagged_entries(&doc, &mut trail)
-}
-
-/// Walk every mapping, checking the entries of the two blocks that hold a tagged
-/// enum. `trail` is the path taken, for an error a reader can find in the file.
-fn walk_tagged_entries<'a>(node: &'a serde_yaml::Value, trail: &mut Vec<&'a str>) -> Result<()> {
-    let serde_yaml::Value::Mapping(map) = node else {
-        return Ok(());
-    };
-
-    for (key, value) in map {
-        let Some(key) = key.as_str() else { continue };
-
-        let allowed = match key {
-            "special_filters" => Some(crate::SpecialFilter::allowed_keys as fn(&str) -> _),
-            "virtual_fields" => Some(crate::VirtualField::allowed_keys as fn(&str) -> _),
-            _ => None,
-        };
-
-        trail.push(key);
-
-        if let Some(allowed) = allowed {
-            if let serde_yaml::Value::Mapping(entries) = value {
-                for (name, entry) in entries {
-                    let name = name.as_str().unwrap_or_default();
-                    check_entry_keys(&trail.join("."), name, entry, allowed)?;
-                }
-            }
-        }
-
-        walk_tagged_entries(value, trail)?;
-        trail.pop();
-    }
-
-    Ok(())
-}
-
-/// Every key of one tagged entry must be one its `kind` declares.
-fn check_entry_keys(
-    where_: &str,
-    name: &str,
-    entry: &serde_yaml::Value,
-    allowed: fn(&str) -> Option<&'static [&'static str]>,
-) -> Result<()> {
-    let serde_yaml::Value::Mapping(fields) = entry else {
-        return Ok(());
-    };
-
-    let kind = fields
-        .get(serde_yaml::Value::from("kind"))
-        .and_then(serde_yaml::Value::as_str)
-        .unwrap_or_default();
-
-    let Some(allowed) = allowed(kind) else {
-        return Ok(());
-    };
-
-    for key in fields.keys().filter_map(serde_yaml::Value::as_str) {
-        anyhow::ensure!(
-            allowed.contains(&key),
-            "{}: '{}' is a {} and carries no '{}'; it takes {:?}",
-            where_,
-            name,
-            kind,
-            key,
-            allowed
-        );
-    }
-
-    Ok(())
 }
 
 fn validate(desc: &DatasetDescription) -> Result<()> {
@@ -184,9 +99,9 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
         // and answers every one a client sends with a 400 that reads, from
         // outside, like a dataset missing those columns. `filters` is required
         // for that reason, and an absent block would step around the
-        // requirement one level up: `deny_unknown_fields` no more sees a missing
-        // `request:` than it saw a missing `filters:`. Only the block table has
-        // nothing to say here.
+        // requirement one level up: the block is optional to serde, so nothing
+        // there sees a missing `request:`. Only the block table has nothing to
+        // say here.
         anyhow::ensure!(
             table.is_block_table() || table.request_surface.is_some(),
             "table '{}': no request block, so it would take no filters and no \
@@ -1427,62 +1342,55 @@ tables:
         assert!(err.contains("8-byte bloom over a 64-byte"), "got: {err}");
     }
 
-    /// `special_filters` and `virtual_fields` hold internally tagged enums, the
-    /// one shape serde cannot apply `deny_unknown_fields` to: a key it does not
-    /// know is buffered and dropped. A catalog left half-renamed would otherwise
-    /// load and do nothing the author asked for (INV-D1).
-    ///
-    /// Covers CT-1 · INV-D1
+    /// A catalog is published once and read by consumers on their own release
+    /// cycles, so a key added under `v2` reaches readers that predate it. Such a
+    /// reader skips the key rather than refusing the catalog, wherever the key
+    /// sits: `added_later` below appears once in every shape a catalog has.
     #[test]
-    fn test_validate_rejects_stale_keys_in_tagged_blocks() {
-        let catalog = |bloom: &str, roll: &str| {
-            format!(
-                r#"
+    fn test_keys_from_a_later_release_are_skipped() {
+        let yaml = r#"
 version: v2
 name: test
+added_later: { nested: [ 1, 2 ] }
 tables:
   blocks:
+    added_later: 1
     block_number_column: number
-    sort_key: [number]
     columns:
-      number: {{ type: uint64 }}
+      number: { type: uint64, added_later: 1 }
   items:
     request:
-      filters: [ mentions ]
+      added_later: 1
+      filters: [ user, mentions ]
       special_filters:
-        mentions: {{ kind: bloom, column: accounts_bloom, bytes: 64, hashes: 7{bloom} }}
+        mentions: { kind: bloom, column: user_bloom, bytes: 64, hashes: 7, added_later: 1 }
+      relations:
+        block: { table: blocks, left_key: [ block_number ], right_key: [ number ], added_later: 1 }
     output:
+      added_later: 1
       name: item
-      fields: [ topics ]
+      fields: [ seq, user, parts ]
       virtual_fields:
-        topics: {{ kind: roll, columns: [ topic0 ]{roll} }}
+        parts: { kind: roll, columns: [ user, payload ], added_later: 1 }
+      variant_column: kind
+      variants:
+        call:
+          action: [ { column: payload, as: payload, added_later: 1 } ]
     item_order_keys: [ seq ]
     columns:
-      block_number: {{ type: uint64 }}
-      seq: {{ type: uint32 }}
-      topic0: {{ type: string }}
-      accounts_bloom: {{ type: fixed_binary_64, system: true }}
-"#
-            )
-        };
-
-        parse_dataset_description(&catalog("", "")).expect("the catalog without stale keys loads");
-
-        // The spelling `hashes` replaced. Serde takes `hashes`, drops this, and
-        // the author believes the edit took effect.
-        let err = format!(
-            "{:#}",
-            parse_dataset_description(&catalog(", num_hashes: 3", ""))
-                .expect_err("a stale special-filter key")
-        );
-        assert!(err.contains("num_hashes"), "got: {err}");
-
-        let err = format!(
-            "{:#}",
-            parse_dataset_description(&catalog("", ", type: roll"))
-                .expect_err("a stale virtual-field key")
-        );
-        assert!(err.contains("'topics'"), "got: {err}");
+      block_number: { type: uint64 }
+      seq: { type: uint32 }
+      kind: { type: string }
+      user: { type: string }
+      payload: { type: string }
+      user_bloom: { type: fixed_binary_64, system: true }
+aliases:
+  view:
+    table: items
+    filters: [ user ]
+    added_later: 1
+"#;
+        parse_dataset_description(yaml).expect("keys from a later release must be skipped");
     }
 
     /// A catalog is written by hand and read by nothing else. Each check below
@@ -1526,11 +1434,6 @@ tables:
                 "an alias that omits its filter surface",
                 "aliases:\n  view:\n    table: items",
                 "missing field `filters`",
-            ),
-            (
-                "a misspelled alias key",
-                "aliases:\n  view:\n    table: items\n    filters: []\n    filter: [ user ]",
-                "unknown field `filter`",
             ),
             (
                 "an implicit filter on a column that is not there",
@@ -1716,8 +1619,7 @@ tables:
     }
 
     /// A request block that omits `filters` accepts no filters at all and 400s
-    /// every one a client sends, which `deny_unknown_fields` cannot catch — it
-    /// sees an absent key, not a misspelled one.
+    /// every one a client sends, so the key is required rather than defaulted.
     #[test]
     fn test_validate_rejects_a_request_without_a_filter_surface() {
         let yaml = r#"
