@@ -1,8 +1,10 @@
 use crate::integers::OwnedIntColumn;
-use crate::metadata::{ColumnType, JsonEncoding, TableDescription, VirtualField};
+use crate::metadata::{
+    ColumnType, JsonEncoding, MemberDescription, TableDescription, VirtualField,
+};
 use crate::output::encoder::{
-    encode_json_string, encode_roll, resolve_encoder, snake_to_camel, EncoderFn,
-    ResolvedRollEncoder, RollSource, Unrenderable,
+    encode_json_string, encode_roll, resolve_encoder, snake_to_camel, Encoder, ResolvedRollEncoder,
+    RollSource, Unrenderable,
 };
 use crate::text::{OwnedStringColumn, StringColumn};
 use anyhow::Result;
@@ -84,6 +86,8 @@ pub(crate) enum FieldWriter {
         /// The catalog's type for `column_name`, which the parquet file does not
         /// always match. `hexNumber` pads to the declared width.
         declared_type: Option<ColumnType>,
+        /// How a struct column's members render, where the catalog says.
+        members: Option<BTreeMap<String, MemberDescription>>,
     },
 }
 
@@ -107,7 +111,7 @@ pub(crate) enum ResolvedIndices {
     /// A Regular field's column index and its encoder, resolved together: the
     /// encoder is chosen from the array at that index, so neither exists without
     /// the other.
-    Single(Option<(usize, EncoderFn)>),
+    Single(Option<(usize, Encoder)>),
     /// Multiple column indices for Roll fields.
     Multi(Vec<usize>),
 }
@@ -178,6 +182,7 @@ pub(crate) fn resolve_writers(
                 column_name,
                 encoding,
                 declared_type,
+                members,
             } => {
                 let mut resolved = None;
                 if let Ok(i) = batch.schema().index_of(column_name) {
@@ -185,6 +190,7 @@ pub(crate) fn resolve_writers(
                         batch.column(i).data_type(),
                         encoding.as_ref(),
                         declared_type.as_ref(),
+                        members.as_ref(),
                     )
                     .map_err(|e| unrenderable(column_name.clone(), e))?;
                     resolved = Some((i, encoder));
@@ -266,6 +272,7 @@ pub(crate) fn build_field_writers(
                 column_name: col_name.clone(),
                 encoding: declared.and_then(|c| c.encoding.clone()),
                 declared_type: declared.map(|c| c.data_type.clone()),
+                members: declared.and_then(|c| c.members.clone()),
             }
         })
         .collect()
@@ -336,6 +343,7 @@ pub(crate) fn build_grouped_writers(
                 column_name: phys_col.to_string(),
                 encoding: declared.and_then(|c| c.encoding.clone()),
                 declared_type: declared.map(|c| c.data_type.clone()),
+                members: declared.and_then(|c| c.members.clone()),
             });
     }
 
@@ -424,7 +432,7 @@ fn write_row_fields_resolved(
             ResolvedIndices::Single(Some((idx, encoder))) => {
                 let col = batch.column(*idx);
                 buf.extend_from_slice(&rw.json_key_prefix);
-                encoder(col.as_ref(), row, buf);
+                encoder.encode(col.as_ref(), row, buf);
                 buf.push(b',');
             }
             ResolvedIndices::Single(None) => {}

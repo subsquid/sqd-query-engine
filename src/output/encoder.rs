@@ -1,8 +1,9 @@
 use crate::integers::is_integer;
-use crate::metadata::{ColumnType, JsonEncoding};
+use crate::metadata::{ColumnType, JsonEncoding, MemberDescription};
 use arrow::array::*;
 use arrow::datatypes::DataType;
 use serde::Serializer;
+use std::collections::BTreeMap;
 
 /// Function pointer type for pre-resolved encoders.
 pub type EncoderFn = fn(&dyn Array, usize, &mut Vec<u8>);
@@ -24,8 +25,76 @@ impl std::fmt::Display for Unrenderable {
 
 impl std::error::Error for Unrenderable {}
 
-/// Resolve an encoder function once per column based on DataType and encoding.
-/// Eliminates per-row DataType match + downcast dispatch in the hot loop.
+/// A column's encoder, resolved once: a function for a column of one type, or
+/// a tree of them for a struct whose members the catalog renders differently
+/// from their stored type.
+///
+/// The tree exists for one reason. A function pointer cannot carry which
+/// member is the `priorityFee` that renders as a decimal string, and a struct
+/// rendered member by member through `resolve_value_encoder` renders every
+/// member as its stored type. So a struct with declared members resolves each
+/// member's encoder up front and walks them per row; a struct without stays a
+/// plain function, which is the hot path.
+pub enum Encoder {
+    Plain(EncoderFn),
+    /// A struct's members in stored order: the JSON key, quoted and followed by
+    /// its colon, and the member's encoder.
+    Struct(Vec<(Vec<u8>, Encoder)>),
+    /// A list whose elements carry an encoder of their own.
+    List(Box<Encoder>),
+}
+
+impl Encoder {
+    #[inline]
+    pub fn encode(&self, array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
+        match self {
+            Encoder::Plain(encoder) => encoder(array, row, buf),
+            Encoder::Struct(members) => {
+                if array.is_null(row) {
+                    buf.extend_from_slice(b"null");
+                    return;
+                }
+                let a = array
+                    .as_any()
+                    .downcast_ref::<StructArray>()
+                    .expect("resolved against a struct");
+
+                buf.push(b'{');
+                for (i, ((key, member), column)) in members.iter().zip(a.columns()).enumerate() {
+                    if i > 0 {
+                        buf.push(b',');
+                    }
+                    buf.extend_from_slice(key);
+                    member.encode(column.as_ref(), row, buf);
+                }
+                buf.push(b'}');
+            }
+            Encoder::List(element) => {
+                if array.is_null(row) {
+                    buf.extend_from_slice(b"null");
+                    return;
+                }
+                let a = array
+                    .as_any()
+                    .downcast_ref::<GenericListArray<i32>>()
+                    .expect("resolved against a list");
+                let values = a.value(row);
+
+                buf.push(b'[');
+                for i in 0..values.len() {
+                    if i > 0 {
+                        buf.push(b',');
+                    }
+                    element.encode(values.as_ref(), i, buf);
+                }
+                buf.push(b']');
+            }
+        }
+    }
+}
+
+/// Resolve a column's encoder once, from its physical type and the catalog's
+/// word on how it renders.
 ///
 /// An encoding names the *declared* type; the chunk decides the physical one,
 /// and the two drift — an archive outlives the catalog that described it. Where
@@ -33,7 +102,49 @@ impl std::error::Error for Unrenderable {}
 /// to its physical encoder here, once, rather than downcasting per row and
 /// taking the thread down mid-response (INV-E1). Where there is no physical
 /// encoder either, the column is refused rather than rendered as `null`.
+///
+/// `members` is the catalog's description of a struct's members. It applies
+/// where the column is a struct or a list of them, and to nothing else: a
+/// chunk that stores the column as something other than a struct has no
+/// members to describe, and renders as what it is.
 pub fn resolve_encoder(
+    data_type: &DataType,
+    encoding: Option<&JsonEncoding>,
+    declared_type: Option<&ColumnType>,
+    members: Option<&BTreeMap<String, MemberDescription>>,
+) -> Result<Encoder, Unrenderable> {
+    if let Some(members) = members {
+        match data_type {
+            DataType::Struct(fields) => {
+                let mut resolved = Vec::with_capacity(fields.len());
+                for field in fields {
+                    let member = members.get(field.name());
+                    let encoder = resolve_encoder(
+                        field.data_type(),
+                        member.and_then(|m| m.encoding.as_ref()),
+                        None,
+                        member.and_then(|m| m.members.as_ref()),
+                    )?;
+
+                    let mut key = Vec::with_capacity(field.name().len() + 4);
+                    encode_json_string(&snake_to_camel(field.name()), &mut key);
+                    key.push(b':');
+                    resolved.push((key, encoder));
+                }
+                return Ok(Encoder::Struct(resolved));
+            }
+            DataType::List(item) if matches!(item.data_type(), DataType::Struct(_)) => {
+                let element = resolve_encoder(item.data_type(), None, None, Some(members))?;
+                return Ok(Encoder::List(Box::new(element)));
+            }
+            _ => {}
+        }
+    }
+
+    resolve_encoder_fn(data_type, encoding, declared_type).map(Encoder::Plain)
+}
+
+fn resolve_encoder_fn(
     data_type: &DataType,
     encoding: Option<&JsonEncoding>,
     declared_type: Option<&ColumnType>,
@@ -587,11 +698,11 @@ impl ResolvedRollEncoder {
             let column = match data_type {
                 DataType::List(item) if is_last => RollColumn::Splice {
                     index: source.column_index,
-                    element_encoder: resolve_encoder(item.data_type(), source.encoding, None)?,
+                    element_encoder: resolve_encoder_fn(item.data_type(), source.encoding, None)?,
                 },
                 _ => RollColumn::Value {
                     index: source.column_index,
-                    encoder: resolve_encoder(data_type, source.encoding, source.declared_type)?,
+                    encoder: resolve_encoder_fn(data_type, source.encoding, source.declared_type)?,
                 },
             };
             columns.push(column);
@@ -1166,10 +1277,11 @@ mod tests {
             array.data_type(),
             Some(&JsonEncoding::HexNumber),
             declared.as_ref(),
+            None,
         )
         .unwrap();
         let mut buf = Vec::new();
-        encoder(array.as_ref(), 0, &mut buf);
+        encoder.encode(array.as_ref(), 0, &mut buf);
         String::from_utf8(buf).unwrap()
     }
 
@@ -1270,10 +1382,11 @@ mod tests {
             array.data_type(),
             Some(&JsonEncoding::SolanaTxVersion),
             Some(&ColumnType::Int16),
+            None,
         )
         .unwrap();
         let mut buf = Vec::new();
-        encoder(array.as_ref(), 0, &mut buf);
+        encoder.encode(array.as_ref(), 0, &mut buf);
         String::from_utf8(buf).unwrap()
     }
 
@@ -1330,9 +1443,9 @@ mod tests {
             JsonEncoding::HexBytes,
             JsonEncoding::Base58,
         ] {
-            let encoder = resolve_encoder(wrong.data_type(), Some(&encoding), None).unwrap();
+            let encoder = resolve_encoder(wrong.data_type(), Some(&encoding), None, None).unwrap();
             let mut buf = Vec::new();
-            encoder(wrong.as_ref(), 0, &mut buf);
+            encoder.encode(wrong.as_ref(), 0, &mut buf);
 
             let rendered = String::from_utf8(buf).unwrap();
             assert!(
@@ -1359,14 +1472,85 @@ mod tests {
         );
     }
 
+    /// A member the catalog spells differently from its stored type renders
+    /// that way, and its neighbours render as stored: Solana's
+    /// `transactionConfig`, whose `priorityFee` is a decimal string among plain
+    /// numbers. The same description reaches a list of such structs, and a
+    /// null struct is `null` rather than a struct of nulls.
+    ///
+    /// Covers CT-6 · INV-O9
+    #[test]
+    fn test_struct_members_render_by_their_own_encoding() {
+        use arrow::datatypes::{Field, Fields};
+        use std::sync::Arc;
+
+        let fields: Fields = vec![
+            Field::new("compute_unit_limit", DataType::UInt64, true),
+            Field::new("priority_fee", DataType::UInt64, true),
+        ]
+        .into();
+        let config = StructArray::new(
+            fields.clone(),
+            vec![
+                Arc::new(UInt64Array::from(vec![Some(2000), None])) as ArrayRef,
+                Arc::new(UInt64Array::from(vec![Some(5000), None])) as ArrayRef,
+            ],
+            Some(vec![true, false].into()),
+        );
+        let members: BTreeMap<String, MemberDescription> = [(
+            "priority_fee".to_string(),
+            MemberDescription {
+                encoding: Some(JsonEncoding::DecimalString),
+                members: None,
+            },
+        )]
+        .into_iter()
+        .collect();
+
+        let encoder = resolve_encoder(config.data_type(), None, None, Some(&members)).unwrap();
+        let mut buf = Vec::new();
+        encoder.encode(&config, 0, &mut buf);
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            r#"{"computeUnitLimit":2000,"priorityFee":"5000"}"#
+        );
+        let mut buf = Vec::new();
+        encoder.encode(&config, 1, &mut buf);
+        assert_eq!(String::from_utf8(buf).unwrap(), "null");
+
+        // Without the description the same struct renders every member as stored.
+        let plain = resolve_encoder(config.data_type(), None, None, None).unwrap();
+        let mut buf = Vec::new();
+        plain.encode(&config, 0, &mut buf);
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            r#"{"computeUnitLimit":2000,"priorityFee":5000}"#
+        );
+
+        // A list of them carries the description down to each element.
+        let list = ListArray::new(
+            Arc::new(Field::new("item", config.data_type().clone(), true)),
+            arrow::buffer::OffsetBuffer::new(vec![0, 2].into()),
+            Arc::new(config),
+            None,
+        );
+        let encoder = resolve_encoder(list.data_type(), None, None, Some(&members)).unwrap();
+        let mut buf = Vec::new();
+        encoder.encode(&list, 0, &mut buf);
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            r#"[{"computeUnitLimit":2000,"priorityFee":"5000"},null]"#
+        );
+    }
+
     fn rendered_with(
         array: std::sync::Arc<dyn Array>,
         encoding: Option<&JsonEncoding>,
         declared: Option<&ColumnType>,
     ) -> String {
-        let encoder = resolve_encoder(array.data_type(), encoding, declared).unwrap();
+        let encoder = resolve_encoder(array.data_type(), encoding, declared, None).unwrap();
         let mut buf = Vec::new();
-        encoder(array.as_ref(), 0, &mut buf);
+        encoder.encode(array.as_ref(), 0, &mut buf);
         String::from_utf8(buf).unwrap()
     }
 

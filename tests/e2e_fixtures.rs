@@ -151,6 +151,25 @@ solana_fixture!(rewards);
 solana_fixture!(tx_instructions_from_instruction);
 
 // ---------------------------------------------------------------------------
+// Solana devnet fixtures (uses Solana metadata). A chunk of a later archiver:
+// the one place `transactionConfig` is stored.
+// ---------------------------------------------------------------------------
+
+macro_rules! solana_devnet_fixture {
+    ($name:ident) => {
+        paste::paste! {
+            #[test]
+            #[ignore = "requires external fixture data"]
+            fn [<solana_devnet_ $name>]() {
+                test_fixture("solana_devnet", "metadata/solana.yaml", stringify!($name));
+            }
+        }
+    };
+}
+
+solana_devnet_fixture!(v1_transaction);
+
+// ---------------------------------------------------------------------------
 // Ethereum (EVM) fixtures
 // ---------------------------------------------------------------------------
 
@@ -266,6 +285,25 @@ macro_rules! optimism_fixture {
 }
 
 optimism_fixture!(all);
+
+// ---------------------------------------------------------------------------
+// Monad fixtures (uses EVM metadata). A chunk whose logs table is empty, so a
+// relation onto transactions runs with no rows to join.
+// ---------------------------------------------------------------------------
+
+macro_rules! monad_fixture {
+    ($name:ident) => {
+        paste::paste! {
+            #[test]
+            #[ignore = "requires external fixture data"]
+            fn [<monad_ $name>]() {
+                test_fixture("monad", "metadata/evm.yaml", stringify!($name));
+            }
+        }
+    };
+}
+
+monad_fixture!(logs_no_predicate_with_transaction);
 
 // ---------------------------------------------------------------------------
 // Binance fixtures (uses EVM metadata)

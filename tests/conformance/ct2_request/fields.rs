@@ -5,6 +5,7 @@ use sqd_query_engine::query::parse_query;
 use std::collections::BTreeSet;
 
 use crate::harness::fixtures::meta;
+use crate::harness::guard::reference_query_sources;
 
 /// A misspelled field name used to come back as a 200 with the field missing,
 /// which sends the client looking for the bug everywhere except in its own
@@ -199,6 +200,18 @@ const REFERENCE_FIELD_SURFACE: &[(&str, &str, &str, &[&str])] = &[
             "mainBlockGeneralGasLimit",
             "sharedGasLimit",
             "timestampMillisPart",
+            "blockExtraData",
+            "blockGasCost",
+            "extDataGasUsed",
+            "extDataHash",
+            "minDelayExcess",
+            "timestampMilliseconds",
+            "targetExponent",
+            "minPriceExponent",
+            "settledHeight",
+            "settledGasUnix",
+            "settledGasNumerator",
+            "settledExcess",
         ],
     ),
     (
@@ -344,6 +357,7 @@ const REFERENCE_FIELD_SURFACE: &[(&str, &str, &str, &[&str])] = &[
             "loadedAddresses",
             "feePayer",
             "hasDroppedLogMessages",
+            "transactionConfig",
         ],
     ),
     (
@@ -740,6 +754,116 @@ fn the_field_surface_is_exactly_the_declared_one() {
             });
         }
     }
+}
+
+/// The transcription above is what the previous test pins the catalogs to, and
+/// a transcription is a copy of the reference at the moment someone copied it.
+/// Twelve Avalanche block fields and Solana's `transactionConfig` landed in the
+/// reference while the copy stayed green. This reads the reference's own field
+/// lists — the `item_field_selection!` blocks of its query sources — and diffs
+/// them against the catalogs, so the lag is a failing test rather than a review
+/// finding.
+///
+/// Every field the reference serves must be a field here, under the same
+/// table; every field here must be one the reference serves, or the surface
+/// has an extension the divergence table does not know about.
+///
+/// Covers CT-2 · INV-Q14, INV-Q7
+#[test]
+#[ignore = "requires external fixture data"]
+fn the_catalogs_serve_every_field_the_reference_serves() {
+    let Some(sources) = reference_query_sources() else {
+        return;
+    };
+
+    // Reference source file → the catalog it describes.
+    let datasets = [
+        ("eth.rs", "evm"),
+        ("solana.rs", "solana"),
+        ("substrate.rs", "substrate"),
+        ("bitcoin.rs", "bitcoin"),
+        ("tron.rs", "tron"),
+        ("hyperliquid_fills.rs", "hyperliquid_fills"),
+        ("hyperliquid_replica_cmds.rs", "hyperliquid_replica_cmds"),
+    ];
+
+    let mut problems = Vec::new();
+    for (file, dataset) in datasets {
+        let source = std::fs::read_to_string(sources.join(file))
+            .unwrap_or_else(|e| panic!("reading the reference's {file}: {e}"));
+        let metadata = meta(dataset);
+
+        for (selection, fields) in reference_field_selections(&source) {
+            // `TokenBalanceFieldSelection` describes the table whose output
+            // name is `tokenBalance`.
+            let mut output_name = selection.clone();
+            output_name.replace_range(..1, &selection[..1].to_ascii_lowercase());
+
+            let Some(desc) = metadata
+                .tables
+                .values()
+                .find(|t| t.output.name.as_deref() == Some(output_name.as_str()))
+            else {
+                problems.push(format!(
+                    "{dataset}: the reference serves `{output_name}` and no table here outputs it"
+                ));
+                continue;
+            };
+
+            let reference: BTreeSet<&str> = fields.iter().map(String::as_str).collect();
+            let declared: BTreeSet<&str> = desc.output.fields.iter().map(String::as_str).collect();
+
+            for missing in reference.difference(&declared) {
+                problems.push(format!(
+                    "{dataset}.{output_name}: the reference serves `{missing}` and the catalog does not"
+                ));
+            }
+            for extra in declared.difference(&reference) {
+                problems.push(format!(
+                    "{dataset}.{output_name}: the catalog serves `{extra}` and the reference does not"
+                ));
+            }
+        }
+    }
+
+    assert!(
+        problems.is_empty(),
+        "the catalogs and the reference disagree on the field surface:\n  {}",
+        problems.join("\n  ")
+    );
+}
+
+/// The `(name, fields)` of every `item_field_selection! { NameFieldSelection {
+/// a, b, … } … }` block in a reference source file, fields in stored spelling.
+fn reference_field_selections(source: &str) -> Vec<(String, Vec<String>)> {
+    let mut selections = Vec::new();
+    let mut rest = source;
+
+    while let Some(at) = rest.find("item_field_selection!") {
+        rest = &rest[at..];
+        let (name, after_name) = rest
+            .split_once("FieldSelection {")
+            .expect("a field selection names its struct");
+        let name = name
+            .rsplit(|c: char| c.is_whitespace() || c == '{')
+            .next()
+            .expect("the struct name precedes the suffix")
+            .to_string();
+
+        let (fields, after_fields) = after_name
+            .split_once('}')
+            .expect("the field list closes before the projection");
+        let fields = fields
+            .split(',')
+            .map(|f| f.trim().trim_start_matches("r#").to_string())
+            .filter(|f| !f.is_empty())
+            .collect();
+
+        selections.push((name, fields));
+        rest = after_fields;
+    }
+
+    selections
 }
 
 /// The two the specification names, through the request path a client uses.

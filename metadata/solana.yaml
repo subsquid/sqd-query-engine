@@ -55,7 +55,7 @@ tables:
         transaction_index, version, account_keys, address_table_lookups,
         num_readonly_signed_accounts, num_readonly_unsigned_accounts, num_required_signatures,
         recent_blockhash, signatures, err, fee, compute_units_consumed, loaded_addresses,
-        fee_payer, has_dropped_log_messages
+        fee_payer, has_dropped_log_messages, transaction_config
       ]
     item_order_keys: [ transaction_index ]
     sort_key: [ fee_payer, block_number, transaction_index ]
@@ -99,6 +99,12 @@ tables:
       loaded_addresses:
         type: struct
         weight: loaded_addresses_size
+      # Nullable; absent from chunks written before the field existed.
+      transaction_config:
+        type: struct
+        members:
+          priority_fee:
+            encoding: decimal_string
       has_dropped_log_messages:
         type: boolean
       fee_payer:

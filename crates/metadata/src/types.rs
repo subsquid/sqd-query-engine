@@ -316,6 +316,30 @@ pub struct ColumnDescription {
     /// otherwise get an empty response rather than its rows.
     #[serde(default)]
     pub fold_case: bool,
+
+    /// How the members of a `struct` or `list_struct` column render, keyed by
+    /// the member's stored name. Only the members whose rendering is not the
+    /// type's natural JSON need an entry; the rest render as they are stored.
+    ///
+    /// The chunk decides which members a struct has and what they are stored
+    /// as; the catalog only says how one of them is spelled — a `priorityFee`
+    /// quoted so it survives a JavaScript client, when the neighbouring
+    /// members are plain numbers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub members: Option<BTreeMap<String, MemberDescription>>,
+}
+
+/// How one member of a struct column renders. A member that is itself a
+/// struct, or a list of them, describes its own members the same way.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MemberDescription {
+    #[serde(default)]
+    pub encoding: Option<JsonEncoding>,
+
+    // Serialized even when absent: the strict loader finds unknown keys by
+    // diffing the document against the description written back out.
+    #[serde(default)]
+    pub members: Option<BTreeMap<String, MemberDescription>>,
 }
 
 impl ColumnDescription {

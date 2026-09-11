@@ -265,6 +265,7 @@ catalogs.
 | `weight` | no | What the column adds to a row's weight: a size column's name, or a fixed integer. Absent means 32. |
 | `system` | no | The column exists for filters, joins, ordering or weights, and is never emitted. It cannot be a field or a plain filter; a special filter is how it is reached on purpose. Weighs nothing. |
 | `fold_case` | no | Compare filter values case-insensitively. A `hex_bytes` column folds already; this is for hex stored without the `0x` prefix, as Tron writes it, which renders verbatim and so cannot say it through the encoding. |
+| `members` | no | On a `struct` or `list_struct` column: how named members render, each with its own `encoding` and, for a member that is itself a struct, its own `members`. Only the members whose rendering is not their stored type's need an entry. |
 
 Types:
 
@@ -278,7 +279,7 @@ Types:
 | `timestamp_second`, `timestamp_millisecond` | timestamps, rendered as integers in the declared unit |
 | `decimal128` | Decimal128 |
 | `list_uint8`, `list_uint32`, `list_string` | lists |
-| `struct`, `list_struct` | passed through as JSON |
+| `struct`, `list_struct` | passed through as JSON, member by member; `members` spells the exceptions |
 | `fixed_binary_N` | FixedSizeBinary(N) — `fixed_binary_64` for a bloom |
 
 A declared type bounds the values, not the storage. An archive writer narrows
@@ -286,6 +287,15 @@ integers to the smallest width that fits the chunk, so a `uint64` block number
 is usually stored as 32 bits and a `uint32` index as 16, and different chunks of
 one dataset differ. The engine reads any integer width for any declared integer
 type and answers the same.
+
+A struct's members render as they are stored unless the column says otherwise:
+
+```yaml
+transaction_config:
+  type: struct
+  members:
+    priority_fee: { encoding: decimal_string }
+```
 
 Encodings, named as the specification names them:
 

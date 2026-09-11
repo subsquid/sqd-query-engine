@@ -41,3 +41,35 @@ pub fn fixture_tree_has(dataset: &str) -> bool {
 pub fn fixture_tree_is_present() -> bool {
     fixture_tree_has("ethereum")
 }
+
+/// Where the reference implementation's query sources are, if they are.
+///
+/// The fixture tree is a checkout of the reference's `crates/query/fixtures`,
+/// so the sources sit two directories up from it; `SQD_REFERENCE_SRC` names
+/// them directly for a tree that was copied without them. Same contract as
+/// [`fixture_tree_has`]: absent is a skip, unless `SQD_REQUIRE_FIXTURES` says
+/// it is a failure.
+// Shared with `e2e_fixtures`, which has no use for it.
+#[allow(dead_code)]
+pub fn reference_query_sources() -> Option<PathBuf> {
+    let sources = match std::env::var_os("SQD_REFERENCE_SRC") {
+        Some(path) => PathBuf::from(path),
+        None => std::fs::canonicalize(fixture_dir())
+            .ok()
+            .and_then(|fixtures| fixtures.parent().map(|query| query.join("src/query")))
+            .unwrap_or_default(),
+    };
+
+    if sources.join("eth.rs").is_file() {
+        return Some(sources);
+    }
+
+    assert!(
+        std::env::var_os("SQD_REQUIRE_FIXTURES").is_none(),
+        "SQD_REQUIRE_FIXTURES is set but the reference sources are not at {}, \
+         so this test would report green having compared nothing",
+        sources.display()
+    );
+
+    None
+}

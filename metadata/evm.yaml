@@ -10,7 +10,10 @@ tables:
         logs_bloom, sha3_uncles, extra_data, miner, nonce, mix_hash, size, gas_limit, gas_used,
         difficulty, total_difficulty, base_fee_per_gas, uncles, withdrawals, withdrawals_root,
         blob_gas_used, excess_blob_gas, parent_beacon_block_root, requests_hash,
-        l1_block_number, main_block_general_gas_limit, shared_gas_limit, timestamp_millis_part
+        l1_block_number, main_block_general_gas_limit, shared_gas_limit, timestamp_millis_part,
+        block_extra_data, block_gas_cost, ext_data_gas_used, ext_data_hash, min_delay_excess,
+        timestamp_milliseconds, target_exponent, min_price_exponent, settled_height,
+        settled_gas_unix, settled_gas_numerator, settled_excess
       ]
     parent_hash_column: parent_hash
     block_number_column: number
@@ -104,8 +107,49 @@ tables:
       timestamp_millis_part:
         type: string
         encoding: hex_bytes
+      # Avalanche-specific block header fields (nullable; only present in Avalanche chunks).
+      block_extra_data:
+        type: string
+        encoding: hex_bytes
+        weight: block_extra_data_size
+      block_gas_cost:
+        type: string
+        encoding: hex_bytes
+      ext_data_gas_used:
+        type: string
+        encoding: hex_bytes
+      ext_data_hash:
+        type: string
+        encoding: hex_bytes
+      min_delay_excess:
+        type: string
+        encoding: hex_bytes
+      timestamp_milliseconds:
+        type: string
+        encoding: hex_bytes
+      target_exponent:
+        type: string
+        encoding: hex_bytes
+      min_price_exponent:
+        type: string
+        encoding: hex_bytes
+      settled_height:
+        type: string
+        encoding: hex_bytes
+      settled_gas_unix:
+        type: string
+        encoding: hex_bytes
+      settled_gas_numerator:
+        type: string
+        encoding: hex_bytes
+      settled_excess:
+        type: string
+        encoding: hex_bytes
       # system
       extra_data_size:
+        type: uint64
+        system: true
+      block_extra_data_size:
         type: uint64
         system: true
       withdrawals_size:
@@ -204,6 +248,9 @@ tables:
         type: list_string
       authorization_list:
         type: list_struct
+        members:
+          nonce:
+            encoding: decimal_string
       contract_address:
         type: string
         encoding: hex_bytes

@@ -66,7 +66,7 @@ fn unknown_keys(yaml: &str, desc: &DatasetDescription) -> Result<Vec<String>> {
             let column = known["tables"][table_name.as_str()]["columns"][column_name.as_str()]
                 .as_mapping_mut()
                 .expect("a column description serializes as a mapping");
-            for field in ["encoding", "weight"] {
+            for field in ["encoding", "weight", "members"] {
                 column.entry(Value::from(field)).or_insert(Value::Null);
             }
         }
@@ -197,6 +197,24 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
                     table_name,
                     weight_col,
                     col_name
+                );
+            }
+        }
+
+        // Members are a struct's to have. On any other column the block
+        // describes nothing, and a typo'd column type would carry it silently.
+        for (col_name, col) in &table.columns {
+            if col.members.is_some() {
+                anyhow::ensure!(
+                    matches!(
+                        col.data_type,
+                        crate::ColumnType::Struct | crate::ColumnType::ListStruct
+                    ),
+                    "table '{}': column '{}' declares members, which only a struct or \
+                     list_struct column has, not {:?}",
+                    table_name,
+                    col_name,
+                    col.data_type
                 );
             }
         }
@@ -1085,6 +1103,66 @@ tables:
         assert_eq!(fee.encoding, Some(crate::JsonEncoding::DecimalString));
         let number = blocks.column("number").unwrap();
         assert_eq!(number.encoding, None);
+    }
+
+    /// A struct's members carry their own encodings, nested as deep as the
+    /// struct goes, and the block is refused anywhere but on a struct.
+    ///
+    /// Covers CT-1 · INV-D1
+    #[test]
+    fn test_struct_members_declare_their_encodings() {
+        let yaml = r#"
+version: v2
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    sort_key: [number]
+    columns:
+      number: { type: uint64 }
+      config:
+        type: struct
+        members:
+          priority_fee: { encoding: decimal_string }
+          nested:
+            members:
+              hash: { encoding: hex_bytes }
+      lookups:
+        type: list_struct
+        members:
+          account_key: { encoding: base58 }
+"#;
+        let desc = parse_dataset_description_strict(yaml).unwrap();
+        let blocks = desc.table("blocks").unwrap();
+
+        let config = blocks.column("config").unwrap().members.as_ref().unwrap();
+        assert_eq!(
+            config["priority_fee"].encoding,
+            Some(crate::JsonEncoding::DecimalString)
+        );
+        let nested = config["nested"].members.as_ref().unwrap();
+        assert_eq!(nested["hash"].encoding, Some(crate::JsonEncoding::HexBytes));
+        assert_eq!(config["nested"].encoding, None);
+
+        let lookups = blocks.column("lookups").unwrap().members.as_ref().unwrap();
+        assert_eq!(
+            lookups["account_key"].encoding,
+            Some(crate::JsonEncoding::Base58)
+        );
+
+        let on_a_scalar = yaml.replacen("type: struct", "type: uint64", 1);
+        let err = format!("{:#}", parse_dataset_description(&on_a_scalar).unwrap_err());
+        assert!(err.contains("members"), "{err}");
+
+        let misspelled = yaml.replacen("{ encoding: base58 }", "{ encodng: base58 }", 1);
+        assert!(parse_dataset_description_strict(&misspelled).is_err());
+
+        let explicit_nulls = yaml.replacen(
+            "{ encoding: base58 }",
+            "{ encoding: base58, members: null }",
+            1,
+        );
+        parse_dataset_description_strict(&explicit_nulls).unwrap();
     }
 
     /// Covers CT-1 · INV-D1

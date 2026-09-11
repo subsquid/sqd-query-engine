@@ -190,6 +190,15 @@ per column.
 A float that is NaN or infinite renders as `null`
 ([INV-O9](07-invariants.md#inv-o9)).
 
+A `struct` or `list<struct>` column renders member by member, each as its
+stored type, with the member's name camel-cased. Where one member renders
+otherwise — the `nonce` of an EIP-7702 authorization and the `priorityFee` of
+a Solana transaction's config are integers the reference quotes as
+`decimalString` among plain numbers — the catalog assigns that member its
+encoding, nested as deep as the struct goes. The chunk still decides which
+members a struct has; the catalog only spells the ones whose rendering is not
+the default.
+
 Not every hex value is `hexBytes`. Tron writes hex without the `0x` prefix, so
 its addresses, topics and sighashes render verbatim and are `utf8` here. They
 still compare case-insensitively, which the catalog declares on the column rather
