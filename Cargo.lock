@@ -2496,6 +2496,7 @@ dependencies = [
  "faster-hex",
  "indexmap",
  "itoa",
+ "libc",
  "memmap2 0.9.10",
  "parquet",
  "paste",

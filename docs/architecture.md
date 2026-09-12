@@ -114,6 +114,10 @@ Selection reads item keys only when relations or weight deduplication need them;
 a table with one source can defer its other item-key columns to the output pass.
 Readers that do not advertise position support use the complete-key fallback.
 
+Independent output groups are materialized concurrently in the existing Rayon
+pool. Results are collected in source order before output slots are updated or
+errors are returned, so completion order does not determine either.
+
 ### scan() Internals
 
 **Entry point:** `src/scan/scanner.rs:523`
