@@ -73,8 +73,8 @@ Raised against a chunk. Detectable only once the data is in hand.
 | `TableNotFound` | The chunk has no data for a table the query needs. |
 | `ColumnNotFound` | A column the query selects or filters on is absent from the chunk. |
 | `UnexpectedBaseBlock` | `parentBlockHash` does not match the hash of the block preceding `fromBlock`. |
-| `UnsupportedKeyType` | A relation key, group key, or ordering key has a physical type the engine cannot compare. |
-| `MalformedChunkData` | A stored value violates the catalog: a list where a scalar was declared, a `jsonVerbatim` column holding non-JSON, a fixed-width column of the wrong width. |
+| `UnsupportedKeyType` | A relation key, group key, ordering key or filtered column has a physical type the engine cannot compare its values against. |
+| `MalformedChunkData` | A stored value violates the catalog: a list where a scalar was declared, a `jsonVerbatim` column holding non-JSON, a fixed-width column of the wrong width, a selected column stored at a type nothing renders. |
 
 ### `ColumnNotFound`
 
@@ -82,6 +82,12 @@ Fires for a column the query **selects** or **filters on**, never for one the
 engine merely reads for its own purposes. The distinction is what makes it usable:
 a chunk written before `sighash` existed must reject `{"sighash": [...]}` rather
 than answer it with every transaction in the block.
+
+A selected field's columns are every column it is rendered and weighed from:
+the source columns of a roll field, which are positional and cannot be skipped
+without shifting the ones after them, and the `*_size` column a field declares
+its weight through, without which the value weighs nothing
+([INV-B9](07-invariants.md#inv-b9)).
 
 An engine MAY treat a column declared in the catalog as *optional* — nullable and
 tolerated when absent — but only if the catalog says so explicitly, and even then

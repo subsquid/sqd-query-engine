@@ -3,6 +3,7 @@ use crate::error::ErrorKind;
 use crate::integers::{IntColumn, OwnedIntColumn};
 use crate::scan::chunk::ParquetTable;
 use crate::scan::predicate::RowPredicate;
+use crate::text::StringColumn;
 use anyhow::{Context, Result};
 use arrow::array::builder::BooleanBufferBuilder;
 use arrow::array::*;
@@ -585,7 +586,7 @@ fn extract_block_numbers(col: &dyn Array, out: &mut HashSet<u64>) {
 /// A typed column extractor that avoids per-row type dispatch.
 enum TypedKeyColumn<'a> {
     Int(IntColumn<'a>),
-    Str(&'a StringArray),
+    Str(StringColumn<'a>),
     List(&'a GenericListArray<i32>),
 }
 
@@ -594,8 +595,8 @@ impl<'a> TypedKeyColumn<'a> {
         if let Some(ints) = IntColumn::resolve(col) {
             return Some(Self::Int(ints));
         }
-        if let Some(a) = col.as_any().downcast_ref::<StringArray>() {
-            return Some(Self::Str(a));
+        if let Some(text) = StringColumn::resolve(col) {
+            return Some(Self::Str(text));
         }
         if let Some(a) = col.as_any().downcast_ref::<GenericListArray<i32>>() {
             return Some(Self::List(a));
@@ -608,7 +609,7 @@ impl<'a> TypedKeyColumn<'a> {
     fn is_null(&self, row: usize) -> bool {
         match self {
             Self::Int(a) => a.is_null(row),
-            Self::Str(a) => a.is_null(row),
+            Self::Str(a) => a.value(row).is_none(),
             Self::List(a) => a.is_null(row),
         }
     }
@@ -625,7 +626,7 @@ impl<'a> TypedKeyColumn<'a> {
         match self {
             Self::Int(a) => buf.extend_from_slice(&a.join_key(row).to_le_bytes()),
             Self::Str(a) => {
-                let v = a.value(row);
+                let v = a.value(row).expect("checked above");
                 buf.extend_from_slice(&(v.len() as u32).to_le_bytes());
                 buf.extend_from_slice(v.as_bytes());
             }
@@ -912,10 +913,43 @@ fn ensure_columns_present(table: &ParquetTable, request: &ScanRequest) -> Result
     Ok(())
 }
 
+/// Refuse a filter whose values cannot be compared against the column as this
+/// chunk stores it, before any row is read (INV-E7).
+///
+/// Here rather than in the row filter for the same reason the block-number
+/// check is: a row filter's callback can only fail with an `ArrowError`, which
+/// carries no kind, and a chunk that answers or refuses depending on how many
+/// rows a predicate happened to reach is the same bug from the other side.
+fn ensure_predicates_comparable(table: &ParquetTable, request: &ScanRequest) -> Result<()> {
+    for pred in &request.predicates {
+        for col_pred in &pred.columns {
+            let Some(index) = table.column_index(&col_pred.column) else {
+                continue;
+            };
+            let stored = table.schema().field(index).data_type();
+
+            if let Err(e) =
+                crate::scan::predicate::check_stored_type(col_pred.predicate.as_ref(), stored)
+            {
+                crate::engine_bail!(
+                    ErrorKind::UnsupportedKeyType,
+                    "filter on column '{}' of '{}': {}",
+                    col_pred.column,
+                    table.name(),
+                    e
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Execute a scan against a parquet table: read, filter, project.
 /// Returns filtered RecordBatches with only the output columns.
 pub fn scan(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<RecordBatch>> {
     ensure_columns_present(table, request)?;
+    ensure_predicates_comparable(table, request)?;
     ensure_block_numbers_readable(table, request)?;
 
     if let Some(rows) = request.row_indices {
@@ -1027,10 +1061,16 @@ fn select_row_groups(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<
 
         // Check predicate-based row group skipping
         if !request.predicates.is_empty() {
-            let stats_fn = |col_name: &str| -> Option<(Arc<dyn Array>, Arc<dyn Array>)> {
+            let stats_fn = |col_name: &str| -> Option<crate::scan::predicate::StatRange> {
+                // Parquet stats come at the physical type; the stored type says how to read them.
+                let stored = table.schema().field_with_name(col_name).ok()?.data_type();
                 let stats = table.column_stats(rg_idx, col_name)?;
                 let (min, max) = (stats.min?, stats.max?);
-                Some((stat_value_to_array(&min), stat_value_to_array(&max)))
+                crate::scan::predicate::StatRange::new(
+                    stored,
+                    stat_value_to_array(&min).as_ref(),
+                    stat_value_to_array(&max).as_ref(),
+                )
             };
 
             let pred_refs: Vec<&RowPredicate> = request.predicates.clone();
@@ -1189,7 +1229,9 @@ fn scan_row_groups(
                         col_projection,
                         move |batch: RecordBatch| {
                             if let Some(col) = batch.column_by_name(&col_name) {
-                                Ok(evaluator.evaluate(col.as_ref()))
+                                evaluator
+                                    .evaluate(col.as_ref())
+                                    .map_err(|e| ArrowError::ComputeError(e.to_string()))
                             } else {
                                 Ok(BooleanArray::from(vec![true; batch.num_rows()]))
                             }
@@ -1215,7 +1257,10 @@ fn scan_row_groups(
                             let mut result: Option<BooleanArray> = None;
                             for cp in &rest {
                                 if let Some(col) = batch.column_by_name(&cp.column) {
-                                    let mask = cp.predicate.evaluate(col.as_ref());
+                                    let mask = cp
+                                        .predicate
+                                        .evaluate(col.as_ref())
+                                        .map_err(|e| ArrowError::ComputeError(e.to_string()))?;
                                     result = Some(match result {
                                         Some(prev) => {
                                             arrow::compute::kernels::boolean::and(&prev, &mask)
@@ -1252,9 +1297,8 @@ fn scan_row_groups(
                 pred_projection,
                 move |batch: RecordBatch| {
                     let pred_refs: Vec<&RowPredicate> = predicates.iter().collect();
-                    Ok(crate::scan::predicate::or_row_predicates(
-                        &pred_refs, &batch,
-                    ))
+                    crate::scan::predicate::or_row_predicates(&pred_refs, &batch)
+                        .map_err(|e| ArrowError::ComputeError(e.to_string()))
                 },
             )));
         }
@@ -1547,11 +1591,12 @@ fn stat_value_to_array(value: &crate::scan::chunk::StatValue) -> Arc<dyn Array> 
         StatValue::Int64(v) => Arc::new(Int64Array::from(vec![*v])),
         StatValue::Float(v) => Arc::new(Float32Array::from(vec![*v])),
         StatValue::Double(v) => Arc::new(Float64Array::from(vec![*v])),
-        StatValue::ByteArray(v) => {
-            Arc::new(StringArray::from(
-                vec![std::str::from_utf8(v).unwrap_or("")],
-            ))
-        }
+        StatValue::ByteArray(v) => match std::str::from_utf8(v) {
+            Ok(text) => Arc::new(StringArray::from(vec![text])),
+            // Bytes no string comparison can order. Rendered as `""` they sort
+            // below every filter value, and the group is pruned on that alone.
+            Err(_) => Arc::new(BinaryArray::from(vec![v.as_slice()])),
+        },
         StatValue::FixedLenByteArray(v) => {
             let len = v.len() as i32;
             let mut builder = FixedSizeBinaryBuilder::with_capacity(1, len);
@@ -1566,6 +1611,30 @@ mod tests {
     use super::*;
     use crate::scan::predicate::InListPredicate;
     use std::path::{Path, PathBuf};
+
+    /// A byte statistic no string can carry prunes nothing. Rendered as `""` it
+    /// sorts below every filter value, and the row group goes with it.
+    ///
+    /// Covers CT-3 · INV-P16
+    #[test]
+    fn a_statistic_that_is_not_text_prunes_nothing() {
+        use crate::scan::chunk::StatValue;
+        use crate::scan::predicate::{ArrayPredicate, StatRange};
+        use arrow::datatypes::DataType;
+
+        let raw = StatValue::ByteArray(vec![0xff, 0xfe]);
+        let stat = stat_value_to_array(&raw);
+        assert!(
+            StatRange::new(&DataType::Utf8, stat.as_ref(), stat.as_ref()).is_none(),
+            "unreadable bounds are no bounds"
+        );
+
+        let text = stat_value_to_array(&StatValue::ByteArray(b"0xabc".to_vec()));
+        let range = StatRange::new(&DataType::Utf8, text.as_ref(), text.as_ref())
+            .expect("valid utf8 still reads");
+        assert!(InListPredicate::from_strings(&["0xdef"]).can_skip(&range));
+        assert!(!InListPredicate::from_strings(&["0xabc"]).can_skip(&range));
+    }
 
     #[test]
     fn materialization_keys_preserve_nulls_and_list_components() {

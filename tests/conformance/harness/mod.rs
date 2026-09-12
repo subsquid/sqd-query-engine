@@ -11,4 +11,5 @@ pub mod fixtures;
 pub mod generator;
 pub mod guard;
 pub mod json;
+pub mod sol_like;
 pub mod synthetic;

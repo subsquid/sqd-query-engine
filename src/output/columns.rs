@@ -157,29 +157,53 @@ pub(crate) fn resolve_relation_output_columns(
     cols.into_iter().collect()
 }
 
-/// Physical columns that the user explicitly requested as output fields and
-/// which must exist in the parquet (a missing one is a hard error, matching
-/// legacy). Engine-internal columns (block number, sort keys, weights) are
-/// excluded, as are `system` columns and virtual-field sources (the latter are
-/// tolerated when absent).
+/// Physical columns a selected field cannot be rendered without, which must
+/// exist in the parquet (a missing one is `ColumnNotFound`, INV-E3).
+///
+/// That is the column behind a plain or variant field, every source of a roll
+/// field, and the `*_size` companion a field declares its weight through.
+/// Engine-internal columns (block number, sort keys) are excluded: their
+/// absence is a different error, raised where they are read.
+///
+/// A roll's sources are required even though a roll stops at its first null:
+/// the sources are positional, and a chunk written before `a12` existed puts
+/// `a13` in its place. The reference errors on the first missing source. A
+/// weight column is required because a value weighed at zero is a page bounded
+/// only by the transport (INV-B9).
 pub(crate) fn required_output_columns(
     output_columns: &[String],
     table_desc: &TableDescription,
 ) -> Vec<String> {
-    let mut cols = Vec::new();
+    let mut cols: Vec<String> = Vec::new();
+    let require = |phys: &str, cols: &mut Vec<String>| {
+        let Some(desc) = table_desc.columns.get(phys) else {
+            return;
+        };
+        if desc.system {
+            return;
+        }
+        if !cols.iter().any(|c| c == phys) {
+            cols.push(phys.to_string());
+        }
+        if let Some(WeightSource::Column(wc)) = &desc.weight {
+            if !cols.iter().any(|c| c == wc) {
+                cols.push(wc.clone());
+            }
+        }
+    };
+
     for col in output_columns {
-        // Virtual fields roll several optional sources — don't hard-require them.
-        if table_desc.output.virtual_fields.contains_key(col.as_str()) {
+        if let Some(VirtualField::Roll { columns }) =
+            table_desc.output.virtual_fields.get(col.as_str())
+        {
+            for source in columns {
+                require(source, &mut cols);
+            }
             continue;
         }
         // Resolve variant fields (e.g. `call_call_type` → `call_type`).
-        let Some(phys) = table_desc.physical_output_column(col) else {
-            continue;
-        };
-        if let Some(desc) = table_desc.columns.get(phys) {
-            if !desc.system {
-                cols.push(phys.to_string());
-            }
+        if let Some(phys) = table_desc.physical_output_column(col) {
+            require(phys, &mut cols);
         }
     }
     cols

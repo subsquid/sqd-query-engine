@@ -2,8 +2,10 @@ use crate::integers::OwnedIntColumn;
 use crate::metadata::{ColumnType, JsonEncoding, TableDescription, VirtualField};
 use crate::output::encoder::{
     encode_json_string, encode_roll, resolve_encoder, snake_to_camel, EncoderFn,
-    ResolvedRollEncoder,
+    ResolvedRollEncoder, RollSource, Unrenderable,
 };
+use crate::text::{OwnedStringColumn, StringColumn};
+use anyhow::Result;
 use arrow::array::*;
 use arrow::record_batch::RecordBatch;
 use rustc_hash::FxHashMap;
@@ -30,17 +32,17 @@ pub(crate) struct IndexedBatches {
 /// comparison.
 pub(crate) enum TypedSortColumn {
     Int(OwnedIntColumn),
-    Utf8(StringArray),
+    Text(OwnedStringColumn),
     List(GenericListArray<i32>),
 }
 
 impl TypedSortColumn {
-    fn resolve(col: &dyn Array) -> Option<Self> {
+    pub(crate) fn resolve(col: &dyn Array) -> Option<Self> {
         if let Some(ints) = OwnedIntColumn::resolve(col) {
             return Some(Self::Int(ints));
         }
-        if let Some(a) = col.as_any().downcast_ref::<StringArray>() {
-            return Some(Self::Utf8(a.clone()));
+        if let Some(text) = OwnedStringColumn::resolve(col) {
+            return Some(Self::Text(text));
         }
         if let Some(a) = col.as_any().downcast_ref::<GenericListArray<i32>>() {
             return Some(Self::List(a.clone()));
@@ -53,10 +55,11 @@ impl TypedSortColumn {
     ///
     /// Integers compare as `i128`, so two sides stored at different widths — or
     /// one signed and one not — order by value rather than by bit pattern.
+    /// Text compares as text whichever type carries it.
     fn cmp_rows(&self, row_a: usize, other: &TypedSortColumn, row_b: usize) -> std::cmp::Ordering {
         match (self, other) {
             (Self::Int(a), Self::Int(b)) => a.value(row_a).cmp(&b.value(row_b)),
-            (Self::Utf8(a), Self::Utf8(b)) => a.value(row_a).cmp(b.value(row_b)),
+            (Self::Text(a), Self::Text(b)) => a.value(row_a).cmp(&b.value(row_b)),
             (Self::List(a), Self::List(b)) => compare_list_values(a, row_a, b, row_b),
             _ => {
                 debug_assert!(false, "TypedSortColumn type mismatch in cmp_rows");
@@ -71,7 +74,7 @@ pub(crate) enum FieldWriter {
     /// Virtual field: roll columns together.
     Roll {
         json_key_prefix: Vec<u8>,
-        source_column_names: Vec<String>,
+        sources: Vec<RollSourceColumn>,
     },
     /// Regular column with optional encoding override.
     Regular {
@@ -82,6 +85,13 @@ pub(crate) enum FieldWriter {
         /// always match. `hexNumber` pads to the declared width.
         declared_type: Option<ColumnType>,
     },
+}
+
+/// One column of a roll, with what the catalog declares for it.
+pub(crate) struct RollSourceColumn {
+    name: String,
+    encoding: Option<JsonEncoding>,
+    declared_type: Option<ColumnType>,
 }
 
 /// FieldWriter with column indices resolved for a specific batch schema.
@@ -124,22 +134,39 @@ pub(crate) struct ResolvedGroupedWriters {
 }
 
 /// Resolve field writers against a specific batch schema (done once per batch).
+///
+/// A column stored at a type nothing renders is refused here as well as at the
+/// pre-scan check in assembly: that check is what makes the refusal independent
+/// of which rows a query reaches, and this is what makes it impossible to
+/// render `null` in a value's place if a batch ever carries a type the schema
+/// did not announce.
 pub(crate) fn resolve_writers(
     writers: &[FieldWriter],
     batch: &RecordBatch,
-) -> Vec<ResolvedFieldWriter> {
-    writers
-        .iter()
-        .map(|w| match w {
+) -> Result<Vec<ResolvedFieldWriter>> {
+    let mut resolved_writers = Vec::with_capacity(writers.len());
+
+    for writer in writers {
+        let resolved = match writer {
             FieldWriter::Roll {
                 json_key_prefix,
-                source_column_names,
+                sources,
             } => {
-                let idxs: Vec<usize> = source_column_names
+                let present: Vec<(usize, &RollSourceColumn)> = sources
                     .iter()
-                    .filter_map(|c| batch.schema().index_of(c).ok())
+                    .filter_map(|s| Some((batch.schema().index_of(&s.name).ok()?, s)))
                     .collect();
-                let roll_encoder = ResolvedRollEncoder::resolve(batch, &idxs);
+                let roll_sources: Vec<RollSource<'_>> = present
+                    .iter()
+                    .map(|(index, s)| RollSource {
+                        column_index: *index,
+                        encoding: s.encoding.as_ref(),
+                        declared_type: s.declared_type.as_ref(),
+                    })
+                    .collect();
+                let roll_encoder = ResolvedRollEncoder::resolve(batch, &roll_sources)
+                    .map_err(|e| unrenderable(roll_source_names(sources), e))?;
+                let idxs = present.iter().map(|(index, _)| *index).collect();
                 ResolvedFieldWriter {
                     json_key_prefix: json_key_prefix.clone(),
                     indices: ResolvedIndices::Multi(idxs),
@@ -152,22 +179,44 @@ pub(crate) fn resolve_writers(
                 encoding,
                 declared_type,
             } => {
-                let resolved = batch.schema().index_of(column_name).ok().map(|i| {
+                let mut resolved = None;
+                if let Ok(i) = batch.schema().index_of(column_name) {
                     let encoder = resolve_encoder(
                         batch.column(i).data_type(),
                         encoding.as_ref(),
                         declared_type.as_ref(),
-                    );
-                    (i, encoder)
-                });
+                    )
+                    .map_err(|e| unrenderable(column_name.clone(), e))?;
+                    resolved = Some((i, encoder));
+                }
                 ResolvedFieldWriter {
                     json_key_prefix: json_key_prefix.clone(),
                     indices: ResolvedIndices::Single(resolved),
                     roll_encoder: None,
                 }
             }
-        })
-        .collect()
+        };
+        resolved_writers.push(resolved);
+    }
+
+    Ok(resolved_writers)
+}
+
+fn roll_source_names(sources: &[RollSourceColumn]) -> String {
+    sources
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn unrenderable(column: String, cause: Unrenderable) -> anyhow::Error {
+    crate::engine_err!(
+        crate::error::ErrorKind::MalformedChunkData,
+        "column '{}': {}",
+        column,
+        cause
+    )
 }
 
 /// Pre-compute the JSON key prefixes and column resolution for a table's output columns.
@@ -186,9 +235,20 @@ pub(crate) fn build_field_writers(
                             let mut prefix = Vec::with_capacity(col_name.len() + 4);
                             encode_json_string(&snake_to_camel(col_name), &mut prefix);
                             prefix.push(b':');
+                            let sources = columns
+                                .iter()
+                                .map(|name| {
+                                    let declared = desc.columns.get(name);
+                                    RollSourceColumn {
+                                        name: name.clone(),
+                                        encoding: declared.and_then(|c| c.encoding.clone()),
+                                        declared_type: declared.map(|c| c.data_type.clone()),
+                                    }
+                                })
+                                .collect();
                             return FieldWriter::Roll {
                                 json_key_prefix: prefix,
-                                source_column_names: columns.clone(),
+                                sources,
                             };
                         }
                     }
@@ -308,25 +368,37 @@ pub(crate) fn build_grouped_writers(
 pub(crate) fn resolve_grouped_writers(
     gw: &GroupedWriters,
     batch: &RecordBatch,
-) -> ResolvedGroupedWriters {
-    let base_resolved = resolve_writers(&gw.base_writers, batch);
+) -> Result<ResolvedGroupedWriters> {
+    let base_resolved = resolve_writers(&gw.base_writers, batch)?;
+
     let variant_col_idx = batch.schema().index_of(&gw.variant_column).ok();
+    if let Some(idx) = variant_col_idx {
+        // The tag picks which groups a row gets. A tag no reader resolves
+        // would pick none, and every row would render as the bare variant.
+        let column = batch.column(idx);
+        crate::engine_ensure!(
+            StringColumn::resolve(column.as_ref()).is_some(),
+            crate::error::ErrorKind::MalformedChunkData,
+            "variant column '{}' is stored as {}, which is not text",
+            gw.variant_column,
+            column.data_type()
+        );
+    }
+
     let mut variant_resolved: VariantGroups<ResolvedFieldWriter> = HashMap::new();
     for (variant, groups) in &gw.variant_writers {
-        let resolved_groups: Vec<_> = groups
-            .iter()
-            .map(|(key, writers)| {
-                let resolved = resolve_writers(writers, batch);
-                (key.clone(), resolved)
-            })
-            .collect();
+        let mut resolved_groups = Vec::with_capacity(groups.len());
+        for (key, writers) in groups {
+            resolved_groups.push((key.clone(), resolve_writers(writers, batch)?));
+        }
         variant_resolved.insert(variant.clone(), resolved_groups);
     }
-    ResolvedGroupedWriters {
+
+    Ok(ResolvedGroupedWriters {
         base_resolved,
         variant_col_idx,
         variant_resolved,
-    }
+    })
 }
 
 /// Write all fields for a single row as JSON key-value pairs using resolved writers.
@@ -372,13 +444,9 @@ fn write_row_grouped(
     // Read the variant column to determine the variant
     let tag_value = resolved.variant_col_idx.and_then(|idx| {
         let col = batch.column(idx);
-        col.as_any().downcast_ref::<StringArray>().and_then(|arr| {
-            if arr.is_null(row) {
-                None
-            } else {
-                Some(arr.value(row))
-            }
-        })
+        StringColumn::resolve(col.as_ref())
+            .expect("checked when the writers were resolved")
+            .value(row)
     });
 
     if let Some(tag) = tag_value {
@@ -769,6 +837,27 @@ mod tests {
             assert_eq!(narrow.cmp_rows(0, &wide, 0), std::cmp::Ordering::Less); // 9 < 10
             assert_eq!(narrow.cmp_rows(1, &wide, 0), std::cmp::Ordering::Greater); // 11 > 10
             assert_eq!(narrow.cmp_rows(1, &wide, 1), std::cmp::Ordering::Less); // 11 < 300
+        }
+    }
+
+    /// A text sort key stored wide still orders. It used to resolve to nothing,
+    /// and a `None` sort column compares every pair as equal, so the items came
+    /// out in file order without a word.
+    ///
+    /// Covers CT-6 · INV-D7
+    /// Covers CT-6 · INV-O5
+    #[test]
+    fn a_text_sort_key_orders_at_every_text_type() {
+        let rows = vec!["b", "a", "c"];
+        let plain = sort_column(StringArray::from(rows.clone()));
+
+        for wide in [
+            sort_column(LargeStringArray::from(rows.clone())),
+            sort_column(StringViewArray::from(rows.clone())),
+        ] {
+            assert_eq!(wide.cmp_rows(1, &plain, 0), std::cmp::Ordering::Less); // a < b
+            assert_eq!(wide.cmp_rows(2, &plain, 0), std::cmp::Ordering::Greater); // c > b
+            assert_eq!(wide.cmp_rows(0, &wide, 0), std::cmp::Ordering::Equal);
         }
     }
 

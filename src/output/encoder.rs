@@ -1,3 +1,4 @@
+use crate::integers::is_integer;
 use crate::metadata::{ColumnType, JsonEncoding};
 use arrow::array::*;
 use arrow::datatypes::DataType;
@@ -6,6 +7,23 @@ use serde::Serializer;
 /// Function pointer type for pre-resolved encoders.
 pub type EncoderFn = fn(&dyn Array, usize, &mut Vec<u8>);
 
+/// A column stored at a type no encoder renders.
+///
+/// The one outcome resolution may not answer with an encoder: `null` in its
+/// place tells the client the row has no value, when the truth is that the
+/// chunk stores one the engine cannot read (INV-E3). Assembly turns this into
+/// `MalformedChunkData` before any row is rendered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unrenderable(pub DataType);
+
+impl std::fmt::Display for Unrenderable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "no encoder renders a column stored as {}", self.0)
+    }
+}
+
+impl std::error::Error for Unrenderable {}
+
 /// Resolve an encoder function once per column based on DataType and encoding.
 /// Eliminates per-row DataType match + downcast dispatch in the hot loop.
 ///
@@ -13,16 +31,18 @@ pub type EncoderFn = fn(&dyn Array, usize, &mut Vec<u8>);
 /// and the two drift — an archive outlives the catalog that described it. Where
 /// an encoder's array type is not the one in front of it, the column falls back
 /// to its physical encoder here, once, rather than downcasting per row and
-/// taking the thread down mid-response (INV-E1).
+/// taking the thread down mid-response (INV-E1). Where there is no physical
+/// encoder either, the column is refused rather than rendered as `null`.
 pub fn resolve_encoder(
     data_type: &DataType,
     encoding: Option<&JsonEncoding>,
     declared_type: Option<&ColumnType>,
-) -> EncoderFn {
+) -> Result<EncoderFn, Unrenderable> {
     let declared: Option<EncoderFn> = match encoding {
-        // Reads its own type and emits null for anything else.
-        Some(JsonEncoding::DecimalString) => Some(encode_bignum),
-        Some(JsonEncoding::HexNumber) => Some(resolve_hex_number_encoder(data_type, declared_type)),
+        Some(JsonEncoding::DecimalString) => (is_integer(data_type)
+            || matches!(data_type, DataType::Decimal128(_, _)))
+        .then_some(encode_bignum as EncoderFn),
+        Some(JsonEncoding::HexNumber) => resolve_hex_number_encoder(data_type, declared_type),
         Some(JsonEncoding::JsonVerbatim) => {
             matches!(data_type, DataType::Utf8).then_some(encode_json_passthrough as EncoderFn)
         }
@@ -39,7 +59,10 @@ pub fn resolve_encoder(
         None => None,
     };
 
-    declared.unwrap_or_else(|| resolve_declared_encoder(data_type, declared_type))
+    match declared {
+        Some(encoder) => Ok(encoder),
+        None => resolve_declared_encoder(data_type, declared_type),
+    }
 }
 
 /// `hexBytes` — `0x` and lowercase hex, whatever the column is stored as. A text
@@ -68,10 +91,13 @@ fn resolve_base58_encoder(data_type: &DataType) -> Option<EncoderFn> {
 /// The physical encoder, except that a timestamp's unit is the *declared* one
 /// (INV-O9). Storage picks a resolution per chunk; the catalog says what the
 /// number means, and only the pair of them decides what to emit.
-fn resolve_declared_encoder(data_type: &DataType, declared_type: Option<&ColumnType>) -> EncoderFn {
+fn resolve_declared_encoder(
+    data_type: &DataType,
+    declared_type: Option<&ColumnType>,
+) -> Result<EncoderFn, Unrenderable> {
     use arrow::datatypes::TimeUnit;
 
-    match (data_type, declared_type) {
+    let encoder: EncoderFn = match (data_type, declared_type) {
         (DataType::Timestamp(TimeUnit::Millisecond, _), Some(ColumnType::TimestampMillisecond)) => {
             encode_timestamp_millisecond_raw
         }
@@ -84,30 +110,16 @@ fn resolve_declared_encoder(data_type: &DataType, declared_type: Option<&ColumnT
         (DataType::Timestamp(TimeUnit::Second, _), Some(ColumnType::TimestampSecond)) => {
             encode_timestamp_second
         }
-        _ => resolve_value_encoder(data_type),
-    }
+        _ => return resolve_value_encoder(data_type),
+    };
+    Ok(encoder)
 }
 
-/// A declared integer type bounds the values, not the storage: the writer picks
-/// a width per chunk, so the same logical column arrives as `int16` in one and
-/// `int32` in the next. An encoding that reads an integer has to accept every
-/// width, or the same row renders two ways (INV-D7).
-fn is_integer(data_type: &DataType) -> bool {
-    matches!(
-        data_type,
-        DataType::Int8
-            | DataType::Int16
-            | DataType::Int32
-            | DataType::Int64
-            | DataType::UInt8
-            | DataType::UInt16
-            | DataType::UInt32
-            | DataType::UInt64
-    )
-}
-
-fn resolve_value_encoder(data_type: &DataType) -> EncoderFn {
-    match data_type {
+/// The encoder for a physical type, or the refusal. A list or a struct is
+/// renderable only if everything inside it is: the element encoders are
+/// resolved per value, and this is where they are checked.
+fn resolve_value_encoder(data_type: &DataType) -> Result<EncoderFn, Unrenderable> {
+    let encoder: EncoderFn = match data_type {
         DataType::Boolean => encode_boolean,
         DataType::Int8 => encode_int8,
         DataType::UInt8 => encode_uint8,
@@ -125,14 +137,19 @@ fn resolve_value_encoder(data_type: &DataType) -> EncoderFn {
         DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, _) => {
             encode_timestamp_millisecond
         }
-        DataType::List(_) => encode_list_value,
-        DataType::Struct(_) => encode_struct_value,
-        _ => encode_null_value,
-    }
-}
-
-fn encode_null_value(_array: &dyn Array, _row: usize, buf: &mut Vec<u8>) {
-    buf.extend_from_slice(b"null");
+        DataType::List(item) => {
+            resolve_value_encoder(item.data_type())?;
+            encode_list_value
+        }
+        DataType::Struct(fields) => {
+            for field in fields {
+                resolve_value_encoder(field.data_type())?;
+            }
+            encode_struct_value
+        }
+        other => return Err(Unrenderable(other.clone())),
+    };
+    Ok(encoder)
 }
 
 fn encode_boolean(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
@@ -395,10 +412,15 @@ fn encode_struct_value(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
     encode_struct(a, row, buf);
 }
 
-/// Encode a single value from an Arrow array to JSON bytes (generic fallback).
-/// Prefer `resolve_encoder` + direct call in hot loops.
-pub fn encode_value(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
-    resolve_value_encoder(array.data_type())(array, row, buf);
+/// Encode one element of a list or one member of a struct.
+///
+/// Resolved per value rather than once, which is what the nested encoders can
+/// afford; the element type was checked when the container's encoder was
+/// resolved, so there is nothing left for this to refuse.
+fn encode_value(array: &dyn Array, row: usize, buf: &mut Vec<u8>) {
+    let encoder = resolve_value_encoder(array.data_type())
+        .expect("checked when the containing column's encoder was resolved");
+    encoder(array, row, buf);
 }
 
 /// Encode a value as a bignum (quoted string number).
@@ -523,27 +545,59 @@ pub fn encode_roll(batch: &RecordBatch, row: usize, column_indices: &[usize], bu
     buf.push(b']');
 }
 
+/// A roll source as the catalog declares it: the same trio `resolve_encoder`
+/// takes for a regular column, so the roll renders each source the way the
+/// column would render on its own.
+pub struct RollSource<'a> {
+    pub column_index: usize,
+    pub encoding: Option<&'a JsonEncoding>,
+    pub declared_type: Option<&'a ColumnType>,
+}
+
 /// Pre-resolved encoder for a Roll column. Resolves once per batch, reused per row.
 pub struct ResolvedRollEncoder {
-    /// Per-column: (column_index, encoder_fn, is_last_and_list)
-    columns: Vec<(usize, EncoderFn, bool)>,
+    columns: Vec<RollColumn>,
+}
+
+enum RollColumn {
+    Value {
+        index: usize,
+        encoder: EncoderFn,
+    },
+    /// A trailing list is spliced into the roll, one element after another.
+    Splice {
+        index: usize,
+        element_encoder: EncoderFn,
+    },
 }
 
 impl ResolvedRollEncoder {
-    /// Resolve encoders for a Roll's column indices against a specific batch.
-    pub fn resolve(batch: &RecordBatch, column_indices: &[usize]) -> Self {
-        let columns = column_indices
-            .iter()
-            .enumerate()
-            .map(|(i, &col_idx)| {
-                let col = batch.column(col_idx);
-                let is_last = i == column_indices.len() - 1;
-                let is_list = matches!(col.data_type(), DataType::List(_));
-                let encoder = resolve_value_encoder(col.data_type());
-                (col_idx, encoder, is_last && is_list)
-            })
-            .collect();
-        Self { columns }
+    /// Resolve encoders for a Roll's sources against a specific batch.
+    ///
+    /// Resolved with the declared encoding, as the pre-scan check in assembly
+    /// resolves them: a source stored as bytes under `base58` is an address
+    /// there and must be one here, not `0x…` hex.
+    pub fn resolve(batch: &RecordBatch, sources: &[RollSource<'_>]) -> Result<Self, Unrenderable> {
+        let mut columns = Vec::with_capacity(sources.len());
+
+        for (i, source) in sources.iter().enumerate() {
+            let data_type = batch.column(source.column_index).data_type();
+            let is_last = i == sources.len() - 1;
+
+            let column = match data_type {
+                DataType::List(item) if is_last => RollColumn::Splice {
+                    index: source.column_index,
+                    element_encoder: resolve_encoder(item.data_type(), source.encoding, None)?,
+                },
+                _ => RollColumn::Value {
+                    index: source.column_index,
+                    encoder: resolve_encoder(data_type, source.encoding, source.declared_type)?,
+                },
+            };
+            columns.push(column);
+        }
+
+        Ok(Self { columns })
     }
 
     /// Encode the roll for a given row using pre-resolved encoders.
@@ -552,34 +606,42 @@ impl ResolvedRollEncoder {
         buf.push(b'[');
         let mut has_items = false;
 
-        for &(col_idx, encoder, is_last_list) in &self.columns {
-            let col = batch.column(col_idx);
+        for column in &self.columns {
+            match *column {
+                RollColumn::Value { index, encoder } => {
+                    let col = batch.column(index);
+                    if col.is_null(row) {
+                        break;
+                    }
 
-            if col.is_null(row) {
-                break;
-            }
-
-            if is_last_list {
-                let list = col
-                    .as_any()
-                    .downcast_ref::<GenericListArray<i32>>()
-                    .unwrap();
-                let values = list.value(row);
-                // List elements need per-element dispatch (heterogeneous types possible)
-                let elem_encoder = resolve_value_encoder(values.data_type());
-                for j in 0..values.len() {
                     if has_items {
                         buf.push(b',');
                     }
-                    elem_encoder(values.as_ref(), j, buf);
+                    encoder(col.as_ref(), row, buf);
                     has_items = true;
                 }
-            } else {
-                if has_items {
-                    buf.push(b',');
+                RollColumn::Splice {
+                    index,
+                    element_encoder,
+                } => {
+                    let col = batch.column(index);
+                    if col.is_null(row) {
+                        break;
+                    }
+
+                    let list = col
+                        .as_any()
+                        .downcast_ref::<GenericListArray<i32>>()
+                        .expect("resolved as a list");
+                    let values = list.value(row);
+                    for j in 0..values.len() {
+                        if has_items {
+                            buf.push(b',');
+                        }
+                        element_encoder(values.as_ref(), j, buf);
+                        has_items = true;
+                    }
                 }
-                encoder(col.as_ref(), row, buf);
-                has_items = true;
             }
         }
 
@@ -626,7 +688,7 @@ fn encode_hex_bytes(bytes: &[u8], buf: &mut Vec<u8>) {
 fn resolve_hex_number_encoder(
     data_type: &DataType,
     declared_type: Option<&ColumnType>,
-) -> EncoderFn {
+) -> Option<EncoderFn> {
     let physical_bytes = match data_type {
         DataType::UInt8 | DataType::Int8 => 1,
         DataType::UInt16 | DataType::Int16 => 2,
@@ -634,11 +696,11 @@ fn resolve_hex_number_encoder(
         DataType::UInt64 | DataType::Int64 => 8,
         // The declaration is checked at load (`metadata::loader::validate`), so
         // reaching here means the chunk stores something other than an integer
-        // under a column the catalog calls one.
-        other => return resolve_value_encoder(other),
+        // under a column the catalog calls one. The physical encoder decides.
+        _ => return None,
     };
 
-    match declared_type {
+    let encoder: EncoderFn = match declared_type {
         Some(ColumnType::UInt8) => encode_hex_number_u8,
         Some(ColumnType::UInt16) => encode_hex_number_u16,
         Some(ColumnType::UInt32) => encode_hex_number_u32,
@@ -649,7 +711,8 @@ fn resolve_hex_number_encoder(
             4 => encode_hex_number_u32,
             _ => encode_hex_number_u64,
         },
-    }
+    };
+    Some(encoder)
 }
 
 /// The stored value of an integer column, whatever width and signedness the
@@ -955,6 +1018,59 @@ mod tests {
         assert_eq!(String::from_utf8(buf).unwrap(), r#"["a0_val","b1","b2"]"#);
     }
 
+    /// A roll source renders as the column would on its own: an address stored
+    /// as bytes under `base58` is an address in the roll too, not `0x…` hex,
+    /// and the trailing list's elements follow the same encoding.
+    ///
+    /// Covers CT-6 · INV-O10
+    #[test]
+    fn a_roll_renders_its_sources_at_their_declared_encoding() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a0", DataType::Binary, true),
+            Field::new(
+                "rest",
+                DataType::List(Arc::new(Field::new("item", DataType::Binary, true))),
+                true,
+            ),
+        ]));
+
+        let mut rest = ListBuilder::new(BinaryBuilder::new()).with_field(Field::new(
+            "item",
+            DataType::Binary,
+            true,
+        ));
+        rest.values().append_value([0u8, 1]);
+        rest.append(true);
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(BinaryArray::from(vec![Some(&[0u8, 0, 1][..])])),
+                Arc::new(rest.finish()),
+            ],
+        )
+        .unwrap();
+
+        let base58 = JsonEncoding::Base58;
+        let sources = [
+            RollSource {
+                column_index: 0,
+                encoding: Some(&base58),
+                declared_type: Some(&ColumnType::String),
+            },
+            RollSource {
+                column_index: 1,
+                encoding: Some(&base58),
+                declared_type: Some(&ColumnType::ListString),
+            },
+        ];
+        let roll = ResolvedRollEncoder::resolve(&batch, &sources).unwrap();
+
+        let mut buf = Vec::new();
+        roll.encode(&batch, 0, &mut buf);
+        assert_eq!(String::from_utf8(buf).unwrap(), r#"["112","12"]"#);
+    }
+
     /// Covers CT-6 · INV-O8
     #[test]
     fn test_snake_to_camel() {
@@ -1050,7 +1166,8 @@ mod tests {
             array.data_type(),
             Some(&JsonEncoding::HexNumber),
             declared.as_ref(),
-        );
+        )
+        .unwrap();
         let mut buf = Vec::new();
         encoder(array.as_ref(), 0, &mut buf);
         String::from_utf8(buf).unwrap()
@@ -1153,7 +1270,8 @@ mod tests {
             array.data_type(),
             Some(&JsonEncoding::SolanaTxVersion),
             Some(&ColumnType::Int16),
-        );
+        )
+        .unwrap();
         let mut buf = Vec::new();
         encoder(array.as_ref(), 0, &mut buf);
         String::from_utf8(buf).unwrap()
@@ -1212,7 +1330,7 @@ mod tests {
             JsonEncoding::HexBytes,
             JsonEncoding::Base58,
         ] {
-            let encoder = resolve_encoder(wrong.data_type(), Some(&encoding), None);
+            let encoder = resolve_encoder(wrong.data_type(), Some(&encoding), None).unwrap();
             let mut buf = Vec::new();
             encoder(wrong.as_ref(), 0, &mut buf);
 
@@ -1246,7 +1364,7 @@ mod tests {
         encoding: Option<&JsonEncoding>,
         declared: Option<&ColumnType>,
     ) -> String {
-        let encoder = resolve_encoder(array.data_type(), encoding, declared);
+        let encoder = resolve_encoder(array.data_type(), encoding, declared).unwrap();
         let mut buf = Vec::new();
         encoder(array.as_ref(), 0, &mut buf);
         String::from_utf8(buf).unwrap()

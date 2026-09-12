@@ -1,6 +1,7 @@
 use crate::integers::{BlockNumbers, IntColumn};
 use crate::metadata::{DatasetDescription, TableDescription, VirtualField, WeightSource};
 use crate::query::Plan;
+use crate::text::StringColumn;
 use arrow::array::*;
 use arrow::record_batch::RecordBatch;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -499,10 +500,7 @@ fn equal_key_value(a: &dyn Array, ai: usize, b: &dyn Array, bi: usize) -> bool {
     if let (Some(a), Some(b)) = (IntColumn::resolve(a), IntColumn::resolve(b)) {
         return a.value(ai) == b.value(bi);
     }
-    if let (Some(a), Some(b)) = (
-        a.as_any().downcast_ref::<StringArray>(),
-        b.as_any().downcast_ref::<StringArray>(),
-    ) {
+    if let (Some(a), Some(b)) = (StringColumn::resolve(a), StringColumn::resolve(b)) {
         return a.value(ai) == b.value(bi);
     }
     if let (Some(a), Some(b)) = (
@@ -585,7 +583,7 @@ fn hash_array_value(col: &dyn arrow::array::Array, row: usize, hasher: &mut impl
 
     if let Some(ints) = crate::integers::IntColumn::resolve(col) {
         ints.value(row).hash(hasher);
-    } else if let Some(a) = col.as_any().downcast_ref::<StringArray>() {
+    } else if let Some(a) = StringColumn::resolve(col) {
         a.value(row).hash(hasher);
     } else if let Some(a) = col.as_any().downcast_ref::<GenericListArray<i32>>() {
         let values = a.value(row);

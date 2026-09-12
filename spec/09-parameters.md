@@ -72,11 +72,14 @@ standing note that a longer gap misses the parent. That divergence is recorded i
 ## 9.4 Merge-gate thresholds
 
 Used by the gates in [08-conformance.md](08-conformance.md). All of these ratchet
-upward only: a change may raise them, never lower them.
+upward only: a change may raise them, never lower them. The one exception is a
+matrix correction — a row's grade lowered because its cited tests never reached
+the invariant, with no test removed — which re-baselines the observed value and
+its target together ([ADR-14](decisions/ADR-14-a-matrix-correction-rebaselines-the-ratchet.md)).
 
 | Parameter | Role | Observed | Target |
 |---|---|---|---|
-| `P-COV-PROPERTY` | Fraction of invariants at status **C** in the traceability matrix ([MG-1](08-conformance.md#812-merge-gates)) | 0.73 (62 of 85) | ⚠ 0.73, then ratchet |
+| `P-COV-PROPERTY` | Fraction of invariants at status **C** in the traceability matrix ([MG-1](08-conformance.md#812-merge-gates)) | 0.69 (59 of 85) | ⚠ 0.69, then ratchet |
 | `P-COV-DIFF` | Line coverage of lines a change touches ([MG-2](08-conformance.md#812-merge-gates)) | unmeasured | ⚠ 0.80 |
 | `P-COV-TOTAL` | Whole-repository line coverage floor ([MG-2](08-conformance.md#812-merge-gates)) | unmeasured | ⚠ 0.70 |
 | `P-FLAKE-RETRIES` | Retries a test gets before it is quarantined ([MG-7](08-conformance.md#812-merge-gates)) | none | ⚠ 1 |
