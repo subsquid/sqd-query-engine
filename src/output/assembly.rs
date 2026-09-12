@@ -176,6 +176,9 @@ enum FmtOutput {
     Arrow(Option<ArrowOutput>),
 }
 
+/// The tables every query scans: the block table and each table with an item
+/// request. A relation's target is not among them — it is opened only when the
+/// relation has rows to follow, and its absence is reported there (INV-E4).
 fn ensure_required_tables_present(plan: &Plan, chunk: &dyn ChunkReader) -> Result<()> {
     let ensure_present = |table: &str| {
         crate::engine_ensure!(
@@ -190,9 +193,6 @@ fn ensure_required_tables_present(plan: &Plan, chunk: &dyn ChunkReader) -> Resul
     ensure_present(&plan.block_table)?;
     for table_plan in &plan.table_plans {
         ensure_present(&table_plan.table)?;
-        for relation in &table_plan.relations {
-            ensure_present(&relation.target_table)?;
-        }
     }
 
     Ok(())
@@ -437,8 +437,6 @@ fn scan_tables(
 
         let has_primary_rows = batches.iter().any(|b| b.num_rows() > 0);
         if has_primary_rows && !table_plan.relations.is_empty() {
-            // (relation tables are accessed via chunk.scan() — no pre-opening needed)
-
             // Build key filters for each relation (before parallel scan)
             let t_kf = timer!();
             let primary_bn_col = table_desc.block_number_column.as_str();
@@ -574,6 +572,14 @@ fn scan_tables(
                     let kf_opt = &key_filters[rel_idx];
                     let hf_opt = &hierarchical_filters[rel_idx];
 
+                    // Use filtered batches for join source when source_predicates are set.
+                    // A relation with no rows to follow never opens its target.
+                    let source_batches =
+                        rel_filtered_batches[rel_idx].as_deref().unwrap_or(&batches);
+                    if source_batches.iter().all(|b| b.num_rows() == 0) {
+                        return None;
+                    }
+
                     let rel_table_desc = metadata.table(&rel.target_table);
 
                     let rel_output_cols =
@@ -616,10 +622,6 @@ fn scan_tables(
 
                     let left_key: Vec<&str> = rel.left_key.iter().map(String::as_str).collect();
                     let right_key: Vec<&str> = rel.right_key.iter().map(String::as_str).collect();
-
-                    // Use filtered batches for join source when source_predicates are set
-                    let source_batches =
-                        rel_filtered_batches[rel_idx].as_deref().unwrap_or(&batches);
 
                     let t_join = if profile {
                         Some(std::time::Instant::now())
@@ -765,9 +767,7 @@ fn execute_chunk_fmt(
 
     let t_total = timer!();
 
-    // 0. A missing table is an incompatible chunk, not an empty table. Check
-    //    every table the plan names before a zero-row primary scan can hide a
-    //    missing relation target (INV-E4).
+    // 0. A missing table is an incompatible chunk, not an empty table (INV-E4).
     ensure_required_tables_present(plan, chunk)?;
     ensure_columns_renderable(plan, metadata, chunk, format)?;
 

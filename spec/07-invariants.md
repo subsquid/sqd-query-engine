@@ -548,7 +548,24 @@ data is read. No output precedes any error.
 *Why:* `null` tells the client "this transaction had no `sighash`". The truth is "this chunk predates `sighash`". Those call for different actions.
 
 ### INV-E4
-**A missing table is an error** (`TableNotFound`).
+**A missing table is an error** (`TableNotFound`) — at the moment the query
+needs it, and not before.
+
+The block table and every table with an item request are needed by every
+query that names them, whether or not any row matches. A relation's target is
+needed only once the relation has a row to follow: a relation with no inputs
+never opens its target, so its absence is not observed, and the query answers
+as it would on a complete chunk.
+
+The engine MUST NOT open a table the query does not name. What else the chunk
+directory holds — a stray file, a table of another kind too damaged to read —
+is not the query's business. A table the query does open and cannot read is
+`MalformedChunkData`.
+
+*Why:* a chunk that predates a table is a chunk with nothing in it, and a query
+that would not have touched the table has no reason to fail. Opening every file
+in the directory up front turns each of them into a way to fail a query that
+asked for none of it, and charges a header-only query for every footer parse.
 
 ### INV-E5
 **Fork detection.** When `parentBlockHash` is supplied and the chunk knows the
