@@ -26,22 +26,18 @@ Compared against the reference implementation, as of 2026-09-05.
 
 | # | Gap | Invariant | Sev |
 |---|---|---|---|
-| 37 | A relation onto a table the chunk lacks is an error even when the primary scan is empty | [INV-E4](07-invariants.md#inv-e4) | **S3** |
-| 38 | Every parquet file in the chunk directory is opened for every query | [INV-E4](07-invariants.md#inv-e4) | **S3** |
 | 44 | The weight model differs from the reference in four places | [INV-B5](07-invariants.md#inv-b5) | **S4** |
 | 31 | A block number above 2³¹ stored in `Int32` is read as negative by the range filter | [INV-D7](07-invariants.md#inv-d7) | **S4** |
 | 32 | The bloom's hash function is not pinned by the manifest, and the version it resolves to today ignores the seed above 240 bytes | [INV-P9](07-invariants.md#inv-p9) | **S4** |
 
 Every dataset [chapter 3](03-catalog.md) names is served except `fuel`, which is
-out of scope ([ADR-10](decisions/ADR-10-fuel-is-out-of-scope.md)). On a
-well-formed chunk carrying every table the query names, the only requests the
-reference answers and this engine refuses are the ones the divergence table
-below says are deliberate. Outside that case gaps 37 and 38 refuse as well: a
-missing target table, and an unreadable file beside the ones the query reads.
+out of scope ([ADR-10](decisions/ADR-10-fuel-is-out-of-scope.md)). The only
+requests the reference answers and this engine refuses are the ones the
+divergence table below says are deliberate.
 
 Gaps 33 to 44 came from one review, done before the engine goes to a fleet of
 workers that nobody can patch quickly. The number 34 was never assigned, and 33,
-35, 36 and 39 to 43 are closed, so three of those entries are left. The review ran the reference
+35 to 43 are closed, so one of those entries is left. The review ran the reference
 and this engine side by side: every filter, relation, alias and field of all
 seven datasets diffed against the reference's request macros; about 330
 request probes and about 700 response runs on the real chunks and every
@@ -78,34 +74,6 @@ transcription of the older revision. The lag is closed, and
 `the_catalogs_serve_every_field_the_reference_serves` now reads the reference's
 field macros off the checkout the fixture tree comes from, so the next such
 move fails a test rather than waiting for a review.
-
----
-
-## S3 — Loud
-
-### 37. A relation onto a table the chunk lacks is an error even when the primary scan is empty
-
-`ensure_required_tables_present` runs before any scan. A chunk with no
-`statediffs` file, queried with `logs: [{transactionStateDiffs: true}]` over an
-empty logs table, gets `TableNotFound`; the reference opens the target only when
-the relation has inputs and answers with header-only blocks.
-[INV-E4](07-invariants.md#inv-e4) says a missing table is an error and does not
-say when; it should.
-
-*First test:* an EVM fixture chunk with `statediffs.parquet` removed — every
-chunk in the tree carries one — queried as above, asserting the reference's
-answer.
-
-### 38. Every parquet file in the chunk directory is opened for every query
-
-`ParquetChunk::open` maps every `*.parquet` in the directory and parses each
-footer before the plan runs. A truncated `traces.parquet` or a stray temporary
-file fails a blocks-only query with an untyped error; the reference opens tables
-lazily and answers. It is also a cost: a header-only query pays every table's
-footer parse.
-
-*First test:* a chunk with one zero-byte extra parquet file and a query that does
-not touch it.
 
 ---
 

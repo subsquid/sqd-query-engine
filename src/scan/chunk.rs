@@ -15,14 +15,7 @@ use parquet::file::statistics::Statistics;
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
-/// A chunk of parquet data — a directory containing one parquet file per table.
-pub struct ParquetChunk {
-    path: PathBuf,
-    /// Cached table readers, keyed by table name.
-    tables: HashMap<String, ParquetTable>,
-}
+use std::sync::{Arc, RwLock};
 
 /// A single parquet table file with cached metadata and memory-mapped data.
 pub struct ParquetTable {
@@ -55,69 +48,66 @@ pub enum StatValue {
     FixedLenByteArray(Vec<u8>),
 }
 
-impl ParquetChunk {
-    /// Open a chunk directory. Discovers all .parquet files.
-    pub fn open(path: &Path) -> Result<Self> {
-        let mut tables = HashMap::new();
+/// A `ChunkReader` backed by a directory of parquet files, one per table.
+///
+/// A table is opened the first time a query touches it and kept for the
+/// reader's lifetime. Nothing else in the directory is read, so a file the
+/// query does not name — a stray temporary, a truncated table of another
+/// kind — cannot fail it, and a header-only query pays for one footer.
+pub struct ParquetChunkReader {
+    chunk_dir: PathBuf,
+    tables: RwLock<HashMap<String, Arc<ParquetTable>>>,
+}
 
-        for entry in std::fs::read_dir(path)
-            .with_context(|| format!("reading chunk directory {}", path.display()))?
-        {
-            let entry = entry?;
-            let file_path = entry.path();
-            if file_path.extension().and_then(|e| e.to_str()) == Some("parquet") {
-                let table_name = file_path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .to_string();
-
-                let table = ParquetTable::open(&file_path)?;
-                tables.insert(table_name, table);
-            }
-        }
-
+impl ParquetChunkReader {
+    /// Create a reader for a chunk directory. No table is opened yet.
+    pub fn open(chunk_dir: &Path) -> Result<Self> {
+        anyhow::ensure!(
+            chunk_dir.is_dir(),
+            "chunk directory {} does not exist",
+            chunk_dir.display()
+        );
         Ok(Self {
-            path: path.to_path_buf(),
-            tables,
+            chunk_dir: chunk_dir.to_path_buf(),
+            tables: RwLock::new(HashMap::new()),
         })
     }
 
     pub fn path(&self) -> &Path {
-        &self.path
+        &self.chunk_dir
     }
 
-    /// Get a table by name.
-    pub fn table(&self, name: &str) -> Option<&ParquetTable> {
-        self.tables.get(name)
+    fn table_path(&self, table: &str) -> PathBuf {
+        self.chunk_dir.join(format!("{table}.parquet"))
     }
 
-    /// List all table names in this chunk.
-    pub fn table_names(&self) -> Vec<&str> {
-        self.tables.keys().map(|s| s.as_str()).collect()
-    }
-}
+    /// The table, opened on first use. `None` when the chunk has no file for
+    /// it; an error when the file is there but is not a parquet file the
+    /// engine can read.
+    pub fn table(&self, table: &str) -> Result<Option<Arc<ParquetTable>>> {
+        if let Some(opened) = self.tables.read().unwrap().get(table) {
+            return Ok(Some(opened.clone()));
+        }
 
-/// A `ChunkReader` backed by a directory of parquet files.
-/// Caches opened `ParquetTable` instances for reuse across scans.
-pub struct ParquetChunkReader {
-    chunk_dir: PathBuf,
-    cache: HashMap<String, ParquetTable>,
-}
+        let path = self.table_path(table);
+        if !path.is_file() {
+            return Ok(None);
+        }
 
-impl ParquetChunkReader {
-    /// Create a reader for a chunk directory, pre-opening all parquet files.
-    pub fn open(chunk_dir: &Path) -> Result<Self> {
-        let chunk = ParquetChunk::open(chunk_dir)?;
-        Ok(Self {
-            chunk_dir: chunk_dir.to_path_buf(),
-            cache: chunk.tables,
-        })
-    }
+        let opened = match ParquetTable::open(&path) {
+            Ok(opened) => Arc::new(opened),
+            Err(e) => crate::engine_bail!(
+                crate::error::ErrorKind::MalformedChunkData,
+                "table '{}' cannot be opened: {:#}",
+                table,
+                e
+            ),
+        };
 
-    /// Create a reader from an existing table cache (for benchmark reuse).
-    pub fn from_cache(chunk_dir: PathBuf, cache: HashMap<String, ParquetTable>) -> Self {
-        Self { chunk_dir, cache }
+        // Two scans racing on the same table both open it; either copy serves.
+        let mut tables = self.tables.write().unwrap();
+        let entry = tables.entry(table.to_string()).or_insert(opened);
+        Ok(Some(entry.clone()))
     }
 }
 
@@ -127,11 +117,14 @@ impl ChunkReader for ParquetChunkReader {
     }
 
     fn scan(&self, table: &str, request: &ScanRequest) -> Result<Vec<RecordBatch>> {
-        let parquet_table = match self.cache.get(table) {
-            Some(t) => t,
-            None => return Ok(Vec::new()),
+        let Some(parquet_table) = self.table(table)? else {
+            crate::engine_bail!(
+                crate::error::ErrorKind::TableNotFound,
+                "table '{}' is not found in the chunk",
+                table
+            );
         };
-        scanner::scan(parquet_table, request)
+        scanner::scan(&parquet_table, request)
     }
 
     fn next_block_range_end(
@@ -140,15 +133,17 @@ impl ChunkReader for ParquetChunkReader {
         block_column: &str,
         from_block: u64,
     ) -> Option<u64> {
-        scanner::next_block_range_end(self.cache.get(table)?, block_column, from_block)
+        let table = self.table(table).ok()??;
+        scanner::next_block_range_end(&table, block_column, from_block)
     }
 
     fn has_table(&self, table: &str) -> bool {
-        self.cache.contains_key(table) || self.chunk_dir.join(format!("{}.parquet", table)).exists()
+        self.table_path(table).is_file()
     }
 
     fn table_schema(&self, table: &str) -> Option<SchemaRef> {
-        self.cache.get(table).map(|t| t.schema().clone())
+        let table = self.table(table).ok()??;
+        Some(table.schema().clone())
     }
 }
 
@@ -395,21 +390,21 @@ mod tests {
             return;
         }
 
-        let chunk = ParquetChunk::open(&solana_chunk_path()).unwrap();
-        let mut names = chunk.table_names();
-        names.sort();
-        assert_eq!(
-            names,
-            vec![
-                "balances",
-                "blocks",
-                "instructions",
-                "logs",
-                "rewards",
-                "token_balances",
-                "transactions"
-            ]
-        );
+        let chunk = ParquetChunkReader::open(&solana_chunk_path()).unwrap();
+        for name in [
+            "balances",
+            "blocks",
+            "instructions",
+            "logs",
+            "rewards",
+            "token_balances",
+            "transactions",
+        ] {
+            assert!(chunk.has_table(name), "{name} is missing");
+            assert!(chunk.table(name).unwrap().is_some(), "{name} does not open");
+        }
+        assert!(!chunk.has_table("receipts"));
+        assert!(chunk.table("receipts").unwrap().is_none());
     }
 
     #[test]
@@ -419,8 +414,8 @@ mod tests {
             return;
         }
 
-        let chunk = ParquetChunk::open(&solana_chunk_path()).unwrap();
-        let instructions = chunk.table("instructions").unwrap();
+        let chunk = ParquetChunkReader::open(&solana_chunk_path()).unwrap();
+        let instructions = chunk.table("instructions").unwrap().unwrap();
 
         assert!(instructions.num_rows() > 0);
         assert!(instructions.num_row_groups() > 0);
@@ -436,8 +431,8 @@ mod tests {
             return;
         }
 
-        let chunk = ParquetChunk::open(&solana_chunk_path()).unwrap();
-        let blocks = chunk.table("blocks").unwrap();
+        let chunk = ParquetChunkReader::open(&solana_chunk_path()).unwrap();
+        let blocks = chunk.table("blocks").unwrap().unwrap();
 
         // blocks.number should have stats
         let stats = blocks.column_stats(0, "number");
@@ -451,8 +446,8 @@ mod tests {
             return;
         }
 
-        let chunk = ParquetChunk::open(&solana_chunk_path()).unwrap();
-        let blocks = chunk.table("blocks").unwrap();
+        let chunk = ParquetChunkReader::open(&solana_chunk_path()).unwrap();
+        let blocks = chunk.table("blocks").unwrap().unwrap();
 
         let batches = blocks.read(&["number", "hash"], None, 1000).unwrap();
         assert!(!batches.is_empty());
@@ -470,8 +465,8 @@ mod tests {
             return;
         }
 
-        let chunk = ParquetChunk::open(&solana_chunk_path()).unwrap();
-        let instructions = chunk.table("instructions").unwrap();
+        let chunk = ParquetChunkReader::open(&solana_chunk_path()).unwrap();
+        let instructions = chunk.table("instructions").unwrap().unwrap();
 
         // Read only the first row group
         let batches = instructions
@@ -490,8 +485,8 @@ mod tests {
             return;
         }
 
-        let chunk = ParquetChunk::open(&evm_chunk_path()).unwrap();
-        let logs = chunk.table("logs").unwrap();
+        let chunk = ParquetChunkReader::open(&evm_chunk_path()).unwrap();
+        let logs = chunk.table("logs").unwrap().unwrap();
 
         let batches = logs
             .read(&["block_number", "address", "topic0"], None, 10000)

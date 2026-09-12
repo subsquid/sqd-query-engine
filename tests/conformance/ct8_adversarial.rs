@@ -93,6 +93,86 @@ fn a_missing_relation_table_is_an_error() {
     );
 }
 
+/// A relation with nothing to follow never opens its target, so a chunk missing
+/// that table answers a query whose primary scan is empty the way a complete
+/// chunk does — and refuses the same query the moment the relation has inputs.
+///
+/// Covers CT-8 · INV-E4
+#[test]
+fn a_missing_relation_table_is_not_observed_without_inputs() {
+    let metadata = catalog();
+    let source = weighted_chunk(BLOCKS, &uniform(&[10, 11], 0), &uniform(BLOCKS, 0));
+    let chunk = chunk_without_table(source.path(), "transactions");
+    let query = |from: u64, to: u64| {
+        serde_json::json!({
+            "type": "test",
+            "fromBlock": from,
+            "toBlock": to,
+            "includeAllBlocks": true,
+            "logs": [{"transaction": true}],
+            "fields": {"block": {"number": true}, "transaction": {"input": true}}
+        })
+        .to_string()
+    };
+
+    answers_the_same(
+        &metadata,
+        &query(12, 14),
+        source.path(),
+        chunk.path(),
+        "dropping a relation target no row points at",
+    );
+
+    let err = run_against(&metadata, chunk.path(), &query(10, 11))
+        .expect_err("a relation with inputs must observe its missing target");
+    assert_eq!(error_kind(&err), Some(ErrorKind::TableNotFound));
+}
+
+/// Only the tables a query names are opened. A file the query does not touch —
+/// however broken — is not the query's business, and a broken file it does
+/// touch is refused with a kind, not a stack of I/O context.
+///
+/// Covers CT-8 · INV-E4
+#[test]
+fn only_the_tables_a_query_names_are_opened() {
+    let metadata = catalog();
+    let source = weighted_chunk(BLOCKS, &uniform(BLOCKS, 0), &uniform(BLOCKS, 0));
+    let chunk = chunk_without_table(source.path(), "transactions");
+    std::fs::write(
+        chunk.path().join("transactions.parquet"),
+        b"PAR1 but not really",
+    )
+    .unwrap();
+    std::fs::write(chunk.path().join("receipts.parquet.tmp"), b"").unwrap();
+    std::fs::write(chunk.path().join("receipts.parquet"), b"").unwrap();
+
+    answers_the_same(
+        &metadata,
+        &logs_query().to_string(),
+        source.path(),
+        chunk.path(),
+        "breaking tables the query does not name",
+    );
+
+    let query = serde_json::json!({
+        "type": "test",
+        "fromBlock": 10,
+        "toBlock": 14,
+        "logs": [{"transaction": true}],
+        "fields": {"transaction": {"input": true}}
+    })
+    .to_string();
+    let err = run_against(&metadata, chunk.path(), &query)
+        .expect_err("a relation onto a broken table must error");
+
+    assert_eq!(error_kind(&err), Some(ErrorKind::MalformedChunkData));
+    assert!(
+        err.root_cause().to_string().contains("transactions"),
+        "the error must name the broken table, got: {}",
+        err.root_cause()
+    );
+}
+
 /// The block table supplies response framing and is required by every query.
 ///
 /// Covers CT-8 · INV-E4
