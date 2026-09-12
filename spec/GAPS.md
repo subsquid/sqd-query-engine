@@ -26,34 +26,24 @@ Compared against the reference implementation, as of 2026-09-05.
 
 | # | Gap | Invariant | Sev |
 |---|---|---|---|
-| 40 | A filter on a column stored at a physical type outside the predicate's downcast matrix matches nothing | [INV-D7](07-invariants.md#inv-d7) | **S1** |
-| 41 | A roll field tolerates absent source columns and emits a misaligned list | [INV-E3](07-invariants.md#inv-e3) | **S1** |
 | 35 | The catalogs lag the reference by thirteen fields, and one of them cannot be expressed | [INV-X1](07-invariants.md#inv-x1) | **S2** |
 | 37 | A relation onto a table the chunk lacks is an error even when the primary scan is empty | [INV-E4](07-invariants.md#inv-e4) | **S3** |
 | 38 | Every parquet file in the chunk directory is opened for every query | [INV-E4](07-invariants.md#inv-e4) | **S3** |
-| 39 | Two predicate downcasts panic instead of returning `UnsupportedKeyType` | [INV-E7](07-invariants.md#inv-e7) | **S3** |
-| 42 | A missing `*_size` column weighs zero | [INV-B9](07-invariants.md#inv-b9) | **S4** |
-| 43 | An unsupported physical type renders as `null` instead of erroring | [INV-E3](07-invariants.md#inv-e3) | **S4** |
 | 44 | The weight model differs from the reference in four places | [INV-B5](07-invariants.md#inv-b5) | **S4** |
 | 31 | A block number above 2³¹ stored in `Int32` is read as negative by the range filter | [INV-D7](07-invariants.md#inv-d7) | **S4** |
 | 32 | The bloom's hash function is not pinned by the manifest, and the version it resolves to today ignores the seed above 240 bytes | [INV-P9](07-invariants.md#inv-p9) | **S4** |
-
-Gaps 40 and 41 need a chunk of an older archiver vintage to reach. Whether any
-such chunk is still served is unknown here, and the rating turns on it: **S1** if
-one is, **S4** if none is. Both are listed at the higher rating until an
-inventory settles it.
 
 Every dataset [chapter 3](03-catalog.md) names is served except `fuel`, which is
 out of scope ([ADR-10](decisions/ADR-10-fuel-is-out-of-scope.md)). On a
 well-formed chunk carrying every table the query names, the only requests the
 reference answers and this engine refuses are the ones the divergence table
 below says are deliberate, plus gap 35, which is not. Outside that case gaps 37
-to 39 refuse as well: a missing target table, an unreadable file beside the ones
-the query reads, and two physical types that panic.
+and 38 refuse as well: a missing target table, and an unreadable file beside the
+ones the query reads.
 
 Gaps 33 to 44 came from one review, done before the engine goes to a fleet of
-workers that nobody can patch quickly. The number 34 was never assigned, and 33
-and 36 are closed, so nine of those entries are left. The review ran the reference
+workers that nobody can patch quickly. The number 34 was never assigned, and 33,
+36 and 39 to 43 are closed, so four of those entries are left. The review ran the reference
 and this engine side by side: every filter, relation, alias and field of all
 seven datasets diffed against the reference's request macros; about 330
 request probes and about 700 response runs on the real chunks and every
@@ -65,8 +55,8 @@ filter algebra, every `lastBlock` case off the wave path, ordering, dedup,
 every encoding in use, and every integer width, codec and row-group layout
 either writer has produced.
 
-Three of the new entries are about what the engine does with a chunk that is
-older than its catalog. Two archiver generations wrote the chunks in the field.
+Several of the review's entries were about what the engine does with a chunk
+that is older than its catalog. Two archiver generations wrote the chunks in the field.
 The Python one wrote every Substrate dataset and most EVM datasets, including
 ethereum-mainnet in 2026: `Int32` block numbers, `Int64` sizes, and a column set
 that stops at the 2024 additions. The Rust one wrote Solana, bitcoin,
@@ -77,58 +67,17 @@ Python one; most chunks have the Python layout throughout. Range planning uses
 row-group statistics to suggest read sizes. Overlapping
 groups produce larger ranges, while missing or inverted bounds select a full
 read. Where the engine
-meets a column that is absent or retyped, it now mostly errors as
-[INV-E3](07-invariants.md#inv-e3) and [INV-X3](07-invariants.md#inv-x3) require.
-Gaps 40 to 43 are the places it still does not.
+meets a column that is absent, it errors as [INV-E3](07-invariants.md#inv-e3)
+and [INV-X3](07-invariants.md#inv-x3) require; where it meets one stored at
+another type, it reads every integer width and every text type, and errors as
+[INV-E7](07-invariants.md#inv-e7) requires on a type it cannot compare or
+render. What is left of that family is gap 44's weight model.
 
 The reference moved while this was written. Twelve Avalanche block-header fields
 and Solana's `transactionConfig` landed there in the first days of September; gap 35
 is that lag, and the test that pins the field surface did not notice because it
 is a hand transcription of the older revision. A check that diffs the reference's
 field macros against the catalogs on every build would have.
-
----
-
-## S1 — Wrong results that look right
-
-### 40. A filter on a column stored at a physical type outside the predicate's downcast matrix matches nothing
-
-`InListPredicate::evaluate` matches a `uint8` list only against `UInt8Array`, a
-`uint16` list only against `UInt16Array`, and a string list only against
-`StringArray`; `EqPredicate` wants the exact array type for booleans and text.
-Anything else evaluates to all-false, silently. The reference casts the scalar to
-the column's type and errors when it cannot.
-
-A Solana chunk with `d1` stored as `UInt16` or as a hex string, or `is_committed`
-as `Int8`, loses 1 968 of 3 742 instructions and eight blocks from the answer,
-with a 200. The Rust archiver stored `d1…d8` as hex strings until late February 2025, and
-the Python one always did; every Solana chunk of either vintage takes this path
-for every discriminator filter. Whether any is still served could not be checked
-from here — the current dataset is a later generation — so this is **S1** if one
-is and **S4** if none is.
-
-[INV-D7](07-invariants.md#inv-d7) says any width and signedness for an integer
-column; [INV-E7](07-invariants.md#inv-e7) says an uncomparable type is an error
-and never "matches nothing". The width sweep the suite already has filters on a
-string column only.
-
-*First test:* extend `physical_width_does_not_reach_the_answer` to filter on an
-integer and a boolean column at every width the writer could narrow to, and on
-the string spelling of a discriminator.
-
-### 41. A roll field tolerates absent source columns and emits a misaligned list
-
-`required_output_columns` skips the sources of a virtual field, and the writer
-rolls whatever columns exist. A Solana chunk without `a12…a15` — the Python
-layout before late March 2024 — renders `accounts` with the tail spliced into position
-twelve and no error. The reference errors on the first missing source. Positional
-data that is silently shifted is the case
-[INV-E3](07-invariants.md#inv-e3)'s *Why* describes, one column further in.
-
-Same reach and same caveat as gap 40.
-
-*First test:* drop one source column of a roll field from a fixture chunk and
-assert `ColumnNotFound`.
 
 ---
 
@@ -185,44 +134,9 @@ footer parse.
 *First test:* a chunk with one zero-byte extra parquet file and a query that does
 not touch it.
 
-### 39. Two predicate downcasts panic instead of returning `UnsupportedKeyType`
-
-`BloomFilterPredicate::evaluate` expects a `FixedSizeBinary` array and
-`eval_dict_typed` unwraps a `DictionaryArray<Int32>`. A bloom column stored as
-`Binary`, or a dictionary keyed by anything but `Int32`, panics. The worker
-catches the panic and reports a server error, so this is loud rather than fatal;
-[INV-E7](07-invariants.md#inv-e7) wants the typed error. No current writer
-produces either shape.
-
-*First test:* the two retyped columns on a synthetic chunk, asserting the kind.
-
 ---
 
 ## S4 — Latent
-
-### 42. A missing `*_size` column weighs zero
-
-System columns are not required for output, so a chunk without `logs.message_size`
-or `data_size` answers with the variable-size field selected and weighed at zero.
-The page is then bounded only by the transport's limit. The reference requires
-the column. [INV-B9](07-invariants.md#inv-b9) says weight is a pure function of
-projection and values; a value that contributes nothing because its size column
-is missing is not that. Rust-written Solana chunks from mid-December 2024 to
-mid-February 2025 and Python-written EVM chunks before late October 2023 lack these columns.
-
-*First test:* drop `message_size` from a fixture chunk and assert
-`ColumnNotFound` when `message` is selected.
-
-### 43. An unsupported physical type renders as `null` instead of erroring
-
-`resolve_value_encoder` falls back to the null encoder for `LargeUtf8`,
-`Utf8View`, dictionary-encoded columns, `LargeList`, and microsecond or
-nanosecond timestamps, and the variant writer reads the tag column as
-`StringArray` only, so a dictionary-encoded `traces.type` drops every `action`
-and `result` group. The reference errors on each. No writer today produces these
-types; the next writer change would turn this into gap 40's shape.
-
-*First test:* each retyping on a fixture chunk, asserting `MalformedChunkData`.
 
 ### 44. The weight model differs from the reference in four places
 
@@ -482,13 +396,11 @@ hyperliquid, hyperliquid_replica_cmds and tempo have fixture comparison against
 reference-generated results but no live differential. Datasets with a real
 archive chunk on disk: one Ethereum, one Solana.
 
-Three matrix rows overstate their evidence — [INV-D6](07-invariants.md#inv-d6)
-rests on one `is_err()` case, [INV-P13](07-invariants.md#inv-p13) has no
-behavioural test of prefix dispatch, [INV-Q14](07-invariants.md#inv-q14) is
-green against the stale transcription of gap 35 — and
-[ADR-4](decisions/ADR-4-closed-field-surface.md) and
-[ADR-9](decisions/ADR-9-reject-undecidable-fork-checks.md) are still `Proposed`
-while their MUST text is implemented. Whether to lower those three rows to **P**
-and take the coverage ratchet of
-[§8.12](08-conformance.md#812-merge-gates) below its floor is a decision, not a
-finding, and is left to one.
+The three rows that overstated their evidence — [INV-D6](07-invariants.md#inv-d6),
+[INV-P13](07-invariants.md#inv-p13) and [INV-Q14](07-invariants.md#inv-q14) — were
+read against the tests they name and lowered to **P**, which took
+`P-COV-PROPERTY` from 0.73 to 0.69. The number a ratchet starts from has to be one
+the tests earn, so it was moved down once rather than locked in. What each row is
+missing is now written in the row. [ADR-4](decisions/ADR-4-closed-field-surface.md)
+and [ADR-9](decisions/ADR-9-reject-undecidable-fork-checks.md) are still `Proposed`
+while their MUST text is implemented.

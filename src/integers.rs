@@ -8,10 +8,29 @@
 //! in one, six in another, eight in a third. A width one of them had forgotten
 //! did not raise anything; it returned no rows.
 //!
-//! So there is one list, here, and the sites resolve through it.
+//! So there is one list, here — [`for_each_int_type`] — and everything that
+//! enumerates integer types is generated from it.
 
 use arrow::array::*;
-use arrow::datatypes::DataType;
+use arrow::datatypes::{ArrowPrimitiveType, DataType};
+
+/// The one list: every integer type a column may be stored at, as
+/// `Variant(ArrayType, native, unsigned native, bits, signed)`, handed to a
+/// callback macro.
+macro_rules! for_each_int_type {
+    ($callback:ident) => {
+        $callback! {
+            UInt64(UInt64Array, u64, u64, 64, false),
+            UInt32(UInt32Array, u32, u32, 32, false),
+            UInt16(UInt16Array, u16, u16, 16, false),
+            UInt8(UInt8Array, u8, u8, 8, false),
+            Int64(Int64Array, i64, u64, 64, true),
+            Int32(Int32Array, i32, u32, 32, true),
+            Int16(Int16Array, i16, u16, 16, true),
+            Int8(Int8Array, i8, u8, 8, true),
+        }
+    };
+}
 
 /// An integer column, resolved once so a read costs a match rather than a
 /// downcast chain.
@@ -28,21 +47,22 @@ pub(crate) enum IntColumn<'a> {
 
 /// Whether a declared integer column may be stored at this physical type.
 pub(crate) fn is_integer(data_type: &DataType) -> bool {
-    matches!(
-        data_type,
-        DataType::UInt8
-            | DataType::UInt16
-            | DataType::UInt32
-            | DataType::UInt64
-            | DataType::Int8
-            | DataType::Int16
-            | DataType::Int32
-            | DataType::Int64
-    )
+    width_of(data_type).is_some()
+}
+
+/// A computation over an integer array of any width, monomorphized per width
+/// by [`IntColumn::visit`] rather than dispatched per row.
+pub(crate) trait IntVisitor {
+    type Out;
+
+    fn visit<T>(self, array: &PrimitiveArray<T>) -> Self::Out
+    where
+        T: ArrowPrimitiveType,
+        T::Native: Into<i128> + TryFrom<i128>;
 }
 
 macro_rules! int_column {
-    ($($variant:ident($array:ty, $native:ty, $unsigned:ty)),+ $(,)?) => {
+    ($($variant:ident($array:ty, $native:ty, $unsigned:ty, $bits:literal, $signed:literal)),+ $(,)?) => {
         impl<'a> IntColumn<'a> {
             /// The reader for a column's physical width, or `None` when the
             /// column is not an integer at all.
@@ -52,6 +72,14 @@ macro_rules! int_column {
                 })+
 
                 None
+            }
+
+            /// Run a visitor over the array at its own width.
+            #[inline]
+            pub(crate) fn visit<V: IntVisitor>(&self, visitor: V) -> V::Out {
+                match self {
+                    $(Self::$variant(a) => visitor.visit(*a),)+
+                }
             }
 
             /// The value at `row`, exactly, sign and all.
@@ -87,7 +115,7 @@ macro_rules! int_column {
             /// mismatch matches nothing and says nothing (INV-D7).
             #[inline]
             pub(crate) fn join_key(&self, row: usize) -> u64 {
-                self.value(row) as i64 as u64
+                stored_key(self.value(row))
             }
 
             #[inline]
@@ -120,19 +148,18 @@ macro_rules! int_column {
                 _ => None,
             }
         }
+
+        /// The physical width in bits and the signedness of an integer type.
+        pub(crate) fn width_of(data_type: &DataType) -> Option<(u32, bool)> {
+            match data_type {
+                $(DataType::$variant => Some(($bits, $signed)),)+
+                _ => None,
+            }
+        }
     };
 }
 
-int_column!(
-    UInt64(UInt64Array, u64, u64),
-    UInt32(UInt32Array, u32, u32),
-    UInt16(UInt16Array, u16, u16),
-    UInt8(UInt8Array, u8, u8),
-    Int64(Int64Array, i64, u64),
-    Int32(Int32Array, i32, u32),
-    Int16(Int16Array, i16, u16),
-    Int8(Int8Array, i8, u8),
-);
+for_each_int_type!(int_column);
 
 /// The block-number column of a batch: resolved once, and checked once.
 ///
@@ -202,7 +229,7 @@ pub(crate) enum OwnedIntColumn {
 }
 
 macro_rules! owned_int_column {
-    ($($variant:ident($array:ty)),+ $(,)?) => {
+    ($($variant:ident($array:ty, $native:ty, $unsigned:ty, $bits:literal, $signed:literal)),+ $(,)?) => {
         impl OwnedIntColumn {
             pub(crate) fn resolve(col: &dyn Array) -> Option<Self> {
                 $(if let Some(a) = col.as_any().downcast_ref::<$array>() {
@@ -228,13 +255,154 @@ macro_rules! owned_int_column {
     };
 }
 
-owned_int_column!(
-    UInt64(UInt64Array),
-    UInt32(UInt32Array),
-    UInt16(UInt16Array),
-    UInt8(UInt8Array),
-    Int64(Int64Array),
-    Int32(Int32Array),
-    Int16(Int16Array),
-    Int8(Int8Array),
-);
+for_each_int_type!(owned_int_column);
+
+/// The number of integer types, for a cache indexed by [`slot_of`].
+pub(crate) const INT_TYPES: usize = 8;
+
+/// The index of an integer type in a per-type cache of [`INT_TYPES`] slots.
+pub(crate) fn slot_of(data_type: &DataType) -> Option<usize> {
+    let (bits, signed) = width_of(data_type)?;
+
+    let width = match bits {
+        8 => 0,
+        16 => 1,
+        32 => 2,
+        _ => 3,
+    };
+    Some(if signed { width + 4 } else { width })
+}
+
+/// The integer values a filter carries, at the signedness the catalog declares.
+///
+/// A filter is compiled from a declared type, and the declared type says how
+/// the stored bits are to be read: an `int16` column stored as `UInt16` holds
+/// `-1` as `65535`. So the filter keeps its values wide and at the declared
+/// signedness, and narrows to the stored width when it meets the column.
+#[derive(Debug, Clone)]
+pub(crate) enum IntValues {
+    Unsigned(Vec<u64>),
+    Signed(Vec<i64>),
+}
+
+/// Widens an array's values at the array's signedness.
+struct Widen;
+
+impl IntVisitor for Widen {
+    type Out = IntValues;
+
+    fn visit<T>(self, array: &PrimitiveArray<T>) -> IntValues
+    where
+        T: ArrowPrimitiveType,
+        T::Native: Into<i128>,
+    {
+        let wide = array.values().iter().map(|&v| v.into());
+        let (_, signed) = width_of(array.data_type()).expect("visited as an integer");
+
+        if signed {
+            IntValues::Signed(wide.map(|v| v as i64).collect())
+        } else {
+            IntValues::Unsigned(wide.map(|v| v as u64).collect())
+        }
+    }
+}
+
+impl IntValues {
+    /// The values of an integer array, widened at the array's signedness, or
+    /// `None` when the array is not an integer one.
+    pub(crate) fn from_array(values: &dyn Array) -> Option<Self> {
+        Some(IntColumn::resolve(values)?.visit(Widen))
+    }
+
+    /// Whether the values are signed.
+    pub(crate) fn signed(&self) -> bool {
+        matches!(self, Self::Signed(_))
+    }
+
+    /// The keys, in [`stored_key`] terms, of the values that fit the stored
+    /// width, in order. A value that does not fit matches no stored value, so
+    /// it has no key. `None` when the stored type is not an integer.
+    ///
+    /// An iterator rather than a list: the pruner asks whether *every* key is
+    /// outside a row group, once per group, and stops at the first that is not.
+    pub(crate) fn stored_keys(&self, stored: &DataType) -> Option<impl Iterator<Item = u64> + '_> {
+        let (bits, signed) = width_of(stored)?;
+
+        let keys: Box<dyn Iterator<Item = u64>> = match self {
+            Self::Unsigned(values) => Box::new(
+                values
+                    .iter()
+                    .copied()
+                    .filter(move |&v| fits_unsigned(v, bits))
+                    .map(move |v| if signed { sign_extend(v, bits) } else { v }),
+            ),
+            Self::Signed(values) => Box::new(
+                values
+                    .iter()
+                    .copied()
+                    .filter(move |&v| fits_signed(v, bits))
+                    .map(move |v| {
+                        if signed {
+                            v as u64
+                        } else {
+                            zero_extend(v as u64, bits)
+                        }
+                    }),
+            ),
+        };
+
+        Some(keys)
+    }
+}
+
+fn fits_unsigned(value: u64, bits: u32) -> bool {
+    bits == 64 || value >> bits == 0
+}
+
+fn fits_signed(value: i64, bits: u32) -> bool {
+    if bits == 64 {
+        return true;
+    }
+
+    let half = 1i64 << (bits - 1);
+    (-half..half).contains(&value)
+}
+
+fn sign_extend(bits_value: u64, bits: u32) -> u64 {
+    let shift = 64 - bits;
+    (((bits_value << shift) as i64) >> shift) as u64
+}
+
+fn zero_extend(bits_value: u64, bits: u32) -> u64 {
+    if bits == 64 {
+        bits_value
+    } else {
+        bits_value & ((1u64 << bits) - 1)
+    }
+}
+
+/// The key of a stored integer: its value sign-extended to 64 bits, so that a
+/// signed and an unsigned reading of the same bits produce different keys and
+/// [`IntValues::stored_keys`] can pick the one the catalog declared.
+#[inline]
+pub(crate) fn stored_key(value: i128) -> u64 {
+    value as i64 as u64
+}
+
+/// The value the catalog declares a stored integer to be: its bits, at the
+/// width they were stored, read at the declared signedness.
+///
+/// This is the reading [`IntValues::stored_keys`] matches equality by, written
+/// from the column's side so that an order comparison reads a value the same
+/// way an equality does: an `int16` stored as `UInt16` holds `-1` as `65535`,
+/// and `>= -1` has to find it where `= -1` does (INV-D7).
+#[inline]
+pub(crate) fn declared_value(stored: i128, bits: u32, declared_signed: bool) -> i128 {
+    let key = stored_key(stored);
+
+    if declared_signed {
+        sign_extend(key, bits) as i64 as i128
+    } else {
+        zero_extend(key, bits) as i128
+    }
+}

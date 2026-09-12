@@ -7,6 +7,7 @@ pub use sqd_metadata as metadata;
 pub mod output;
 pub mod query;
 pub mod scan;
+pub mod text;
 
 #[cfg(test)]
 mod testing;

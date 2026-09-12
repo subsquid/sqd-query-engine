@@ -586,6 +586,16 @@ nothing".
 
 *Why:* "matches nothing" silently returns a response missing every related row.
 
+A filtered column is a key in this sense. A filter carries values of the
+catalog's declared type, and the chunk stores the column at a type of the
+writer's choosing: any integer width and signedness, any text type, are the
+same column ([INV-D7](#inv-d7)) and MUST be compared. A stored type the values
+cannot be compared against — text under an integer filter, a number under a
+text one — MUST be refused before any row is read, so that the same chunk
+refuses whatever the range.
+*Test:* store a filtered integer column as text; assert the filter errors with
+`UnsupportedKeyType` rather than answering with no rows.
+
 ---
 
 ## X — Cross-cutting

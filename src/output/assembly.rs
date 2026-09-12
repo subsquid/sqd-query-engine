@@ -1,4 +1,5 @@
-use crate::metadata::DatasetDescription;
+use crate::integers::is_integer;
+use crate::metadata::{DatasetDescription, WeightSource};
 use crate::output::arrow_out::{
     dedup_first, filter_to_blocks, hexify_group, project_columns, write_arrow_frames, ArrowOutput,
     OutputFormat,
@@ -10,13 +11,13 @@ use crate::output::columns::{
     find_address_column, group_keys_for_relation, physical_output_columns, required_output_columns,
     resolve_output_columns, resolve_relation_output_columns,
 };
-use crate::output::encoder::{encode_json_string, snake_to_camel};
+use crate::output::encoder::{encode_json_string, resolve_encoder, snake_to_camel};
 use crate::output::materialize::{
     materialize_tables, read_rows, retain_blocks, retain_selected_keys, SelectionReader,
 };
 use crate::output::row_writer::{
     build_field_writers, build_full_sort_columns, build_grouped_writers, resolve_grouped_writers,
-    resolve_sort_columns, resolve_writers, IndexedBatches,
+    resolve_sort_columns, resolve_writers, IndexedBatches, TypedSortColumn,
 };
 use crate::output::weight::{
     block_scan_columns, compute_block_weights, weight_range_end, weight_scan_columns,
@@ -28,6 +29,7 @@ use crate::scan::predicate::{evaluate_predicates_on_batch, RowPredicate};
 use crate::scan::{
     ChunkReader, HierarchicalFilter, HierarchicalMode, KeyFilter, ParquetChunkReader, ScanRequest,
 };
+use crate::text::StringColumn;
 use anyhow::Result;
 use arrow::record_batch::RecordBatch;
 use rayon::prelude::*;
@@ -196,6 +198,117 @@ fn ensure_required_tables_present(plan: &Plan, chunk: &dyn ChunkReader) -> Resul
     Ok(())
 }
 
+/// Refuse a chunk that stores a selected column at a type the output cannot
+/// use, before any row is read (INV-E3).
+///
+/// Off the schema rather than off the batches, so that the same chunk refuses
+/// whatever the query: the writers resolve against batches, and a range that
+/// reaches no row of a table resolves nothing. A column the chunk lacks is not
+/// this check's business — the scan raises `ColumnNotFound` for it.
+///
+/// What "use" means depends on the format. JSON renders through an encoder,
+/// orders rows by the sort keys and groups them by the variant tag; Arrow ships
+/// the physical column and orders by an Arrow row key, so only the weight
+/// companion — an integer both formats read to bound the page (INV-B9) — is
+/// checked for it.
+fn ensure_columns_renderable(
+    plan: &Plan,
+    metadata: &DatasetDescription,
+    chunk: &dyn ChunkReader,
+    format: OutputFormat,
+) -> Result<()> {
+    let json = matches!(format, OutputFormat::Json);
+
+    let check = |table: &str, output_columns: &[String]| -> Result<()> {
+        let (Some(desc), Some(schema)) = (metadata.table(table), chunk.table_schema(table)) else {
+            return Ok(());
+        };
+
+        for column in required_output_columns(output_columns, desc) {
+            let Ok(field) = schema.field_with_name(&column) else {
+                continue;
+            };
+            let declared = desc.columns.get(&column);
+
+            if let Some(WeightSource::Column(companion)) = declared.and_then(|c| c.weight.as_ref())
+            {
+                if let Ok(field) = schema.field_with_name(companion) {
+                    crate::engine_ensure!(
+                        is_integer(field.data_type()),
+                        crate::error::ErrorKind::MalformedChunkData,
+                        "weight column '{}' of '{}' is stored as {}, which is not an integer",
+                        companion,
+                        table,
+                        field.data_type()
+                    );
+                }
+            }
+
+            if !json {
+                continue;
+            }
+
+            if let Err(e) = resolve_encoder(
+                field.data_type(),
+                declared.and_then(|c| c.encoding.as_ref()),
+                declared.map(|c| &c.data_type),
+            ) {
+                crate::engine_bail!(
+                    crate::error::ErrorKind::MalformedChunkData,
+                    "column '{}' of '{}': {}",
+                    column,
+                    table,
+                    e
+                );
+            }
+        }
+
+        if !json {
+            return Ok(());
+        }
+
+        for key in build_full_sort_columns(desc) {
+            if let Ok(field) = schema.field_with_name(&key) {
+                let probe = arrow::array::new_empty_array(field.data_type());
+                crate::engine_ensure!(
+                    TypedSortColumn::resolve(probe.as_ref()).is_some(),
+                    crate::error::ErrorKind::MalformedChunkData,
+                    "sort key '{}' of '{}' is stored as {}, which cannot order rows",
+                    key,
+                    table,
+                    field.data_type()
+                );
+            }
+        }
+
+        if let Some(variant) = &desc.output.variant_column {
+            if let Ok(field) = schema.field_with_name(variant) {
+                let probe = arrow::array::new_empty_array(field.data_type());
+                crate::engine_ensure!(
+                    StringColumn::resolve(probe.as_ref()).is_some(),
+                    crate::error::ErrorKind::MalformedChunkData,
+                    "variant column '{}' of '{}' is stored as {}, which is not text",
+                    variant,
+                    table,
+                    field.data_type()
+                );
+            }
+        }
+
+        Ok(())
+    };
+
+    check(&plan.block_table, &plan.block_output_columns)?;
+    for table_plan in &plan.table_plans {
+        check(&table_plan.table, &table_plan.output_columns)?;
+        for relation in &table_plan.relations {
+            check(&relation.target_table, &relation.output_columns)?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Suggest a range large enough to cover a batch of row groups in every table.
 /// Missing statistics select a full read; overlapping groups produce larger ranges.
 fn next_range_end(
@@ -330,18 +443,27 @@ fn scan_tables(
             let primary_bn_col = table_desc.block_number_column.as_str();
 
             // Pre-filter primary batches per relation when source_predicates are set
-            let rel_filtered_batches: Vec<Option<Vec<RecordBatch>>> = table_plan
-                .relations
-                .iter()
-                .map(|rel| {
-                    rel.source_predicates.as_ref().map(|preds| {
-                        batches
-                            .iter()
-                            .filter_map(|b| evaluate_predicates_on_batch(b, preds))
-                            .collect()
-                    })
-                })
-                .collect();
+            let mut rel_filtered_batches: Vec<Option<Vec<RecordBatch>>> = Vec::new();
+            for rel in &table_plan.relations {
+                let Some(preds) = rel.source_predicates.as_ref() else {
+                    rel_filtered_batches.push(None);
+                    continue;
+                };
+
+                let mut filtered = Vec::new();
+                for batch in &batches {
+                    let kept = evaluate_predicates_on_batch(batch, preds).map_err(|e| {
+                        crate::engine_err!(
+                            crate::error::ErrorKind::UnsupportedKeyType,
+                            "filter on '{}': {}",
+                            table_plan.table,
+                            e
+                        )
+                    })?;
+                    filtered.extend(kept);
+                }
+                rel_filtered_batches.push(Some(filtered));
+            }
 
             let key_filters: Vec<Option<KeyFilter>> = table_plan
                 .relations
@@ -646,6 +768,7 @@ fn execute_chunk_fmt(
     //    every table the plan names before a zero-row primary scan can hide a
     //    missing relation target (INV-E4).
     ensure_required_tables_present(plan, chunk)?;
+    ensure_columns_renderable(plan, metadata, chunk, format)?;
 
     // 1. A reorg between two pages must be reported, not paved over with data
     //    from the branch the client did not ask about.
@@ -1129,7 +1252,7 @@ fn execute_chunk_fmt(
     let header_resolved = block_batches
         .iter()
         .map(|b| resolve_writers(&header_writers, b))
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
 
     // Pre-resolve column indices for each source (once per batch schema)
     let all_resolved = all_indexes
@@ -1138,22 +1261,25 @@ fn execute_chunk_fmt(
             idx.batches
                 .iter()
                 .map(|b| resolve_writers(&idx.writers, b))
-                .collect::<Vec<_>>()
+                .collect::<Result<Vec<_>>>()
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
 
     // Pre-resolve grouped writers
     let all_grouped_resolved = all_indexes
         .iter()
         .map(|idx| {
-            idx.grouped.as_ref().map(|gw| {
-                idx.batches
-                    .iter()
-                    .map(|b| resolve_grouped_writers(gw, b))
-                    .collect::<Vec<_>>()
-            })
+            idx.grouped
+                .as_ref()
+                .map(|gw| {
+                    idx.batches
+                        .iter()
+                        .map(|b| resolve_grouped_writers(gw, b))
+                        .collect::<Result<Vec<_>>>()
+                })
+                .transpose()
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
 
     elapsed!(
         t_blocks,

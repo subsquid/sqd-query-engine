@@ -1,6 +1,7 @@
 use crate::engine_err;
 use crate::error::ErrorKind;
 use crate::integers::{is_integer, IntColumn};
+use crate::text::{is_text, StringColumn};
 use anyhow::Result;
 use arrow::array::*;
 use arrow::compute;
@@ -38,7 +39,8 @@ fn resolve_key_indices(schema: &SchemaRef, key_columns: &[&str]) -> Result<Vec<u
 enum TypedExtractor {
     /// Any integer width, written eight bytes wide.
     Int(usize),
-    Utf8(usize),
+    /// Any text type.
+    Text(usize),
     Boolean(usize),
     FixedBinary(usize),
     /// A list of integers, each element written eight bytes wide.
@@ -50,7 +52,7 @@ impl TypedExtractor {
         let dt = batch.column(col_idx).data_type();
         Ok(match dt {
             _ if is_integer(dt) => Self::Int(col_idx),
-            arrow::datatypes::DataType::Utf8 => Self::Utf8(col_idx),
+            _ if is_text(dt) => Self::Text(col_idx),
             arrow::datatypes::DataType::Boolean => Self::Boolean(col_idx),
             arrow::datatypes::DataType::FixedSizeBinary(_) => Self::FixedBinary(col_idx),
             arrow::datatypes::DataType::List(field) if is_integer(field.data_type()) => {
@@ -77,7 +79,7 @@ impl TypedExtractor {
     fn col_idx(&self) -> usize {
         match self {
             Self::Int(i)
-            | Self::Utf8(i)
+            | Self::Text(i)
             | Self::Boolean(i)
             | Self::FixedBinary(i)
             | Self::IntList(i) => *i,
@@ -97,9 +99,9 @@ impl TypedExtractor {
                 let ints = IntColumn::resolve(col.as_ref()).expect("`is_integer` admitted it");
                 buf.extend_from_slice(&ints.join_key(row).to_le_bytes());
             }
-            Self::Utf8(_) => {
-                let a = col.as_any().downcast_ref::<StringArray>().unwrap();
-                let s = a.value(row);
+            Self::Text(_) => {
+                let text = StringColumn::resolve(col.as_ref()).expect("`is_text` admitted it");
+                let s = text.value(row).expect("checked above");
                 buf.extend_from_slice(&(s.len() as u32).to_le_bytes());
                 buf.extend_from_slice(s.as_bytes());
             }
