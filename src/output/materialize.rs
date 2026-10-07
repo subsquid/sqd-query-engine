@@ -75,7 +75,10 @@ impl<'a> SelectionReader<'a> {
                     extend_unique(primary, desc.address_column.iter().cloned());
                 }
                 for predicate in relation.source_predicates.iter().flatten() {
-                    extend_unique(primary, predicate.columns.iter().map(|p| p.column.clone()));
+                    extend_unique(
+                        primary,
+                        predicate.required_columns().into_iter().map(str::to_owned),
+                    );
                 }
             }
             for relation in &table.relations {
@@ -279,9 +282,7 @@ pub(super) fn materialize_tables(
                 .map(|batch| project_columns(batch, &key))
                 .collect::<Result<Vec<_>>>()?;
             let is_unfiltered = |predicates: &[RowPredicate]| {
-                predicates
-                    .iter()
-                    .any(|predicate| predicate.columns.is_empty())
+                predicates.iter().any(RowPredicate::matches_every_row)
             };
             let primary_predicates = relation.is_none().then_some(table.predicates.as_slice());
             let group = *groups.entry((target, projection)).or_insert_with(|| {

@@ -138,7 +138,7 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
         // and the same name can mean a different join on each.
         let mut seen_relations: HashSet<(Option<String>, String)> = HashSet::new();
         // Track source predicates per relation name, and how many items request each
-        let mut rel_source_preds: std::collections::HashMap<String, Option<Vec<RowPredicate>>> =
+        let mut rel_source_preds: std::collections::HashMap<String, Vec<RowPredicate>> =
             std::collections::HashMap::new();
         let mut rel_item_count: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
@@ -148,28 +148,22 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
         let mut total_items = 0usize;
 
         for item in items {
-            let item_predicates = match compile_item_predicates(item, table_desc)? {
+            let item_predicate = match compile_item_predicates(item, table_desc)? {
                 CompiledItem::Unsatisfiable => continue,
-                CompiledItem::Predicates(preds) => preds,
+                CompiledItem::Predicate(predicate) => predicate,
             };
             total_items += 1;
-            let item_has_predicates = !item_predicates.is_empty();
-            all_predicates.extend(item_predicates.clone());
+            all_predicates.push(item_predicate.clone());
 
             // Collect relations (dedup across items)
             for rel_name in &item.relations {
                 *rel_item_count.entry(rel_name.clone()).or_default() += 1;
 
                 // Update source predicates for this relation
-                let entry = rel_source_preds
+                rel_source_preds
                     .entry(rel_name.clone())
-                    .or_insert_with(|| Some(Vec::new()));
-                if !item_has_predicates {
-                    // Item with no filters matches all rows → relation applies to all
-                    *entry = None;
-                } else if let Some(preds) = entry {
-                    preds.extend(item_predicates.clone());
-                }
+                    .or_default()
+                    .push(item_predicate.clone());
 
                 let rel_key = (item.alias.clone(), rel_name.clone());
                 if seen_relations.contains(&rel_key) {
@@ -249,7 +243,7 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
                             rel.source_predicates = if count >= total_items {
                                 None
                             } else {
-                                preds.clone()
+                                Some(preds.clone())
                             };
                             break;
                         }
@@ -342,9 +336,8 @@ fn order_columns_by_metadata(
 enum CompiledItem {
     /// No row can match, whatever the chunk holds (INV-P3).
     Unsatisfiable,
-    /// One predicate per discriminator length group, OR'd together. A single
-    /// predicate with no columns matches every row.
-    Predicates(Vec<RowPredicate>),
+    /// The item's filters. One that matches every row has none.
+    Predicate(RowPredicate),
 }
 
 /// Filter keys that address one discriminator: the special filter itself and
@@ -408,9 +401,8 @@ fn check_item_limits(item: &QueryItem, table: &TableDescription) -> Result<()> {
     Ok(())
 }
 
-/// Compile a single query item's filters into one or more RowPredicates.
-/// Returns multiple predicates when discriminator dispatches to multiple column lengths
-/// (each length group becomes its own predicate, OR'd with others).
+/// Compile a single query item's filters into one RowPredicate. A discriminator
+/// that dispatches to several column lengths becomes its alternatives.
 fn compile_item_predicates(item: &QueryItem, table: &TableDescription) -> Result<CompiledItem> {
     check_item_limits(item, table)?;
 
@@ -565,20 +557,19 @@ fn compile_item_predicates(item: &QueryItem, table: &TableDescription) -> Result
         }
     }
 
-    // If there are discriminator groups, distribute other predicates across them
-    if let Some(groups) = discriminator_groups {
-        let mut result = Vec::new();
-        for group in groups {
-            let mut preds = col_predicates.clone();
-            preds.extend(group);
-            result.push(RowPredicate::new(preds));
+    // The item's other filters are shared by every length, so they are kept
+    // once rather than copied into each length's group: a ten-value bloom
+    // copied four times is evaluated four times on every row.
+    let predicate = match discriminator_groups {
+        Some(groups) if groups.len() > 1 => RowPredicate::with_alternatives(col_predicates, groups),
+        Some(groups) => {
+            col_predicates.extend(groups.into_iter().flatten());
+            RowPredicate::new(col_predicates)
         }
-        Ok(CompiledItem::Predicates(result))
-    } else {
-        Ok(CompiledItem::Predicates(vec![RowPredicate::new(
-            col_predicates,
-        )]))
-    }
+        None => RowPredicate::new(col_predicates),
+    };
+
+    Ok(CompiledItem::Predicate(predicate))
 }
 
 /// Reject a malformed value on a column declared `encoding: hex_bytes`
@@ -1187,6 +1178,9 @@ mod tests {
         assert!(rel_names.contains(&"instructions"));
     }
 
+    /// A discriminator at several lengths is one alternative per length, and
+    /// the item's other filters appear once beside them, not once per length.
+    ///
     /// Covers CT-3 · INV-P13
     #[test]
     fn test_compile_discriminator_mixed_lengths() {
@@ -1196,23 +1190,58 @@ mod tests {
             "fromBlock": 0,
             "instructions": [{
                 "programId": ["whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc"],
-                "discriminator": ["0xab", "0xf8c69e91e17587c8"]
+                "mentionsAccount": ["whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc"],
+                "discriminator": ["0xab", "0xabcd", "0xf8c69e91e17587c8"]
             }]
         }"#;
 
         let query = parse_query(json, &meta).unwrap();
         let plan = compile(&query, &meta).unwrap();
 
-        let instr_plan = &plan.table_plans[0];
-        // Mixed discriminator: 1 byte (d1) + 8 bytes (d8)
-        // This creates 2 predicates (one per length group):
-        // 1: programId IN [...] AND d1 IN [0xab]
-        // 2: programId IN [...] AND d8 IN [0xf8c6...]
-        assert_eq!(instr_plan.predicates.len(), 2);
+        let predicates = &plan.table_plans[0].predicates;
+        assert_eq!(predicates.len(), 1, "one item compiles to one predicate");
 
-        // Each predicate has 2 columns: programId + dN
-        assert_eq!(instr_plan.predicates[0].columns.len(), 2);
-        assert_eq!(instr_plan.predicates[1].columns.len(), 2);
+        let mut shared: Vec<&str> = predicates[0]
+            .columns
+            .iter()
+            .map(|p| p.column.as_str())
+            .collect();
+        shared.sort_unstable();
+        assert_eq!(shared, ["accounts_bloom", "program_id"]);
+
+        let alternatives: Vec<Vec<&str>> = predicates[0]
+            .alternatives
+            .iter()
+            .map(|group| group.iter().map(|p| p.column.as_str()).collect())
+            .collect();
+        assert_eq!(alternatives, [["d1"], ["d2"], ["d8"]]);
+    }
+
+    /// A discriminator at one length needs no alternatives: its column joins
+    /// the item's other filters, last.
+    #[test]
+    fn test_compile_discriminator_single_length() {
+        let meta = solana_metadata();
+        let json = br#"{
+            "type": "solana",
+            "fromBlock": 0,
+            "instructions": [{
+                "programId": ["whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc"],
+                "discriminator": ["0xab", "0xcd"]
+            }]
+        }"#;
+
+        let query = parse_query(json, &meta).unwrap();
+        let plan = compile(&query, &meta).unwrap();
+
+        let predicate = &plan.table_plans[0].predicates[0];
+        let columns: Vec<&str> = predicate
+            .columns
+            .iter()
+            .map(|p| p.column.as_str())
+            .collect();
+        assert_eq!(columns, ["program_id", "d1"]);
+        assert!(predicate.alternatives.is_empty());
     }
 
     /// Covers CT-3 · INV-P1

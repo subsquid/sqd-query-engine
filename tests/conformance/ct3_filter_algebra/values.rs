@@ -9,7 +9,8 @@ use std::path::Path;
 
 use crate::harness::chunk::write_parquet;
 use crate::harness::fixtures::{fixture_tree_is_present, meta, plan_error, run, run_against};
-use crate::harness::json::{count_items, items_in, parse_response};
+use crate::harness::json::{assert_same_response, count_items, items_in, parse_response};
+use crate::harness::sol_like;
 
 /// INV-P14: a well-formed value the column cannot hold matches nothing. It is
 /// not an error, and it must never be truncated into a *different* value —
@@ -84,6 +85,73 @@ fn discriminator_hex_is_a_prefix_chain() {
         }
     }
     assert!(checked > 0, "fixture must contain whirlpool instructions");
+}
+
+/// A discriminator at several lengths answers the union of its lengths, with the
+/// item's other filters holding for each. The lengths are alternatives within
+/// one item; the other filters belong to none of them in particular.
+///
+/// Covers CT-3 · INV-P13
+#[test]
+fn a_discriminator_at_several_lengths_is_the_union_of_its_lengths() {
+    let meta = sol_like::catalog();
+    let chunk = sol_like::chunk();
+    let answer =
+        |items: &str| run_against(&meta, chunk.path(), &sol_like::query_with(items)).unwrap();
+
+    // Two lengths of one program's discriminator, and a third length that
+    // matches no instruction.
+    let discriminator = r#""discriminator":["0x07","0x0700","0x2a0001"]"#;
+    let mentions = format!(r#""mentionsAccount":["{}"]"#, sol_like::account(4));
+    let committed = r#""isCommitted":true"#;
+
+    let mixed = answer(&format!("{{{discriminator},{mentions},{committed}}}"));
+    let union: Vec<String> = ["0x07", "0x0700", "0x2a0001"]
+        .iter()
+        .map(|length| format!(r#"{{"discriminator":["{length}"],{mentions},{committed}}}"#))
+        .collect();
+    assert_same_response(
+        &mixed,
+        &answer(&union.join(",")),
+        "a mixed-length discriminator",
+    );
+
+    // Each filter removes rows the other two keep, or the equality above would
+    // hold without testing it.
+    let rows = count_items(&mixed, "instructions");
+    assert!(rows > 0);
+    for (dropped, rest) in [
+        ("discriminator", format!("{{{mentions},{committed}}}")),
+        (
+            "mentionsAccount",
+            format!("{{{discriminator},{committed}}}"),
+        ),
+        ("isCommitted", format!("{{{discriminator},{mentions}}}")),
+    ] {
+        let wider = count_items(&answer(&rest), "instructions");
+        assert!(rows < wider, "{dropped} removes nothing the others keep");
+    }
+}
+
+/// A zero-length prefix is a prefix of every instruction, alone or beside
+/// another length.
+///
+/// Covers CT-3 · INV-P13
+#[test]
+fn an_empty_discriminator_prefix_matches_every_instruction() {
+    let meta = sol_like::catalog();
+    let chunk = sol_like::chunk();
+    let answer =
+        |items: &str| run_against(&meta, chunk.path(), &sol_like::query_with(items)).unwrap();
+
+    let everything = answer("{}");
+    assert!(count_items(&everything, "instructions") > 0);
+    for item in [
+        r#"{"discriminator":["0x"]}"#,
+        r#"{"discriminator":["0x07","0x"]}"#,
+    ] {
+        assert_same_response(&everything, &answer(item), item);
+    }
 }
 
 /// A one-element list and the bare value are the same request, so they must

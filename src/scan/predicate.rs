@@ -258,6 +258,10 @@ impl std::fmt::Debug for ColumnPredicate {
 pub struct RowPredicate {
     /// All column predicates must match (AND).
     pub columns: Vec<ColumnPredicate>,
+    /// When not empty, at least one group must match in full as well. A
+    /// discriminator given at several lengths is one group per length, so the
+    /// item's other filters stay in `columns` and run once, not once per length.
+    pub alternatives: Vec<Vec<ColumnPredicate>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -729,12 +733,66 @@ impl BloomFilterPredicate {
             num_hashes,
         }
     }
+}
 
-    fn check_bloom(&self, bloom_bytes: &[u8]) -> bool {
-        // Check if ANY needle might be in the bloom filter
-        self.needles
+/// Each needle's bits in a filter of one width: the bytes a stored filter must
+/// have set for the needle to be a possible member. A needle's hashes depend on
+/// the width and not on the row, so they are computed once per width rather
+/// than once per row.
+///
+/// The width comes from the stored array rather than from the catalog: the bits
+/// were set at whatever width the writer used, and that is the only width that
+/// reads them back.
+struct NeedleMasks<'a> {
+    predicate: &'a BloomFilterPredicate,
+    width: usize,
+    masks: Vec<Vec<u8>>,
+}
+
+impl<'a> NeedleMasks<'a> {
+    fn new(predicate: &'a BloomFilterPredicate) -> Self {
+        Self {
+            predicate,
+            width: 0,
+            masks: Vec::new(),
+        }
+    }
+
+    /// Whether any needle might be in `filter`.
+    fn any_member(&mut self, filter: &[u8]) -> bool {
+        if filter.is_empty() {
+            return false;
+        }
+        if filter.len() != self.width {
+            self.build(filter.len());
+        }
+
+        self.masks.iter().any(|mask| {
+            let missing = mask
+                .iter()
+                .zip(filter)
+                .fold(0, |missing, (bits, stored)| missing | (bits & !stored));
+            missing == 0
+        })
+    }
+
+    fn build(&mut self, width: usize) {
+        let num_bits = width * 8;
+        let predicate = self.predicate;
+
+        self.width = width;
+        self.masks = predicate
+            .needles
             .iter()
-            .any(|needle| bloom_contains(bloom_bytes, needle, self.num_hashes))
+            .map(|needle| {
+                let mut mask = vec![0u8; width];
+                for n in 0..predicate.num_hashes {
+                    let bit = bloom_bit(needle, n, num_bits);
+                    mask[bit / 8] |= 1 << (bit % 8);
+                }
+                mask
+            })
+            .collect();
     }
 }
 
@@ -768,23 +826,6 @@ pub fn bloom_bit(value: &[u8], n: usize, num_bits: usize) -> usize {
     (std::hash::Hasher::finish(&hasher) as usize) % num_bits
 }
 
-/// Check if a bloom filter (byte array) might contain a value.
-///
-/// The width comes from the stored array rather than from the catalog: the bits
-/// were set at whatever width the writer used, and that is the only width that
-/// reads them back.
-fn bloom_contains(filter: &[u8], value: &[u8], num_hashes: usize) -> bool {
-    let num_bits = filter.len() * 8;
-    if num_bits == 0 {
-        return false;
-    }
-
-    (0..num_hashes).all(|n| {
-        let bit = bloom_bit(value, n, num_bits);
-        filter[bit / 8] & (1 << (bit % 8)) != 0
-    })
-}
-
 impl ArrayPredicate for BloomFilterPredicate {
     fn evaluate(&self, array: &dyn Array) -> Mask {
         if let Some(mask) = through_dictionary(self, array) {
@@ -793,11 +834,12 @@ impl ArrayPredicate for BloomFilterPredicate {
 
         // The filter is a byte string; which bytes type carries it is the
         // writer's choice.
+        let mut masks = NeedleMasks::new(self);
         macro_rules! checked {
             ($($array:ty),+ $(,)?) => {
                 $(if let Some(arr) = array.as_any().downcast_ref::<$array>() {
                     return Ok(BooleanArray::from_iter((0..arr.len()).map(|i| {
-                        Some(!arr.is_null(i) && self.check_bloom(arr.value(i)))
+                        Some(!arr.is_null(i) && masks.any_member(arr.value(i)))
                     })));
                 })+
             };
@@ -997,16 +1039,42 @@ impl ArrayPredicate for NeverPredicate {
 
 impl RowPredicate {
     pub fn new(columns: Vec<ColumnPredicate>) -> Self {
-        Self { columns }
+        Self::with_alternatives(columns, Vec::new())
+    }
+
+    pub fn with_alternatives(
+        columns: Vec<ColumnPredicate>,
+        alternatives: Vec<Vec<ColumnPredicate>>,
+    ) -> Self {
+        Self {
+            columns,
+            alternatives,
+        }
+    }
+
+    /// Whether this predicate admits every row: no column predicate and no
+    /// alternatives to choose between.
+    pub fn matches_every_row(&self) -> bool {
+        self.columns.is_empty() && self.alternatives.is_empty()
+    }
+
+    /// Every column predicate, the alternatives' included.
+    pub fn column_predicates(&self) -> impl Iterator<Item = &ColumnPredicate> {
+        self.columns
+            .iter()
+            .chain(self.alternatives.iter().flatten())
     }
 
     /// Returns the column names needed for this predicate.
     pub fn required_columns(&self) -> Vec<&str> {
-        self.columns.iter().map(|c| c.column.as_str()).collect()
+        self.column_predicates()
+            .map(|c| c.column.as_str())
+            .collect()
     }
 
     /// Evaluate the predicate on a RecordBatch, returning a boolean mask.
-    /// All column predicates are ANDed together.
+    /// All column predicates are ANDed together, and with them the OR of the
+    /// alternatives. That OR is Kleene, as discriminator lengths need (INV-P13).
     ///
     /// A column absent from the batch is skipped rather than fatal, so that this
     /// kernel cannot panic on an unexpected batch. That tolerance is not the
@@ -1014,36 +1082,60 @@ impl RowPredicate {
     /// have before any row is read, because skipping it silently widens the
     /// query to everything (INV-X3).
     pub fn evaluate(&self, batch: &RecordBatch) -> Mask {
-        let mut result: Option<BooleanArray> = None;
+        let mut result = evaluate_all(&self.columns, batch)?;
 
-        for col_pred in &self.columns {
-            let Some(col) = batch.column_by_name(&col_pred.column) else {
-                continue; // missing column → all-true (no filtering)
-            };
-            let mask = col_pred.predicate.evaluate(col.as_ref())?;
-            result = Some(match result {
-                None => mask,
-                Some(prev) => and(&prev, &mask).unwrap(),
-            });
+        if !self.alternatives.is_empty() {
+            let mut any: Option<BooleanArray> = None;
+            for group in &self.alternatives {
+                let mask = evaluate_all(group, batch)?;
+                any = Some(match any {
+                    None => mask,
+                    Some(prev) => or_kleene(&prev, &mask).unwrap(),
+                });
+            }
+            result = and(&result, &any.expect("alternatives are not empty")).unwrap();
         }
 
-        Ok(result.unwrap_or_else(|| all(batch.num_rows(), true)))
+        Ok(result)
     }
 
     /// Check if the entire row group can be skipped using column statistics.
     /// Returns true if no rows can match.
     pub fn can_skip_row_group(&self, stats_fn: &ColumnStats) -> bool {
-        // ALL column predicates must pass for a row to match.
-        // If ANY column predicate says it can skip (no matches possible), skip the group.
-        for col_pred in &self.columns {
-            if let Some(stats) = stats_fn(&col_pred.column) {
-                if col_pred.predicate.can_skip(&stats) {
-                    return true;
-                }
-            }
-        }
-        false
+        let no_alternative_can_match = !self.alternatives.is_empty()
+            && self
+                .alternatives
+                .iter()
+                .all(|group| any_can_skip(group, stats_fn));
+
+        any_can_skip(&self.columns, stats_fn) || no_alternative_can_match
     }
+}
+
+/// The AND of `columns` over `batch`; every row when there are none.
+fn evaluate_all(columns: &[ColumnPredicate], batch: &RecordBatch) -> Mask {
+    let mut result: Option<BooleanArray> = None;
+
+    for col_pred in columns {
+        let Some(col) = batch.column_by_name(&col_pred.column) else {
+            continue; // missing column → all-true (no filtering)
+        };
+        let mask = col_pred.predicate.evaluate(col.as_ref())?;
+        result = Some(match result {
+            None => mask,
+            Some(prev) => and(&prev, &mask).unwrap(),
+        });
+    }
+
+    Ok(result.unwrap_or_else(|| all(batch.num_rows(), true)))
+}
+
+/// Whether one of `columns`, all of which must hold, cannot hold anywhere in a
+/// row group with these statistics.
+fn any_can_skip(columns: &[ColumnPredicate], stats_fn: &ColumnStats) -> bool {
+    columns.iter().any(|col_pred| {
+        stats_fn(&col_pred.column).is_some_and(|stats| col_pred.predicate.can_skip(&stats))
+    })
 }
 
 /// Combine multiple row predicates with OR (multiple request items).
@@ -2139,6 +2231,136 @@ mod tests {
             );
         }
         assert!(pred.evaluate(&StringArray::from(vec!["x"])).is_err());
+    }
+
+    /// Each stored filter is read at its own width, and in a variable-length
+    /// array the width can change from one row to the next.
+    #[test]
+    fn a_bloom_reads_each_filter_at_its_own_width() {
+        let filter_of = |value: &[u8], width: usize| {
+            let mut bytes = vec![0u8; width];
+            for n in 0..7 {
+                let bit = bloom_bit(value, n, width * 8);
+                bytes[bit / 8] |= 1 << (bit % 8);
+            }
+            bytes
+        };
+        let pred = BloomFilterPredicate::new(vec![b"alpha".to_vec(), b"beta".to_vec()], 64, 7);
+
+        let rows = [
+            filter_of(b"alpha", 8),
+            filter_of(b"gamma", 8),
+            filter_of(b"beta", 64),
+            filter_of(b"gamma", 64),
+            Vec::new(),
+            filter_of(b"alpha", 8),
+        ];
+        let array = BinaryArray::from_vec(rows.iter().map(Vec::as_slice).collect());
+
+        assert_eq!(
+            pred.evaluate(&array).unwrap(),
+            BooleanArray::from(vec![true, false, true, false, false, true]),
+        );
+    }
+
+    /// The alternatives are a Kleene disjunction, ANDed with the shared
+    /// predicates: a row whose other alternative's column is null still matches.
+    ///
+    /// Covers CT-3 · INV-P13
+    #[test]
+    fn alternatives_are_a_kleene_disjunction_beside_the_shared_predicates() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("program", DataType::UInt8, false),
+            Field::new("d1", DataType::UInt8, true),
+            Field::new("d8", DataType::UInt64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(UInt8Array::from(vec![7, 7, 7, 7, 9])),
+                Arc::new(UInt8Array::from(vec![
+                    Some(1),
+                    None,
+                    Some(2),
+                    Some(1),
+                    Some(1),
+                ])),
+                Arc::new(UInt64Array::from(vec![
+                    None,
+                    Some(100),
+                    Some(200),
+                    Some(100),
+                    None,
+                ])),
+            ],
+        )
+        .unwrap();
+
+        let pred = RowPredicate::with_alternatives(
+            vec![col_eq("program", ScalarValue::UInt8(7))],
+            vec![
+                vec![col_eq("d1", ScalarValue::UInt8(1))],
+                vec![col_eq("d8", ScalarValue::UInt64(100))],
+            ],
+        );
+        let mask = pred.evaluate(&batch).unwrap();
+        let selected = arrow::compute::filter_record_batch(&batch, &mask).unwrap();
+
+        let programs = selected
+            .column(0)
+            .as_primitive::<UInt8Type>()
+            .values()
+            .to_vec();
+        assert_eq!(
+            programs,
+            [7, 7, 7],
+            "rows 0, 1 and 3, and not the other program"
+        );
+        assert_eq!(
+            selected
+                .column(1)
+                .as_primitive::<UInt8Type>()
+                .iter()
+                .collect::<Vec<_>>(),
+            [Some(1), None, Some(1)]
+        );
+    }
+
+    /// A row group is skipped when a shared predicate excludes it, or when every
+    /// alternative does; one alternative that might match keeps it.
+    #[test]
+    fn a_row_group_is_skipped_only_when_no_alternative_can_match() {
+        let pred = RowPredicate::with_alternatives(
+            vec![col_eq("program", ScalarValue::UInt8(7))],
+            vec![
+                vec![col_eq("d1", ScalarValue::UInt8(1))],
+                vec![col_eq("d8", ScalarValue::UInt64(100))],
+            ],
+        );
+        let stats = |program: (u8, u8), d1: (u8, u8), d8: (u64, u64)| {
+            move |column: &str| -> Option<StatRange> {
+                let (min, max): (ArrayRef, ArrayRef) = match column {
+                    "program" => (
+                        Arc::new(UInt8Array::from(vec![program.0])),
+                        Arc::new(UInt8Array::from(vec![program.1])),
+                    ),
+                    "d1" => (
+                        Arc::new(UInt8Array::from(vec![d1.0])),
+                        Arc::new(UInt8Array::from(vec![d1.1])),
+                    ),
+                    _ => (
+                        Arc::new(UInt64Array::from(vec![d8.0])),
+                        Arc::new(UInt64Array::from(vec![d8.1])),
+                    ),
+                };
+                StatRange::new(min.data_type(), min.as_ref(), max.as_ref())
+            }
+        };
+
+        assert!(!pred.can_skip_row_group(&stats((7, 7), (1, 1), (0, 0))));
+        assert!(!pred.can_skip_row_group(&stats((7, 7), (5, 5), (100, 100))));
+        assert!(pred.can_skip_row_group(&stats((7, 7), (5, 5), (0, 0))));
+        assert!(pred.can_skip_row_group(&stats((8, 9), (1, 1), (100, 100))));
     }
 
     /// Every predicate kind refuses, rather than matches nothing on, a column

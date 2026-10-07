@@ -27,11 +27,10 @@ Compared against the reference implementation, as of 2026-10-07.
 | # | Gap | Invariant | Sev |
 |---|---|---|---|
 | 47 | A query without relations decodes every matching row of the chunk before the page cut | — | **S3** |
-| 48 | Discriminator groups multiply the item's other predicates | [INV-Q10](07-invariants.md#inv-q10) | **S3** |
 | 44 | The weight model differs from the reference in four places | [INV-B5](07-invariants.md#inv-b5) | **S4** |
 | 31 | A block number above 2³¹ stored in `Int32` is read as negative by the range filter | [INV-D7](07-invariants.md#inv-d7) | **S4** |
 | 32 | The bloom's hash function is not pinned by the manifest, and the version it resolves to today ignores the seed above 240 bytes | [INV-P9](07-invariants.md#inv-p9) | **S4** |
-| 49 | Relation-heavy queries cost 1.4–4.8× the reference's CPU | — | **S4** |
+| 49 | Relation-heavy and many-item queries cost 1.4–7.6× the reference's CPU | — | **S4** |
 | 50 | Several malformed chunk shapes are answered rather than refused | [INV-E3](07-invariants.md#inv-e3), [INV-E7](07-invariants.md#inv-e7) | **S4** |
 | 53 | A damaged chunk can panic the decoder, and the error kinds around it are coarse | [INV-E7](07-invariants.md#inv-e7) | **S4** |
 | 55 | A catalog key that changes the output is skipped by a release that predates it | [INV-X1](07-invariants.md#inv-x1) | **S4** |
@@ -65,8 +64,8 @@ budget-hitting probe at 1, 2, 4 and 17 threads; 50 paged walks; and the peak hea
 of about 30 query shapes on both engines, at up to 20 concurrent queries. The
 memory path the first review found on relation queries is fixed: those shapes now
 use less heap than the reference. The same path without relations is gap 47. The
-two S1 entries of that review, 45 and 46, are closed, and so are 51, 52, 54
-and 56.
+two S1 entries of that review, 45 and 46, are closed, and so are 48, 51, 52,
+54 and 56.
 
 Several of the review's entries were about what the engine does with a chunk
 that is older than its catalog. Two archiver generations wrote the chunks in the field.
@@ -131,28 +130,6 @@ measured again.
 
 *First test:* a peak-heap bound on a no-relation, all-fields shape in the memory
 bench.
-
-### 48. Discriminator groups multiply the item's other predicates
-
-When an item lists discriminators of several lengths, `compile_item_predicates` in
-`src/query/plan.rs` builds one row predicate per length and copies every other
-filter of the item into each. `or_row_predicates` in `src/scan/predicate.rs`
-then evaluates every copy on every row, with no early exit for rows already
-matched. A ten-value `mentionsAccount` bloom costs seventy hashes a row, so four
-lengths cost 280 and sixteen cost 1 120. The caps on items and bloom values were
-meant to bound this cost, and the split multiplies it.
-
-A 74 KB request within every bound — 100 items, each with four discriminator
-lengths and a ten-value bloom — ran 5.6 s against the reference's 0.3 s on a
-400-block Solana chunk, and 37.6 s against 0.45 s on a larger one. The answers
-were equal. The reference builds one predicate per item with the discriminator
-lengths ORed inside it, so the bloom runs once.
-
-The same missing short-circuit costs a 100-item log query 3.5× the reference's
-time (gap 49).
-
-*First test:* a cost bound on the request above, or a plan-shape test that the
-item's shared predicates appear once.
 
 ---
 
@@ -352,12 +329,12 @@ The check that fits is a unit test pinning `bloom_bit`'s seven bits for a
 240-byte value once a version is chosen, which fails if the resolution moves
 across the bug in either direction.
 
-### 49. Relation-heavy queries cost 1.4–4.8× the reference's CPU
+### 49. Relation-heavy and many-item queries cost 1.4–7.6× the reference's CPU
 
 Answers and memory are fine here; time is not. Solana everything-with-relations
 ran 363 ms against 76 ms, and at 16 concurrent queries 2.1 against 18.5 queries a
 second. Paging a whole chunk took 2.3× the reference's time on EVM and 5× on
-Solana. Four causes, each measured:
+Solana. Five causes, each measured:
 
 - Weight dedup (`accumulate_dedup_contributions` in `src/output/weight.rs`)
   hashes and compares every key value through `IntColumn::resolve` per value,
@@ -373,6 +350,14 @@ Solana. Four causes, each measured:
   skip it, every item is evaluated on every row with no short-circuit, and the
   same OR is evaluated again, serially, to filter relation sources. A 100-item
   log query costs 395 ms against 114.
+- Pruning stops at the row group. The reference also reads the page index the
+  chunks carry, so a filter on a column the table is sorted by reads only the
+  pages that can match, and an item's other filters run on those pages alone. A
+  100-item Solana request, each item a discriminator at four lengths beside a
+  ten-value `mentionsAccount` bloom, takes 61 ms against 19 on a 400-block chunk
+  and 170 ms against 29 on one of 2.1 million instructions; at one length, 47
+  against 12 and 106 against 14. The bloom alone is faster here than in the
+  reference, 125 ms against 411, so what is left is how many rows it runs on.
 - Hierarchical matching (`match_address` in `src/scan/scanner.rs`) compares each
   target row with every source address of its transaction. One transaction with
   45 000 traces and `parents: true` took 5.3 s against 0.11 s. No real chunk has
@@ -392,7 +377,7 @@ answers, median of three interleaved rounds:
 | EVM everything, 16 concurrent | 9.2 q/s | 3.5 q/s | 5.9 q/s |
 
 Two shapes end up faster than the reference and the rest do not. The 100-item
-query is the third cause. Most of what is left on Solana is a fifth one: a
+query is the third cause. Most of what is left on Solana is a sixth one: a
 profile of Solana everything after the two fixes puts about 70% of the query's
 time in `HierarchicalFilter::build` in `src/scan/scanner.rs`, which for every
 source row clones the group key into a new `Vec<u8>`, copies the address into a
@@ -557,8 +542,9 @@ The three rows that overstated their evidence — [INV-D6](07-invariants.md#inv-
 read against the tests they name and lowered to **P**, which took
 `P-COV-PROPERTY` from 0.73 to 0.69. The number a ratchet starts from has to be one
 the tests earn, so it was moved down once rather than locked in. What each row is
-missing is now written in the row; INV-Q14 has since earned **C** back with a test
-that recomputes the field surface from the reference's own source.
+missing is now written in the row. INV-Q14 has since earned **C** back with a test
+that recomputes the field surface from the reference's own source, and INV-P13
+with tests that check the rows a mixed-length discriminator returns.
 [ADR-4](decisions/ADR-4-closed-field-surface.md)
 and [ADR-9](decisions/ADR-9-reject-undecidable-fork-checks.md) are still `Proposed`
 while their MUST text is implemented.

@@ -922,7 +922,7 @@ fn ensure_columns_present(table: &ParquetTable, request: &ScanRequest) -> Result
 /// rows a predicate happened to reach is the same bug from the other side.
 fn ensure_predicates_comparable(table: &ParquetTable, request: &ScanRequest) -> Result<()> {
     for pred in &request.predicates {
-        for col_pred in &pred.columns {
+        for col_pred in pred.column_predicates() {
             let Some(index) = table.column_index(&col_pred.column) else {
                 continue;
             };
@@ -1218,9 +1218,12 @@ fn scan_row_groups(
         // Predicate stages: first column gets its own stage (most selective — sort key leader),
         // remaining columns are merged into a single stage.
         if request.predicates.len() == 1 {
-            let pred = request.predicates[0].clone();
-            let columns = pred.columns;
-            if let Some(first) = columns.first() {
+            let pred = request.predicates[0];
+            let (first, rest) = match pred.columns.split_first() {
+                Some((first, rest)) => (Some(first), rest),
+                None => (None, &[][..]),
+            };
+            if let Some(first) = first {
                 if let Ok(idx) = table.schema().index_of(&first.column) {
                     let col_projection = ProjectionMask::roots(parquet_schema, vec![idx]);
                     let col_name = first.column.clone();
@@ -1239,14 +1242,14 @@ fn scan_row_groups(
                     )));
                 }
             }
-            if columns.len() > 1 {
-                let rest: Vec<_> = columns[1..].to_vec();
-                let mut rest_indices: Vec<usize> = Vec::new();
-                for cp in &rest {
-                    if let Ok(idx) = table.schema().index_of(&cp.column) {
-                        rest_indices.push(idx);
-                    }
-                }
+
+            let rest = RowPredicate::with_alternatives(rest.to_vec(), pred.alternatives.clone());
+            if !rest.matches_every_row() {
+                let mut rest_indices: Vec<usize> = rest
+                    .required_columns()
+                    .into_iter()
+                    .filter_map(|column| table.schema().index_of(column).ok())
+                    .collect();
                 rest_indices.sort_unstable();
                 rest_indices.dedup();
                 if !rest_indices.is_empty() {
@@ -1254,25 +1257,8 @@ fn scan_row_groups(
                     filter_stages.push(Box::new(ArrowPredicateFn::new(
                         rest_proj,
                         move |batch: RecordBatch| {
-                            let mut result: Option<BooleanArray> = None;
-                            for cp in &rest {
-                                if let Some(col) = batch.column_by_name(&cp.column) {
-                                    let mask = cp
-                                        .predicate
-                                        .evaluate(col.as_ref())
-                                        .map_err(|e| ArrowError::ComputeError(e.to_string()))?;
-                                    result = Some(match result {
-                                        Some(prev) => {
-                                            arrow::compute::kernels::boolean::and(&prev, &mask)
-                                                .unwrap()
-                                        }
-                                        None => mask,
-                                    });
-                                }
-                            }
-                            Ok(result.unwrap_or_else(|| {
-                                BooleanArray::from(vec![true; batch.num_rows()])
-                            }))
+                            rest.evaluate(&batch)
+                                .map_err(|e| ArrowError::ComputeError(e.to_string()))
                         },
                     )));
                 }
