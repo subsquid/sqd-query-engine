@@ -43,13 +43,6 @@ impl<'a> SelectionReader<'a> {
         plan: &Plan,
         metadata: &DatasetDescription,
     ) -> Option<Self> {
-        if metadata.tables.keys().any(|table| {
-            inner
-                .table_schema(table)
-                .is_some_and(|schema| schema.index_of(ROW_INDEX).is_ok())
-        }) {
-            return None;
-        }
         let track_positions = inner.supports_row_positions();
         let mut source_counts = HashMap::<&str, usize>::new();
         for table in &plan.table_plans {
@@ -104,14 +97,18 @@ impl<'a> SelectionReader<'a> {
                 );
             }
         }
-        // A row without its complete identity cannot be fetched by key. Keep
-        // the existing scan path for such schemas, including its error behavior.
+        // A row without its complete identity cannot be fetched by key, and a
+        // stored column named like the position column would be read as one.
+        // Keep the existing scan path for such schemas, including its error
+        // behavior. Only the tables this reader scans are asked (INV-E4).
         for table in columns.keys() {
             let schema = inner.table_schema(table)?;
-            if row_key(metadata.table(table)?)
+            let incomplete_key = row_key(metadata.table(table)?)
                 .iter()
-                .any(|key| schema.index_of(key).is_err())
-            {
+                .any(|key| schema.index_of(key).is_err());
+            let shadows_positions = schema.index_of(ROW_INDEX).is_ok();
+
+            if incomplete_key || shadows_positions {
                 return None;
             }
         }

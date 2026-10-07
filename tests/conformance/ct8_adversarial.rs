@@ -10,12 +10,14 @@
 //! they are being asked is whether the answer moved rather than whether the
 //! engine noticed.
 
-use arrow::datatypes::{DataType, Field, TimeUnit};
+use arrow::datatypes::{DataType, Field, SchemaRef, TimeUnit};
+use arrow::record_batch::RecordBatch;
 use sqd_query_engine::error::{error_kind, ErrorKind};
-use sqd_query_engine::output::{execute_chunk_arrow, execute_plan};
+use sqd_query_engine::output::{execute_chunk, execute_chunk_arrow, execute_plan};
 use sqd_query_engine::query::{compile, parse_query};
-use sqd_query_engine::scan::ParquetChunkReader;
-use std::sync::Arc;
+use sqd_query_engine::scan::{ChunkReader, ParquetChunkReader, ScanRequest};
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex};
 
 use crate::harness::chunk::{
     chunk_with_column_retyped, chunk_with_nullable_column, chunk_without_column,
@@ -23,8 +25,8 @@ use crate::harness::chunk::{
 };
 use crate::harness::fixtures::{answers_the_same, fixture_tree_is_present, meta, run, run_against};
 use crate::harness::json::count_items;
-use crate::harness::sol_like;
 use crate::harness::synthetic::{catalog, logs_query, uniform, weighted_chunk, BLOCKS};
+use crate::harness::{evm_like, sol_like};
 
 /// Covers CT-8 · INV-E3
 #[test]
@@ -170,6 +172,97 @@ fn only_the_tables_a_query_names_are_opened() {
         err.root_cause().to_string().contains("transactions"),
         "the error must name the broken table, got: {}",
         err.root_cause()
+    );
+}
+
+/// A chunk reader that remembers every table it was asked about.
+struct Recording {
+    inner: ParquetChunkReader,
+    asked: Mutex<BTreeSet<String>>,
+}
+
+impl Recording {
+    fn note(&self, table: &str) {
+        self.asked.lock().unwrap().insert(table.to_owned());
+    }
+}
+
+impl ChunkReader for Recording {
+    fn scan(&self, table: &str, request: &ScanRequest) -> anyhow::Result<Vec<RecordBatch>> {
+        self.note(table);
+        self.inner.scan(table, request)
+    }
+
+    fn supports_row_positions(&self) -> bool {
+        self.inner.supports_row_positions()
+    }
+
+    fn next_block_range_end(&self, table: &str, block_column: &str, from: u64) -> Option<u64> {
+        self.note(table);
+        self.inner.next_block_range_end(table, block_column, from)
+    }
+
+    fn has_table(&self, table: &str) -> bool {
+        self.note(table);
+        self.inner.has_table(table)
+    }
+
+    fn table_schema(&self, table: &str) -> Option<SchemaRef> {
+        self.note(table);
+        self.inner.table_schema(table)
+    }
+}
+
+/// A query that follows a relation reads the tables it names and no others,
+/// however unreadable the rest are. Choosing how to read the page used to ask
+/// every table of the catalog for its schema; the failed open was swallowed,
+/// so only the cost showed.
+///
+/// Covers CT-8 · INV-E4
+#[test]
+fn a_relation_query_asks_only_for_the_tables_it_names() {
+    let metadata = evm_like::catalog();
+    let intact = evm_like::chunk();
+    let chunk = evm_like::chunk();
+    std::fs::write(chunk.path().join("traces.parquet"), b"PAR1 but not really").unwrap();
+    let query = serde_json::json!({
+        "type": "test",
+        "fromBlock": 100,
+        "toBlock": 115,
+        "logs": [{"transaction": true}],
+        "fields": {"log": {"data": true}, "transaction": {"gasUsed": true}}
+    })
+    .to_string();
+
+    let plan = compile(
+        &parse_query(query.as_bytes(), &metadata).unwrap(),
+        &metadata,
+    )
+    .unwrap();
+    let reader = Recording {
+        inner: ParquetChunkReader::open(chunk.path()).unwrap(),
+        asked: Mutex::default(),
+    };
+    let answer = execute_chunk(&plan, &metadata, &reader, false)
+        .unwrap()
+        .expect("the range holds blocks")
+        .into_json_lines();
+
+    let expected = run_against(&metadata, intact.path(), &query).unwrap();
+    assert_eq!(
+        answer, expected,
+        "an unrelated table must not move the answer"
+    );
+    assert!(
+        count_items(&answer, "transactions") > 0,
+        "the relation must have been followed for the check to mean anything"
+    );
+
+    let asked = reader.asked.into_inner().unwrap();
+    let named: BTreeSet<String> = ["blocks", "logs", "transactions"].map(String::from).into();
+    assert_eq!(
+        asked, named,
+        "only the tables the query names may be asked for"
     );
 }
 
