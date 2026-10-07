@@ -67,7 +67,9 @@ have equal length.
 
 ### INV-D6
 **Hierarchies need addresses.** Every `children` or `parents` relation has an
-`addressColumn` declared on both source and target tables.
+`addressColumn` declared on both source and target tables. Apart from the
+target's address column, its two keys name the same columns: the walk matches
+them by name on both sides.
 
 *Test:* static.
 

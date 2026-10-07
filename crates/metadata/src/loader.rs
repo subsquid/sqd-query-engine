@@ -981,6 +981,30 @@ fn check_relation(
                 table_name
             );
         }
+
+        // The walk sets the target's address column aside on both sides and
+        // matches the rest by name, so those must be the same columns. A key
+        // that names the source's address under another name keeps one column
+        // more on the left than on the right.
+        let walked = target.address_column.as_deref();
+        let group = |keys: &[String]| -> Vec<String> {
+            keys.iter()
+                .filter(|key| Some(key.as_str()) != walked)
+                .cloned()
+                .collect()
+        };
+        let (left_group, right_group) = (group(left), group(right));
+        anyhow::ensure!(
+            left_group == right_group,
+            "{}: relation '{}' is {:?} and walks '{}', so the rest of its key must name \
+             the same columns on both sides, but they are {:?} and {:?}",
+            owner,
+            relation_name,
+            relation.kind,
+            walked.unwrap_or(""),
+            left_group,
+            right_group
+        );
     }
 
     Ok(())
@@ -1977,6 +2001,78 @@ tables:
             assert!(
                 parse_dataset_description(&catalog(relation)).is_err(),
                 "{what} must be refused"
+            );
+        }
+    }
+
+    /// A hierarchical relation between two tables whose address columns have
+    /// different names. Naming both addresses in the key used to load, and
+    /// then failed an assertion on the key lengths in every query that
+    /// followed the relation.
+    ///
+    /// Covers CT-1 · INV-D6
+    #[test]
+    fn test_validate_rejects_a_walk_whose_keys_differ() {
+        let catalog = |keys: &str| {
+            format!(
+                r#"
+version: v2
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    sort_key: [number]
+    columns:
+      number: {{ type: uint64 }}
+  calls:
+    request:
+      filters: []
+      relations:
+        events:
+          table: events
+          kind: children
+{keys}
+    item_order_keys: [ group, address ]
+    address_column: address
+    columns:
+      block_number: {{ type: uint64 }}
+      group: {{ type: uint32 }}
+      address: {{ type: list_uint32 }}
+  events:
+    request:
+      filters: []
+    item_order_keys: [ index ]
+    address_column: call_address
+    columns:
+      block_number: {{ type: uint64 }}
+      group: {{ type: uint32 }}
+      index: {{ type: uint32 }}
+      call_address: {{ type: list_uint32 }}
+"#
+            )
+        };
+
+        parse_dataset_description(&catalog("          key: [ block_number, group ]"))
+            .expect("a walk within one group must load");
+
+        let rejected: &[(&str, &str)] = &[
+            (
+                "both address columns in the key",
+                "          left_key: [ block_number, group, address ]\n\
+                 \x20         right_key: [ block_number, group, call_address ]",
+            ),
+            (
+                "different group columns",
+                "          left_key: [ block_number, group ]\n\
+                 \x20         right_key: [ block_number, index ]",
+            ),
+        ];
+        for (what, keys) in rejected {
+            let err = parse_dataset_description(&catalog(keys))
+                .expect_err(&format!("{what} must be refused"));
+            assert!(
+                format!("{err:#}").contains("must name the same columns on both sides"),
+                "{what}: refused for another reason: {err:#}"
             );
         }
     }
