@@ -9,7 +9,7 @@ Delete an entry when the gap closes. If the spec turns out to be wrong and the
 implementation right, fix the spec and delete the entry. The document should tend
 toward empty.
 
-Compared against the reference implementation, as of 2026-09-05.
+Compared against the reference implementation, as of 2026-10-07.
 
 ---
 
@@ -26,9 +26,15 @@ Compared against the reference implementation, as of 2026-09-05.
 
 | # | Gap | Invariant | Sev |
 |---|---|---|---|
+| 47 | A query without relations decodes every matching row of the chunk before the page cut | — | **S3** |
+| 48 | Discriminator groups multiply the item's other predicates | [INV-Q10](07-invariants.md#inv-q10) | **S3** |
 | 44 | The weight model differs from the reference in four places | [INV-B5](07-invariants.md#inv-b5) | **S4** |
 | 31 | A block number above 2³¹ stored in `Int32` is read as negative by the range filter | [INV-D7](07-invariants.md#inv-d7) | **S4** |
 | 32 | The bloom's hash function is not pinned by the manifest, and the version it resolves to today ignores the seed above 240 bytes | [INV-P9](07-invariants.md#inv-p9) | **S4** |
+| 49 | Relation-heavy queries cost 1.4–4.8× the reference's CPU | — | **S4** |
+| 50 | Several malformed chunk shapes are answered rather than refused | [INV-E3](07-invariants.md#inv-e3), [INV-E7](07-invariants.md#inv-e7) | **S4** |
+| 53 | A damaged chunk can panic the decoder, and the error kinds around it are coarse | [INV-E7](07-invariants.md#inv-e7) | **S4** |
+| 55 | A catalog key that changes the output is skipped by a release that predates it | [INV-X1](07-invariants.md#inv-x1) | **S4** |
 
 Every dataset [chapter 3](03-catalog.md) names is served except `fuel`, which is
 out of scope ([ADR-10](decisions/ADR-10-fuel-is-out-of-scope.md)). The only
@@ -48,6 +54,19 @@ could reach that is not listed here matched the reference exactly: the whole
 filter algebra, every `lastBlock` case off the wave path, ordering, dedup,
 every encoding in use, and every integer width, codec and row-group layout
 either writer has produced.
+
+Gaps 45 to 56 came from a second review of the same kind, on 2026-10-07, after
+35 and 37 to 43 had closed. It ran the whole suite with the fixture tree and the
+real chunks required (480 tests, all green, CT-7 included); about 2 200 mutations
+of the fixture queries in each of two range modes; one query per catalog field on
+19 chunks; about 600 probes on the real chunks; 211 synthetic chunk variants
+against both engines; about 4 100 hostile or generated requests; every
+budget-hitting probe at 1, 2, 4 and 17 threads; 50 paged walks; and the peak heap
+of about 30 query shapes on both engines, at up to 20 concurrent queries. The
+memory path the first review found on relation queries is fixed: those shapes now
+use less heap than the reference. The same path without relations is gap 47. The
+two S1 entries of that review, 45 and 46, are closed, and so are 51, 52, 54
+and 56.
 
 Several of the review's entries were about what the engine does with a chunk
 that is older than its catalog. Two archiver generations wrote the chunks in the field.
@@ -77,6 +96,66 @@ move fails a test rather than waiting for a review.
 
 ---
 
+## S3 — Loud
+
+### 47. A query without relations decodes every matching row of the chunk before the page cut
+
+The selection reader that defers payload reads until the page is chosen is
+switched on only when some table plan has relations (`execute_chunk_fmt` in
+`src/output/assembly.rs`). Without one, the scan reads every output column of
+every matching row in the range the size hint suggests. The hint is narrow only
+for a single table with no predicate and no `includeAllBlocks`; for anything else
+it is the maximum over tables, and on tables sorted by a filter column every row
+group spans the whole chunk. So the whole chunk is decoded and the weight cut
+then keeps a few dozen blocks.
+
+Measured per query, peak heap against the reference's: transactions and logs with
+all fields, 300 MB against 54 MB on the 224-block EVM chunk and 1 064 MB against
+51 MB on a 1 592-block one; every table with all fields, 3 669 MB against
+262 MB; Solana instructions and logs, 1 892 MB against 150 MB. At four concurrent
+queries the every-table shape held 14.6 GB against 0.8 GB. Answers were byte
+for byte the same. A worker serves many queries at once on a fixed amount of
+memory, so this is how a valid request takes one down.
+
+Using the selection reader for every query brought the every-table shape to
+45 MB, and transactions with logs from 71 ms and 300 MB to 51 ms and 56 MB,
+with every answer and the whole suite unchanged. It is the wrong gate, though,
+because selective single-table queries pay for it. On a quiet machine:
+`usdc_transfers` went from 7.2 to 9.5 ms, against the reference's 9.6, so its
+lead is gone; `getLogs` over 100 blocks from 4.6 to 6.5 ms; `getBlockByNumber`
+with transaction hashes from 2.2 to 3.9 ms. That is 32–77%, not the 5–25% a
+first run under load suggested. The reader should be switched on where the
+whole-chunk decode can happen — more than one table plan, `includeAllBlocks`, or
+a predicate the row-group statistics cannot bound — and the selective shapes
+measured again.
+
+*First test:* a peak-heap bound on a no-relation, all-fields shape in the memory
+bench.
+
+### 48. Discriminator groups multiply the item's other predicates
+
+When an item lists discriminators of several lengths, `compile_item_predicates` in
+`src/query/plan.rs` builds one row predicate per length and copies every other
+filter of the item into each. `or_row_predicates` in `src/scan/predicate.rs`
+then evaluates every copy on every row, with no early exit for rows already
+matched. A ten-value `mentionsAccount` bloom costs seventy hashes a row, so four
+lengths cost 280 and sixteen cost 1 120. The caps on items and bloom values were
+meant to bound this cost, and the split multiplies it.
+
+A 74 KB request within every bound — 100 items, each with four discriminator
+lengths and a ten-value bloom — ran 5.6 s against the reference's 0.3 s on a
+400-block Solana chunk, and 37.6 s against 0.45 s on a larger one. The answers
+were equal. The reference builds one predicate per item with the discriminator
+lengths ORed inside it, so the bloom runs once.
+
+The same missing short-circuit costs a 100-item log query 3.5× the reference's
+time (gap 49).
+
+*First test:* a cost bound on the request above, or a plan-shape test that the
+item's shared predicates appear once.
+
+---
+
 ## S4 — Latent
 
 ### 44. The weight model differs from the reference in four places
@@ -84,14 +163,32 @@ move fails a test rather than waiting for a review.
 Weight dedup now compares key values after hashing, so colliding hashes cannot
 merge distinct rows. The remaining differences concern the weight model.
 
-Four smaller differences move the cut by one block in either direction: boundary
-blocks weigh zero here and their header weight there; the key columns weighed
-when not selected differ; the header's `number` is weighed only when selected;
-Substrate `digest` weighs 32 here and 128 there. Items are equal when each engine
-pages independently, so none of this is wrong, but until it is closed the parity
-suite cannot assert `lastBlock` equality against the reference. The engine's
-answer is a prefix of the reference's on every shape the review ran, so a
-paging client loses nothing; only the page boundary moves.
+Four differences move the cut: boundary blocks weigh zero here and their header
+weight there; the key columns weighed when not selected differ; the header's
+`number` is weighed only when selected; Substrate `digest` weighs 32 here and 128
+there. The largest is the keys. The reference weighs every primary-key column at
+32 whether or not it is selected; this engine weighs only the columns that
+resolve as output fields, so an unselected `block_number` weighs nothing.
+
+The cut moves by more than a block. The second review measured all traces with
+subtraces on the real EVM chunk at 78 blocks there and 103 here (7.6 MB against
+10.2 MB), all logs with every relation at 39 against 46, and a Moonbeam
+everything query at 2 269 against 2 783; one fixture shape cut earlier here, 131
+against 142. Usually the reference's page is a prefix of this engine's. Paging
+each engine on its own gave the same items on all 50 walks, with nothing lost or
+repeated, so no client is wrong; but a page can be about a third larger than the
+reference's, and the parity suite cannot assert `lastBlock` equality until this
+closes.
+
+The keys cannot be weighed the reference's way today, because the catalog has no
+primary key: `compute_weight_params` in `src/output/weight.rs` knows only the
+selected fields. Declaring a table's primary key in the catalog, and weighing
+those columns whether or not they are selected, closes the largest difference.
+A release that predates the key skips it and keeps cutting where it does now,
+which is gap 55's case but harmless here: only the page boundary moves. The
+alternative is to keep this engine's model and record it as a deliberate
+divergence, in which case the parity suite compares page walks and never
+`lastBlock`.
 
 Range reads compute the final weight after collecting every table and relation
 for a complete block range. The narrow size pre-scan only suggests the first
@@ -255,6 +352,113 @@ The check that fits is a unit test pinning `bloom_bit`'s seven bits for a
 240-byte value once a version is chosen, which fails if the resolution moves
 across the bug in either direction.
 
+### 49. Relation-heavy queries cost 1.4–4.8× the reference's CPU
+
+Answers and memory are fine here; time is not. Solana everything-with-relations
+ran 363 ms against 76 ms, and at 16 concurrent queries 2.1 against 18.5 queries a
+second. Paging a whole chunk took 2.3× the reference's time on EVM and 5× on
+Solana. Four causes, each measured:
+
+- Weight dedup (`accumulate_dedup_contributions` in `src/output/weight.rs`)
+  hashes and compares every key value through `IntColumn::resolve` per value,
+  and a list key (`instruction_address`, `trace_address`) allocates an array per
+  row and per comparison. It is serial, and about half the query thread's time.
+  The selection reader already tags each row with its physical position, and
+  deduplicating on that position, as the reference does by row index, took
+  Solana everything from 329 ms to 190 ms with the same answer.
+- List-key filters allocate per row (`TypedKeyColumn::append_to` in
+  `src/scan/scanner.rs`). Reading the offsets once took a Solana
+  instructions-with-relations query from 569 ms to 182 ms (reference 294).
+- Items are ORed into one scan. A row group is skipped only when every item can
+  skip it, every item is evaluated on every row with no short-circuit, and the
+  same OR is evaluated again, serially, to filter relation sources. A 100-item
+  log query costs 395 ms against 114.
+- Hierarchical matching (`match_address` in `src/scan/scanner.rs`) compares each
+  target row with every source address of its transaction. One transaction with
+  45 000 traces and `parents: true` took 5.3 s against 0.11 s. No real chunk has
+  been seen with such a transaction.
+
+The first two fixes together, measured on a quiet machine with byte-identical
+answers, median of three interleaved rounds:
+
+| Shape | Reference | Today | Fixed |
+|---|---|---|---|
+| Solana instructions + inner + logs + balances, 527 blocks | 330 ms | 657 ms | 181 ms |
+| EVM USDC traces + subtraces and parents | 165 ms | 236 ms | 112 ms |
+| Solana everything with relations | 64.5 ms | 349 ms | 126 ms |
+| EVM everything with relations | 119 ms | 275 ms | 162 ms |
+| EVM 100 log items + transactions | 59 ms | 272 ms | 210 ms |
+| Solana everything, 16 concurrent | 17.4 q/s | 1.8 q/s | 5.5 q/s |
+| EVM everything, 16 concurrent | 9.2 q/s | 3.5 q/s | 5.9 q/s |
+
+Two shapes end up faster than the reference and the rest do not. The 100-item
+query is the third cause. Most of what is left on Solana is a fifth one: a
+profile of Solana everything after the two fixes puts about 70% of the query's
+time in `HierarchicalFilter::build` in `src/scan/scanner.rs`, which for every
+source row clones the group key into a new `Vec<u8>`, copies the address into a
+new `Vec<u32>`, and inserts both into a `std` `HashMap` hashed with SipHash. A
+fixed-width integer key in an `FxHashMap` and one flat address buffer with
+offsets would remove those allocations; it is not measured yet.
+
+*First test:* the throughput bench's relation shapes, with a ratio bound against
+the reference.
+
+### 50. Several malformed chunk shapes are answered rather than refused
+
+Each needs a chunk no writer produces today, which is why this is **S4**; each
+answers with a 200 where the reference, or the spec, errors.
+
+- Relation join keys are never type-checked. A target `transaction_index`
+  stored as text reads as transaction 0 (`get_u64` in `src/scan/scanner.rs`
+  returns 0 for a non-integer key), which attaches logs to the wrong
+  transaction; text on the source side matches nothing. The reference errors
+  ("datatypes of join keys don't match"); INV-E7 wants `UnsupportedKeyType`.
+- Without `traces.type`, the variant writer writes no variant group, so
+  `callValue` and its siblings vanish from every row. The reference errors with
+  `ColumnNotFound`.
+- A list or struct stored where the catalog declares a scalar is rendered
+  nested, not refused as `MalformedChunkData`.
+- A missing sort-key column is tolerated and items come out in another order;
+  the reference errors.
+- An item whose block has no header row gets a synthesized `"header":{"number":N}`
+  although `number` was not selected (INV-O7).
+- An empty block table skips the `parentBlockHash` check.
+- A `jsonVerbatim` value that is not JSON is spliced into the response, which
+  then does not parse. §6.3 requires `MalformedChunkData`. The reference splices
+  it too.
+
+*First test:* one synthetic chunk per shape, asserting the kind.
+
+### 53. A damaged chunk can panic the decoder, and the error kinds around it are coarse
+
+A corrupted data page panics inside the parquet crate's RLE decoder on some
+queries; the reference panics in the same place, and the caller catches it.
+Other decode failures surface with no `ErrorKind`. In the other direction, every
+table-open failure is labelled `MalformedChunkData` (`src/scan/chunk.rs`),
+including a transient I/O error, which tells a caller not to retry a read that
+would succeed.
+
+*First test:* a truncated page and an injected I/O error, asserting two
+different kinds.
+
+### 55. A catalog key that changes the output is skipped by a release that predates it
+
+The lenient loader skips keys it does not know, so a catalog that gains an
+optional key still loads in an older release, and the version rule says to
+prefer additive changes under `v2`. That is safe for a key an older release can
+ignore without changing its answer, and not for one that changes the answer.
+`members:` is the second kind: a release from before it renders Solana
+`transactionConfig.priorityFee` and `authorizationList[].nonce` as JSON numbers
+where the reference renders decimal strings, with no error. Nothing in the
+catalog format tells a reader that a key must be understood.
+
+Either such a key bumps the version, or the format gains a way to mark keys a
+reader must understand, so an older reader refuses the catalog instead of
+answering differently.
+
+*First test:* parse a catalog carrying a must-understand key with a reader that
+does not know it, and assert the refusal.
+
 ---
 
 ## Deliberate divergences from the reference
@@ -277,7 +481,7 @@ worker answers.
 | `null` as a filter value | Absent: `"address": null` is no constraint | `InvalidFilterValue` | Every filter value has a form the kind accepts and `null` is not one. *Terminal*; also present in earlier revisions of this engine. |
 | `hyperliquidReplicaCmds` aliases | `orderActions`, `cancelActions`, `cancelByCloidActions`, `batchModifyActions` add no `actionType` predicate — `orderActions: [{user: [U]}]` returns every action type for `U` | Each alias carries an implicit `actionType` predicate ([§3.8](03-catalog.md#38-hyperliquidreplicacmds)) | The alias name promises orders; the reference does not keep the promise. **Silent:** 7 092 rows there, 3 856 here for the same request. The reference also reads `asset`/`cloid` columns the parquet does not have for `cancelByCloidActions.containsAsset`/`containsCloid`, so those filters error there and answer here. |
 | Item-request cap counting | `hyperliquidReplicaCmds` counts only the `actions` array; its four aliases are uncounted | Count every item request, uniformly ([INV-Q5](07-invariants.md#inv-q5)) | An uncounted alias is an unbounded scan. *Terminal* above a hundred items through aliases. |
-| Shapes the reference rejects and this engine accepts | Duplicate JSON keys, a bare string where a list is expected, `null` for `fromBlock` / `includeAllBlocks` / `fields`, `status` as a list or in upper case, `0X` on a Solana discriminator, an integer in a `d1` list | Accepted; last key wins, a scalar is a one-element list, `null` is the default, bogus values match nothing | Harmless while the portal filters with the reference's parser; a client relying on one of these gets a request error from a reference worker and data from this one. |
+| Shapes the reference rejects and this engine accepts | Duplicate JSON keys, a bare string where a list is expected, `null` for `fromBlock` / `includeAllBlocks` / `fields`, `status` as a list or in upper case, `0X` in a Solana `discriminator` list, an integer in a `d1` list | Accepted; last key wins, a scalar is a one-element list, `null` is the default, bogus values match nothing | Harmless while the portal filters with the reference's parser; a client relying on one of these gets a request error from a reference worker and data from this one. |
 | Empty result | `[]` (array writer) or empty (lines writer) | Zero bytes ([INV-O1](07-invariants.md#inv-o1)) | NDJSON is the only format; zero bytes concatenates. Moot on the wire: the worker uses the lines writer for the reference too. |
 | Response field order | Declaration order in the query DSL | Catalog column order ([INV-O6](07-invariants.md#inv-o6)) | Both are stable; the catalog is the single source of truth. Values are equal, bytes are not — the parity suite must compare values, not bytes. |
 | String escaping | `\u`-escapes non-ASCII | Raw UTF-8 | Both valid JSON. Same reason as above. |
@@ -285,6 +489,7 @@ worker answers.
 | Signed filter values | No signed arm either; `transactions.version` and `rewards.lamports` are unfilterable | Filterable where a catalog declares it ([INV-P14](07-invariants.md#inv-p14)) | No bundled catalog declares such a filter, so nothing changes on the wire. What changed is that refusing one is now a catalog decision rather than a hole in the compiler. |
 | `parentBlockHash` when `fromBlock` is outside the chunk | Errors: the window below `fromBlock` is empty and the lookup fails with a server error | Skip the check ([INV-E5](07-invariants.md#inv-e5)) | A chunk that cannot see the block is not evidence of a fork. Unreachable through the portal, which intersects the range with the chunk before sending. |
 | Fork search window | Searches back over *parent* numbers, with a standing FIXME that a longer gap in block numbering misses the parent | Answer from the first block at or after `fromBlock`, which states its own parent's hash; the window only sizes the evidence ([§2.1](02-request.md#parentblockhash)) | A window is a guess about how far back the parent lies. The row that answers is the next block the chain has, so nothing has to be guessed and a numbering gap of any width is answered, whether `fromBlock` lies after the gap or inside it. Inside the chunk both engines give the same answer and the same message at every `fromBlock` the CT-7 fork probe tries; they differ only where the gap is wider than the reference's window. |
+| Solana `d1`/`d2`/`d4`/`d8` with a `0X` prefix, and `discriminator` lists of mixed lengths | Accepts the query and answers differently. A `0X` value in a `d` list is dropped silently: `d1: ["0X0C"]` matches nothing, and `["0x0c","0X09"]` matches only `0x0c` (326 items against 491 here). Mixed-length discriminators are ORed without Kleene logic, so an instruction shorter than the longest length is dropped even when a shorter discriminator matches it: `["0x09","0xf8c69e91e17587c8"]` gives 87 instructions there and 6 901 here | `0X` is a hex prefix ([INV-Q12](07-invariants.md#inv-q12)); a row matches when any discriminator matches | The reference is wrong in both. **Silent**, and unlike the rejected shapes above the reference's parser lets these through, so during a mixed fleet the answer depends on the worker. |
 
 Two rows that used to be here are gone: the reference emitted Substrate
 `event.callAddress` twice and now emits it once, and the reference's bloom was
@@ -329,8 +534,8 @@ chunk is absent, so CI reports green having compared nothing. `SQD_REQUIRE_FIXTU
 is what turns that skip into a failure, and CI does not set it. On a checkout
 with the tree in place no variable is needed: all 112 fixture queries and the 48
 fixture-backed conformance tests run and pass. The live differential (CT-7) runs
-600 filter probes with no disagreement, but against a reference checkout a month old,
-over the first forty blocks of seven fixture chunks, with plain
+600 filter probes with no disagreement, against whatever reference checkout sits
+beside this one, over the first forty blocks of seven fixture chunks, with plain
 in-list filters and the default projection only, and never in CI. A second CT-7
 test sends about 1 300 `parentBlockHash` checks to both engines across the same
 seven chunks, every `fromBlock` next to a skipped Solana slot included, and
@@ -339,6 +544,13 @@ ethereum, optimism, solana, kusama, moonbeam, bitcoin and tron; binance,
 hyperliquid, hyperliquid_replica_cmds and tempo have fixture comparison against
 reference-generated results but no live differential. Datasets with a real
 archive chunk on disk: one Ethereum, one Solana.
+
+The second review's two S1 entries, 45 and 46, were in shapes the suite never
+built: a `fromBlock` on a skipped slot, and the Arrow rendering of a value whose
+hex has an odd digit count. Both shapes are in the tree now, as the CT-7 fork
+probe and a CT-6 test that renders every hex field of every fixture chunk both
+ways. The rest of the probe sets of both reviews are the obvious next additions
+to CT-7.
 
 The three rows that overstated their evidence — [INV-D6](07-invariants.md#inv-d6),
 [INV-P13](07-invariants.md#inv-p13) and [INV-Q14](07-invariants.md#inv-q14) — were
