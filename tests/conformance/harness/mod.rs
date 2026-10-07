@@ -5,6 +5,7 @@
 //! with itself, and §8.1 names silent skips as the most common way a conformance
 //! suite lies.
 
+pub mod arrow;
 pub mod chunk;
 pub mod evm_like;
 pub mod fixtures;

@@ -1633,6 +1633,120 @@ mod tests {
         assert!(checked, "logs stream must be present");
     }
 
+    /// Block `gasLimit` and transaction `value` are minimal-form quantities, so
+    /// many have an odd digit count. The binary rendering used to emit `null` for
+    /// every one: `gasLimit` in all 224 blocks of this chunk.
+    ///
+    /// Covers CT-6 · INV-O14
+    #[test]
+    #[ignore = "requires external chunk data"]
+    fn test_arrow_binary_quantities_match_json() {
+        if !crate::testing::chunks_present() {
+            return;
+        }
+
+        use arrow::array::{Array, BinaryArray, UInt64Array};
+        use arrow::datatypes::DataType;
+        use arrow::ipc::reader::StreamReader;
+        use std::io::Cursor;
+
+        let meta = evm_metadata();
+        let q = br#"{
+            "type": "evm", "fromBlock": 0, "includeAllBlocks": true,
+            "fields": {
+                "block": { "number": true, "gasLimit": true },
+                "transaction": { "transactionIndex": true, "value": true }
+            },
+            "transactions": [{}]
+        }"#;
+        let plan = compile(&parse_query(q, &meta).unwrap(), &meta).unwrap();
+        let chunk = evm_chunk();
+
+        let json = to_blocks(execute_chunk(&plan, &meta, &chunk, false).unwrap());
+        let arrow = execute_chunk_arrow(&plan, &meta, &chunk, false, true)
+            .unwrap()
+            .unwrap()
+            .into_data();
+
+        let digits = |text: &str| {
+            let d = text.trim_start_matches("0x");
+            if d.len() % 2 == 1 {
+                format!("0{d}")
+            } else {
+                d.to_string()
+            }
+        };
+        let mut json_values: HashMap<&str, Vec<(u64, Option<String>)>> = HashMap::new();
+        for block in &json {
+            let number = block["header"]["number"].as_u64().unwrap();
+            let gas_limit = block["header"]["gasLimit"].as_str().map(digits);
+            json_values
+                .entry("blocks")
+                .or_default()
+                .push((number, gas_limit));
+            for tx in block["transactions"].as_array().into_iter().flatten() {
+                let value = tx["value"].as_str().map(digits);
+                json_values
+                    .entry("transactions")
+                    .or_default()
+                    .push((number, value));
+            }
+        }
+
+        let mut arrow_values: HashMap<&str, Vec<(u64, Option<String>)>> = HashMap::new();
+        let mut rest = arrow.as_slice();
+        while !rest.is_empty() {
+            let name_len = u32::from_le_bytes(rest[..4].try_into().unwrap()) as usize;
+            let name = std::str::from_utf8(&rest[4..4 + name_len])
+                .unwrap()
+                .to_string();
+            rest = &rest[4 + name_len..];
+            let payload_len = u32::from_le_bytes(rest[..4].try_into().unwrap()) as usize;
+            let payload = &rest[4..4 + payload_len];
+            rest = &rest[4 + payload_len..];
+
+            let (table, block_column, column) = match name.as_str() {
+                "blocks" => ("blocks", "number", "gas_limit"),
+                "transactions" => ("transactions", "block_number", "value"),
+                _ => continue,
+            };
+            for batch in StreamReader::try_new(Cursor::new(payload), None).unwrap() {
+                let batch = batch.unwrap();
+                let blocks = arrow::compute::cast(
+                    batch.column_by_name(block_column).unwrap(),
+                    &DataType::UInt64,
+                )
+                .unwrap();
+                let blocks = blocks.as_any().downcast_ref::<UInt64Array>().unwrap();
+                let values = batch.column_by_name(column).unwrap();
+                let values = values.as_any().downcast_ref::<BinaryArray>().unwrap();
+                for row in 0..batch.num_rows() {
+                    let value = values
+                        .is_valid(row)
+                        .then(|| faster_hex::hex_string(values.value(row)));
+                    arrow_values
+                        .entry(table)
+                        .or_default()
+                        .push((blocks.value(row), value));
+                }
+            }
+        }
+
+        for table in ["blocks", "transactions"] {
+            let (mut ours, mut json) = (arrow_values[table].clone(), json_values[table].clone());
+            ours.sort();
+            json.sort();
+            assert!(
+                json.iter().all(|(_, v)| v.is_some()),
+                "{table}: every value is set"
+            );
+            assert_eq!(
+                ours, json,
+                "{table}: the binary rendering must carry the JSON values"
+            );
+        }
+    }
+
     #[test]
     #[ignore = "requires external chunk data"]
     fn test_execute_solana_instructions() {
