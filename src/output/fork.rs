@@ -32,6 +32,9 @@ pub struct UnexpectedBaseBlock {
     pub prev_blocks: Vec<BlockRef>,
 }
 
+/// The one message that is part of the contract (spec §6.3): a transport that
+/// carries an error as text alone leaves a client only this to rewind with.
+/// It is the reference's text, word for word.
 impl fmt::Display for UnexpectedBaseBlock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.prev_blocks.last() {

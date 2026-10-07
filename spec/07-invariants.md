@@ -605,7 +605,8 @@ the skipped case: it is silent because it was never asked.
 
 ### INV-E6
 **Error kinds are stable and machine-readable.** Clients switch on the kind; only
-humans read the message.
+humans read the message. The one exception is the message of
+`UnexpectedBaseBlock`, which is fixed ([§6.3](06-errors.md#unexpectedbaseblock)).
 
 ### INV-E7
 **An uncomparable key type is an error** (`UnsupportedKeyType`), never "matches

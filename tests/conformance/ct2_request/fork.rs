@@ -1060,3 +1060,38 @@ fn a_chunk_holding_the_block_after_the_gap_must_carry_its_parent_hash() {
         "nothing at or after fromBlock, and nothing in the window behind it"
     );
 }
+
+/// The one message that is part of the contract. A transport that carries an
+/// error as text alone gives a client nothing else to rewind with, so the text
+/// is parsed: the prefix up to `expected `, then `but got <number>#<hash>`. It
+/// is the reference's text, and rewording it breaks fork recovery silently.
+///
+/// Covers CT-2 · INV-E6
+#[test]
+fn the_fork_error_message_is_pinned() {
+    use sqd_query_engine::metadata::parse_dataset_description;
+    use sqd_query_engine::output::UnexpectedBaseBlock;
+
+    let chain = skipping_chain(&[(10, 9), (11, 10), (13, 11)], &Writing::default());
+    let catalog = parse_dataset_description(SKIPPING_CATALOG).unwrap();
+    let query = r#"{"type":"test","fromBlock":12,"includeAllBlocks":true,
+                    "parentBlockHash":"0xdead","fields":{"block":{"number":true}}}"#;
+
+    let err = run_against(&catalog, chain.path(), query).expect_err("the parent is 11");
+
+    let expected = format!(
+        "unexpected base block: expected 0xdead, but got 11#{}",
+        hash_of(11)
+    );
+    assert_eq!(err.to_string(), expected);
+    assert_eq!(format!("{err:#}"), expected, "no context may wrap it");
+
+    let without_blocks = UnexpectedBaseBlock {
+        expected_hash: "0xdead".to_owned(),
+        prev_blocks: Vec::new(),
+    };
+    assert_eq!(
+        without_blocks.to_string(),
+        "unexpected base block: expected 0xdead, but got empty prev_blocks"
+    );
+}

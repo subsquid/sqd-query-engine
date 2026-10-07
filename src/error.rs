@@ -4,6 +4,8 @@
 //! `spec/06-errors.md`. Clients switch on the kind; only humans read the message
 //! (INV-E6). A library that has to match on message text breaks the day someone
 //! improves the wording, so the text is deliberately not part of the contract.
+//! The one exception is `UnexpectedBaseBlock`, whose text is parsed where a
+//! transport carries nothing else; see its `Display`.
 //!
 //! Kinds ride along inside `anyhow::Error` rather than replacing it: the engine's
 //! internals return `anyhow::Result` throughout, and a request error is one of
