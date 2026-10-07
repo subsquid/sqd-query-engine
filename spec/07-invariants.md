@@ -574,12 +574,20 @@ block preceding `fromBlock`, its hash MUST be compared. A mismatch is
 `(blockNumber, hash)` pairs. Accepting the field and ignoring it silently serves
 data from a chain the client did not ask about.
 
-Each block row carries its own parent's hash, so the row at `fromBlock` answers
-the question, and only that row does; the window around it exists to carry the
-recent pairs a client needs to find the fork point, not to answer in its place.
-The check is skipped without error when the chunk does not hold that row —
-whether because the window caught nothing at all, or because the chunk ends
-below `fromBlock`. A chunk that cannot see the block is not evidence about it.
+Each block row carries its own parent's hash, so one row answers the question:
+the first at or after `fromBlock` whose parent number is below `fromBlock`. On a
+chain that has a block at `fromBlock`, that is the row at `fromBlock`. On a chain
+that skipped `fromBlock` — a Solana slot nobody produced, where a client resuming
+at `lastBlock + 1` often lands — it is the next block, whose parent is the block
+before the gap. Without a parent-number column the parent number is `n - 1`, and
+only the row at `fromBlock` qualifies. The window behind `fromBlock` exists to
+carry the recent pairs a client needs to find the fork point, not to answer in
+its place.
+
+The check is skipped without error when the chunk does not hold that row:
+because the chunk ends below `fromBlock`, or because its first block's parent is
+at or above `fromBlock`. A chunk that cannot see the block is not evidence about
+it.
 
 A dataset whose block table declares no parent-hash column cannot answer the
 question at all. Such a dataset MUST reject `parentBlockHash`
@@ -591,7 +599,7 @@ carries neither the block table nor the parent-hash column cannot answer either,
 and MUST fail rather than return data. Only a chunk the window does not reach is
 the skipped case: it is silent because it was never asked.
 
-*Test:* supply a wrong `parentBlockHash` for the chunk's first block and assert `UnexpectedBaseBlock`; supply any `parentBlockHash` to a dataset with no parent-hash column and assert `UnsupportedRequestField`; supply one to a chunk inside the window whose block table lacks the column and assert an error; supply one with `fromBlock` below the chunk, and one with `fromBlock` above it, and assert the query succeeds in both.
+*Test:* supply a wrong `parentBlockHash` for the chunk's first block and assert `UnexpectedBaseBlock`; supply one with `fromBlock` on a number the chain skipped and assert `UnexpectedBaseBlock` naming the block before the gap; supply any `parentBlockHash` to a dataset with no parent-hash column and assert `UnsupportedRequestField`; supply one to a chunk inside the window whose block table lacks the column and assert an error; supply one with `fromBlock` below the chunk, and one with `fromBlock` above it, and assert the query succeeds in both.
 
 ### INV-E6
 **Error kinds are stable and machine-readable.** Clients switch on the kind; only

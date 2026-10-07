@@ -60,9 +60,10 @@ injectable rather than compiled in.
 | `P-FORK-WINDOW` | Recent `(blockNumber, hash)` pairs an `UnexpectedBaseBlock` carries, as a span of block numbers behind `fromBlock` (§2.2, [INV-E5](07-invariants.md#inv-e5)) | 100 | 100 |
 
 This parameter no longer decides whether the parent is found, so there is nothing
-to derive it from. The row *at* `fromBlock` states its own parent's hash, and the
-search is anchored there; the window behind it only sizes the evidence a client
-gets for locating the fork point. A dataset whose numbering skips further than the
+to derive it from. The first block at or after `fromBlock` states its own
+parent's hash, and the search reaches it however far the chain skipped; the
+window behind `fromBlock` only sizes the evidence a client gets for locating the
+fork point. A dataset whose numbering skips further than the
 window returns fewer pairs, and still answers.
 
 The reference implementation searches over parent numbers instead, and carries a

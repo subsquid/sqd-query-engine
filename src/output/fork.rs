@@ -8,10 +8,12 @@
 
 use crate::metadata::{DatasetDescription, TableDescription};
 use crate::query::Plan;
+use crate::scan::predicate::{ColumnPredicate, RangeLtePredicate, RowPredicate, ScalarValue};
 use crate::scan::{ChunkReader, ScanRequest};
 use anyhow::Result;
 use arrow::array::Array;
 use std::fmt;
+use std::sync::Arc;
 
 /// One `(block number, hash)` pair from the window preceding `fromBlock`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,8 +55,8 @@ impl std::error::Error for UnexpectedBaseBlock {}
 /// `(block number, hash)` pairs an `UnexpectedBaseBlock` carries, expressed as a
 /// span of block numbers behind `from_block`.
 ///
-/// It does not decide whether the parent is found. The row *at* `from_block`
-/// states its own parent's hash, and the scan is anchored there, so a dataset
+/// It does not decide whether the parent is found. The row that answers states
+/// its own parent's hash, and the scan reaches it wherever it lies, so a dataset
 /// whose numbering skips further than this window returns fewer pairs rather
 /// than losing fork detection (INV-E5).
 const FORK_WINDOW: u64 = 100;
@@ -96,11 +98,11 @@ pub(crate) fn check_parent_block(
 
     let (refs, answer) = read_prev_blocks(plan, table, parent_hash_column, chunk)?;
 
-    // Only the row *at* `from_block` states what precedes it; every other row in
-    // the window is there so the client can find the fork point. Comparing
-    // against the highest row the chunk happens to hold reports a fork whenever
-    // the chunk ends below `from_block` — the chunk not reaching the block is
-    // not the chain having moved under the client.
+    // Only the first block at or after `from_block` states what precedes it;
+    // every other row in the window is there so the client can find the fork
+    // point. Comparing against the highest row the chunk happens to hold reports
+    // a fork whenever the chunk ends below `from_block` — the chunk not reaching
+    // the block is not the chain having moved under the client.
     let Some(parent) = answer else {
         return Ok(());
     };
@@ -117,13 +119,19 @@ pub(crate) fn check_parent_block(
 }
 
 /// Read `(preceding block number, its hash)` for the blocks in the window,
-/// ascending, along with the one that answers the client's question — the ref
-/// contributed by the row at `from_block`, if the chunk holds it.
+/// ascending, along with the one that answers the client's question.
 ///
 /// Each row of the block table carries its own parent's hash, so a row is read
 /// as a statement about the block before it. Where the dataset declares a parent
 /// *number* column that number is used verbatim, because a chain that skips
 /// numbers has no `n - 1`.
+///
+/// The answer comes from the first row at or above `from_block` whose parent is
+/// below it. That is the row at `from_block` when the chain has one. When the
+/// chain skipped `from_block` — a Solana slot nobody produced, which is where a
+/// client resuming at `lastBlock + 1` often lands — it is the next block, whose
+/// parent is the block before the gap. Requiring the row at `from_block` itself
+/// skipped the check for exactly those clients.
 fn read_prev_blocks(
     plan: &Plan,
     table: &TableDescription,
@@ -138,12 +146,11 @@ fn read_prev_blocks(
             .table_schema(&plan.block_table)
             .is_some_and(|schema| schema.column_with_name(col).is_some())
     });
-    // The scan is anchored on the block number and reaches `from_block` itself,
-    // because that row is the one that answers. Filtering on the parent number
-    // instead made the answer depend on how far back the parent lies, so a chain
-    // that skipped more numbers than the window silently lost fork detection —
-    // the failure INV-E5 exists to prevent. The window behind it carries the
-    // recent pairs and nothing more.
+    // The scan is anchored on the block number, not the parent number. Filtering
+    // the window on the parent number made the answer depend on how far back the
+    // parent lies, so a chain that skipped more numbers than the window silently
+    // lost fork detection — the failure INV-E5 exists to prevent. The window
+    // behind `from_block` carries the recent pairs and nothing more.
     let block_column = table.block_number_column.as_str();
     let mut columns = vec![block_column, parent_hash_column];
     if let Some(parent_number) = parent_number_column {
@@ -152,8 +159,24 @@ fn read_prev_blocks(
 
     let mut request = ScanRequest::new(columns);
     request.from_block = Some(plan.from_block.saturating_sub(FORK_WINDOW));
-    request.to_block = Some(plan.from_block);
     request.block_number_column = Some(block_column);
+
+    // Upward, the scan stops at the answering row. With `n - 1` that is the row
+    // at `from_block`. With a parent-number column it is wherever the first block
+    // after a gap lies, so the bound is on the parent instead; row groups past it
+    // are pruned on the column's statistics.
+    let newest_parent = plan.from_block.checked_sub(1);
+    let parent_below_from = match (parent_number_column, newest_parent) {
+        (Some(column), Some(newest)) => Some(RowPredicate::new(vec![ColumnPredicate {
+            column: column.to_string(),
+            predicate: Arc::new(RangeLtePredicate::new(ScalarValue::UInt64(newest))),
+        }])),
+        _ => None,
+    };
+    match &parent_below_from {
+        Some(predicate) => request.predicates = vec![predicate],
+        None => request.to_block = Some(plan.from_block),
+    }
 
     // A chunk that cannot produce the hash cannot clear the client's
     // `parentBlockHash`, and serving the query regardless is the reorg being
@@ -180,7 +203,9 @@ fn read_prev_blocks(
     }
 
     let mut refs = Vec::new();
-    let mut answer = None;
+    // The answering row's own number, kept to pick the lowest one at or above
+    // `from_block`.
+    let mut answer: Option<(u64, BlockRef)> = None;
     for batch in &batches {
         let (Some(blocks), Some(hashes)) = (
             batch.column_by_name(block_column),
@@ -231,13 +256,19 @@ fn read_prev_blocks(
             };
 
             let block_ref = BlockRef { number, hash };
-            if row_block == plan.from_block {
-                answer = Some(block_ref.clone());
+
+            // Every row the scan returns has its parent below `from_block`, so
+            // the lowest one at or above it is the block that follows the parent.
+            let at_or_after_from = row_block >= plan.from_block;
+            let lower_than_answer = answer.as_ref().is_none_or(|(block, _)| row_block < *block);
+            if at_or_after_from && lower_than_answer {
+                answer = Some((row_block, block_ref.clone()));
             }
+
             refs.push(block_ref);
         }
     }
 
     refs.sort_by_key(|r| r.number);
-    Ok((refs, answer))
+    Ok((refs, answer.map(|(_, block_ref)| block_ref)))
 }

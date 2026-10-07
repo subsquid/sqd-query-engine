@@ -284,7 +284,7 @@ worker answers.
 | Float formatting | `1.634916549089593e11` | `163491654908.9593` | Same `f64`; any JSON parser agrees. Bitcoin `difficulty` and values, hyperliquid prices. |
 | Signed filter values | No signed arm either; `transactions.version` and `rewards.lamports` are unfilterable | Filterable where a catalog declares it ([INV-P14](07-invariants.md#inv-p14)) | No bundled catalog declares such a filter, so nothing changes on the wire. What changed is that refusing one is now a catalog decision rather than a hole in the compiler. |
 | `parentBlockHash` when `fromBlock` is outside the chunk | Errors: the window below `fromBlock` is empty and the lookup fails with a server error | Skip the check ([INV-E5](07-invariants.md#inv-e5)) | A chunk that cannot see the block is not evidence of a fork. Unreachable through the portal, which intersects the range with the chunk before sending. |
-| Fork search window | Searches back over *parent* numbers, with a standing FIXME that a longer gap in block numbering misses the parent | Anchor the check at `fromBlock`, whose row states its own parent's hash; the window only sizes the evidence ([§2.1](02-request.md#parentblockhash)) | A window is a guess about how far back the parent lies. The row that answers is at a known number, so nothing has to be guessed and a numbering gap of any width is answered. |
+| Fork search window | Searches back over *parent* numbers, with a standing FIXME that a longer gap in block numbering misses the parent | Answer from the first block at or after `fromBlock`, which states its own parent's hash; the window only sizes the evidence ([§2.1](02-request.md#parentblockhash)) | A window is a guess about how far back the parent lies. The row that answers is the next block the chain has, so nothing has to be guessed and a numbering gap of any width is answered, whether `fromBlock` lies after the gap or inside it. Inside the chunk both engines give the same answer and the same message at every `fromBlock` the CT-7 fork probe tries; they differ only where the gap is wider than the reference's window. |
 
 Two rows that used to be here are gone: the reference emitted Substrate
 `event.callAddress` twice and now emits it once, and the reference's bloom was
@@ -328,10 +328,13 @@ fixture tree is not in the repository, and `fixture_tree_has` skips a test whose
 chunk is absent, so CI reports green having compared nothing. `SQD_REQUIRE_FIXTURES`
 is what turns that skip into a failure, and CI does not set it. On a checkout
 with the tree in place no variable is needed: all 112 fixture queries and the 48
-fixture-backed conformance tests run and pass. The one live differential (CT-7) runs
-600 probes with no disagreement, but against a reference checkout a month old,
+fixture-backed conformance tests run and pass. The live differential (CT-7) runs
+600 filter probes with no disagreement, but against a reference checkout a month old,
 over the first forty blocks of seven fixture chunks, with plain
-in-list filters and the default projection only, and never in CI. It covers
+in-list filters and the default projection only, and never in CI. A second CT-7
+test sends about 1 300 `parentBlockHash` checks to both engines across the same
+seven chunks, every `fromBlock` next to a skipped Solana slot included, and
+compares the verdict and the message. It covers
 ethereum, optimism, solana, kusama, moonbeam, bitcoin and tron; binance,
 hyperliquid, hyperliquid_replica_cmds and tempo have fixture comparison against
 reference-generated results but no live differential. Datasets with a real

@@ -295,3 +295,109 @@ fn every_catalog_filter_answers_the_same_as_the_reference() {
     );
     eprintln!("{checked} generated queries agree with the reference");
 }
+
+/// How many `fromBlock` values the fork probe samples from each chunk, besides
+/// the ones next to a skipped number. Every number of every fixture chunk agreed
+/// when this was written — 43 936 probes — but that run takes eight minutes.
+const FORK_PROBES_PER_CHUNK: u64 = 100;
+
+/// Block numbers a chunk covers, the skipped ones included, as a `fromBlock`
+/// with a `parentBlockHash`: the hash the chunk holds for the parent, and one it
+/// does not. Both engines must serve the first and refuse the second with the
+/// same message, which names the block they compared against.
+///
+/// The range stops at the chunk's ends. Past them the two disagree on purpose
+/// (the divergence table in GAPS.md).
+///
+/// Covers CT-7 · INV-E5
+#[test]
+fn the_fork_check_answers_the_same_as_the_reference() {
+    let mut checked = 0usize;
+    let mut skipped_numbers = 0usize;
+    let mut mismatches: Vec<String> = Vec::new();
+
+    for (catalog, dataset) in DATASETS {
+        let chunk = fixture_chunk(dataset);
+        if !chunk.is_dir() {
+            continue;
+        }
+        let metadata =
+            load_dataset_description(Path::new(&format!("metadata/{catalog}.yaml"))).unwrap();
+
+        let all_blocks = format!(
+            r#"{{"type":"{}","fromBlock":0,"includeAllBlocks":true,
+                 "fields":{{"block":{{"number":true,"parentHash":true}}}}}}"#,
+            metadata.name
+        );
+        let blocks: Vec<(u64, String)> =
+            as_blocks(&run_new(all_blocks.as_bytes(), &metadata, &chunk).unwrap())
+                .iter()
+                .map(|b| {
+                    let header = &b["header"];
+                    let number = header["number"].as_u64().unwrap();
+                    let parent_hash = header["parentHash"].as_str().unwrap().to_string();
+                    (number, parent_hash)
+                })
+                .collect();
+        let (first, last) = (blocks[0].0, blocks.last().unwrap().0);
+        skipped_numbers += (last - first + 1) as usize - blocks.len();
+
+        // A stride through the chunk, and every number within two of a gap: the
+        // numbers where the block after `fromBlock` is not the one at it.
+        let stride = ((last - first) / FORK_PROBES_PER_CHUNK).max(1);
+        let near_a_gap = |from: u64| {
+            blocks.windows(2).any(|pair| {
+                let gap = pair[0].0 + 1..pair[1].0;
+                !gap.is_empty() && from + 2 >= gap.start && from <= gap.end + 2
+            })
+        };
+        let froms = (first..=last).filter(|from| (from - first) % stride == 0 || near_a_gap(*from));
+
+        let mut next = 0;
+        for from in froms {
+            // The first block at or after `fromBlock` states the parent's hash.
+            while blocks[next].0 < from {
+                next += 1;
+            }
+            let true_parent = &blocks[next].1;
+
+            for parent in [true_parent.as_str(), "0xnot-the-parent"] {
+                let query = format!(
+                    r#"{{"type":"{}","fromBlock":{from},"toBlock":{from},"includeAllBlocks":true,
+                         "parentBlockHash":"{parent}",
+                         "fields":{{"block":{{"number":true}}}}}}"#,
+                    metadata.name
+                );
+                let ours = run_new(query.as_bytes(), &metadata, &chunk);
+                let theirs = run_legacy(query.as_bytes(), &chunk);
+                checked += 1;
+
+                let agree = match (&ours, &theirs) {
+                    (Ok(ours), Ok(theirs)) => as_blocks(ours) == as_blocks(theirs),
+                    (Err(ours), Err(theirs)) => ours == theirs,
+                    _ => false,
+                };
+                if !agree {
+                    mismatches.push(format!(
+                        "{dataset} fromBlock {from}, parentBlockHash {parent}:\n      ours: {ours:?}\n    theirs: {theirs:?}"
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(checked > 500, "only {checked} fork probes ran");
+    assert!(skipped_numbers > 0, "no chunk skipped a block number");
+    assert!(
+        mismatches.is_empty(),
+        "{} of {checked} fork probes disagree with the reference:\n  - {}",
+        mismatches.len(),
+        mismatches
+            .iter()
+            .take(20)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n  - ")
+    );
+    eprintln!("{checked} fork probes agree with the reference ({skipped_numbers} skipped numbers)");
+}
