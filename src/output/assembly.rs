@@ -345,7 +345,7 @@ fn initial_range_end(
     };
     if plan.include_all_blocks
         || !table.relations.is_empty()
-        || table.predicates.iter().any(|p| !p.columns.is_empty())
+        || !table.predicates.iter().all(RowPredicate::matches_every_row)
     {
         return Ok(next_range_end(plan, metadata, chunk, plan.from_block));
     }
@@ -852,12 +852,11 @@ fn execute_chunk_fmt(
             // turn into empty scans across numeric gaps.
             // Unfiltered scans fill a page quickly; selective scans use larger
             // ranges to amortize predicate decoding over overlapping row groups.
-            let blocks_per_selection = if plan.table_plans.iter().any(|table| {
-                table
-                    .predicates
-                    .iter()
-                    .any(|predicate| predicate.columns.is_empty())
-            }) {
+            let blocks_per_selection = if plan
+                .table_plans
+                .iter()
+                .any(|table| table.predicates.iter().any(RowPredicate::matches_every_row))
+            {
                 16
             } else {
                 1024

@@ -81,8 +81,8 @@ pub(crate) fn resolve_output_columns(
         // Source predicate columns (needed for post-hoc filtering of relation sources)
         if let Some(preds) = &rel.source_predicates {
             for pred in preds {
-                for col_pred in &pred.columns {
-                    cols.insert(col_pred.column.clone());
+                for column in pred.required_columns() {
+                    cols.insert(column.to_owned());
                 }
             }
         }
