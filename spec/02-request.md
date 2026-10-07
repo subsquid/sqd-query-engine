@@ -61,22 +61,28 @@ This is not decoration. Clients use it to detect that the chain reorganised
 under them between one page and the next. An engine that accepts the field and
 ignores it silently serves data from a chain the client did not ask about.
 
-Every row of the block table carries its own parent's hash, so the row *at*
-`fromBlock` is the one that answers the question. The check therefore works even
-when `fromBlock` is the chunk's first block. Where a dataset numbers blocks with
-gaps, the block table also declares a parent-*number* column, and the engine
-matches on that instead of assuming `fromBlock - 1`.
+Every row of the block table carries its own parent's hash, so the first block
+at or after `fromBlock` is the one that answers the question. The check therefore
+works even when `fromBlock` is the chunk's first block. Where a dataset numbers
+blocks with gaps, the block table also declares a parent-*number* column, and the
+engine reads that instead of assuming `fromBlock - 1`.
 
-The search is anchored at `fromBlock` rather than aimed at where the parent might
-lie, so no window width can make the parent unfindable: a dataset that skips a
-thousand numbers is answered by the same row as one that skips none. An engine
-also returns the `P-FORK-WINDOW` blocks ending at `fromBlock`, which is the
-evidence a client needs to find the fork point — a dataset that skips numbers
-returns fewer pairs, and still answers.
+On such a chain `fromBlock` can be a number the chain skipped. A client that
+resumes at `lastBlock + 1` lands on one whenever the next slot was empty, so this
+is the common case, not an edge. There is no row at `fromBlock` then, and the
+block that answers is the next one: its parent is the block before the gap, which
+is the block the client means.
 
-The check is skipped, without error, in exactly one case: the chunk holds no
-block in that range, because `fromBlock` lies outside the chunk. A chunk that
-cannot see the block is not evidence of a fork.
+The search starts at `fromBlock` and moves forward to that block, rather than
+backward to where the parent might lie, so no window width can make the parent
+unfindable: a dataset that skips a thousand numbers is answered by the same rule
+as one that skips none. An engine also returns the blocks of the `P-FORK-WINDOW`
+behind `fromBlock`, which is the evidence a client needs to find the fork point —
+a dataset that skips numbers returns fewer pairs, and still answers.
+
+The check is skipped, without error, in exactly one case: the chunk does not
+hold the block that answers, because `fromBlock` lies outside the chunk. A chunk
+that cannot see the block is not evidence of a fork.
 
 If the dataset's block table declares **no parent-hash column at all**, the
 engine MUST reject the request (`UnsupportedRequestField`;

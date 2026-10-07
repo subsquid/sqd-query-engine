@@ -6,8 +6,8 @@ use sqd_query_engine::output::execute_plan;
 use sqd_query_engine::query::{compile, parse_query};
 
 use crate::harness::chunk::chunk_without_column;
-use crate::harness::chunk::write_parquet;
-use crate::harness::fixtures::{fixture_tree_is_present, meta, run};
+use crate::harness::chunk::{write_parquet, write_table_row_groups};
+use crate::harness::fixtures::{fixture_tree_is_present, meta, run, run_against};
 use crate::harness::json::parse_response;
 
 /// The parent hash of the first block a chunk can speak about, read from the
@@ -642,5 +642,421 @@ tables:
     assert!(
         compile(&parsed, &answerable).is_ok(),
         "a catalog that declares the column must still accept the field"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `fromBlock` on a number the chain skipped
+// ---------------------------------------------------------------------------
+
+/// Solana skips slots, so a client that resumes at `lastBlock + 1` often names
+/// a slot with no block. The first block after the gap states the parent the
+/// client means — the block before the gap — and that row is the one compared.
+/// The check used to require a row *at* `fromBlock`, find none, and serve the
+/// data with no error. The reference answers `UnexpectedBaseBlock` here, with
+/// this message.
+///
+/// Covers CT-2 · INV-E5
+#[test]
+#[ignore = "requires external fixture data"]
+fn a_skipped_from_block_is_settled_by_the_block_after_the_gap() {
+    if !fixture_tree_is_present() {
+        return;
+    }
+
+    let solana = meta("solana");
+    const PARENT: u64 = 217_710_447;
+    const SKIPPED: u64 = 217_710_448;
+    const NEXT: u64 = 217_710_449;
+
+    let query = |parent: &str| {
+        format!(
+            r#"{{"type":"solana","fromBlock":{SKIPPED},"toBlock":{NEXT},"includeAllBlocks":true,
+                 "parentBlockHash":"{parent}",
+                 "fields":{{"block":{{"number":true}}}}}}"#
+        )
+        .into_bytes()
+    };
+
+    let actual_parent = parent_hash_of("solana", &solana, NEXT);
+
+    let err = run("solana", &solana, &query("not-the-parent"))
+        .expect_err("a skipped fromBlock must not skip the check");
+    assert_eq!(error_kind(&err), Some(ErrorKind::UnexpectedBaseBlock));
+
+    let reported = err
+        .downcast_ref::<sqd_query_engine::output::UnexpectedBaseBlock>()
+        .expect("the error must carry the refs a client rewinds with");
+    let parent = reported.prev_blocks.last().unwrap();
+    assert_eq!(parent.number, PARENT, "the block before the gap");
+    assert_eq!(parent.hash, actual_parent);
+    assert_eq!(
+        reported.to_string(),
+        format!("unexpected base block: expected not-the-parent, but got {PARENT}#{actual_parent}"),
+        "the reference's message, verbatim"
+    );
+
+    let body = run("solana", &solana, &query(&actual_parent))
+        .expect("the hash of the block before the gap must be accepted");
+    let blocks = parse_response(&body);
+    assert_eq!(blocks[0]["header"]["number"], NEXT);
+}
+
+/// A client paging through the chunk resumes at `lastBlock + 1` after every
+/// page, wherever the page ended. Each slot of the fixture chunk is such a
+/// resume point, the skipped ones included: the hash of the last block before
+/// it must be accepted, and any other hash reported with that block as the
+/// chunk's answer.
+///
+/// Covers CT-2 · INV-E5
+#[test]
+#[ignore = "requires external fixture data"]
+fn a_client_resuming_at_any_slot_is_checked() {
+    if !fixture_tree_is_present() {
+        return;
+    }
+
+    let solana = meta("solana");
+    let body = run(
+        "solana",
+        &solana,
+        br#"{"type":"solana","fromBlock":0,"includeAllBlocks":true,
+             "fields":{"block":{"number":true,"hash":true}}}"#,
+    )
+    .unwrap();
+    let blocks: Vec<(u64, String)> = parse_response(&body)
+        .iter()
+        .map(|b| {
+            let header = &b["header"];
+            let number = header["number"].as_u64().unwrap();
+            let hash = header["hash"].as_str().unwrap().to_string();
+            (number, hash)
+        })
+        .collect();
+
+    let first = blocks[0].0;
+    let last = blocks.last().unwrap().0;
+    let skipped = (last - first + 1) as usize - blocks.len();
+    assert!(skipped > 0, "the fixture chunk must skip slots");
+
+    let query = |from: u64, parent: &str| {
+        format!(
+            r#"{{"type":"solana","fromBlock":{from},"toBlock":{from},"includeAllBlocks":true,
+                 "parentBlockHash":"{parent}",
+                 "fields":{{"block":{{"number":true}}}}}}"#
+        )
+        .into_bytes()
+    };
+
+    let mut parent = 0;
+    for from in first + 1..=last {
+        while blocks[parent + 1].0 < from {
+            parent += 1;
+        }
+        let (parent_number, parent_hash) = &blocks[parent];
+
+        run("solana", &solana, &query(from, parent_hash)).unwrap_or_else(|e| {
+            panic!("fromBlock {from}: the hash of block {parent_number} must be accepted: {e:#}")
+        });
+
+        let err = run("solana", &solana, &query(from, "not-the-parent"))
+            .expect_err("a wrong hash must be reported at every slot");
+        let reported = err
+            .downcast_ref::<sqd_query_engine::output::UnexpectedBaseBlock>()
+            .unwrap_or_else(|| panic!("fromBlock {from}: not a fork error: {err:#}"));
+        let answer = reported.prev_blocks.last().unwrap();
+        assert_eq!(
+            (answer.number, answer.hash.as_str()),
+            (*parent_number, parent_hash.as_str()),
+            "fromBlock {from}"
+        );
+    }
+}
+
+/// A Solana-shaped catalog: the block table states its parent's number, so the
+/// chain may skip numbers.
+const SKIPPING_CATALOG: &str = r#"
+version: v2
+name: test
+
+tables:
+  blocks:
+    output:
+      name: block
+      fields: [number]
+    block_number_column: number
+    parent_hash_column: parent_hash
+    parent_number_column: parent_number
+    sort_key: [number]
+    columns:
+      number: { type: uint64 }
+      parent_number: { type: uint64 }
+      parent_hash: { type: string }
+"#;
+
+/// The hash the synthetic chain gives each block.
+fn hash_of(block: u64) -> String {
+    format!("0x{block:04x}")
+}
+
+/// How a synthetic chain is written: the parent number's physical width, how
+/// many rows go in each row group, and whether the parent hash is there at all.
+#[derive(Clone)]
+struct Writing {
+    parent_number: arrow::datatypes::DataType,
+    rows_per_group: usize,
+    parent_hash: bool,
+}
+
+impl Default for Writing {
+    fn default() -> Self {
+        Self {
+            parent_number: arrow::datatypes::DataType::UInt64,
+            rows_per_group: usize::MAX,
+            parent_hash: true,
+        }
+    }
+}
+
+/// A block table of `(number, parent number)` rows, each stating its parent's
+/// hash as [`hash_of`] the parent.
+fn skipping_chain(blocks: &[(u64, u64)], writing: &Writing) -> tempfile::TempDir {
+    use arrow::array::{ArrayRef, StringArray, UInt64Array};
+    use arrow::compute::cast;
+    use arrow::datatypes::{DataType, Field};
+    use std::sync::Arc;
+
+    let mut fields = vec![
+        Field::new("number", DataType::UInt64, false),
+        Field::new("parent_number", writing.parent_number.clone(), false),
+    ];
+    if writing.parent_hash {
+        fields.push(Field::new("parent_hash", DataType::Utf8, false));
+    }
+
+    let groups = blocks
+        .chunks(writing.rows_per_group.min(blocks.len()))
+        .map(|rows| {
+            let numbers: Vec<u64> = rows.iter().map(|(n, _)| *n).collect();
+            let parents: Vec<u64> = rows.iter().map(|(_, p)| *p).collect();
+            let parent_numbers =
+                cast(&UInt64Array::from(parents.clone()), &writing.parent_number).unwrap();
+
+            let mut columns = vec![
+                Arc::new(UInt64Array::from(numbers)) as ArrayRef,
+                parent_numbers,
+            ];
+            if writing.parent_hash {
+                let hashes: Vec<String> = parents.iter().map(|p| hash_of(*p)).collect();
+                columns.push(Arc::new(StringArray::from(hashes)) as ArrayRef);
+            }
+            columns
+        })
+        .collect();
+
+    let dir = tempfile::tempdir().unwrap();
+    write_table_row_groups(dir.path(), "blocks", fields, groups);
+    dir
+}
+
+/// What the fork check made of one `(fromBlock, parentBlockHash)` pair.
+#[derive(Debug, PartialEq)]
+enum Verdict {
+    Served,
+    /// The block the chunk reported as the parent, and the hash it holds for it.
+    Fork(u64, String),
+}
+
+fn verdict(chunk: &std::path::Path, from: u64, parent_hash: &str) -> Verdict {
+    use sqd_query_engine::metadata::parse_dataset_description;
+
+    let catalog = parse_dataset_description(SKIPPING_CATALOG).unwrap();
+    let query = format!(
+        r#"{{"type":"test","fromBlock":{from},"includeAllBlocks":true,
+             "parentBlockHash":"{parent_hash}","fields":{{"block":{{"number":true}}}}}}"#
+    );
+
+    let err = match run_against(&catalog, chunk, &query) {
+        Ok(_) => return Verdict::Served,
+        Err(err) => err,
+    };
+    let Some(fork) = err.downcast_ref::<sqd_query_engine::output::UnexpectedBaseBlock>() else {
+        panic!("fromBlock {from}: expected a fork or an answer, got: {err:#}");
+    };
+    let answer = fork
+        .prev_blocks
+        .last()
+        .expect("prev_blocks must not be empty");
+    Verdict::Fork(answer.number, answer.hash.clone())
+}
+
+/// Every `fromBlock` inside a gap names the same parent: the block before the
+/// gap. That holds where the gap is wider than `P-FORK-WINDOW` and the window
+/// behind `fromBlock` holds no block at all, at every width the parent number
+/// is stored at, and whether the block after the gap shares a row group with
+/// the one before it or not.
+///
+/// Covers CT-2 · INV-E5
+#[test]
+fn every_from_block_inside_a_gap_is_settled_by_the_block_after_it() {
+    use arrow::datatypes::DataType;
+
+    // 1001..=1499 are skipped, five times the window.
+    let blocks = [
+        (999, 998),
+        (1000, 999),
+        (1500, 1000),
+        (1501, 1500),
+        (1502, 1501),
+    ];
+
+    for parent_number in [
+        DataType::UInt64,
+        DataType::UInt32,
+        DataType::Int64,
+        DataType::Int32,
+    ] {
+        for rows_per_group in [1, 2, usize::MAX] {
+            let writing = Writing {
+                parent_number: parent_number.clone(),
+                rows_per_group,
+                ..Writing::default()
+            };
+            let chain = skipping_chain(&blocks, &writing);
+            let at = |from: u64, hash: &str| verdict(chain.path(), from, hash);
+            let case = format!("{parent_number} parent number, {rows_per_group} rows per group");
+
+            for from in [1001, 1002, 1100, 1101, 1399, 1400, 1401, 1498, 1499, 1500] {
+                assert_eq!(
+                    at(from, &hash_of(1000)),
+                    Verdict::Served,
+                    "{case}, fromBlock {from}"
+                );
+                assert_eq!(
+                    at(from, "0xdead"),
+                    Verdict::Fork(1000, hash_of(1000)),
+                    "{case}, fromBlock {from}"
+                );
+            }
+
+            // Either side of the gap the row at `fromBlock` answers, as before.
+            assert_eq!(
+                at(1000, "0xdead"),
+                Verdict::Fork(999, hash_of(999)),
+                "{case}"
+            );
+            assert_eq!(
+                at(1501, "0xdead"),
+                Verdict::Fork(1500, hash_of(1500)),
+                "{case}"
+            );
+            assert_eq!(at(1502, &hash_of(1501)), Verdict::Served, "{case}");
+        }
+    }
+}
+
+/// A gap that straddles the start of the chunk: the chunk's first block names a
+/// parent that lives in the chunk before it. For a `fromBlock` inside the gap
+/// that row is still the block after the parent, so this chunk answers. For a
+/// `fromBlock` at or below the parent it is not, and the chunk stays quiet.
+///
+/// Covers CT-2 · INV-E5
+#[test]
+fn a_gap_across_the_start_of_the_chunk_is_settled_by_its_first_block() {
+    let chain = skipping_chain(&[(1500, 1000), (1501, 1500)], &Writing::default());
+    let at = |from: u64, hash: &str| verdict(chain.path(), from, hash);
+
+    for from in [1001, 1200, 1499, 1500] {
+        assert_eq!(
+            at(from, &hash_of(1000)),
+            Verdict::Served,
+            "fromBlock {from}"
+        );
+        assert_eq!(
+            at(from, "0xdead"),
+            Verdict::Fork(1000, hash_of(1000)),
+            "fromBlock {from}"
+        );
+    }
+
+    for from in [0, 1, 999, 1000] {
+        assert_eq!(
+            at(from, "0xdead"),
+            Verdict::Served,
+            "fromBlock {from}: the chunk does not hold the block after its parent"
+        );
+    }
+}
+
+/// A gap that straddles the end of the chunk: the block after it is in the next
+/// chunk, which answers. This one holds only blocks below `fromBlock`, and none
+/// of them states what precedes it.
+///
+/// Covers CT-2 · INV-E5
+#[test]
+fn a_gap_across_the_end_of_the_chunk_is_left_to_the_next_chunk() {
+    let chain = skipping_chain(&[(999, 998), (1000, 999)], &Writing::default());
+
+    for from in [1001, 1050, 1100, 1101, 5000] {
+        assert_eq!(
+            verdict(chain.path(), from, "0xdead"),
+            Verdict::Served,
+            "fromBlock {from}"
+        );
+    }
+    assert_eq!(
+        verdict(chain.path(), 1000, "0xdead"),
+        Verdict::Fork(999, hash_of(999))
+    );
+}
+
+/// The genesis slot has no parent below it. The row at `fromBlock` answers there
+/// as it always has, rather than the bound on the parent number wrapping.
+///
+/// Covers CT-2 · INV-E5
+#[test]
+fn a_from_block_of_zero_is_settled_by_the_row_at_zero() {
+    let chain = skipping_chain(&[(0, 0), (2, 0)], &Writing::default());
+
+    assert_eq!(verdict(chain.path(), 0, &hash_of(0)), Verdict::Served);
+    assert_eq!(
+        verdict(chain.path(), 0, "0xdead"),
+        Verdict::Fork(0, hash_of(0))
+    );
+    assert_eq!(
+        verdict(chain.path(), 1, "0xdead"),
+        Verdict::Fork(0, hash_of(0))
+    );
+}
+
+/// A chunk that holds the block after the gap owes the answer, and one that
+/// cannot produce the parent hash must fail rather than serve the query. A
+/// chunk that holds nothing at or after `fromBlock` is not asked.
+///
+/// Covers CT-2 · INV-E5
+#[test]
+fn a_chunk_holding_the_block_after_the_gap_must_carry_its_parent_hash() {
+    use sqd_query_engine::metadata::parse_dataset_description;
+
+    let writing = Writing {
+        parent_hash: false,
+        ..Writing::default()
+    };
+    let chain = skipping_chain(&[(1000, 999), (1500, 1000)], &writing);
+    let catalog = parse_dataset_description(SKIPPING_CATALOG).unwrap();
+    let answer = |from: u64| {
+        let query = format!(
+            r#"{{"type":"test","fromBlock":{from},"includeAllBlocks":true,
+                 "parentBlockHash":"0xdead","fields":{{"block":{{"number":true}}}}}}"#
+        );
+        run_against(&catalog, chain.path(), &query)
+    };
+
+    let err = answer(1200).expect_err("the chunk holds the block that answers");
+    assert_eq!(error_kind(&err), Some(ErrorKind::ColumnNotFound));
+
+    assert!(
+        answer(5000).is_ok(),
+        "nothing at or after fromBlock, and nothing in the window behind it"
     );
 }
