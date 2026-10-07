@@ -191,11 +191,13 @@ pub fn parse_query(json_bytes: &[u8], metadata: &DatasetDescription) -> Result<Q
         ),
     };
 
-    // Build lookup maps: request name → table_name, output name → table_name
+    // Build lookup maps: request name → table_name, output name → table_name.
+    // A table without a request block, the block table, takes no item requests.
     let request_name_to_table: HashMap<&str, &str> = metadata
         .tables
         .iter()
-        .filter_map(|(name, desc)| desc.request().name.as_deref().map(|rn| (rn, name.as_str())))
+        .filter(|(_, desc)| desc.request_surface.is_some())
+        .map(|(name, desc)| (desc.request_name(name), name.as_str()))
         .collect();
 
     let output_name_to_table: HashMap<&str, &str> = metadata
@@ -215,21 +217,14 @@ pub fn parse_query(json_bytes: &[u8], metadata: &DatasetDescription) -> Result<Q
             continue;
         }
 
-        // Resolve table name (try the request name, snake_case, then aliases)
-        let table_name = request_name_to_table.get(key.as_str()).copied();
-        let snake_key = camel_to_snake(key);
-        let alias_name: Option<&str> = None;
-        let (table_name, alias_name) = if let Some(tn) = table_name {
-            (tn, alias_name)
-        } else if metadata.tables.contains_key(&snake_key) {
-            (snake_key.as_str(), alias_name)
-        } else if let Some(alias) = metadata
-            .aliases
-            .get(key.as_str())
-            .or_else(|| metadata.aliases.get(&snake_key))
+        // A key is a request name or an alias, spelled as the catalog spells it
+        // (INV-Q2). A table's own name is internal: `blocks` or `statediffs`
+        // as a key would publish the storage layout as request surface.
+        let (table_name, alias_entry) = if let Some(table) = request_name_to_table.get(key.as_str())
         {
-            // Alias → resolve to the real table
-            (alias.table.as_str(), Some(key.as_str()))
+            (*table, None)
+        } else if let Some((alias_key, alias)) = metadata.aliases.get_key_value(key.as_str()) {
+            (alias.table.as_str(), Some((alias_key, alias)))
         } else {
             engine_bail!(
                 ErrorKind::UnknownTable,
@@ -239,14 +234,6 @@ pub fn parse_query(json_bytes: &[u8], metadata: &DatasetDescription) -> Result<Q
         };
 
         let table_desc = metadata.table(table_name).unwrap();
-        // Keep the catalog's own spelling of the alias key: the request may use
-        // either, and the plan looks the alias up again by what is recorded here.
-        let alias_entry = alias_name.and_then(|an| {
-            metadata
-                .aliases
-                .get_key_value(an)
-                .or_else(|| metadata.aliases.get_key_value(&camel_to_snake(an)))
-        });
         let alias_def = alias_entry.map(|(_, def)| def);
 
         let arr = value.as_array().ok_or_else(|| {
@@ -714,19 +701,63 @@ mod tests {
         assert!(parse_query(json, &meta).is_err());
     }
 
+    /// A table's own name is not a request key unless the catalog makes it
+    /// one: `blocks: [{}]` used to add a `blocks` array to every block, and
+    /// `statediffs` stood in for `stateDiffs`. The same holds for an alias
+    /// spelled in snake case.
+    ///
+    /// Covers CT-2 · INV-Q2
     #[test]
-    fn test_table_name_fallback_resolution() {
-        // "blocks" declares no request name in EVM metadata, so it resolves via
-        // the snake_case table name fallback, not via the request name lookup.
-        let meta = evm_metadata();
-        assert!(meta.tables.get("blocks").unwrap().request().name.is_none());
-        let json = br#"{
-            "type": "evm",
-            "fromBlock": 0,
-            "blocks": [{}]
-        }"#;
-        let query = parse_query(json, &meta).unwrap();
-        assert!(query.items.contains_key("blocks"));
+    fn test_internal_table_names_are_not_request_keys() {
+        let key_kind = |meta: &DatasetDescription, key: &str| {
+            let json = serde_json::json!({"type": meta.name, "fromBlock": 0, key: [{}]});
+            parse_query(json.to_string().as_bytes(), meta)
+                .err()
+                .map(|err| crate::error::error_kind(&err))
+        };
+
+        let mut refused = 0;
+        for entry in std::fs::read_dir("metadata").unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|ext| ext != "yaml") {
+                continue;
+            }
+            let meta = load_dataset_description(&path).unwrap();
+            let request_names: Vec<&str> = meta
+                .tables
+                .iter()
+                .filter(|(_, desc)| desc.request_surface.is_some())
+                .map(|(name, desc)| desc.request_name(name))
+                .chain(meta.aliases.keys().map(String::as_str))
+                .collect();
+
+            for name in &request_names {
+                assert_eq!(
+                    key_kind(&meta, name),
+                    None,
+                    "{path:?}: '{name}' must resolve"
+                );
+            }
+
+            let internal = meta
+                .tables
+                .keys()
+                .cloned()
+                .chain(meta.aliases.keys().map(|alias| camel_to_snake(alias)))
+                .filter(|name| !request_names.contains(&name.as_str()));
+            for name in internal {
+                assert_eq!(
+                    key_kind(&meta, &name),
+                    Some(Some(ErrorKind::UnknownTable)),
+                    "{path:?}: '{name}' is not a request name"
+                );
+                refused += 1;
+            }
+        }
+
+        // `blocks` in every catalog, plus `statediffs`, `token_balances`,
+        // `internal_transactions` and the snake-cased aliases.
+        assert!(refused > 10, "only {refused} internal names were tried");
     }
 
     /// INV-Q4: a present-but-malformed block bound is an error, never
