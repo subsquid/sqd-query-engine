@@ -106,6 +106,13 @@ in the chunk — `fromBlock` lies outside it. It is never skipped merely because
 hash. A dataset with no parent-hash column rejects the field instead
 (`UnsupportedRequestField`).
 
+Its message is the one message that is part of the contract. A transport that
+carries an error as text alone gives the client nothing else to rewind with, so
+the client parses it. It reads `unexpected base block: expected <hash>, but got
+<number>#<hash>`, the last pair being the newest of the recent pairs, or
+`unexpected base block: expected <hash>, but got empty prev_blocks` when there
+are none. This is the reference's text, and it does not change.
+
 ### `UnsupportedKeyType`
 
 An engine will not support comparing every physical type as a join key —
