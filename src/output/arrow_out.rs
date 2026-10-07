@@ -24,8 +24,10 @@
 //!   in the metadata are decoded from `0x…` `Utf8` to raw `Binary`. The hex set
 //!   is taken from the schema, not sniffed from the values, so a column's emitted
 //!   type is stable across responses (an all-null hex column is still `Binary`;
-//!   base58/other `Utf8` columns are left untouched). ~2× smaller raw, ~20-30%
-//!   smaller after zstd, ~100× faster client decode, at the cost of a decode pass.
+//!   base58/other `Utf8` columns are left untouched). An odd digit count — an EVM
+//!   quantity such as `0x0` — decodes as if it had a leading zero. ~2× smaller
+//!   raw, ~20-30% smaller after zstd, ~100× faster client decode, at the cost of
+//!   a decode pass.
 //!
 //! ## Framing
 //!
@@ -205,8 +207,8 @@ pub fn hexify_group(
 }
 
 /// Decode the `hex_idxs` columns of one batch from `0x…` hex `Utf8` to `Binary`.
-/// A value that fails to decode (malformed/odd-length hex — a corrupt source)
-/// becomes null rather than silently-zeroed bytes.
+/// A value that is not hex is an error: a null there would be a different
+/// answer from the JSON one, which renders the same text verbatim (INV-O14).
 fn hexify_batch(batch: &RecordBatch, hex_idxs: &HashSet<usize>) -> Result<RecordBatch> {
     let schema = batch.schema();
     let mut fields: Vec<Field> = Vec::with_capacity(schema.fields().len());
@@ -229,18 +231,24 @@ fn hexify_batch(batch: &RecordBatch, hex_idxs: &HashSet<usize>) -> Result<Record
             continue;
         };
         let mut b = BinaryBuilder::new();
+        let mut buf = Vec::new();
         for r in 0..sa.len() {
             if sa.is_null(r) {
                 b.append_null();
                 continue;
             }
+
             let v = sa.value(r);
-            let h = v.strip_prefix("0x").unwrap_or(v);
-            let mut buf = vec![0u8; h.len() / 2];
-            match faster_hex::hex_decode(h.as_bytes(), &mut buf) {
-                Ok(()) => b.append_value(&buf),
-                Err(_) => b.append_null(),
+            if decode_hex(v, &mut buf).is_err() {
+                // Hex columns include calldata, so the value can be megabytes.
+                let head: String = v.chars().take(40).collect();
+                crate::engine_bail!(
+                    crate::error::ErrorKind::MalformedChunkData,
+                    "column '{}' is declared hex but holds {head:?}",
+                    field.name()
+                );
             }
+            b.append_value(&buf);
         }
         fields.push(Field::new(
             field.name(),
@@ -250,6 +258,25 @@ fn hexify_batch(batch: &RecordBatch, hex_idxs: &HashSet<usize>) -> Result<Record
         cols.push(Arc::new(b.finish()));
     }
     Ok(RecordBatch::try_new(Arc::new(Schema::new(fields)), cols)?)
+}
+
+/// Decode `0x…` text into `out`, replacing its contents.
+///
+/// An odd digit count is a quantity in minimal form (`0x0`, `0x3938700`), so it
+/// reads as if it had a leading zero: the bytes are the same number, big-endian.
+fn decode_hex(text: &str, out: &mut Vec<u8>) -> Result<(), faster_hex::Error> {
+    let digits = text.strip_prefix("0x").unwrap_or(text).as_bytes();
+    let odd = digits.len() % 2 == 1;
+
+    out.clear();
+    out.resize(digits.len().div_ceil(2), 0);
+
+    if !odd {
+        return faster_hex::hex_decode(digits, out);
+    }
+
+    faster_hex::hex_decode(&[b'0', digits[0]], &mut out[..1])?;
+    faster_hex::hex_decode(&digits[1..], &mut out[1..])
 }
 
 /// Serialize `(table_name, batches)` groups as framed Arrow IPC streams. Empty
@@ -292,4 +319,115 @@ pub fn write_arrow_frames<W: Write>(
         writer.write_all(&payload)?;
     }
     Ok(writer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::BinaryArray;
+
+    fn decoded(text: &str) -> Vec<u8> {
+        let mut out = vec![0xff; 7];
+        decode_hex(text, &mut out).unwrap();
+        out
+    }
+
+    fn hexified(values: Vec<Option<&str>>) -> Result<Vec<Option<Vec<u8>>>> {
+        let schema = Arc::new(Schema::new(vec![Field::new("value", DataType::Utf8, true)]));
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(StringArray::from(values))])?;
+        let out = hexify_batch(&batch, &HashSet::from([0]))?;
+
+        let column = out
+            .column(0)
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        Ok(column.iter().map(|v| v.map(<[u8]>::to_vec)).collect())
+    }
+
+    /// Covers CT-6 · INV-O14
+    #[test]
+    fn an_odd_digit_count_decodes_with_a_leading_zero() {
+        assert_eq!(decoded("0x0"), [0x00]);
+        assert_eq!(decoded("0x1"), [0x01]);
+        assert_eq!(decoded("0xf"), [0x0f]);
+        assert_eq!(decoded("0x3938700"), [0x03, 0x93, 0x87, 0x00]);
+        assert_eq!(decoded("0x123"), [0x01, 0x23]);
+        assert_eq!(decoded("0xABC"), [0x0a, 0xbc]);
+    }
+
+    #[test]
+    fn an_even_digit_count_decodes_unchanged() {
+        assert_eq!(decoded("0x"), Vec::<u8>::new());
+        assert_eq!(decoded(""), Vec::<u8>::new());
+        assert_eq!(decoded("0x00"), [0x00]);
+        assert_eq!(decoded("0xdeadbeef"), [0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(decoded("deadbeef"), [0xde, 0xad, 0xbe, 0xef]);
+    }
+
+    #[test]
+    fn a_value_that_is_not_hex_does_not_decode() {
+        let mut out = Vec::new();
+        for text in ["0xg", "0x0g", "0xzz", "0X12", "0x 1", "0x1-"] {
+            assert!(
+                decode_hex(text, &mut out).is_err(),
+                "{text:?} must not decode"
+            );
+        }
+    }
+
+    /// The number a quantity names survives the trip: big-endian bytes read back
+    /// as the value the JSON rendering states.
+    ///
+    /// Covers CT-6 · INV-O14
+    #[test]
+    fn a_decoded_quantity_is_the_same_number() {
+        for value in [0u64, 1, 15, 16, 255, 256, 60_000_000, 30_000_000, u64::MAX] {
+            let text = format!("{value:#x}");
+            let bytes = decoded(&text);
+
+            let mut word = [0u8; 8];
+            word[8 - bytes.len()..].copy_from_slice(&bytes);
+            assert_eq!(u64::from_be_bytes(word), value, "{text}");
+        }
+    }
+
+    /// A row the decoder cannot read used to become null, which a client cannot
+    /// tell from a value the chain left unset.
+    ///
+    /// Covers CT-6 · INV-O14
+    #[test]
+    fn hexify_keeps_every_row_and_only_the_nulls_null() {
+        let rows = hexified(vec![
+            Some("0x0"),
+            None,
+            Some("0x3938700"),
+            Some("0x"),
+            Some("0xdeadbeef"),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            rows,
+            [
+                Some(vec![0x00]),
+                None,
+                Some(vec![0x03, 0x93, 0x87, 0x00]),
+                Some(vec![]),
+                Some(vec![0xde, 0xad, 0xbe, 0xef]),
+            ]
+        );
+    }
+
+    /// Covers CT-6 · INV-O14
+    #[test]
+    fn hexify_refuses_a_value_that_is_not_hex() {
+        let err = hexified(vec![Some("0x00"), Some("0xnot-hex")]).unwrap_err();
+
+        assert_eq!(
+            crate::error::error_kind(&err),
+            Some(crate::error::ErrorKind::MalformedChunkData)
+        );
+        assert!(err.to_string().contains("value"), "names the column: {err}");
+    }
 }

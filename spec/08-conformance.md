@@ -387,7 +387,7 @@ renamed out from under a comment inside it.
 | [INV-O11](07-invariants.md#inv-o11) | CT-6 | **P** | variants are exercised; an unknown variant is not, and that is the case archives outliving catalogs produce |
 | [INV-O12](07-invariants.md#inv-o12) | CT-6 | **C** | `the_same_chunk_and_query_give_the_same_bytes`, and every case of INV-D7 and INV-D8 is a second assertion of it |
 | [INV-O13](07-invariants.md#inv-o13) | CT-6 | **C** | `thread_count_does_not_reach_the_answer` compares responses at several pool sizes; `the_pool_size_does_not_move_a_page_boundary` and `every_generated_query_pages_the_same` compare pagination. Storage layout and integer-width variations are covered by INV-D7 and INV-D8. |
-| [INV-O14](07-invariants.md#inv-o14) | CT-6 | **C** | six Arrow-parity cases |
+| [INV-O14](07-invariants.md#inv-o14) | CT-6 | **C** | six Arrow-parity cases; `binary_arrow_carries_every_hex_value_json_does` renders every hex field of every fixture chunk both ways and compares the values row for row, `binary_arrow_keeps_an_odd_length_hex_value` and `binary_arrow_refuses_a_hex_column_holding_something_else` the two cases a decoder can get wrong |
 | [INV-E1](07-invariants.md#inv-e1) | CT-9 | **P** | the request half is fuzzed under CT-9, and `a_chunk_that_disagrees_with_the_catalog_does_not_panic` pins the encoders against a chunk written to disagree. `a_block_number_nothing_can_place_is_refused_on_every_path` adds the corrupt-value half for the one column every layer places a row by, and asserts the refusal is the same from an unbounded scan, a bounded range, a relation pull, a hierarchical pull, a range that excludes the offending row — a chunk that errors on one shape and under-answers on another is worse than either. It runs both writings of that chunk, one stating a null count and one stating none, since a check reading the count off the metadata says nothing about the file that omits it. The chunk-type *sweep* the invariant asks for needs HC-3, and two existing tests still assert a panic rather than forbid one |
 | [INV-E2](07-invariants.md#inv-e2) | CT-2 | **P** | validation precedes scanning by construction; nothing asserts that no output precedes an error |
 | [INV-E3](07-invariants.md#inv-e3) | CT-8 | **C** | `selecting_an_absent_column_is_an_error`; `a_roll_field_with_a_missing_source_is_an_error` for a source of a roll field, which is positional and cannot be tolerated; `a_selected_column_nothing_renders_is_an_error` for the other way a chunk can fail to carry a selected value — stored at a type no encoder reads, refused off the schema so a range that reaches no row refuses too; `a_variant_column_nothing_reads_is_an_error` for the column that picks a row's groups; `a_sort_key_nothing_orders_is_an_error` for a key the output orders by but does not render; `the_arrow_output_ships_what_json_cannot_render` that the refusal is the JSON encoder's, not the chunk's |
@@ -404,14 +404,14 @@ renamed out from under a comment inside it.
 
 The figure fell from 0.73 to 0.69 on 2026-09-12, and no test was removed to make it fall. [INV-D6](07-invariants.md#inv-d6), [INV-P13](07-invariants.md#inv-p13) and [INV-Q14](07-invariants.md#inv-q14) were read against the tests they name and did not hold at **C**; their rows now say what those tests actually do. A ratchet on a number three rows had inflated would have locked the inflation in, so the baseline moved down once, deliberately, and ratchets from there. INV-Q14 earned its **C** back the same day with a test that recomputes the transcription from the reference.
 
-Of the 85 rows at **C** or **P**, 70 are backed by a tagged test and 15 rest on
-prose alone. Those 15 are the rows whose note says "fixtures only" or describes a
+Of the 85 rows at **C** or **P**, 71 are backed by a tagged test and 14 rest on
+prose alone. Those 14 are the rows whose note says "fixtures only" or describes a
 group of cases without naming one, and they are the ones nothing recomputes: the
 status is what somebody believed on the day they typed it. Shrinking that number
 is what turns MG-1's ratchet from an intention into an arithmetic fact, so the
 checker recomputes all three numbers in this paragraph rather than trusting them.
 
-A tag is not the same as a gate. 4 of the 70 are backed only by tests marked
+A tag is not the same as a gate. 4 of the 71 are backed only by tests marked
 `#[ignore]`, which MG-3's portable job does not run: the test would fail if the
 invariant broke, but only on a machine that has the chunks. The checker reports
 those rows on every run too, because a status that no job can falsify is a status

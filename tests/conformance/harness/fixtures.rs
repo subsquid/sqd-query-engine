@@ -13,6 +13,21 @@ use sqd_query_engine::query::{compile, parse_query};
 use sqd_query_engine::scan::ParquetChunkReader;
 use std::path::Path;
 
+/// Every fixture dataset and the catalog it is served by.
+pub const FIXTURE_DATASETS: [(&str, &str); 11] = [
+    ("ethereum", "evm"),
+    ("optimism", "evm"),
+    ("binance", "evm"),
+    ("tempo", "evm"),
+    ("tron", "tron"),
+    ("bitcoin", "bitcoin"),
+    ("solana", "solana"),
+    ("kusama", "substrate"),
+    ("moonbeam", "substrate"),
+    ("hyperliquid", "hyperliquid_fills"),
+    ("hyperliquid_replica_cmds", "hyperliquid_replica_cmds"),
+];
+
 pub fn meta(name: &str) -> DatasetDescription {
     load_dataset_description(Path::new(&format!("metadata/{name}.yaml"))).unwrap()
 }

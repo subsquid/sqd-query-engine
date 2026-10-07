@@ -26,7 +26,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use crate::harness::chunk::{blocks_parquet_named, read_columns, write_table};
-use crate::harness::fixtures::{fixture_chunk, fixture_tree_is_present, meta};
+use crate::harness::fixtures::{fixture_chunk, fixture_tree_is_present, meta, FIXTURE_DATASETS};
 use crate::harness::synthetic::run_json;
 
 // ---------------------------------------------------------------------------
@@ -175,21 +175,6 @@ fn a_relation_target_names_its_own_block_column() {
 // ---------------------------------------------------------------------------
 // INV-D4 — the item key identifies a row
 // ---------------------------------------------------------------------------
-
-/// Every fixture dataset and the catalog it is served by.
-const FIXTURE_DATASETS: [(&str, &str); 11] = [
-    ("ethereum", "evm"),
-    ("optimism", "evm"),
-    ("binance", "evm"),
-    ("tempo", "evm"),
-    ("tron", "tron"),
-    ("bitcoin", "bitcoin"),
-    ("solana", "solana"),
-    ("kusama", "substrate"),
-    ("moonbeam", "substrate"),
-    ("hyperliquid", "hyperliquid_fills"),
-    ("hyperliquid_replica_cmds", "hyperliquid_replica_cmds"),
-];
 
 /// `[blockNumberColumn] ++ itemOrderKeys ++ [addressColumn]?` must identify a
 /// row. Deduplication and output ordering both use it: where two rows share a
