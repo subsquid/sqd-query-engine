@@ -29,7 +29,7 @@ Compared against the reference implementation, as of 2026-10-07.
 | 44 | The weight model differs from the reference in four places | [INV-B5](07-invariants.md#inv-b5) | **S4** |
 | 31 | A block number above 2³¹ stored in `Int32` is read as negative by the range filter | [INV-D7](07-invariants.md#inv-d7) | **S4** |
 | 32 | The bloom's hash function is not pinned by the manifest, and the version it resolves to today ignores the seed above 240 bytes | [INV-P9](07-invariants.md#inv-p9) | **S4** |
-| 49 | Relation-heavy and many-item queries cost 1.4–7.6× the reference's CPU | — | **S4** |
+| 49 | Whole-table queries with relations cost 1.3–1.6× the reference's CPU | — | **S4** |
 | 50 | Several malformed chunk shapes are answered rather than refused | [INV-E3](07-invariants.md#inv-e3), [INV-E7](07-invariants.md#inv-e7) | **S4** |
 | 53 | A damaged chunk can panic the decoder, and the error kinds around it are coarse | [INV-E7](07-invariants.md#inv-e7) | **S4** |
 | 55 | A catalog key that changes the output is skipped by a release that predates it | [INV-X1](07-invariants.md#inv-x1) | **S4** |
@@ -291,61 +291,49 @@ The check that fits is a unit test pinning `bloom_bit`'s seven bits for a
 240-byte value once a version is chosen, which fails if the resolution moves
 across the bug in either direction.
 
-### 49. Relation-heavy and many-item queries cost 1.4–7.6× the reference's CPU
+### 49. Whole-table queries with relations cost 1.3–1.6× the reference's CPU
 
-Answers and memory are fine here; time is not. Solana everything-with-relations
-ran 363 ms against 76 ms, and at 16 concurrent queries 2.1 against 18.5 queries a
-second. Paging a whole chunk took 2.3× the reference's time on EVM and 5× on
-Solana. Five causes, each measured:
+Answers and memory are fine here; time is not, on one family of shapes: a query
+that asks for every row of a table together with its relations. Median of three
+interleaved rounds on a quiet laptop, with byte-identical answers before and
+after:
 
-- Weight dedup (`accumulate_dedup_contributions` in `src/output/weight.rs`)
-  hashes and compares every key value through `IntColumn::resolve` per value,
-  and a list key (`instruction_address`, `trace_address`) allocates an array per
-  row and per comparison. It is serial, and about half the query thread's time.
-  The selection reader already tags each row with its physical position, and
-  deduplicating on that position, as the reference does by row index, took
-  Solana everything from 329 ms to 190 ms with the same answer.
-- List-key filters allocate per row (`TypedKeyColumn::append_to` in
-  `src/scan/scanner.rs`). Reading the offsets once took a Solana
-  instructions-with-relations query from 569 ms to 182 ms (reference 294).
-- Items are ORed into one scan. A row group is skipped only when every item can
-  skip it, every item is evaluated on every row with no short-circuit, and the
-  same OR is evaluated again, serially, to filter relation sources. A 100-item
-  log query costs 395 ms against 114.
-- Pruning stops at the row group. The reference also reads the page index the
-  chunks carry, so a filter on a column the table is sorted by reads only the
-  pages that can match, and an item's other filters run on those pages alone. A
-  100-item Solana request, each item a discriminator at four lengths beside a
-  ten-value `mentionsAccount` bloom, takes 61 ms against 19 on a 400-block chunk
-  and 170 ms against 29 on one of 2.1 million instructions; at one length, 47
-  against 12 and 106 against 14. The bloom alone is faster here than in the
-  reference, 125 ms against 411, so what is left is how many rows it runs on.
-- Hierarchical matching (`match_address` in `src/scan/scanner.rs`) compares each
-  target row with every source address of its transaction. One transaction with
-  45 000 traces and `parents: true` took 5.3 s against 0.11 s. No real chunk has
-  been seen with such a transaction.
-
-The first two fixes together, measured on a quiet machine with byte-identical
-answers, median of three interleaved rounds:
-
-| Shape | Reference | Today | Fixed |
+| Shape | Reference | Before | Now |
 |---|---|---|---|
-| Solana instructions + inner + logs + balances, 527 blocks | 330 ms | 657 ms | 181 ms |
-| EVM USDC traces + subtraces and parents | 165 ms | 236 ms | 112 ms |
-| Solana everything with relations | 64.5 ms | 349 ms | 126 ms |
-| EVM everything with relations | 119 ms | 275 ms | 162 ms |
-| EVM 100 log items + transactions | 59 ms | 272 ms | 210 ms |
-| Solana everything, 16 concurrent | 17.4 q/s | 1.8 q/s | 5.5 q/s |
-| EVM everything, 16 concurrent | 9.2 q/s | 3.5 q/s | 5.9 q/s |
+| Solana everything with relations | 60 ms | 334 ms | 96 ms |
+| EVM everything with relations | 109 ms | 261 ms | 147 ms |
+| Solana everything, paging the whole chunk | 1.0 s | 5.1 s | 1.6 s |
+| EVM everything, paging the whole chunk | 5.4 s | 12.7 s | 7.3 s |
+| Solana everything, 16 concurrent | 16.3 q/s | 1.7 q/s | 10.1 q/s |
+| EVM everything, 16 concurrent | 8.6 q/s | 3.0 q/s | 7.3 q/s |
 
-Two shapes end up faster than the reference and the rest do not. The 100-item
-query is the third cause. Most of what is left on Solana is a sixth one: a
-profile of Solana everything after the two fixes puts about 70% of the query's
-time in `HierarchicalFilter::build` in `src/scan/scanner.rs`, which for every
-source row clones the group key into a new `Vec<u8>`, copies the address into a
-new `Vec<u32>`, and inserts both into a `std` `HashMap` hashed with SipHash. A
-fixed-width integer key in an `FxHashMap` and one flat address buffer with
-offsets would remove those allocations; it is not measured yet.
+The rest of what the second review measured now takes no more time than the
+reference does. A hundred log items with transactions went from 209 ms to 50
+(reference 54). A hundred Solana discriminator items at four lengths beside a
+bloom, on 2.1 million instructions, went from 685 ms to 41 (reference 74).
+Selective relation queries, such as USDC traces with subtraces and parents, run
+in two thirds of the reference's time.
+
+One shape is still well behind, but no longer dangerous. A transaction of
+30 000 traces with `parents: true` took 4.9 s and now takes 70 ms, against
+25 ms. A target finds its parents by looking up each of its own prefixes, so
+the cost grows with depth rather than with the transaction's size. No real
+chunk has been seen with such a transaction.
+
+What is left in the whole-table shapes is the cost of reading in two passes.
+The first pass reads keys and sizes for every table, sixteen blocks at a time,
+to choose the page; the second reads the chosen rows by position. A Solana
+everything query allocates 855 MB to the reference's 420. Its query thread
+spends most of its time waiting on reads that a table of eleven row groups
+cannot spread across many threads.
+
+The page index will not close it, although the review named it as a cause.
+The chunks measured store each sort column of a row group in a single page:
+`program_id`, `d1`, `d2`, `d4`, `topic0`, `address`, `sighash`. So the index
+narrows nothing on them, and reading it cost up to 5.5 ms per table. On many
+items the reference gained from pruning per item. It scans each item on its
+own, so an item runs only on the row groups that its own statistics allow, and
+this engine now does the same.
 
 *First test:* the throughput bench's relation shapes, with a ratio bound against
 the reference.
