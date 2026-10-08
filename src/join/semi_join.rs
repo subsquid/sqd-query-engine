@@ -4,7 +4,6 @@ use crate::integers::{is_integer, IntColumn};
 use crate::text::{is_text, StringColumn};
 use anyhow::Result;
 use arrow::array::*;
-use arrow::compute;
 use arrow::datatypes::SchemaRef;
 use rustc_hash::FxHashSet as HashSet;
 use std::borrow::Borrow;
@@ -183,18 +182,29 @@ pub fn semi_join(
     probe_batches: &[RecordBatch],
     probe_key: &[&str],
 ) -> Result<Vec<RecordBatch>> {
+    let masks = semi_join_masks(build_batches, build_key, probe_batches, probe_key)?;
+    super::keep_matching(probe_batches, masks)
+}
+
+/// Which rows of each probe batch [`semi_join`] keeps.
+pub fn semi_join_masks(
+    build_batches: &[RecordBatch],
+    build_key: &[&str],
+    probe_batches: &[RecordBatch],
+    probe_key: &[&str],
+) -> Result<Vec<BooleanArray>> {
     if build_batches.is_empty() || probe_batches.is_empty() {
-        return Ok(Vec::new());
+        return Ok(super::no_rows(probe_batches));
     }
 
     // Build phase: hash set of keys from the build side
     let key_set = build_key_set(build_batches, build_key)?;
     if key_set.is_empty() {
-        return Ok(Vec::new());
+        return Ok(super::no_rows(probe_batches));
     }
 
     // Probe phase: reuse scratch buffer, null keys → no match
-    let mut result = Vec::new();
+    let mut masks = Vec::with_capacity(probe_batches.len());
     let mut buf = Vec::with_capacity(probe_key.len() * 8);
     for batch in probe_batches {
         let indices = resolve_key_indices(batch.schema_ref(), probe_key)?;
@@ -210,19 +220,10 @@ pub fn semi_join(
                 matches.push(false); // null key → no match
             }
         }
-        let mask = BooleanArray::from(matches);
-        let tc = mask.true_count();
-        if tc == 0 {
-            continue;
-        }
-        if tc == batch.num_rows() {
-            result.push(batch.clone());
-        } else {
-            result.push(compute::filter_record_batch(batch, &mask)?);
-        }
+        masks.push(BooleanArray::from(matches));
     }
 
-    Ok(result)
+    Ok(masks)
 }
 
 /// Lookup join: for each row in `input_batches`, find matching rows in `lookup_batches`
@@ -245,9 +246,20 @@ pub fn lookup_join(
     semi_join(input_batches, input_key, lookup_batches, lookup_key)
 }
 
+/// Which rows of each lookup batch [`lookup_join`] returns.
+pub fn lookup_join_masks(
+    input_batches: &[RecordBatch],
+    input_key: &[&str],
+    lookup_batches: &[RecordBatch],
+    lookup_key: &[&str],
+) -> Result<Vec<BooleanArray>> {
+    semi_join_masks(input_batches, input_key, lookup_batches, lookup_key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::compute;
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
 

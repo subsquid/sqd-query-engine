@@ -17,17 +17,18 @@ use crate::output::materialize::{
 };
 use crate::output::row_writer::{
     build_field_writers, build_full_sort_columns, build_grouped_writers, resolve_grouped_writers,
-    resolve_sort_columns, resolve_writers, IndexedBatches, TypedSortColumn,
+    resolve_sort_columns, resolve_writers, row_sort_keys, IndexedBatches, TypedSortColumn,
 };
 use crate::output::weight::{
     block_scan_columns, compute_block_weights, weight_range_end, weight_scan_columns,
     BlockSelection, TableOutput,
 };
 use crate::output::writer::QueryOutput;
-use crate::query::{Plan, RelationKind, TablePlan};
-use crate::scan::predicate::{evaluate_predicates_on_batch, RowPredicate};
+use crate::query::{Plan, RelationKind, RelationPlan, TablePlan};
+use crate::scan::predicate::RowPredicate;
 use crate::scan::{
-    ChunkReader, HierarchicalFilter, HierarchicalMode, KeyFilter, ParquetChunkReader, ScanRequest,
+    AddressIndex, ChunkReader, HierarchicalFilter, HierarchicalMode, KeyFilter, KeySet,
+    ParquetChunkReader, Rows, ScanRequest, Window,
 };
 use crate::text::StringColumn;
 use anyhow::Result;
@@ -450,6 +451,259 @@ fn initial_range_end(
     ))
 }
 
+/// What a Children or Parents relation follows: which source addresses, and how
+/// a target's address relates to them.
+struct HierarchicalSpec<'a> {
+    group_keys: Vec<&'a str>,
+    source_address: &'a str,
+    target_address: &'a str,
+    mode: HierarchicalMode,
+    inclusive: bool,
+}
+
+impl<'a> HierarchicalSpec<'a> {
+    /// `None` for a join, and for a target without an address column.
+    fn of(
+        relation: &'a RelationPlan,
+        source: &'a TableDescription,
+        metadata: &'a DatasetDescription,
+    ) -> Option<Self> {
+        let mode = match relation.kind {
+            RelationKind::Children => HierarchicalMode::Children,
+            RelationKind::Parents => HierarchicalMode::Parents,
+            RelationKind::Join => return None,
+        };
+        let target_address = find_address_column(metadata.table(&relation.target_table)?)?;
+        let source_address = find_address_column(source).unwrap_or(target_address);
+        // Cross-table relations use inclusive prefix matching because the
+        // source and target address columns are different (e.g., calls.address
+        // vs events.call_address). Same-table uses strict matching.
+        let inclusive = source_address != target_address;
+
+        Some(Self {
+            group_keys: group_keys_for_relation(&relation.left_key, Some(target_address)),
+            source_address,
+            target_address,
+            mode,
+            inclusive,
+        })
+    }
+}
+
+/// The key a relation pushes down to its target scan, source columns first:
+/// the join key, or a hierarchical relation's group key (its non-address
+/// columns).
+fn pushdown_keys<'a>(
+    relation: &'a RelationPlan,
+    metadata: &DatasetDescription,
+) -> Option<(Vec<&'a str>, Vec<&'a str>)> {
+    let (left, right) = match relation.kind {
+        RelationKind::Join => (
+            relation.left_key.iter().map(String::as_str).collect(),
+            relation.right_key.iter().map(String::as_str).collect(),
+        ),
+        RelationKind::Children | RelationKind::Parents => {
+            let address = metadata
+                .table(&relation.target_table)
+                .and_then(find_address_column);
+            (
+                group_keys_for_relation(&relation.left_key, address),
+                group_keys_for_relation(&relation.right_key, address),
+            )
+        }
+    };
+
+    let usable = !left.is_empty() && !right.is_empty();
+    usable.then_some((left, right))
+}
+
+/// Values built once per distinct key, side by side.
+struct BuiltOnce<K, V>(Vec<(K, V)>);
+
+impl<K: PartialEq + Send, V: Send> BuiltOnce<K, V> {
+    fn build(keys: impl IntoIterator<Item = K>, build: impl Fn(&K) -> V + Sync + Send) -> Self {
+        let mut distinct: Vec<K> = Vec::new();
+        for key in keys {
+            if !distinct.contains(&key) {
+                distinct.push(key);
+            }
+        }
+
+        let built = distinct
+            .into_par_iter()
+            .map(|key| {
+                let value = build(&key);
+                (key, value)
+            })
+            .collect();
+        Self(built)
+    }
+
+    /// The value built for `key`, which must be one of the keys built.
+    fn get(&self, key: &K) -> &V {
+        let (_, value) = self
+            .0
+            .iter()
+            .find(|(built, _)| built == key)
+            .expect("a value is built for every key");
+        value
+    }
+}
+
+/// What one relation's target scan needs from its table's rows.
+struct RelationInput<'a> {
+    relation: &'a RelationPlan,
+    /// The primary rows it follows: all of them, or those its own items matched.
+    source: &'a [RecordBatch],
+    key_filter: Option<KeyFilter>,
+    hierarchical_filter: Option<HierarchicalFilter>,
+}
+
+/// Each relation's input. Relations that follow the same rows share the key
+/// set and the address index built from them.
+fn relation_inputs<'a>(
+    table_plan: &'a TablePlan,
+    table_desc: &'a TableDescription,
+    metadata: &'a DatasetDescription,
+    sources: &'a BuiltOnce<Option<&'a [usize]>, Vec<RecordBatch>>,
+) -> Vec<RelationInput<'a>> {
+    let primary_bn = table_desc.block_number_column.as_str();
+    let followed = |relation: &'a RelationPlan| relation.source_items.as_deref();
+    let address_spec = |relation: &'a RelationPlan| {
+        HierarchicalSpec::of(relation, table_desc, metadata)
+            .filter(|spec| !spec.group_keys.is_empty())
+    };
+
+    let key_sets = BuiltOnce::build(
+        table_plan.relations.iter().filter_map(|relation| {
+            let (left, _) = pushdown_keys(relation, metadata)?;
+            Some((followed(relation), left))
+        }),
+        |(items, left)| KeySet::build(sources.get(items), left, primary_bn),
+    );
+    let address_indexes = BuiltOnce::build(
+        table_plan.relations.iter().filter_map(|relation| {
+            let spec = address_spec(relation)?;
+            Some((followed(relation), spec.group_keys, spec.source_address))
+        }),
+        |(items, group_keys, address)| AddressIndex::build(sources.get(items), group_keys, address),
+    );
+
+    table_plan
+        .relations
+        .iter()
+        .map(|relation| {
+            let items = followed(relation);
+            let target_bn = metadata
+                .table(&relation.target_table)
+                .map_or("block_number", |desc| desc.block_number_column.as_str());
+
+            let key_filter = pushdown_keys(relation, metadata)
+                .map(|(left, right)| key_sets.get(&(items, left)).filter(&right, target_bn))
+                .filter(|filter| !filter.is_empty());
+            let hierarchical_filter = address_spec(relation)
+                .map(|spec| {
+                    let index = address_indexes.get(&(items, spec.group_keys, spec.source_address));
+                    index.filter(spec.target_address, spec.mode, spec.inclusive)
+                })
+                .filter(|filter| !filter.is_empty());
+
+            RelationInput {
+                relation,
+                source: sources.get(&items),
+                key_filter,
+                hierarchical_filter,
+            }
+        })
+        .collect()
+}
+
+/// Read the target rows one relation relates to its source rows.
+fn scan_relation(
+    input: &RelationInput,
+    table_desc: &TableDescription,
+    metadata: &DatasetDescription,
+    chunk: &dyn ChunkReader,
+    window: Window,
+    (from_block, to_block): (Option<u64>, Option<u64>),
+    profile: bool,
+) -> Result<Rows> {
+    let relation = input.relation;
+    let target_desc = metadata.table(&relation.target_table);
+
+    let output_columns = resolve_relation_output_columns(&relation.output_columns, target_desc);
+    let required = target_desc
+        .map(|desc| required_output_columns(&relation.output_columns, desc))
+        .unwrap_or_default();
+    let mut request = ScanRequest::new(output_columns.iter().map(String::as_str).collect());
+    request.from_block = from_block;
+    request.to_block = to_block;
+    request.window = Some(window);
+    request.required_columns = required.iter().map(String::as_str).collect();
+    request.block_number_column = target_desc.map(|desc| desc.block_number_column.as_str());
+    request.key_filter = input.key_filter.as_ref();
+    request.hierarchical_filter = input.hierarchical_filter.as_ref();
+
+    let started = profile.then(std::time::Instant::now);
+    let target = chunk.scan_rows(&relation.target_table, &request)?.rows;
+    if let Some(started) = started {
+        eprintln!(
+            "    {} scan: {:.2?} ({} rows)",
+            relation.target_table,
+            started.elapsed(),
+            target.num_rows()
+        );
+    }
+
+    // A filter the scan applied already kept only the related rows.
+    let started = profile.then(std::time::Instant::now);
+    let filtered_in_scan = match relation.kind {
+        RelationKind::Join => input.key_filter.is_some(),
+        RelationKind::Children | RelationKind::Parents => input.hierarchical_filter.is_some(),
+    };
+    let masks = if filtered_in_scan {
+        None
+    } else if relation.kind == RelationKind::Join {
+        let left: Vec<&str> = relation.left_key.iter().map(String::as_str).collect();
+        let right: Vec<&str> = relation.right_key.iter().map(String::as_str).collect();
+        Some(crate::join::lookup_join_masks(
+            input.source,
+            &left,
+            target.batches(),
+            &right,
+        )?)
+    } else {
+        let Some(spec) = HierarchicalSpec::of(relation, table_desc, metadata) else {
+            return Ok(Rows::default());
+        };
+        let relatives = match spec.mode {
+            HierarchicalMode::Children => crate::join::children_masks,
+            HierarchicalMode::Parents => crate::join::parents_masks,
+        };
+        Some(relatives(
+            input.source,
+            target.batches(),
+            &spec.group_keys,
+            spec.source_address,
+            spec.target_address,
+            spec.inclusive,
+        )?)
+    };
+    let related = match masks {
+        None => target,
+        Some(masks) => target.filter(|index, _| Ok(masks[index].clone()))?,
+    };
+
+    if let Some(started) = started {
+        eprintln!(
+            "    {} join: {:.2?}",
+            relation.target_table,
+            started.elapsed()
+        );
+    }
+    Ok(related)
+}
+
 /// Read all primary and relation rows for one complete block range.
 fn scan_tables(
     plan: &Plan,
@@ -478,8 +732,14 @@ fn scan_tables(
         };
     }
 
-    let mut table_outputs = HashMap::new();
-    for table_plan in &plan.table_plans {
+    let window = Window {
+        from: Some(from_block),
+        to: to_block,
+    };
+
+    // Tables are independent, and one table's scan rarely has row groups
+    // enough to keep every thread busy.
+    let scan_table = |table_plan: &TablePlan| -> Result<(String, TableOutput)> {
         let table_desc = metadata.table(&table_plan.table).ok_or_else(|| {
             crate::engine_err!(
                 crate::error::ErrorKind::TableNotFound,
@@ -497,319 +757,96 @@ fn scan_tables(
 
         let mut request = ScanRequest::new(output_col_refs);
         request.predicates = pred_refs;
-        request.from_block = Some(from_block);
-        request.to_block = to_block;
+        request.from_block = window.from;
+        request.to_block = window.to;
+        request.window = Some(window);
         request.block_number_column = Some(table_desc.block_number_column.as_str());
         request.required_columns = req_col_refs;
+        // A relation some items asked for follows only the rows they matched,
+        // which the scan reports as it evaluates them.
+        request.item_tags = table_plan
+            .relations
+            .iter()
+            .filter_map(|relation| relation.source_items.as_deref())
+            .collect();
 
         let t_primary = timer!();
-        let batches = chunk.scan(&table_plan.table, &request)?;
-        let primary_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-        elapsed!(t_primary, "primary scan", "{} rows", primary_rows);
+        let scanned = chunk.scan_rows(&table_plan.table, &request)?;
+        let primary = scanned.rows.batches();
+        elapsed!(
+            t_primary,
+            "primary scan",
+            "{} rows",
+            scanned.rows.num_rows()
+        );
 
         // Compute actual block range from primary scan for cross-table pruning
         let bn_col_name = table_desc.block_number_column.as_str();
-        let (actual_min_block, actual_max_block) = compute_block_range(&batches, bn_col_name)?;
+        let block_range = compute_block_range(primary, bn_col_name)?;
 
-        // Execute relations (skip if primary scan returned no rows)
-        let mut relation_batches: HashMap<usize, Vec<RecordBatch>> = HashMap::new();
-
-        let has_primary_rows = batches.iter().any(|b| b.num_rows() > 0);
+        let mut relations = HashMap::new();
+        let has_primary_rows = primary.iter().any(|b| b.num_rows() > 0);
         if has_primary_rows && !table_plan.relations.is_empty() {
-            // Build key filters for each relation (before parallel scan)
             let t_kf = timer!();
-            let primary_bn_col = table_desc.block_number_column.as_str();
-
-            // Pre-filter primary batches per relation when source_predicates are set
-            let mut rel_filtered_batches: Vec<Option<Vec<RecordBatch>>> = Vec::new();
-            for rel in &table_plan.relations {
-                let Some(preds) = rel.source_predicates.as_ref() else {
-                    rel_filtered_batches.push(None);
-                    continue;
-                };
-
-                let mut filtered = Vec::new();
-                for batch in &batches {
-                    let kept = evaluate_predicates_on_batch(batch, preds).map_err(|e| {
-                        crate::engine_err!(
-                            crate::error::ErrorKind::UnsupportedKeyType,
-                            "filter on '{}': {}",
-                            table_plan.table,
-                            e
-                        )
-                    })?;
-                    filtered.extend(kept);
-                }
-                rel_filtered_batches.push(Some(filtered));
-            }
-
-            let key_filters: Vec<Option<KeyFilter>> = table_plan
-                .relations
-                .iter()
-                .enumerate()
-                .map(|(rel_idx, rel)| {
-                    let rel_table_desc = metadata.table(&rel.target_table);
-                    let target_bn_col = rel_table_desc
-                        .map(|d| d.block_number_column.as_str())
-                        .unwrap_or("block_number");
-
-                    // Use filtered batches if source_predicates are set
-                    let source_batches =
-                        rel_filtered_batches[rel_idx].as_deref().unwrap_or(&batches);
-
-                    // Determine key columns for pushdown
-                    let (left_keys, right_keys): (Vec<&str>, Vec<&str>) = match rel.kind {
-                        RelationKind::Join => {
-                            let lk: Vec<&str> = rel.left_key.iter().map(String::as_str).collect();
-                            let rk: Vec<&str> = rel.right_key.iter().map(String::as_str).collect();
-                            (lk, rk)
-                        }
-                        RelationKind::Children | RelationKind::Parents => {
-                            // Use group keys (non-address columns) for pushdown
-                            let addr_col = rel_table_desc.and_then(find_address_column);
-                            let lk = group_keys_for_relation(&rel.left_key, addr_col);
-                            let rk = group_keys_for_relation(&rel.right_key, addr_col);
-                            if lk.is_empty() || rk.is_empty() {
-                                return None;
-                            }
-                            (lk, rk)
-                        }
-                    };
-
-                    if left_keys.is_empty() {
-                        return None;
-                    }
-
-                    let kf = KeyFilter::build(
-                        source_batches,
-                        &left_keys,
-                        &right_keys,
-                        primary_bn_col,
-                        target_bn_col,
-                    );
-                    if kf.is_empty() {
-                        None
-                    } else {
-                        Some(kf)
-                    }
-                })
-                .collect();
-
-            // Build hierarchical filters for Children/Parents relations
-            let hierarchical_filters: Vec<Option<HierarchicalFilter>> = table_plan
-                .relations
-                .iter()
-                .enumerate()
-                .map(|(rel_idx, rel)| match rel.kind {
-                    RelationKind::Children | RelationKind::Parents => {
-                        let rel_table_desc = metadata.table(&rel.target_table)?;
-                        let target_addr_col = find_address_column(rel_table_desc)?;
-                        let source_addr_col =
-                            find_address_column(table_desc).unwrap_or(target_addr_col);
-                        // Cross-table relations use inclusive prefix matching because the
-                        // source and target address columns are different (e.g., calls.address
-                        // vs events.call_address). Same-table uses strict matching.
-                        let inclusive = source_addr_col != target_addr_col;
-                        let gk = group_keys_for_relation(&rel.left_key, Some(target_addr_col));
-                        if gk.is_empty() {
-                            return None;
-                        }
-                        let mode = match rel.kind {
-                            RelationKind::Children => HierarchicalMode::Children,
-                            _ => HierarchicalMode::Parents,
-                        };
-                        let source_batches =
-                            rel_filtered_batches[rel_idx].as_deref().unwrap_or(&batches);
-                        let hf = HierarchicalFilter::build(
-                            source_batches,
-                            &gk,
-                            source_addr_col,
-                            target_addr_col,
-                            mode,
-                            inclusive,
-                        );
-                        if hf.is_empty() {
-                            None
-                        } else {
-                            Some(hf)
-                        }
-                    }
-                    _ => None,
-                })
-                .collect();
-
+            let sources = BuiltOnce::build(
+                table_plan
+                    .relations
+                    .iter()
+                    .map(|relation| relation.source_items.as_deref()),
+                |items| match items {
+                    None => primary.to_vec(),
+                    Some(items) => scanned
+                        .matched_by(items)
+                        .expect("the scan reports the rows of every relation's items"),
+                },
+            );
+            let inputs = relation_inputs(table_plan, table_desc, metadata, &sources);
             elapsed!(t_kf, "key filter build");
 
-            // Scan + join relations in parallel
             let t_rel = timer!();
-            let rel_results: Vec<(usize, Result<Vec<RecordBatch>>)> = (0..table_plan
-                .relations
-                .len())
-                .into_par_iter()
-                .filter_map(|rel_idx| {
-                    let rel = &table_plan.relations[rel_idx];
-                    let kf_opt = &key_filters[rel_idx];
-                    let hf_opt = &hierarchical_filters[rel_idx];
-
-                    // Use filtered batches for join source when source_predicates are set.
+            let related: Vec<(usize, Result<Rows>)> = inputs
+                .par_iter()
+                .enumerate()
+                .filter_map(|(index, input)| {
                     // A relation with no rows to follow never opens its target.
-                    let source_batches =
-                        rel_filtered_batches[rel_idx].as_deref().unwrap_or(&batches);
-                    if source_batches.iter().all(|b| b.num_rows() == 0) {
+                    if input.source.iter().all(|b| b.num_rows() == 0) {
                         return None;
                     }
-
-                    let rel_table_desc = metadata.table(&rel.target_table);
-
-                    let rel_output_cols =
-                        resolve_relation_output_columns(&rel.output_columns, rel_table_desc);
-                    let rel_col_refs: Vec<&str> =
-                        rel_output_cols.iter().map(|s| s.as_str()).collect();
-                    let rel_req_cols = rel_table_desc
-                        .map(|d| required_output_columns(&rel.output_columns, d))
-                        .unwrap_or_default();
-                    let rel_req_refs: Vec<&str> = rel_req_cols.iter().map(|s| s.as_str()).collect();
-
-                    let mut rel_request = ScanRequest::new(rel_col_refs);
-                    rel_request.from_block = actual_min_block;
-                    rel_request.to_block = actual_max_block;
-                    rel_request.required_columns = rel_req_refs;
-                    if let Some(desc) = rel_table_desc {
-                        rel_request.block_number_column = Some(desc.block_number_column.as_str());
-                    }
-                    rel_request.key_filter = kf_opt.as_ref();
-                    rel_request.hierarchical_filter = hf_opt.as_ref();
-
-                    let t_scan = if profile {
-                        Some(std::time::Instant::now())
-                    } else {
-                        None
-                    };
-                    let rel_all_batches = match chunk.scan(&rel.target_table, &rel_request) {
-                        Ok(b) => b,
-                        Err(e) => return Some((rel_idx, Err(e))),
-                    };
-                    let scan_rows: usize = rel_all_batches.iter().map(|b| b.num_rows()).sum();
-                    if let Some(t) = t_scan {
-                        eprintln!(
-                            "    {} scan: {:.2?} ({} rows)",
-                            rel.target_table,
-                            t.elapsed(),
-                            scan_rows
-                        );
-                    }
-
-                    let left_key: Vec<&str> = rel.left_key.iter().map(String::as_str).collect();
-                    let right_key: Vec<&str> = rel.right_key.iter().map(String::as_str).collect();
-
-                    let t_join = if profile {
-                        Some(std::time::Instant::now())
-                    } else {
-                        None
-                    };
-                    let joined = match rel.kind {
-                        RelationKind::Join if kf_opt.is_some() => {
-                            // KeyFilter already ensured only matching rows were returned
-                            // by the scan — skip redundant lookup_join.
-                            Ok(rel_all_batches)
-                        }
-                        RelationKind::Join => crate::join::lookup_join(
-                            source_batches,
-                            &left_key,
-                            &rel_all_batches,
-                            &right_key,
-                        ),
-                        RelationKind::Children if hf_opt.is_some() => {
-                            // HierarchicalFilter already applied during scan.
-                            Ok(rel_all_batches)
-                        }
-                        RelationKind::Children => {
-                            if let Some(desc) = rel_table_desc {
-                                if let Some(target_addr) = find_address_column(desc) {
-                                    let source_addr =
-                                        find_address_column(table_desc).unwrap_or(target_addr);
-                                    // Cross-table → inclusive prefix, same-table → strict prefix
-                                    let inclusive = source_addr != target_addr;
-                                    let gk =
-                                        group_keys_for_relation(&rel.left_key, Some(target_addr));
-                                    crate::join::find_children(
-                                        source_batches,
-                                        &rel_all_batches,
-                                        &gk,
-                                        source_addr,
-                                        target_addr,
-                                        inclusive,
-                                    )
-                                } else {
-                                    Ok(Vec::new())
-                                }
-                            } else {
-                                Ok(Vec::new())
-                            }
-                        }
-                        RelationKind::Parents if hf_opt.is_some() => {
-                            // HierarchicalFilter already applied during scan.
-                            Ok(rel_all_batches)
-                        }
-                        RelationKind::Parents => {
-                            if let Some(desc) = rel_table_desc {
-                                if let Some(target_addr) = find_address_column(desc) {
-                                    let source_addr =
-                                        find_address_column(table_desc).unwrap_or(target_addr);
-                                    // Cross-table → inclusive prefix, same-table → strict prefix
-                                    let inclusive = source_addr != target_addr;
-                                    let gk =
-                                        group_keys_for_relation(&rel.left_key, Some(target_addr));
-                                    crate::join::find_parents(
-                                        source_batches,
-                                        &rel_all_batches,
-                                        &gk,
-                                        source_addr,
-                                        target_addr,
-                                        inclusive,
-                                    )
-                                } else {
-                                    Ok(Vec::new())
-                                }
-                            } else {
-                                Ok(Vec::new())
-                            }
-                        }
-                    };
-
-                    if let Some(t) = t_join {
-                        eprintln!("    {} join: {:.2?}", rel.target_table, t.elapsed());
-                    }
-
-                    Some((rel_idx, joined))
+                    let rows = scan_relation(
+                        input,
+                        table_desc,
+                        metadata,
+                        chunk,
+                        window,
+                        block_range,
+                        profile,
+                    );
+                    Some((index, rows))
                 })
                 .collect();
-
             elapsed!(t_rel, "relation scans+joins");
 
-            for (rel_idx, result) in rel_results {
-                let rows: Vec<RecordBatch> = result?;
+            for (index, rows) in related {
+                let rows = rows?;
                 if profile {
-                    let n: usize = rows.iter().map(|b| b.num_rows()).sum();
-                    eprintln!(
-                        "    {}: {} rows",
-                        table_plan.relations[rel_idx].target_table, n
-                    );
+                    let target = &table_plan.relations[index].target_table;
+                    eprintln!("    {}: {} rows", target, rows.num_rows());
                 }
-                relation_batches.entry(rel_idx).or_default().extend(rows);
+                relations.insert(index, rows);
             }
         }
 
-        table_outputs.insert(
-            table_plan.table.clone(),
-            TableOutput {
-                batches,
-                relation_batches,
-            },
-        );
-    }
+        let output = TableOutput {
+            rows: scanned.rows,
+            relations,
+        };
+        Ok((table_plan.table.clone(), output))
+    };
 
-    Ok(table_outputs)
+    // The first failure in plan order, the one a serial scan would report.
+    let scanned: Vec<Result<(String, TableOutput)>> =
+        plan.table_plans.par_iter().map(scan_table).collect();
+    scanned.into_iter().collect()
 }
 
 /// Core execution: scan → block selection → output assembly. The `format`
@@ -868,7 +905,7 @@ fn execute_chunk_fmt(
     let t_blocks = timer!();
     let block_table_desc = metadata.table(&plan.block_table);
     let readable_block_table = block_table_desc.filter(|_| chunk.has_table(&plan.block_table));
-    let mut block_batches = if let Some(block_desc) = readable_block_table {
+    let header_rows = if let Some(block_desc) = readable_block_table {
         // Block number + requested output columns + the weight companions those
         // columns declare (see `block_scan_columns`).
         let bn_col = block_desc.block_number_column.as_str();
@@ -883,20 +920,20 @@ fn execute_chunk_fmt(
         request.block_number_column = Some(bn_col);
         request.required_columns = block_req_refs;
 
-        scan_reader.scan(&plan.block_table, &request)?
+        scan_reader.scan_rows(&plan.block_table, &request)?.rows
     } else {
-        Vec::new()
+        Rows::default()
     };
 
     let bn_column = block_table_desc
         .map(|d| d.block_number_column.as_str())
         .unwrap_or("number");
     let mut boundary_blocks = HashSet::default();
-    collect_boundary_blocks(&block_batches, bn_column, &mut boundary_blocks)?;
+    collect_boundary_blocks(header_rows.batches(), bn_column, &mut boundary_blocks)?;
 
     let mut header_numbers = HashSet::default();
     if selection_reader.is_some() {
-        collect_block_numbers(&block_batches, bn_column, &mut header_numbers)?;
+        collect_block_numbers(header_rows.batches(), bn_column, &mut header_numbers)?;
     }
     let mut header_numbers: Vec<_> = header_numbers.into_iter().collect();
     header_numbers.sort_unstable();
@@ -955,9 +992,10 @@ fn execute_chunk_fmt(
             scan_tables(plan, metadata, scan_reader, from_block, to_block, profile)?;
         let in_range = |block: u64| block >= from_block && to_block.is_none_or(|end| block <= end);
         let range_headers = if first_range && (hint.is_none() || to_block == request_end) {
-            block_batches.clone()
+            header_rows.batches().to_vec()
         } else {
-            block_batches
+            header_rows
+                .batches()
                 .iter()
                 .map(|batch| filter_to_blocks(batch, bn_column, in_range))
                 .collect::<Result<Vec<_>>>()?
@@ -967,7 +1005,7 @@ fn execute_chunk_fmt(
         for (table_name, output) in &range_outputs {
             let table_desc = metadata.table(table_name).unwrap();
             let bn_col = table_desc.block_number_column.as_str();
-            collect_block_numbers(&output.batches, bn_col, &mut block_numbers)?;
+            collect_block_numbers(output.rows.batches(), bn_col, &mut block_numbers)?;
 
             // A relation's target is a different table, and it names its own block
             // number column. Reading one literal name here would drop every row of
@@ -980,7 +1018,7 @@ fn execute_chunk_fmt(
                 .map(|p| p.relations.as_slice())
                 .unwrap_or_default();
 
-            for (rel_idx, rel_batches) in &output.relation_batches {
+            for (rel_idx, rel_rows) in &output.relations {
                 let Some(rel) = plan_relations.get(*rel_idx) else {
                     continue;
                 };
@@ -988,7 +1026,7 @@ fn execute_chunk_fmt(
                     .table(&rel.target_table)
                     .map(|d| d.block_number_column.as_str())
                     .unwrap_or(bn_col);
-                collect_block_numbers(rel_batches, rel_bn_col, &mut block_numbers)?;
+                collect_block_numbers(rel_rows.batches(), rel_bn_col, &mut block_numbers)?;
             }
         }
 
@@ -1002,7 +1040,7 @@ fn execute_chunk_fmt(
         let exhausted = if sorted_blocks.is_empty() {
             false
         } else {
-            let weights = compute_block_weights(&range_outputs, &range_headers, metadata, plan);
+            let weights = compute_block_weights(&range_outputs, &range_headers, metadata, plan)?;
             selection.extend(&sorted_blocks, &weights)
         };
 
@@ -1011,17 +1049,14 @@ fn execute_chunk_fmt(
         }
 
         for (table, output) in range_outputs {
-            let accumulated = table_outputs.entry(table).or_insert_with(|| TableOutput {
-                batches: Vec::new(),
-                relation_batches: HashMap::new(),
-            });
-            accumulated.batches.extend(output.batches);
-            for (relation, batches) in output.relation_batches {
+            let accumulated = table_outputs.entry(table).or_default();
+            accumulated.rows.append(output.rows)?;
+            for (relation, rows) in output.relations {
                 accumulated
-                    .relation_batches
+                    .relations
                     .entry(relation)
                     .or_default()
-                    .extend(batches);
+                    .append(rows)?;
             }
         }
 
@@ -1047,21 +1082,32 @@ fn execute_chunk_fmt(
         });
     }
 
-    if selection_reader.is_some() {
-        let t_materialize = timer!();
-        materialize_tables(&mut table_outputs, plan, metadata, chunk)?;
-        if let Some(desc) = block_table_desc {
-            block_batches = retain_blocks(block_batches, bn_column, &selected_blocks)?;
-            block_batches = read_rows(
-                chunk,
-                &plan.block_table,
-                desc,
-                &block_batches,
-                &block_scan_columns(&plan.block_output_columns, desc),
-            )?;
+    let block_batches = match &selection_reader {
+        None => header_rows.into_batches(),
+        Some(reader) => {
+            reader.release_columns();
+            let t_materialize = timer!();
+            let (tables, headers) = rayon::join(
+                || materialize_tables(&mut table_outputs, plan, metadata, chunk),
+                || -> Result<Vec<RecordBatch>> {
+                    let Some(desc) = block_table_desc else {
+                        return Ok(header_rows.batches().to_vec());
+                    };
+                    let headers = retain_blocks(&header_rows, bn_column, &selected_blocks)?;
+                    read_rows(
+                        chunk,
+                        &plan.block_table,
+                        desc,
+                        &headers,
+                        &block_scan_columns(&plan.block_output_columns, desc),
+                    )
+                },
+            );
+            tables?;
+            elapsed!(t_materialize, "materialize selected rows");
+            headers?
         }
-        elapsed!(t_materialize, "materialize selected rows");
-    }
+    };
 
     // Arrow branch: emit flat per-table IPC streams straight from the post-scan
     // batches and return, skipping the entire JSON assembly below. Columns are
@@ -1087,10 +1133,10 @@ fn execute_chunk_fmt(
                     qn: td.request_name(&table_plan.table).to_string(),
                     td,
                     out_cols: &table_plan.output_columns,
-                    batches: &output.batches,
+                    batches: output.rows.batches(),
                 });
                 for (rel_idx, rel) in table_plan.relations.iter().enumerate() {
-                    if let Some(rb) = output.relation_batches.get(&rel_idx) {
+                    if let Some(rb) = output.relations.get(&rel_idx).map(Rows::batches) {
                         if let Some(rd) = metadata.table(&rel.target_table) {
                             srcs.push(Src {
                                 qn: rd.request_name(&rel.target_table).to_string(),
@@ -1238,28 +1284,38 @@ fn execute_chunk_fmt(
     for table_plan in &plan.table_plans {
         if let Some(output) = table_outputs.remove(&table_plan.table) {
             let TableOutput {
-                batches,
-                mut relation_batches,
+                rows,
+                relations: mut relation_rows,
             } = output;
+            let batches = rows.into_batches();
             let table_desc = metadata.table(&table_plan.table).unwrap();
             let bn_col = table_desc.block_number_column.as_str();
             let query_name = table_desc.request_name(&table_plan.table);
 
+            // A source whose rows were read under another adds nothing to any
+            // block, and as a second source it would only slow the merge.
+            let has_rows = |batches: &[RecordBatch]| batches.iter().any(|b| b.num_rows() > 0);
+
             let grouped = build_grouped_writers(&table_plan.output_columns, table_desc);
             let sort_columns = build_full_sort_columns(table_desc);
             let sort_col_resolved = resolve_sort_columns(&batches, &sort_columns);
-            all_indexes.push(IndexedBatches {
-                index: build_block_index(&batches, bn_col)?,
-                batches,
-                writers: build_field_writers(&table_plan.output_columns, Some(table_desc)),
-                grouped,
-                table_name: query_name.to_string(),
-                sort_columns,
-                sort_col_resolved,
-            });
+            let sort_rows = row_sort_keys(&batches, &sort_columns, &sort_col_resolved);
+            if has_rows(&batches) {
+                all_indexes.push(IndexedBatches {
+                    index: build_block_index(&batches, bn_col)?,
+                    batches,
+                    writers: build_field_writers(&table_plan.output_columns, Some(table_desc)),
+                    grouped,
+                    table_name: query_name.to_string(),
+                    sort_columns,
+                    sort_col_resolved,
+                    sort_rows,
+                });
+            }
 
             for (rel_idx, rel) in table_plan.relations.iter().enumerate() {
-                if let Some(rel_batches) = relation_batches.remove(&rel_idx) {
+                let rel_batches = relation_rows.remove(&rel_idx).map(Rows::into_batches);
+                if let Some(rel_batches) = rel_batches.filter(|b| has_rows(b)) {
                     if let Some(rd) = metadata.table(&rel.target_table) {
                         let rel_bn = rd.block_number_column.as_str();
                         let rel_qn = rd.request_name(&rel.target_table);
@@ -1268,6 +1324,8 @@ fn execute_chunk_fmt(
                         let rel_sort_columns = build_full_sort_columns(rd);
                         let rel_sort_resolved =
                             resolve_sort_columns(&rel_batches, &rel_sort_columns);
+                        let rel_sort_rows =
+                            row_sort_keys(&rel_batches, &rel_sort_columns, &rel_sort_resolved);
                         all_indexes.push(IndexedBatches {
                             index: build_block_index(&rel_batches, rel_bn)?,
                             batches: rel_batches,
@@ -1276,6 +1334,7 @@ fn execute_chunk_fmt(
                             table_name: rel_qn.to_string(),
                             sort_columns: rel_sort_columns,
                             sort_col_resolved: rel_sort_resolved,
+                            sort_rows: rel_sort_rows,
                         });
                     }
                 }

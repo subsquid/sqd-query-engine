@@ -129,15 +129,29 @@ pub fn filter_to_blocks(
     bn_col: &str,
     keep: impl Fn(u64) -> bool,
 ) -> Result<RecordBatch> {
-    let Some(col) = batch.column_by_name(bn_col) else {
+    if batch.column_by_name(bn_col).is_none() {
         return Ok(batch.clone());
+    }
+
+    let mask = blocks_mask(batch, bn_col, keep)?;
+    Ok(filter_record_batch(batch, &mask)?)
+}
+
+/// The rows whose `bn_col` block number satisfies `keep`; every row of a batch
+/// without that column.
+pub fn blocks_mask(
+    batch: &RecordBatch,
+    bn_col: &str,
+    keep: impl Fn(u64) -> bool,
+) -> Result<BooleanArray> {
+    let Some(col) = batch.column_by_name(bn_col) else {
+        return Ok(BooleanArray::from(vec![true; batch.num_rows()]));
     };
 
     let blocks = BlockNumbers::resolve(col.as_ref(), bn_col)?;
-    let mask: BooleanArray = (0..blocks.len())
+    Ok((0..blocks.len())
         .map(|i| Some(keep(blocks.at(i))))
-        .collect();
-    Ok(filter_record_batch(batch, &mask)?)
+        .collect())
 }
 
 /// Keep the first row for each distinct `key_cols` tuple (drops cross-source

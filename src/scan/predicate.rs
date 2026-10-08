@@ -74,6 +74,7 @@ fn constant(array: &dyn Array, value: bool) -> BooleanArray {
 /// unsigned; reading an `Int8` of `-1` needs them taken as the value they are.
 /// The stored type decides, once, here, so that no predicate has to guess and
 /// none of them can guess differently.
+#[derive(Clone)]
 pub enum StatRange {
     Ints {
         stored: DataType,
@@ -136,9 +137,19 @@ fn stat_text(stat: &dyn Array) -> Option<String> {
 /// differently — a `uint8` 255 matched the `-1` of an `Int8` column and pruned
 /// the row group holding it.
 fn ints_outside(ints: &IntValues, stored: &DataType, min: i128, max: i128) -> Option<bool> {
+    keys_outside(ints.stored_keys(stored)?, stored, min, max)
+}
+
+/// The same, for keys already narrowed to the stored width.
+fn keys_outside(
+    mut keys: impl Iterator<Item = u64>,
+    stored: &DataType,
+    min: i128,
+    max: i128,
+) -> Option<bool> {
     let (_, signed) = width_of(stored)?;
 
-    Some(ints.stored_keys(stored)?.all(|key| {
+    Some(keys.all(|key| {
         let value = if signed {
             key as i64 as i128
         } else {
@@ -210,6 +221,12 @@ pub trait ArrayPredicate: Send + Sync {
     /// wrongly skipped loses its rows silently. Implementations derive the
     /// claim from the same narrowing evaluation uses rather than repeating it.
     fn can_skip(&self, stats: &StatRange) -> bool;
+
+    /// The values a row's column must hold for the predicate to admit it, when
+    /// that is all it asks.
+    fn listed_values(&self) -> Option<&Arc<dyn Array>> {
+        None
+    }
 }
 
 /// Evaluate a predicate on a dictionary-encoded column of any key width: once
@@ -709,12 +726,20 @@ impl ArrayPredicate for InListPredicate {
                 })
             }
             StatRange::Ints { stored, min, max } => {
-                let Some(ints) = self.ints.as_ref() else {
+                let Some(keys) = self
+                    .ints
+                    .as_ref()
+                    .and_then(|ints| self.keys_at(ints, stored))
+                else {
                     return false;
                 };
-                ints_outside(ints, stored, *min, *max).unwrap_or(false)
+                keys_outside(keys.iter().copied(), stored, *min, *max).unwrap_or(false)
             }
         }
+    }
+
+    fn listed_values(&self) -> Option<&Arc<dyn Array>> {
+        Some(&self.values)
     }
 }
 
@@ -1151,6 +1176,86 @@ pub fn or_row_predicates(predicates: &[&RowPredicate], batch: &RecordBatch) -> M
     Ok(result.unwrap_or_else(|| all(batch.num_rows(), false)))
 }
 
+/// A filter every row one of `items` matches also passes, and cheaper than
+/// they are: per column, one list of every value an item lists there. Each item
+/// contributes a list it requires, or else one from each of its alternatives.
+/// `None` when an item has neither, since the others' lists then constrain
+/// nothing.
+pub fn listed_union(items: &[&RowPredicate]) -> Option<RowPredicate> {
+    // Lists on the column most items require merge into the fewest unions.
+    let mut demand = std::collections::HashMap::<&str, usize>::new();
+    for item in items {
+        for predicate in item.columns.iter().filter(is_listed) {
+            *demand.entry(predicate.column.as_str()).or_default() += 1;
+        }
+    }
+
+    let mut chosen: Vec<&ColumnPredicate> = Vec::new();
+    for item in items {
+        if let Some(required) = most_demanded(&item.columns, &demand) {
+            chosen.push(required);
+            continue;
+        }
+        if item.alternatives.is_empty() {
+            return None;
+        }
+        for group in &item.alternatives {
+            chosen.push(most_demanded(group, &demand)?);
+        }
+    }
+
+    let mut unions: Vec<(&str, Vec<&dyn Array>)> = Vec::new();
+    for predicate in chosen {
+        let values = predicate.predicate.listed_values()?.as_ref();
+        match unions.iter_mut().find(|(c, _)| *c == predicate.column) {
+            Some((_, lists)) => lists.push(values),
+            None => unions.push((predicate.column.as_str(), vec![values])),
+        }
+    }
+
+    let mut groups = Vec::with_capacity(unions.len());
+    for (column, lists) in unions {
+        let values = arrow::compute::concat(&lists).ok()?;
+        groups.push(vec![ColumnPredicate {
+            column: column.to_owned(),
+            predicate: Arc::new(InListPredicate::new(values)),
+        }]);
+    }
+
+    Some(match groups.len() {
+        1 => RowPredicate::new(groups.pop().expect("one group")),
+        _ => RowPredicate::with_alternatives(Vec::new(), groups),
+    })
+}
+
+fn is_listed(predicate: &&ColumnPredicate) -> bool {
+    predicate.predicate.listed_values().is_some()
+}
+
+fn most_demanded<'p>(
+    predicates: &'p [ColumnPredicate],
+    demand: &std::collections::HashMap<&str, usize>,
+) -> Option<&'p ColumnPredicate> {
+    predicates
+        .iter()
+        .filter(is_listed)
+        .max_by_key(|p| demand.get(p.column.as_str()).copied().unwrap_or(0))
+}
+
+/// The Kleene OR of the masks `items` picks out of `masks`; no row for none.
+pub fn or_masks(masks: &[BooleanArray], items: &[usize], len: usize) -> BooleanArray {
+    items
+        .iter()
+        .map(|&item| &masks[item])
+        .fold(None, |result: Option<BooleanArray>, mask| {
+            Some(match result {
+                None => mask.clone(),
+                Some(prev) => or_kleene(&prev, mask).unwrap(),
+            })
+        })
+        .unwrap_or_else(|| all(len, false))
+}
+
 /// A row group's statistics for one column, normalized against the type the
 /// column is stored at, or `None` where the writer recorded none.
 pub type ColumnStats<'a> = dyn Fn(&str) -> Option<StatRange> + 'a;
@@ -1159,22 +1264,6 @@ pub type ColumnStats<'a> = dyn Fn(&str) -> Option<StatRange> + 'a;
 pub fn can_skip_row_group_or(predicates: &[&RowPredicate], stats_fn: &ColumnStats) -> bool {
     // OR: skip only if ALL predicates say skip
     predicates.iter().all(|p| p.can_skip_row_group(stats_fn))
-}
-
-/// Filter a RecordBatch to only include rows matching any of the given predicates (OR'd).
-/// Returns None if the filtered batch would be empty.
-pub fn evaluate_predicates_on_batch(
-    batch: &RecordBatch,
-    predicates: &[RowPredicate],
-) -> Result<Option<RecordBatch>, UnsupportedType> {
-    if batch.num_rows() == 0 {
-        return Ok(None);
-    }
-    let pred_refs: Vec<&RowPredicate> = predicates.iter().collect();
-    let mask = or_row_predicates(&pred_refs, batch)?;
-    let filtered =
-        arrow::compute::filter_record_batch(batch, &mask).expect("mask sized to the batch");
-    Ok((filtered.num_rows() > 0).then_some(filtered))
 }
 
 /// Whether a predicate can be evaluated against a column stored at
@@ -1252,6 +1341,113 @@ pub fn col_bloom(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The union admits every row one of the items matches, whether the item
+    /// lists a value in its required filters or in each of its alternatives,
+    /// beside filters that list nothing; and there is no union when one item
+    /// lists nothing at all.
+    #[test]
+    fn the_listed_union_admits_every_row_an_item_matches() {
+        let mut seed = 0x5EED_0049u64;
+        let mut next = move |bound: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % bound
+        };
+
+        let rows = 200;
+        let column = |next: &mut dyn FnMut(u64) -> u64| -> Vec<u32> {
+            (0..rows).map(|_| next(6) as u32).collect()
+        };
+        let a = column(&mut next);
+        let b = column(&mut next);
+        let text: Vec<String> = column(&mut next).iter().map(|v| format!("t{v}")).collect();
+        let flag: Vec<Option<bool>> = column(&mut next)
+            .iter()
+            .map(|v| (*v < 5).then_some(v % 2 == 0))
+            .collect();
+        let batch = RecordBatch::try_from_iter(vec![
+            ("a", Arc::new(UInt32Array::from(a)) as ArrayRef),
+            ("b", Arc::new(UInt32Array::from(b)) as ArrayRef),
+            ("text", Arc::new(StringArray::from(text)) as ArrayRef),
+            ("flag", Arc::new(BooleanArray::from(flag)) as ArrayRef),
+        ])
+        .unwrap();
+
+        let list = |next: &mut dyn FnMut(u64) -> u64| -> ColumnPredicate {
+            let values: Vec<u32> = (0..1 + next(2)).map(|_| next(6) as u32).collect();
+            match next(3) {
+                0 => col_in_list("a", Arc::new(UInt32Array::from(values))),
+                1 => col_in_list("b", Arc::new(UInt32Array::from(values))),
+                _ => col_in_list(
+                    "text",
+                    Arc::new(StringArray::from_iter_values(
+                        values.iter().map(|v| format!("t{v}")),
+                    )),
+                ),
+            }
+        };
+        let unlisted = || col_eq("flag", ScalarValue::Boolean(true));
+
+        let mut narrowed = 0;
+        for case in 0..300 {
+            let unlisted_only = case % 10 == 9;
+            let items: Vec<RowPredicate> = (0..2 + next(4))
+                .map(|i| {
+                    let mut columns = Vec::new();
+                    if next(2) == 0 {
+                        columns.push(unlisted());
+                    }
+                    if unlisted_only && i == 0 {
+                        return RowPredicate::new(vec![unlisted()]);
+                    }
+                    match next(3) {
+                        0 => RowPredicate::with_alternatives(
+                            columns,
+                            (0..2)
+                                .map(|_| match next(6) {
+                                    0 => vec![unlisted()],
+                                    _ => vec![list(&mut next)],
+                                })
+                                .collect(),
+                        ),
+                        _ => {
+                            columns.extend((0..1 + next(2)).map(|_| list(&mut next)));
+                            RowPredicate::new(columns)
+                        }
+                    }
+                })
+                .collect();
+            let refs: Vec<&RowPredicate> = items.iter().collect();
+            let lists = |columns: &[ColumnPredicate]| columns.iter().any(|c| c.column != "flag");
+            let unbounded = items.iter().any(|item| {
+                !lists(&item.columns)
+                    && (item.alternatives.is_empty()
+                        || item.alternatives.iter().any(|group| !lists(group)))
+            });
+
+            let Some(union) = listed_union(&refs) else {
+                assert!(unbounded, "case {case}: no union for {items:?}");
+                continue;
+            };
+            assert!(
+                !unbounded,
+                "case {case}: an item that lists nothing has a union"
+            );
+
+            let any = or_row_predicates(&refs, &batch).unwrap();
+            let admitted = union.evaluate(&batch).unwrap();
+            assert_eq!(admitted.null_count(), 0);
+            for row in 0..rows {
+                if any.is_valid(row) && any.value(row) {
+                    assert!(admitted.value(row), "case {case}, row {row}: {items:?}");
+                }
+            }
+            narrowed += usize::from(admitted.true_count() < rows);
+        }
+        assert!(narrowed > 0, "the union never excluded a row");
+    }
 
     #[test]
     fn test_eq_predicate_boolean() {

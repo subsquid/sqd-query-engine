@@ -764,7 +764,42 @@ impl ResolvedRollEncoder {
 /// Uses serde_json's Serializer directly (same as legacy engine).
 #[inline]
 pub fn encode_json_string(s: &str, buf: &mut Vec<u8>) {
-    serde_json::Serializer::new(buf).serialize_str(s).unwrap();
+    // Addresses, hashes and base58 keys, most of what a chunk holds, have
+    // nothing to escape.
+    if needs_escape(s.as_bytes()) {
+        serde_json::Serializer::new(buf).serialize_str(s).unwrap();
+        return;
+    }
+
+    buf.reserve(s.len() + 2);
+    buf.push(b'"');
+    buf.extend_from_slice(s.as_bytes());
+    buf.push(b'"');
+}
+
+/// Whether JSON escapes any of `bytes`: a control character, a quote or a
+/// backslash, the bytes serde_json escapes. Eight bytes at a time.
+fn needs_escape(bytes: &[u8]) -> bool {
+    const ONES: u64 = u64::from_ne_bytes([0x01; 8]);
+    const HIGH: u64 = u64::from_ne_bytes([0x80; 8]);
+    let zero_byte = |word: u64| word.wrapping_sub(ONES) & !word & HIGH != 0;
+    let below_space = |word: u64| word.wrapping_sub(ONES * 0x20) & !word & HIGH != 0;
+
+    let mut words = bytes.chunks_exact(8);
+    for word in &mut words {
+        let word = u64::from_ne_bytes(word.try_into().expect("eight bytes"));
+        if below_space(word)
+            || zero_byte(word ^ (ONES * b'"' as u64))
+            || zero_byte(word ^ (ONES * b'\\' as u64))
+        {
+            return true;
+        }
+    }
+
+    words
+        .remainder()
+        .iter()
+        .any(|&b| b < 0x20 || b == b'"' || b == b'\\')
 }
 
 fn encode_hex_bytes(bytes: &[u8], buf: &mut Vec<u8>) {
@@ -905,13 +940,55 @@ hex_number_encoder!(encode_hex_number_u32, u32);
 hex_number_encoder!(encode_hex_number_u64, u64);
 
 fn encode_list(array: &GenericListArray<i32>, row: usize, buf: &mut Vec<u8>) {
-    let values = array.value(row);
+    let offsets = array.value_offsets();
+    let elements = offsets[row] as usize..offsets[row + 1] as usize;
+    let values = array.values().as_ref();
     buf.push(b'[');
-    for i in 0..values.len() {
-        if i > 0 {
-            buf.push(b',');
+
+    // A path of item indices is the common list; its elements are written
+    // without resolving an encoder for each.
+    macro_rules! integers {
+        ($($variant:ident($array:ty, $write:ident, $wide:ty)),+ $(,)?) => {
+            match values.data_type() {
+                $(DataType::$variant => {
+                    let typed = values.as_any().downcast_ref::<$array>().unwrap();
+                    for i in elements.clone() {
+                        if i > elements.start {
+                            buf.push(b',');
+                        }
+                        if typed.is_null(i) {
+                            buf.extend_from_slice(b"null");
+                        } else {
+                            $write(buf, typed.value(i) as $wide);
+                        }
+                    }
+                    buf.push(b']');
+                    return;
+                })+
+                _ => {}
+            }
+        };
+    }
+    integers!(
+        UInt8(UInt8Array, write_u64, u64),
+        UInt16(UInt16Array, write_u64, u64),
+        UInt32(UInt32Array, write_u64, u64),
+        UInt64(UInt64Array, write_u64, u64),
+        Int8(Int8Array, write_i64, i64),
+        Int16(Int16Array, write_i64, i64),
+        Int32(Int32Array, write_i64, i64),
+        Int64(Int64Array, write_i64, i64),
+    );
+
+    if !elements.is_empty() {
+        let encoder = resolve_value_encoder(values.data_type())
+            .expect("checked when the containing column's encoder was resolved");
+        for i in elements.clone() {
+            if i > elements.start {
+                buf.push(b',');
+            }
+            encoder(values, i, buf);
         }
-        encode_value(values.as_ref(), i, buf);
     }
     buf.push(b']');
 }
@@ -1655,5 +1732,42 @@ mod tests {
             rendered_with(base58, Some(&JsonEncoding::Base58), None),
             "\"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA\""
         );
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn a_string_renders_as_serde_renders_it(
+            text in proptest::string::string_regex("(?s).{0,80}").unwrap(),
+            plain in "[1-9A-HJ-NP-Za-km-z]{0,64}",
+            at in 0usize..64,
+            special in proptest::sample::select(vec!['"', '\\', '\n', '\u{0}', '\u{1f}', ' ', '\u{7f}', 'é', '\u{80}']),
+        ) {
+            let mut planted = plain.clone();
+            planted.insert(at.min(plain.len()), special);
+            for case in [&text, &plain, &planted] {
+                let mut rendered = Vec::new();
+                encode_json_string(case, &mut rendered);
+                proptest::prop_assert_eq!(String::from_utf8(rendered).unwrap(), serde_json::to_string(case).unwrap());
+
+                let escaped = case.bytes().any(|b| b < 0x20 || b == b'"' || b == b'\\');
+                proptest::prop_assert_eq!(needs_escape(case.as_bytes()), escaped);
+            }
+        }
+    }
+
+    #[test]
+    fn every_byte_at_every_position_of_a_word_is_judged_alone() {
+        for len in [1, 7, 8, 9, 16, 17] {
+            for at in 0..len {
+                for byte in 0..=255u8 {
+                    for filler in [b'a', 0x7f, 0xff, 0x20] {
+                        let mut bytes = vec![filler; len];
+                        bytes[at] = byte;
+                        let expected = bytes.iter().any(|&b| b < 0x20 || b == b'"' || b == b'\\');
+                        assert_eq!(needs_escape(&bytes), expected, "{bytes:?}");
+                    }
+                }
+            }
+        }
     }
 }

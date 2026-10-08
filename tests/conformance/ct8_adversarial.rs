@@ -11,11 +11,10 @@
 //! engine noticed.
 
 use arrow::datatypes::{DataType, Field, SchemaRef, TimeUnit};
-use arrow::record_batch::RecordBatch;
 use sqd_query_engine::error::{error_kind, ErrorKind};
 use sqd_query_engine::output::{execute_chunk, execute_chunk_arrow, execute_plan};
 use sqd_query_engine::query::{compile, parse_query};
-use sqd_query_engine::scan::{ChunkReader, ParquetChunkReader, ScanRequest};
+use sqd_query_engine::scan::{ChunkReader, ParquetChunkReader, ScanRequest, Scanned};
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
@@ -188,9 +187,9 @@ impl Recording {
 }
 
 impl ChunkReader for Recording {
-    fn scan(&self, table: &str, request: &ScanRequest) -> anyhow::Result<Vec<RecordBatch>> {
+    fn scan_rows(&self, table: &str, request: &ScanRequest) -> anyhow::Result<Scanned> {
         self.note(table);
-        self.inner.scan(table, request)
+        self.inner.scan_rows(table, request)
     }
 
     fn supports_row_positions(&self) -> bool {

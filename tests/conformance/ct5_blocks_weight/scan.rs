@@ -4,7 +4,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use sqd_query_engine::integers::BlockNumbers;
-use sqd_query_engine::scan::{ChunkReader, KeyFilter, ParquetChunkReader, ScanRequest};
+use sqd_query_engine::scan::{ChunkReader, KeyFilter, ParquetChunkReader, Rows, ScanRequest};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::sync::Arc;
@@ -81,29 +81,17 @@ fn physical_positions_survive_pruning_cascaded_filters_and_batches() {
         request.block_number_column = Some(BN);
         request.predicates = vec![&predicate];
         request.batch_size = batch_size;
-        request.row_index_column = Some("position");
-        let selected = reader.scan("items", &request).unwrap();
-        let positions: Vec<_> = selected
-            .iter()
-            .flat_map(|batch| {
-                batch
-                    .column_by_name("position")
-                    .unwrap()
-                    .as_any()
-                    .downcast_ref::<UInt64Array>()
-                    .unwrap()
-                    .values()
-                    .to_vec()
-            })
-            .collect();
-        assert_eq!(positions, [7, 11, 13]);
+        request.positions = true;
+        let selected = reader.scan_rows("items", &request).unwrap().rows;
+        assert_eq!(positions(&selected), [7, 11, 13]);
 
         let mut fetch = ScanRequest::new(vec!["payload"]);
         fetch.row_indices = Some(&[7, 13]);
-        fetch.row_index_column = Some("position");
+        fetch.positions = true;
         fetch.batch_size = batch_size;
-        let batches = reader.scan("items", &fetch).unwrap();
-        let payloads: Vec<_> = batches
+        let fetched = reader.scan_rows("items", &fetch).unwrap().rows;
+        let payloads: Vec<_> = fetched
+            .batches()
             .iter()
             .flat_map(|batch| {
                 batch
@@ -118,20 +106,7 @@ fn physical_positions_survive_pruning_cascaded_filters_and_batches() {
             })
             .collect();
         assert_eq!(payloads, ["value-201", "value-301"]);
-        let fetched_positions: Vec<_> = batches
-            .iter()
-            .flat_map(|batch| {
-                batch
-                    .column_by_name("position")
-                    .unwrap()
-                    .as_any()
-                    .downcast_ref::<UInt64Array>()
-                    .unwrap()
-                    .values()
-                    .to_vec()
-            })
-            .collect();
-        assert_eq!(fetched_positions, [7, 13]);
+        assert_eq!(positions(&fetched), [7, 13]);
         for invalid in [&[13, 7][..], &[7, 7], &[18]] {
             fetch.row_indices = Some(invalid);
             assert!(reader.scan("items", &fetch).is_err());
@@ -267,4 +242,95 @@ fn an_inverted_statistic_does_not_prune_a_relation_row_group_away() {
         wanted.iter().map(|&b| (b, 1)).collect::<BTreeMap<_, _>>(),
         "the relation pruner dropped a row group on a statistic it cannot read"
     );
+}
+
+/// A hierarchical scan drops the rows outside its block range after it finds
+/// them, and each position it reports still names the row beside it.
+#[test]
+fn hierarchical_positions_name_their_rows_after_the_block_range() {
+    use crate::harness::chunk::write_table_row_groups;
+    use arrow::array::{AsArray, ListArray, UInt64Array};
+    use arrow::datatypes::{UInt32Type, UInt64Type};
+    use sqd_query_engine::scan::{HierarchicalFilter, HierarchicalMode};
+
+    // Each block holds one transaction: a root call, its child and grandchild.
+    let addresses = |paths: Vec<Vec<u32>>| {
+        ListArray::from_iter_primitive::<UInt32Type, _, _>(
+            paths
+                .into_iter()
+                .map(|path| Some(path.into_iter().map(Some))),
+        )
+    };
+    let blocks: Vec<u64> = (100..104).flat_map(|block| [block; 3]).collect();
+    let calls = addresses(
+        (100..104)
+            .flat_map(|_| [vec![], vec![0], vec![0, 0]])
+            .collect(),
+    );
+    let fields = vec![
+        Field::new(BN, DataType::UInt64, false),
+        Field::new("transaction_index", DataType::UInt32, false),
+        Field::new("address", calls.data_type().clone(), true),
+    ];
+    let dir = TempDir::new().unwrap();
+    write_table_row_groups(
+        dir.path(),
+        "calls",
+        fields.clone(),
+        vec![vec![
+            Arc::new(UInt64Array::from(blocks.clone())) as ArrayRef,
+            Arc::new(UInt32Array::from(vec![0; blocks.len()])),
+            Arc::new(calls),
+        ]],
+    );
+    let reader = ParquetChunkReader::open(dir.path()).unwrap();
+
+    // Every root is a source, and the range keeps two of the four blocks.
+    let roots = RecordBatch::try_new(
+        Arc::new(Schema::new(fields)),
+        vec![
+            Arc::new(UInt64Array::from_iter_values(100..104)),
+            Arc::new(UInt32Array::from(vec![0; 4])),
+            Arc::new(addresses(vec![vec![]; 4])),
+        ],
+    )
+    .unwrap();
+    let children = HierarchicalFilter::build(
+        &[roots],
+        &[BN, "transaction_index"],
+        "address",
+        "address",
+        HierarchicalMode::Children,
+        false,
+    );
+
+    for batch_size in [1, 2, usize::MAX] {
+        let mut request = ScanRequest::new(vec![BN]);
+        request.block_number_column = Some(BN);
+        request.from_block = Some(101);
+        request.to_block = Some(102);
+        request.hierarchical_filter = Some(&children);
+        request.positions = true;
+        request.batch_size = batch_size;
+        let rows = reader.scan_rows("calls", &request).unwrap().rows;
+
+        let blocks: Vec<u64> = rows
+            .batches()
+            .iter()
+            .flat_map(|batch| {
+                let blocks = batch.column_by_name(BN).unwrap();
+                blocks.as_primitive::<UInt64Type>().values().to_vec()
+            })
+            .collect();
+        assert_eq!(blocks, [101, 101, 102, 102], "batches of {batch_size}");
+        assert_eq!(positions(&rows), [4, 5, 7, 8], "batches of {batch_size}");
+    }
+}
+
+fn positions(rows: &Rows) -> Vec<u64> {
+    rows.positions()
+        .expect("the scan recorded positions")
+        .iter()
+        .flat_map(|batch| batch.values().iter().copied())
+        .collect()
 }

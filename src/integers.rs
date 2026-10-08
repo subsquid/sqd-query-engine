@@ -130,6 +130,24 @@ macro_rules! int_column {
                     $(Self::$variant(a) => a.len(),)+
                 }
             }
+
+            pub(crate) fn nulls(&self) -> Option<&arrow::buffer::NullBuffer> {
+                match self {
+                    $(Self::$variant(a) => a.nulls(),)+
+                }
+            }
+
+            /// [`Self::join_key`] of every row, nulls included as whatever
+            /// their slots hold.
+            pub(crate) fn join_keys(&self) -> Vec<u64> {
+                self.visit(JoinKeys)
+            }
+
+            /// [`Self::join_key`] of every row as eight big-endian bytes, so
+            /// that a run of rows compares as bytes the way its keys compare.
+            pub(crate) fn join_key_bytes(&self) -> Vec<u8> {
+                self.visit(JoinKeyBytes)
+            }
         }
 
         /// The block number a row-group statistic states, widened by the rule
@@ -245,12 +263,6 @@ macro_rules! owned_int_column {
                     $(Self::$variant(a) => a.value(row) as i128,)+
                 }
             }
-
-            pub(crate) fn len(&self) -> usize {
-                match self {
-                    $(Self::$variant(a) => a.len(),)+
-                }
-            }
         }
     };
 }
@@ -287,6 +299,42 @@ pub(crate) enum IntValues {
 
 /// Widens an array's values at the array's signedness.
 struct Widen;
+
+struct JoinKeys;
+
+struct JoinKeyBytes;
+
+impl IntVisitor for JoinKeyBytes {
+    type Out = Vec<u8>;
+
+    fn visit<T>(self, array: &PrimitiveArray<T>) -> Vec<u8>
+    where
+        T: ArrowPrimitiveType,
+        T::Native: Into<i128>,
+    {
+        array
+            .values()
+            .iter()
+            .flat_map(|&value| stored_key(value.into()).to_be_bytes())
+            .collect()
+    }
+}
+
+impl IntVisitor for JoinKeys {
+    type Out = Vec<u64>;
+
+    fn visit<T>(self, array: &PrimitiveArray<T>) -> Vec<u64>
+    where
+        T: ArrowPrimitiveType,
+        T::Native: Into<i128>,
+    {
+        array
+            .values()
+            .iter()
+            .map(|&value| stored_key(value.into()))
+            .collect()
+    }
+}
 
 impl IntVisitor for Widen {
     type Out = IntValues;

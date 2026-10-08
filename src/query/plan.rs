@@ -59,10 +59,10 @@ pub struct RelationPlan {
     pub left_key: Vec<String>,
     pub right_key: Vec<String>,
     pub output_columns: Vec<String>,
-    /// Predicates from items that requested this relation (OR'd).
-    /// `None` means all rows qualify (an item with no filters requested it).
-    /// `Some(preds)` means only rows matching these predicates should feed the relation.
-    pub source_predicates: Option<Vec<RowPredicate>>,
+    /// The items that requested this relation, as indices into the table
+    /// plan's `predicates`; only rows one of them matched feed it. `None` when
+    /// every item did, so every row the scan returns qualifies.
+    pub source_items: Option<Vec<usize>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,10 +142,8 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
         // name: two aliases over one table declare their relations separately,
         // and the same name can mean a different join on each.
         let mut seen_relations: HashSet<(Option<String>, String)> = HashSet::new();
-        // Track source predicates per relation name, and how many items request each
-        let mut rel_source_preds: std::collections::HashMap<String, Vec<RowPredicate>> =
-            std::collections::HashMap::new();
-        let mut rel_item_count: std::collections::HashMap<String, usize> =
+        // The items requesting each relation, by relation name
+        let mut rel_source_items: std::collections::HashMap<String, Vec<usize>> =
             std::collections::HashMap::new();
         // Unsatisfiable items are not counted: they contribute no rows, so a
         // relation every *remaining* item asks for still applies to every row
@@ -158,17 +156,15 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
                 CompiledItem::Predicate(predicate) => predicate,
             };
             total_items += 1;
-            all_predicates.push(item_predicate.clone());
+            let item_index = all_predicates.len();
+            all_predicates.push(item_predicate);
 
             // Collect relations (dedup across items)
             for rel_name in &item.relations {
-                *rel_item_count.entry(rel_name.clone()).or_default() += 1;
-
-                // Update source predicates for this relation
-                rel_source_preds
+                rel_source_items
                     .entry(rel_name.clone())
                     .or_default()
-                    .push(item_predicate.clone());
+                    .push(item_index);
 
                 let rel_key = (item.alias.clone(), rel_name.clone());
                 if seen_relations.contains(&rel_key) {
@@ -205,7 +201,7 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
                     left_key: rel_def.effective_left_key().to_vec(),
                     right_key: rel_def.effective_right_key().to_vec(),
                     output_columns: target_output,
-                    source_predicates: None, // filled in below
+                    source_items: None, // filled in below
                 };
 
                 // Two aliases naming the same join is one scan, not two.
@@ -222,11 +218,11 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
             }
         }
 
-        // Set source_predicates on each relation.
-        // If ALL items request a relation, source_predicates = None (all primary rows qualify,
+        // Set source_items on each relation.
+        // If ALL items request a relation, source_items = None (all primary rows qualify,
         // since the union of all items' predicates IS the primary scan predicate).
         for rel in &mut all_relations {
-            for (rel_name, preds) in &rel_source_preds {
+            for (rel_name, source_items) in &rel_source_items {
                 // Resolve the way the relation was created: through the alias of
                 // any item that asked for it, and otherwise on the table.
                 let rel_def = items
@@ -244,11 +240,10 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
                             && rel_def.effective_left_key() == rel.left_key.as_slice()
                         {
                             // If all items request this relation, no filtering needed
-                            let count = rel_item_count.get(rel_name).copied().unwrap_or(0);
-                            rel.source_predicates = if count >= total_items {
+                            rel.source_items = if source_items.len() >= total_items {
                                 None
                             } else {
-                                Some(preds.clone())
+                                Some(source_items.clone())
                             };
                             break;
                         }
@@ -1515,11 +1510,11 @@ mod tests {
         }
     }
 
-    /// Alias-relation must propagate source_predicates when not all items request it.
+    /// Alias-relation must propagate source_items when not all items request it.
     ///
     /// Covers CT-4 · INV-R1
     #[test]
-    fn test_alias_relation_source_predicates() {
+    fn test_alias_relation_source_items() {
         use crate::metadata::parse_dataset_description;
 
         let yaml = r#"
@@ -1583,10 +1578,11 @@ aliases:
             .find(|r| r.target_table == "related")
             .expect("should have 'related' relation");
 
-        // source_predicates should be Some because only 1 of 2 items requests it
-        assert!(
-            rel.source_predicates.is_some(),
-            "alias relation must have source_predicates when not all items request it"
+        // Only the first of the two items requests it
+        assert_eq!(
+            rel.source_items.as_deref(),
+            Some(&[0][..]),
+            "alias relation must name its source items when not all items request it"
         );
     }
 }

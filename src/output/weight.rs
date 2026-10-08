@@ -1,7 +1,9 @@
 use crate::integers::{BlockNumbers, IntColumn};
 use crate::metadata::{DatasetDescription, TableDescription, VirtualField, WeightSource};
 use crate::query::Plan;
+use crate::scan::Rows;
 use crate::text::StringColumn;
+use anyhow::Result;
 use arrow::array::*;
 use arrow::record_batch::RecordBatch;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -19,19 +21,20 @@ pub(crate) const MAX_RESPONSE_BYTES: u64 = 20 * 1024 * 1024;
 const DEFAULT_ROW_WEIGHT: u64 = 32;
 
 /// Table data: the query-driven items and any relation results.
+#[derive(Default)]
 pub(crate) struct TableOutput {
     /// The primary table's filtered rows.
-    pub(crate) batches: Vec<RecordBatch>,
+    pub(crate) rows: Rows,
     /// Relation results, keyed by the relation's position in the table plan.
     /// Two relations of one query item can name the same target table — and then
     /// the same rows — so each keeps its own entry and the overlap is resolved by
     /// deduplication rather than by concatenation.
-    pub(crate) relation_batches: HashMap<usize, Vec<RecordBatch>>,
+    pub(crate) relations: HashMap<usize, Rows>,
 }
 
-/// A batch source with its weight parameters.
+/// A row source with its weight parameters.
 struct WeightContribution<'a> {
-    batches: &'a [RecordBatch],
+    rows: &'a Rows,
     fixed_weight: u64,
     weight_cols: Vec<String>,
 }
@@ -46,7 +49,8 @@ pub(crate) fn compute_block_weights(
     block_batches: &[RecordBatch],
     metadata: &DatasetDescription,
     plan: &Plan,
-) -> FxHashMap<u64, u64> {
+) -> Result<FxHashMap<u64, u64>> {
+    let no_rows = Rows::default();
     // 1. Group all batch contributions by TARGET table name.
     // Direct batches → target is the table_plan's own table.
     // Relation batches → target is the relation's target_table.
@@ -66,7 +70,7 @@ pub(crate) fn compute_block_weights(
             .entry(&table_plan.table)
             .or_default()
             .push(WeightContribution {
-                batches: &output.batches,
+                rows: &output.rows,
                 fixed_weight,
                 weight_cols: weight_col_names,
             });
@@ -79,11 +83,7 @@ pub(crate) fn compute_block_weights(
                 .entry(&rel.target_table)
                 .or_default()
                 .push(WeightContribution {
-                    batches: output
-                        .relation_batches
-                        .get(&rel_idx)
-                        .map(Vec::as_slice)
-                        .unwrap_or_default(),
+                    rows: output.relations.get(&rel_idx).unwrap_or(&no_rows),
                     fixed_weight,
                     weight_cols,
                 });
@@ -111,14 +111,14 @@ pub(crate) fn compute_block_weights(
         if contribs.len() == 1 {
             // Single source — no dedup needed, fast path.
             accumulate_block_weights(
-                contribs[0].batches,
+                contribs[0].rows.batches(),
                 bn_col_name,
                 contribs[0].fixed_weight,
                 &contribs[0].weight_cols,
                 &mut block_weights,
             );
         } else {
-            accumulate_dedup_contributions(contribs, bn_col_name, &dedup_keys, &mut block_weights);
+            accumulate_dedup_contributions(contribs, bn_col_name, &dedup_keys, &mut block_weights)?;
         }
     }
 
@@ -180,7 +180,7 @@ pub(crate) fn compute_block_weights(
         }
     }
 
-    block_weights
+    Ok(block_weights)
 }
 
 /// Select a weighted prefix across disjoint, complete ranges of blocks.
@@ -411,16 +411,52 @@ pub(crate) fn accumulate_block_weights(
 }
 
 /// Accumulate per-block weights with row deduplication.
-/// Rows are identified by block number and item-key values.
+///
+/// A row is its physical position when the scan recorded one, as the reference
+/// dedups by row index; otherwise it is its block number and item-key values.
+/// Sources that recorded positions read no keys, so they cannot be compared
+/// with sources that did not.
 fn accumulate_dedup_contributions(
     contributions: &[WeightContribution<'_>],
     bn_column: &str,
     key_columns: &[&str],
     weights: &mut FxHashMap<u64, u64>,
-) {
-    let batches: Vec<_> = contributions
+) -> Result<()> {
+    let sources: Vec<_> = contributions
         .iter()
-        .flat_map(|source| source.batches.iter().map(move |batch| (source, batch)))
+        .filter(|source| !source.rows.batches().is_empty())
+        .collect();
+    let positioned = sources
+        .iter()
+        .filter(|source| source.rows.positions().is_some())
+        .count();
+
+    if positioned == sources.len() {
+        let mut seen = FxHashSet::default();
+        for source in sources {
+            let positions = source.rows.positions().expect("every source has positions");
+            for (batch, positions) in source.rows.batches().iter().zip(positions) {
+                accumulate_rows(source, batch, bn_column, weights, |row, _| {
+                    seen.insert(positions.value(row))
+                });
+            }
+        }
+        return Ok(());
+    }
+    anyhow::ensure!(
+        positioned == 0,
+        "rows with positions and rows without cannot be deduplicated together"
+    );
+
+    let batches: Vec<_> = sources
+        .iter()
+        .flat_map(|source| {
+            source
+                .rows
+                .batches()
+                .iter()
+                .map(move |batch| (*source, batch))
+        })
         .collect();
     let keys: Vec<Vec<Option<&dyn Array>>> = batches
         .iter()
@@ -433,30 +469,46 @@ fn accumulate_dedup_contributions(
         .collect();
     let mut seen = FxHashSet::default();
     for ((source, batch), columns) in batches.iter().zip(&keys) {
-        let Some(numbers) = batch.column_by_name(bn_column) else {
+        accumulate_rows(source, batch, bn_column, weights, |row, block| {
+            seen.insert((block, WeightRow { columns, row }))
+        });
+    }
+    Ok(())
+}
+
+/// Add the weight of every row of `batch` that `is_new` admits to its block.
+fn accumulate_rows(
+    source: &WeightContribution<'_>,
+    batch: &RecordBatch,
+    bn_column: &str,
+    weights: &mut FxHashMap<u64, u64>,
+    mut is_new: impl FnMut(usize, u64) -> bool,
+) {
+    let Some(numbers) = batch.column_by_name(bn_column) else {
+        return;
+    };
+    let Ok(blocks) = BlockNumbers::resolve(numbers.as_ref(), bn_column) else {
+        return;
+    };
+    let weight_columns: Vec<_> = source
+        .weight_cols
+        .iter()
+        .filter_map(|name| batch.column_by_name(name))
+        .collect();
+
+    for row in 0..batch.num_rows() {
+        let block = blocks.at(row);
+        if !is_new(row, block) {
             continue;
-        };
-        let Ok(blocks) = BlockNumbers::resolve(numbers.as_ref(), bn_column) else {
-            continue;
-        };
-        let weight_columns: Vec<_> = source
-            .weight_cols
-            .iter()
-            .filter_map(|name| batch.column_by_name(name))
-            .collect();
-        for row in 0..batch.num_rows() {
-            let block = blocks.at(row);
-            if !seen.insert((block, WeightRow { columns, row })) {
-                continue;
-            }
-            let weight = weight_columns
-                .iter()
-                .fold(source.fixed_weight, |sum, column| {
-                    sum.saturating_add(get_weight_value(column.as_ref(), row))
-                });
-            let total = weights.entry(block).or_default();
-            *total = total.saturating_add(weight);
         }
+
+        let weight = weight_columns
+            .iter()
+            .fold(source.fixed_weight, |sum, column| {
+                sum.saturating_add(get_weight_value(column.as_ref(), row))
+            });
+        let total = weights.entry(block).or_default();
+        *total = total.saturating_add(weight);
     }
 }
 
@@ -668,17 +720,17 @@ mod tests {
             ],
         )
         .unwrap();
-        let primary = [batch.clone()];
-        let duplicate = [batch];
-        for related in [&[][..], duplicate.as_slice()] {
+        let primary = Rows::new(vec![batch.clone()]);
+        let duplicate = Rows::new(vec![batch]);
+        for related in [&Rows::default(), &duplicate] {
             let contributions = [
                 WeightContribution {
-                    batches: &primary,
+                    rows: &primary,
                     fixed_weight: 100,
                     weight_cols: vec![],
                 },
                 WeightContribution {
-                    batches: related,
+                    rows: related,
                     fixed_weight: 100,
                     weight_cols: vec![],
                 },
@@ -689,9 +741,67 @@ mod tests {
                 "block_number",
                 &["transaction_index", "trace_address"],
                 &mut weights,
-            );
+            )
+            .unwrap();
             assert_eq!(weights[&100], 200);
         }
+    }
+
+    /// A physical row is charged once however many sources return it, and two
+    /// rows are two rows even when their keys are equal. Rows without positions
+    /// are compared by their keys, and the two kinds never meet.
+    #[test]
+    fn positions_identify_rows_when_every_source_has_them() {
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let rows = |positions: Option<Vec<u64>>| {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("block_number", DataType::UInt64, false),
+                Field::new("transaction_index", DataType::UInt32, false),
+            ]));
+            let columns: Vec<ArrayRef> = vec![
+                Arc::new(UInt64Array::from(vec![100, 100])),
+                Arc::new(UInt32Array::from(vec![7, 7])),
+            ];
+            let batch = RecordBatch::try_new(schema, columns).unwrap();
+            match positions {
+                Some(positions) => {
+                    Rows::with_positions(vec![batch], vec![UInt64Array::from(positions)])
+                }
+                None => Rows::new(vec![batch]),
+            }
+        };
+        let weigh = |primary: Rows, related: Rows| {
+            let contributions = [
+                WeightContribution {
+                    rows: &primary,
+                    fixed_weight: 10,
+                    weight_cols: vec![],
+                },
+                WeightContribution {
+                    rows: &related,
+                    fixed_weight: 10,
+                    weight_cols: vec![],
+                },
+            ];
+            let mut weights = FxHashMap::default();
+            accumulate_dedup_contributions(
+                &contributions,
+                "block_number",
+                &["transaction_index"],
+                &mut weights,
+            )
+            .map(|()| weights[&100])
+        };
+
+        let positioned = |a, b| weigh(rows(Some(a)), rows(Some(b))).unwrap();
+        assert_eq!(positioned(vec![3, 4], vec![4, 3]), 20);
+        assert_eq!(positioned(vec![3, 4], vec![5, 6]), 40);
+
+        assert_eq!(weigh(rows(None), rows(None)).unwrap(), 10);
+        assert_eq!(weigh(rows(Some(vec![3, 4])), Rows::default()).unwrap(), 20);
+        assert!(weigh(rows(Some(vec![3, 4])), rows(None)).is_err());
     }
 
     /// Load the solana metadata for tests.
@@ -1059,7 +1169,7 @@ mod tests {
                 left_key: vec!["block_number".to_string(), "transaction_index".to_string()],
                 right_key: vec!["block_number".to_string(), "transaction_index".to_string()],
                 output_columns: vec![],
-                source_predicates: None,
+                source_items: None,
             }],
         };
 
@@ -1076,40 +1186,36 @@ mod tests {
         assert!(resolved.contains(&"program_id".to_string()));
     }
 
-    /// Covers CT-4 · INV-R1
+    /// A relation some items asked for follows the rows the scan marked as
+    /// theirs, so the columns those items filter on are not read for it.
     #[test]
-    fn test_resolve_includes_source_predicate_columns() {
+    fn test_resolve_reads_no_source_predicate_columns() {
         let meta = solana_meta();
         let instr = meta.table("instructions").unwrap();
 
-        // When a relation has source_predicates (e.g., is_committed filter),
-        // resolve_output_columns adds those predicate columns.
         let table_plan = crate::query::TablePlan {
             table: "instructions".to_string(),
             output_columns: vec!["program_id".to_string()],
-            predicates: vec![],
+            predicates: vec![
+                crate::scan::predicate::RowPredicate::new(vec![crate::scan::predicate::col_eq(
+                    "is_committed",
+                    crate::scan::predicate::ScalarValue::Boolean(true),
+                )]),
+                crate::scan::predicate::RowPredicate::new(vec![]),
+            ],
             relations: vec![crate::query::RelationPlan {
                 target_table: "transactions".to_string(),
                 kind: crate::query::RelationKind::Join,
                 left_key: vec!["block_number".to_string(), "transaction_index".to_string()],
                 right_key: vec!["block_number".to_string(), "transaction_index".to_string()],
                 output_columns: vec![],
-                source_predicates: Some(vec![crate::scan::predicate::RowPredicate::new(vec![
-                    crate::scan::predicate::col_eq(
-                        "is_committed",
-                        crate::scan::predicate::ScalarValue::Boolean(true),
-                    ),
-                ])]),
+                source_items: Some(vec![0]),
             }],
         };
 
         let resolved = resolve_output_columns(&table_plan, instr);
 
-        // is_committed is added because of source_predicates
-        assert!(
-            resolved.contains(&"is_committed".to_string()),
-            "source predicate column should be in resolved columns"
-        );
+        assert!(!resolved.contains(&"is_committed".to_string()));
     }
 
     #[test]

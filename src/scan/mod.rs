@@ -1,9 +1,14 @@
 mod chunk;
+mod columns;
+mod pairs;
 mod positions;
 pub mod predicate;
+mod rows;
 mod scanner;
 
 pub use chunk::*;
+pub use columns::{ColumnCache, Window};
+pub use rows::{Rows, Scanned};
 pub use scanner::*;
 
 use anyhow::Result;
@@ -14,11 +19,19 @@ use arrow::record_batch::RecordBatch;
 /// Implementations handle storage-specific details (parquet files, RocksDB, etc.)
 /// and return Arrow RecordBatches that the rest of the pipeline operates on.
 pub trait ChunkReader: Sync {
-    /// Scan a table: apply projection, predicates, block range, and key/hierarchical filters.
-    fn scan(&self, table: &str, request: &ScanRequest) -> Result<Vec<RecordBatch>>;
+    /// Scan a table: apply projection, predicates, block range, and
+    /// key/hierarchical filters. Besides the rows, the result holds what the
+    /// request asked to learn about them: each row's physical position and
+    /// which rows each item tag matched.
+    fn scan_rows(&self, table: &str, request: &ScanRequest) -> Result<Scanned>;
 
-    /// Whether scans can return physical row positions and read those positions
-    /// back through `ScanRequest::row_indices` on this immutable chunk.
+    /// The rows of [`ChunkReader::scan_rows`] alone.
+    fn scan(&self, table: &str, request: &ScanRequest) -> Result<Vec<RecordBatch>> {
+        Ok(self.scan_rows(table, request)?.rows.into_batches())
+    }
+
+    /// Whether scans can record physical row positions and read those
+    /// positions back through `ScanRequest::row_indices` on this immutable chunk.
     fn supports_row_positions(&self) -> bool {
         false
     }

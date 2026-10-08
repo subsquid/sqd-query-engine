@@ -7,7 +7,6 @@ use crate::harness::json::{assert_same_response, block_numbers, parse_response};
 use crate::harness::synthetic::{catalog, catalog_with_heavy_headers, weighted_chunk, MB};
 use arrow::array::{ArrayRef, BinaryArray, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, SchemaRef};
-use arrow::record_batch::RecordBatch;
 use parquet::basic::Encoding;
 use parquet::file::metadata::ColumnChunkMetaData;
 use parquet::file::properties::{EnabledStatistics, WriterProperties};
@@ -15,7 +14,7 @@ use parquet::schema::types::ColumnPath;
 use sqd_query_engine::metadata::DatasetDescription;
 use sqd_query_engine::output::{execute_chunk_with, ExecOptions};
 use sqd_query_engine::query::{compile, parse_query};
-use sqd_query_engine::scan::{ChunkReader, ParquetChunkReader, ScanRequest};
+use sqd_query_engine::scan::{ChunkReader, ParquetChunkReader, ScanRequest, Scanned};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
@@ -51,13 +50,13 @@ impl ChunkReader for ObservedReader {
         self.inner.supports_row_positions()
     }
 
-    fn scan(&self, table: &str, request: &ScanRequest) -> anyhow::Result<Vec<RecordBatch>> {
-        let batches = self.inner.scan(table, request)?;
+    fn scan_rows(&self, table: &str, request: &ScanRequest) -> anyhow::Result<Scanned> {
+        let scanned = self.inner.scan_rows(table, request)?;
         self.reads.lock().unwrap().push(Read {
             table: table.into(),
             from: request.from_block,
             to: request.to_block,
-            rows: batches.iter().map(RecordBatch::num_rows).sum(),
+            rows: scanned.rows.num_rows(),
             physical_rows: request.row_indices.is_some(),
             filters: !request.predicates.is_empty()
                 || request.key_filter.is_some()
@@ -68,7 +67,7 @@ impl ChunkReader for ObservedReader {
                 .map(|c| c.to_string())
                 .collect(),
         });
-        Ok(batches)
+        Ok(scanned)
     }
     fn next_block_range_end(&self, table: &str, column: &str, from: u64) -> Option<u64> {
         self.span
