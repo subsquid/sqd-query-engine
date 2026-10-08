@@ -137,6 +137,11 @@ impl ChunkReader for ParquetChunkReader {
         scanner::next_block_range_end(&table, block_column, from_block)
     }
 
+    fn estimate_scan_bytes(&self, table: &str, request: &ScanRequest) -> Option<u64> {
+        let table = self.table(table).ok()??;
+        scanner::estimate_scan_bytes(&table, request).ok().flatten()
+    }
+
     fn has_table(&self, table: &str) -> bool {
         self.table_path(table).is_file()
     }

@@ -9,11 +9,13 @@ use arrow::array::builder::BooleanBufferBuilder;
 use arrow::array::*;
 use arrow::compute::kernels::boolean::and;
 use arrow::compute::kernels::cmp::{gt_eq, lt_eq};
-use arrow::datatypes::{Schema, SchemaRef};
+use arrow::datatypes::{DataType, Schema, SchemaRef};
 use arrow::error::ArrowError;
 use arrow::row::{RowConverter, SortField};
 use parquet::arrow::arrow_reader::{ArrowPredicateFn, ParquetRecordBatchReaderBuilder, RowFilter};
 use parquet::arrow::ProjectionMask;
+use parquet::basic::Encoding;
+use parquet::file::metadata::ColumnChunkMetaData;
 use rayon::prelude::*;
 use rustc_hash::FxHashSet as HashSet;
 use std::collections::HashMap;
@@ -1034,6 +1036,168 @@ pub(crate) fn next_block_range_end(
         ends.push(end);
     }
     ends.get(ends.len().min(4).checked_sub(1)?).copied()
+}
+
+/// An upper bound on what a scan's output arrays hold, from the footer alone:
+/// every row of every row group the scan would read, at what each column decodes
+/// to. A group counts whole however little of its block span the request
+/// covers, because its bounds say nothing about how its rows spread between
+/// them. `None` when the footer cannot bound a column. ADR-15 lists what the
+/// bound deliberately does not trust.
+pub(crate) fn estimate_scan_bytes(
+    table: &ParquetTable,
+    request: &ScanRequest,
+) -> Result<Option<u64>> {
+    let parquet = table.metadata().file_metadata().schema_descr();
+    let mut leaves = Vec::new();
+    for &name in &request.output_columns {
+        // A column the file lacks decodes to nulls, which hold no buffers.
+        let Ok(field) = table.schema().field_with_name(name) else {
+            continue;
+        };
+
+        let mut costs = Vec::new();
+        if leaf_costs(field.data_type(), LeafCost::default(), &mut costs).is_none() {
+            return Ok(None);
+        }
+        let indices: Vec<usize> = (0..parquet.num_columns())
+            .filter(|&leaf| parquet.column(leaf).path().parts()[0] == name)
+            .collect();
+        if indices.len() != costs.len() {
+            return Ok(None);
+        }
+
+        leaves.extend(indices.into_iter().zip(costs));
+    }
+
+    let mut total = 0u64;
+    for group in select_row_groups(table, request)? {
+        let metadata = table.row_group(group);
+        let rows = metadata.num_rows().max(0) as u64;
+        let batches = rows.div_ceil(request.batch_size.max(1) as u64);
+
+        for &(leaf, cost) in &leaves {
+            let Some(bytes) = decoded_bytes(metadata.column(leaf), cost, batches) else {
+                return Ok(None);
+            };
+            total = total.saturating_add(bytes);
+        }
+    }
+
+    Ok(Some(total))
+}
+
+/// What one level entry of a parquet leaf decodes to, beside the contents of
+/// its byte strings.
+#[derive(Clone, Copy, Default)]
+struct LeafCost {
+    /// Fixed-width values and the offsets of the leaf and every list above it.
+    bytes: u64,
+    /// A validity bit for every level, and a boolean's value.
+    bits: u64,
+    byte_strings: bool,
+}
+
+/// The cost of each parquet leaf under `data_type`, in schema order. `None` for
+/// a type whose decoded layout this does not model.
+fn leaf_costs(data_type: &DataType, above: LeafCost, out: &mut Vec<LeafCost>) -> Option<()> {
+    let level = LeafCost {
+        bits: above.bits + 1,
+        ..above
+    };
+    let with_offsets = |width: u64| LeafCost {
+        bytes: level.bytes + width,
+        ..level
+    };
+
+    match data_type {
+        DataType::List(item) | DataType::Map(item, _) => {
+            leaf_costs(item.data_type(), with_offsets(4), out)
+        }
+        DataType::LargeList(item) => leaf_costs(item.data_type(), with_offsets(8), out),
+        DataType::FixedSizeList(item, _) => leaf_costs(item.data_type(), level, out),
+        DataType::Struct(fields) => fields
+            .iter()
+            .try_for_each(|field| leaf_costs(field.data_type(), level, out)),
+        DataType::Utf8 | DataType::Binary => {
+            out.push(LeafCost {
+                byte_strings: true,
+                ..with_offsets(4)
+            });
+            Some(())
+        }
+        DataType::LargeUtf8 | DataType::LargeBinary => {
+            out.push(LeafCost {
+                byte_strings: true,
+                ..with_offsets(8)
+            });
+            Some(())
+        }
+        DataType::Boolean => {
+            out.push(LeafCost {
+                bits: level.bits + 1,
+                ..level
+            });
+            Some(())
+        }
+        DataType::Null => {
+            out.push(level);
+            Some(())
+        }
+        DataType::FixedSizeBinary(width) => {
+            out.push(with_offsets((*width).max(0) as u64));
+            Some(())
+        }
+        other => {
+            out.push(with_offsets(other.primitive_width()? as u64));
+            Some(())
+        }
+    }
+}
+
+/// What one column chunk decodes to: its level entries at `cost`, a bitmap per
+/// level rounded up to whole bytes in every batch, and its byte strings.
+/// Saturating, because a damaged footer can claim any count and a cost hint must
+/// not be what panics on it.
+fn decoded_bytes(column: &ColumnChunkMetaData, cost: LeafCost, batches: u64) -> Option<u64> {
+    let entries = column.num_values().max(0) as u64;
+
+    let fixed = entries.saturating_mul(cost.bytes);
+    let bitmaps = entries
+        .saturating_mul(cost.bits)
+        .div_ceil(8)
+        .saturating_add(cost.bits.saturating_mul(batches));
+    let contents = if cost.byte_strings {
+        byte_string_bytes(column)?
+    } else {
+        0
+    };
+
+    Some(fixed.saturating_add(bitmaps).saturating_add(contents))
+}
+
+/// The bytes a byte-string column chunk's values hold, where the footer bounds
+/// them: the writer's count, or the stored pages of an encoding that keeps every
+/// value whole. A dictionary keeps a repeated value once and prefix compression
+/// a shared prefix once, and no statistic bounds what they expand to: bounds are
+/// values rather than lengths, and a writer may truncate or omit them.
+fn byte_string_bytes(column: &ColumnChunkMetaData) -> Option<u64> {
+    if let Some(bytes) = column.unencoded_byte_array_data_bytes() {
+        return Some(bytes.max(0) as u64);
+    }
+
+    // A dictionary the footer does not point at still shows in the encodings.
+    let encodings = column.encodings();
+    let keeps_values_whole = encodings.iter().all(|encoding| {
+        matches!(
+            encoding,
+            Encoding::PLAIN | Encoding::DELTA_LENGTH_BYTE_ARRAY | Encoding::RLE
+        )
+    });
+    let whole =
+        !encodings.is_empty() && keeps_values_whole && column.dictionary_page_offset().is_none();
+
+    whole.then(|| column.uncompressed_size().max(0) as u64)
 }
 
 fn select_row_groups(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<usize>> {

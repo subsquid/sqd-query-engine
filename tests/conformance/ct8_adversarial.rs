@@ -202,6 +202,11 @@ impl ChunkReader for Recording {
         self.inner.next_block_range_end(table, block_column, from)
     }
 
+    fn estimate_scan_bytes(&self, table: &str, request: &ScanRequest) -> Option<u64> {
+        self.note(table);
+        self.inner.estimate_scan_bytes(table, request)
+    }
+
     fn has_table(&self, table: &str) -> bool {
         self.note(table);
         self.inner.has_table(table)
