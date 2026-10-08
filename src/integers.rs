@@ -263,12 +263,6 @@ macro_rules! owned_int_column {
                     $(Self::$variant(a) => a.value(row) as i128,)+
                 }
             }
-
-            pub(crate) fn len(&self) -> usize {
-                match self {
-                    $(Self::$variant(a) => a.len(),)+
-                }
-            }
         }
     };
 }

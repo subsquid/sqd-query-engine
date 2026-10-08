@@ -17,7 +17,7 @@ use crate::output::materialize::{
 };
 use crate::output::row_writer::{
     build_field_writers, build_full_sort_columns, build_grouped_writers, resolve_grouped_writers,
-    resolve_sort_columns, resolve_writers, IndexedBatches, TypedSortColumn,
+    resolve_sort_columns, resolve_writers, row_sort_keys, IndexedBatches, TypedSortColumn,
 };
 use crate::output::weight::{
     block_scan_columns, compute_block_weights, weight_range_end, weight_scan_columns,
@@ -1369,21 +1369,30 @@ fn execute_chunk_fmt(
             let bn_col = table_desc.block_number_column.as_str();
             let query_name = table_desc.request_name(&table_plan.table);
 
+            // A source whose rows were read under another adds nothing to any
+            // block, and as a second source it would only slow the merge.
+            let has_rows = |batches: &[RecordBatch]| batches.iter().any(|b| b.num_rows() > 0);
+
             let grouped = build_grouped_writers(&table_plan.output_columns, table_desc);
             let sort_columns = build_full_sort_columns(table_desc);
             let sort_col_resolved = resolve_sort_columns(&batches, &sort_columns);
-            all_indexes.push(IndexedBatches {
-                index: build_block_index(&batches, bn_col)?,
-                batches,
-                writers: build_field_writers(&table_plan.output_columns, Some(table_desc)),
-                grouped,
-                table_name: query_name.to_string(),
-                sort_columns,
-                sort_col_resolved,
-            });
+            let sort_rows = row_sort_keys(&batches, &sort_columns, &sort_col_resolved);
+            if has_rows(&batches) {
+                all_indexes.push(IndexedBatches {
+                    index: build_block_index(&batches, bn_col)?,
+                    batches,
+                    writers: build_field_writers(&table_plan.output_columns, Some(table_desc)),
+                    grouped,
+                    table_name: query_name.to_string(),
+                    sort_columns,
+                    sort_col_resolved,
+                    sort_rows,
+                });
+            }
 
             for (rel_idx, rel) in table_plan.relations.iter().enumerate() {
-                if let Some(rel_batches) = relation_batches.remove(&rel_idx) {
+                if let Some(rel_batches) = relation_batches.remove(&rel_idx).filter(|b| has_rows(b))
+                {
                     if let Some(rd) = metadata.table(&rel.target_table) {
                         let rel_bn = rd.block_number_column.as_str();
                         let rel_qn = rd.request_name(&rel.target_table);
@@ -1392,6 +1401,8 @@ fn execute_chunk_fmt(
                         let rel_sort_columns = build_full_sort_columns(rd);
                         let rel_sort_resolved =
                             resolve_sort_columns(&rel_batches, &rel_sort_columns);
+                        let rel_sort_rows =
+                            row_sort_keys(&rel_batches, &rel_sort_columns, &rel_sort_resolved);
                         all_indexes.push(IndexedBatches {
                             index: build_block_index(&rel_batches, rel_bn)?,
                             batches: rel_batches,
@@ -1400,6 +1411,7 @@ fn execute_chunk_fmt(
                             table_name: rel_qn.to_string(),
                             sort_columns: rel_sort_columns,
                             sort_col_resolved: rel_sort_resolved,
+                            sort_rows: rel_sort_rows,
                         });
                     }
                 }
