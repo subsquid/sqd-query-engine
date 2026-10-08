@@ -29,7 +29,7 @@ Compared against the reference implementation, as of 2026-10-07.
 | 44 | The weight model differs from the reference in four places | [INV-B5](07-invariants.md#inv-b5) | **S4** |
 | 31 | A block number above 2³¹ stored in `Int32` is read as negative by the range filter | [INV-D7](07-invariants.md#inv-d7) | **S4** |
 | 32 | The bloom's hash function is not pinned by the manifest, and the version it resolves to today ignores the seed above 240 bytes | [INV-P9](07-invariants.md#inv-p9) | **S4** |
-| 49 | A Solana query over every table with relations costs 1.6× the reference's time | — | **S4** |
+| 49 | A query over every Solana table, and deep call trees, take longer than in the reference | — | **S4** |
 | 50 | Several malformed chunk shapes are answered rather than refused | [INV-E3](07-invariants.md#inv-e3), [INV-E7](07-invariants.md#inv-e7) | **S4** |
 | 53 | A damaged chunk can panic the decoder, and the error kinds around it are coarse | [INV-E7](07-invariants.md#inv-e7) | **S4** |
 | 55 | A catalog key that changes the output is skipped by a release that predates it | [INV-X1](07-invariants.md#inv-x1) | **S4** |
@@ -291,48 +291,52 @@ The check that fits is a unit test pinning `bloom_bit`'s seven bits for a
 240-byte value once a version is chosen, which fails if the resolution moves
 across the bug in either direction.
 
-### 49. A Solana query over every table with relations costs 1.6× the reference's time
+### 49. A query over every Solana table, and deep call trees, take longer than in the reference
 
-Answers and memory are fine here; time is not, on two shapes. Median of three
-interleaved rounds on a 96-core machine, with byte-identical answers before and
-after:
+Answers are the same and memory is fine; time is close on one wide shape and
+not on deep synthetic ones. Medians of five interleaved rounds on one NUMA node
+(12 cores) of a 96-core machine, with byte-identical answers before and after:
 
 | Shape | Reference | Before | Now |
 |---|---|---|---|
-| Solana everything with relations | 55 ms | 334 ms | 88 ms |
-| Solana everything, paging the whole chunk | 0.92 s | 5.4 s | 1.38 s |
-| Solana everything, 16 concurrent | 46.8 q/s | 6.5 q/s | 33.4 q/s |
-| One transaction of 32 000 traces 64 deep, `parents: true` | 18 ms | 272 ms | 56 ms |
-| One transaction of 30 000 traces, `parents: true` | 23 ms | 3.7 s | 71 ms |
+| Solana everything with relations | 43.7 ms | 70.1 ms | 49.6 ms |
+| One transaction of 32 000 traces 64 deep, `parents: true` | 15.4 ms | 52.6 ms | 27.2 ms |
+| One transaction of 30 000 traces in combs, `parents: true` | 20.5 ms | 69.4 ms | 32.6 ms |
+| One transaction of 32 000 flat traces, `parents: true` | 4.0 ms | 11.6 ms | 4.8 ms |
 
-The rest of what the second review measured now takes no more time than the
-reference does. EVM everything with relations runs in 76 ms against 92, pages
-the whole chunk in 4.1 s against 5.5, and serves 27.7 queries a second at 16
-concurrent against 21.4. A hundred log items with transactions run in 57 ms
-against 58, and a hundred Solana discriminator items at four lengths beside a
-bloom, on 2.1 million instructions, in 27 ms against 39. Selective relation
-queries, such as USDC traces with subtraces and parents, run in about half the
-reference's time.
+On all 96 cores, paging the whole Solana chunk takes 1.09 s, against 0.89 s for
+the reference and 1.46 s before. Sixteen concurrent Solana queries are served at
+73.5 a second, against 46.2 and 33.0, and EVM ones at 47.1, against 21.1 and
+27.7. The price is memory under load: at sixteen concurrent Solana queries the
+heap peaks at 527 MB, against 395 MB for the reference and 500 MB before. A
+table that several scans read keeps its decoded rows while the page is chosen,
+up to 64 MiB a query.
 
-What is left in the Solana shape is the cost of reading in two passes. The
-first pass reads keys and sizes for every table, sixteen blocks at a time, to
-choose the page; the second reads the chosen rows by position. The query
-allocates 855 MB to the reference's 423.
+Everything else measured takes less time than the reference. EVM everything with
+relations runs in 52.5 ms against 85.3, USDC traces with subtraces and parents
+in 58.3 ms against 130, and a hundred Solana discriminator items beside a bloom,
+on 2.1 million instructions, in 29.3 ms against 74.9.
 
-The large transactions are no longer dangerous, only slow. A target finds its
-parents by a binary search over its group's sorted paths, and in a deep chain
-every comparison walks a long shared prefix. A set of every source prefix would
-answer each target in one lookup, at the price of an index entry per prefix,
-about a million for the deep case. No real chunk has been seen with such a
-transaction.
+What is left in the Solana shape is writing the page. Choosing it now costs what
+it costs the reference, 31.9 ms against 30.7, and the reference's figure
+includes sorting the items. Writing 16 MB of JSON on one thread takes 17.7 ms
+against 13.0. Most of that is copying base58 strings, which both engines do; the
+rest is sorting each block's items and dispatching per field.
 
-The page index will not close the gap, although the review named it as a cause.
-The chunks measured store each sort column of a row group in a single page:
-`program_id`, `d1`, `d2`, `d4`, `topic0`, `address`, `sighash`. So the index
-narrows nothing on them, and reading it cost up to 5.5 ms per table. On many
-items the reference gained from pruning per item. It scans each item on its
-own, so an item runs only on the row groups that its own statistics allow, and
-this engine now does the same.
+The deep transactions are slow for a different reason. The reference sorts a
+transaction's addresses once and walks them with a stack of ancestors. This
+engine indexes the source paths, by hash when they are deep, and looks each
+target up. It keeps every path element as eight bytes, so that keys stored at
+different widths compare equal, and it decodes the deep paths twice: once to
+choose the page and once to write it. Matching the reference means adopting its
+walk, for a shape no real chunk has been seen with.
+
+Two ideas did not pay. Reading the chosen rows through each column chunk's
+offset index saves whole pages, but at most 2% of the time on the shapes above,
+and the reader does not check the index's page locations against the column
+chunk, so a damaged index could panic it, which is gap 53's case.
+Pruning by the page index narrows nothing on the chunks measured, which keep
+each sort column of a row group in one page.
 
 *First test:* the throughput bench's relation shapes, with a ratio bound against
 the reference.
