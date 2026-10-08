@@ -11,3 +11,7 @@ pub mod text;
 
 #[cfg(test)]
 mod testing;
+
+#[cfg(test)]
+#[global_allocator]
+static ALLOCATOR: testing::Counting = testing::Counting;

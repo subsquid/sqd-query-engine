@@ -785,9 +785,9 @@ fn needs_escape(bytes: &[u8]) -> bool {
     let zero_byte = |word: u64| word.wrapping_sub(ONES) & !word & HIGH != 0;
     let below_space = |word: u64| word.wrapping_sub(ONES * 0x20) & !word & HIGH != 0;
 
-    let mut words = bytes.chunks_exact(8);
-    for word in &mut words {
-        let word = u64::from_ne_bytes(word.try_into().expect("eight bytes"));
+    let (words, rest) = bytes.as_chunks::<8>();
+    for word in words {
+        let word = u64::from_ne_bytes(*word);
         if below_space(word)
             || zero_byte(word ^ (ONES * b'"' as u64))
             || zero_byte(word ^ (ONES * b'\\' as u64))
@@ -796,10 +796,7 @@ fn needs_escape(bytes: &[u8]) -> bool {
         }
     }
 
-    words
-        .remainder()
-        .iter()
-        .any(|&b| b < 0x20 || b == b'"' || b == b'\\')
+    rest.iter().any(|&b| b < 0x20 || b == b'"' || b == b'\\')
 }
 
 fn encode_hex_bytes(bytes: &[u8], buf: &mut Vec<u8>) {

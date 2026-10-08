@@ -581,13 +581,19 @@ fn relation_inputs<'a>(
         }),
         |(items, left)| KeySet::build(sources.get(items), left, primary_bn),
     );
-    let address_indexes = BuiltOnce::build(
-        table_plan.relations.iter().filter_map(|relation| {
-            let spec = address_spec(relation)?;
-            Some((followed(relation), spec.group_keys, spec.source_address))
-        }),
-        |(items, group_keys, address)| AddressIndex::build(sources.get(items), group_keys, address),
-    );
+    let address_key = |relation: &'a RelationPlan| {
+        let spec = address_spec(relation)?;
+        Some((followed(relation), spec.group_keys, spec.source_address))
+    };
+    let address_indexes =
+        BuiltOnce::build(table_plan.relations.iter().filter_map(address_key), |key| {
+            let (items, group_keys, address) = key;
+            let parents = table_plan.relations.iter().any(|relation| {
+                relation.kind == RelationKind::Parents
+                    && address_key(relation).as_ref() == Some(key)
+            });
+            AddressIndex::build(sources.get(items), group_keys, address, parents)
+        });
 
     table_plan
         .relations
@@ -763,12 +769,16 @@ fn scan_tables(
         request.block_number_column = Some(table_desc.block_number_column.as_str());
         request.required_columns = req_col_refs;
         // A relation some items asked for follows only the rows they matched,
-        // which the scan reports as it evaluates them.
-        request.item_tags = table_plan
+        // which the scan reports as it evaluates them, once per list of items.
+        for items in table_plan
             .relations
             .iter()
             .filter_map(|relation| relation.source_items.as_deref())
-            .collect();
+        {
+            if !request.item_tags.contains(&items) {
+                request.item_tags.push(items);
+            }
+        }
 
         let t_primary = timer!();
         let scanned = chunk.scan_rows(&table_plan.table, &request)?;
