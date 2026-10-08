@@ -1496,6 +1496,27 @@ fn scan_row_groups(
             pred_col_indices.sort_unstable();
             pred_col_indices.dedup();
 
+            // One list per column admits every row an item could match, so
+            // the items themselves run only on the rows it admits.
+            let union = (request.predicates.len() > 1)
+                .then(|| crate::scan::predicate::listed_union(&request.predicates))
+                .flatten();
+            if let Some(union) = union {
+                let indices: Vec<usize> = union
+                    .required_columns()
+                    .into_iter()
+                    .filter_map(|column| table.schema().index_of(column).ok())
+                    .collect();
+                filter_stages.push(Box::new(ArrowPredicateFn::new(
+                    ProjectionMask::roots(parquet_schema, indices),
+                    move |batch: RecordBatch| {
+                        union
+                            .evaluate(&batch)
+                            .map_err(|e| ArrowError::ComputeError(e.to_string()))
+                    },
+                )));
+            }
+
             let pred_projection = ProjectionMask::roots(parquet_schema, pred_col_indices);
             let predicates: Vec<RowPredicate> =
                 request.predicates.iter().map(|&p| p.clone()).collect();
