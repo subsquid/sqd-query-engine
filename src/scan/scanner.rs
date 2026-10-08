@@ -1,6 +1,6 @@
 use crate::engine_err;
 use crate::error::ErrorKind;
-use crate::integers::{IntColumn, OwnedIntColumn};
+use crate::integers::IntColumn;
 use crate::scan::chunk::ParquetTable;
 use crate::scan::predicate::RowPredicate;
 use crate::text::StringColumn;
@@ -17,8 +17,7 @@ use parquet::arrow::ProjectionMask;
 use parquet::basic::Encoding;
 use parquet::file::metadata::ColumnChunkMetaData;
 use rayon::prelude::*;
-use rustc_hash::FxHashSet as HashSet;
-use std::collections::HashMap;
+use rustc_hash::{FxHashMap, FxHashSet as HashSet};
 use std::sync::Arc;
 
 /// A scan request: which columns to read, what predicates to apply.
@@ -304,12 +303,8 @@ pub enum HierarchicalMode {
 /// A filter for hierarchical joins (find_children / find_parents) that can be
 /// applied as a RowFilter stage, avoiding decode of data columns for non-matching rows.
 pub struct HierarchicalFilter {
-    /// Source addresses indexed by group key (serialized block_number + transaction_index).
-    source_addresses: Arc<HashMap<Vec<u8>, Vec<Vec<u32>>>>,
-    /// Set of first-key values (block_number as u64) for fast pre-filtering.
-    /// Most rows don't match any source block, so this cheap check skips ~85-99% of rows
-    /// before the expensive composite key build + HashMap lookup.
-    first_key_set: Arc<rustc_hash::FxHashSet<u64>>,
+    /// Every source address, by the group it belongs to.
+    sources: Arc<SourceAddresses>,
     /// Group key column names in the target table (e.g., ["block_number", "transaction_index"]).
     pub group_key_columns: Vec<String>,
     /// Address column name in target table (e.g., "instruction_address", "call_address").
@@ -336,63 +331,11 @@ impl HierarchicalFilter {
         mode: HierarchicalMode,
         inclusive: bool,
     ) -> Self {
-        let mut source_addresses: HashMap<Vec<u8>, Vec<Vec<u32>>> = HashMap::new();
-
-        for batch in primary_batches {
-            if batch.num_rows() == 0 {
-                continue;
-            }
-            let typed_keys: Vec<Option<TypedKeyColumn>> = group_key_columns
-                .iter()
-                .map(|name| {
-                    batch
-                        .column_by_name(name)
-                        .and_then(|c| TypedKeyColumn::resolve(c.as_ref()))
-                })
-                .collect();
-
-            let addr_col = batch.column_by_name(source_address_column);
-            let addr_list =
-                addr_col.and_then(|c| c.as_any().downcast_ref::<GenericListArray<i32>>());
-
-            if addr_list.is_none() {
-                continue;
-            }
-            let addr_list = addr_list.unwrap();
-
-            let mut key_buf = Vec::with_capacity(group_key_columns.len() * 8);
-            for row in 0..batch.num_rows() {
-                if addr_list.is_null(row) {
-                    continue;
-                }
-
-                key_buf.clear();
-                let complete = typed_keys
-                    .iter()
-                    .all(|tc| matches!(tc, Some(tc) if tc.append_to(&mut key_buf, row)));
-                if !complete {
-                    continue;
-                }
-                let addr = extract_address_values(addr_list, row);
-                source_addresses
-                    .entry(key_buf.clone())
-                    .or_default()
-                    .push(addr);
-            }
-        }
-
-        // Extract unique first-key values (block_number) for fast pre-filtering
-        let mut first_key_set = rustc_hash::FxHashSet::default();
-        for key in source_addresses.keys() {
-            if key.len() >= 8 {
-                let v = u64::from_le_bytes(key[..8].try_into().unwrap());
-                first_key_set.insert(v);
-            }
-        }
+        let sources =
+            SourceAddresses::build(primary_batches, group_key_columns, source_address_column);
 
         HierarchicalFilter {
-            source_addresses: Arc::new(source_addresses),
-            first_key_set: Arc::new(first_key_set),
+            sources: Arc::new(sources),
             group_key_columns: group_key_columns.iter().map(|s| s.to_string()).collect(),
             address_column: target_address_column.to_string(),
             mode,
@@ -401,33 +344,242 @@ impl HierarchicalFilter {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.source_addresses.is_empty()
+        self.sources.paths.is_empty()
     }
 }
 
-/// A hierarchical address as a path of item indices, at whatever width the
-/// writer stored the elements.
-fn extract_address_values(array: &GenericListArray<i32>, row: usize) -> Vec<u32> {
-    if array.is_null(row) {
-        return Vec::new();
+/// Group ids by group key. Two integer columns, the key of every bundled
+/// relation, pack into one `u128`; any other key is the bytes
+/// [`TypedKeyColumn::append_to`] writes.
+enum GroupIds {
+    Pair(FxHashMap<u128, u32>),
+    Bytes(FxHashMap<Vec<u8>, u32>),
+}
+
+impl GroupIds {
+    fn len(&self) -> usize {
+        match self {
+            Self::Pair(ids) => ids.len(),
+            Self::Bytes(ids) => ids.len(),
+        }
     }
 
-    let values = array.value(row);
-    let Some(elements) = IntColumn::resolve(values.as_ref()) else {
-        return Vec::new();
-    };
+    /// The id of the group `row` belongs to, assigned on first sight.
+    fn insert(
+        &mut self,
+        keys: &[Option<TypedKeyColumn>],
+        row: usize,
+        buf: &mut Vec<u8>,
+    ) -> Option<u32> {
+        let next = self.len() as u32;
+        match self {
+            Self::Pair(ids) => Some(*ids.entry(pair_key(keys, row)?).or_insert(next)),
+            Self::Bytes(ids) => {
+                let key = bytes_key(keys, row, buf)?;
+                if let Some(&id) = ids.get(key) {
+                    return Some(id);
+                }
+                ids.insert(key.to_vec(), next);
+                Some(next)
+            }
+        }
+    }
 
-    (0..elements.len())
-        .map(|i| elements.block_number(i) as u32)
+    /// The id of the group `row` belongs to, if any source does.
+    fn get(&self, keys: &[Option<TypedKeyColumn>], row: usize, buf: &mut Vec<u8>) -> Option<u32> {
+        match self {
+            Self::Pair(ids) => ids.get(&pair_key(keys, row)?).copied(),
+            Self::Bytes(ids) => ids.get(bytes_key(keys, row, buf)?).copied(),
+        }
+    }
+}
+
+/// A two-integer group key, or `None` when the row has none.
+#[inline]
+fn pair_key(keys: &[Option<TypedKeyColumn>], row: usize) -> Option<u128> {
+    let [Some(TypedKeyColumn::Int(first)), Some(TypedKeyColumn::Int(second))] = keys else {
+        return None;
+    };
+    let present = !first.is_null(row) && !second.is_null(row);
+
+    present.then(|| pack16(first.join_key(row), second.join_key(row)))
+}
+
+/// A group key as bytes, or `None` when a component is missing or null.
+#[inline]
+fn bytes_key<'b>(
+    keys: &[Option<TypedKeyColumn>],
+    row: usize,
+    buf: &'b mut Vec<u8>,
+) -> Option<&'b [u8]> {
+    buf.clear();
+    let complete = keys
+        .iter()
+        .all(|key| matches!(key, Some(key) if key.append_to(buf, row)));
+
+    complete.then_some(buf.as_slice())
+}
+
+/// The relation's source addresses, sorted within each group, so a target row
+/// finds its relatives by binary search instead of by comparing itself with
+/// every source of its transaction.
+///
+/// Address elements are kept as join keys, so a path compares by value
+/// whatever width each side stored it at.
+struct SourceAddresses {
+    groups: GroupIds,
+    /// Per group id, the range of `paths` holding the group's addresses.
+    ranges: Vec<std::ops::Range<u32>>,
+    /// `(start, len)` into `elements`, sorted by group and then by path, with
+    /// no path twice in one group.
+    paths: Vec<(u32, u32)>,
+    elements: Vec<u64>,
+}
+
+impl SourceAddresses {
+    fn build(batches: &[RecordBatch], group_key_columns: &[&str], address_column: &str) -> Self {
+        let pair = group_key_columns.len() == 2
+            && batches.iter().filter(|b| b.num_rows() > 0).all(|batch| {
+                group_key_columns.iter().all(|name| {
+                    batch
+                        .column_by_name(name)
+                        .is_some_and(|c| IntColumn::resolve(c.as_ref()).is_some())
+                })
+            });
+        let mut groups = if pair {
+            GroupIds::Pair(Default::default())
+        } else {
+            GroupIds::Bytes(Default::default())
+        };
+
+        let mut entries: Vec<(u32, u32, u32)> = Vec::new();
+        let mut elements: Vec<u64> = Vec::new();
+        let mut buf = Vec::new();
+        for batch in batches {
+            let keys = typed_key_columns(batch, group_key_columns);
+            let Some((addresses, values)) = address_list(batch, address_column) else {
+                continue;
+            };
+            let offsets = addresses.value_offsets();
+
+            for row in 0..batch.num_rows() {
+                // A null address is not the empty one, which is the root call.
+                if addresses.is_null(row) {
+                    continue;
+                }
+                let Some(group) = groups.insert(&keys, row, &mut buf) else {
+                    continue;
+                };
+
+                let start = elements.len() as u32;
+                let path = offsets[row] as usize..offsets[row + 1] as usize;
+                elements.extend(path.map(|i| values.join_key(i)));
+                entries.push((group, start, elements.len() as u32 - start));
+            }
+        }
+
+        let path =
+            |&(_, start, len): &(u32, u32, u32)| &elements[start as usize..(start + len) as usize];
+        entries.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| path(a).cmp(path(b))));
+        entries.dedup_by(|a, b| a.0 == b.0 && path(a) == path(b));
+
+        let mut ranges = vec![0..0; groups.len()];
+        for (index, &(group, ..)) in entries.iter().enumerate() {
+            let range = &mut ranges[group as usize];
+            if range.start == range.end {
+                range.start = index as u32;
+            }
+            range.end = index as u32 + 1;
+        }
+        let paths = entries
+            .iter()
+            .map(|&(_, start, len)| (start, len))
+            .collect();
+
+        SourceAddresses {
+            groups,
+            ranges,
+            paths,
+            elements,
+        }
+    }
+
+    fn path(&self, (start, len): (u32, u32)) -> &[u64] {
+        &self.elements[start as usize..(start + len) as usize]
+    }
+
+    /// Whether `target` is related to a source address of `group`.
+    fn relates(&self, group: u32, target: &[u64], mode: HierarchicalMode, inclusive: bool) -> bool {
+        let range = &self.ranges[group as usize];
+        let paths = &self.paths[range.start as usize..range.end as usize];
+
+        match mode {
+            // A parent is one of the target's prefixes, one lookup per depth.
+            HierarchicalMode::Children => {
+                let depths = if inclusive {
+                    target.len() + 1
+                } else {
+                    target.len()
+                };
+                (0..depths).any(|depth| {
+                    paths
+                        .binary_search_by(|&path| self.path(path).cmp(&target[..depth]))
+                        .is_ok()
+                })
+            }
+            // The addresses that extend the target sort right after it.
+            HierarchicalMode::Parents => {
+                let first = paths.partition_point(|&path| self.path(path) < target);
+                let mut extensions = paths[first..].iter().map(|&path| self.path(path));
+
+                match extensions.next() {
+                    Some(path) if path == target => {
+                        inclusive || extensions.next().is_some_and(|p| p.starts_with(target))
+                    }
+                    Some(path) => path.starts_with(target),
+                    None => false,
+                }
+            }
+        }
+    }
+}
+
+fn typed_key_columns<'a>(
+    batch: &'a RecordBatch,
+    names: &[impl AsRef<str>],
+) -> Vec<Option<TypedKeyColumn<'a>>> {
+    names
+        .iter()
+        .map(|name| {
+            batch
+                .column_by_name(name.as_ref())
+                .and_then(|c| TypedKeyColumn::resolve(c.as_ref()))
+        })
         .collect()
+}
+
+/// A hierarchical address column and its elements. `None` where the column is
+/// absent or its elements are not integers: an address is a path of item
+/// indices, so anything else is a chunk that disagrees with its catalog, and
+/// nothing matches.
+fn address_list<'a>(
+    batch: &'a RecordBatch,
+    column: &str,
+) -> Option<(&'a GenericListArray<i32>, IntColumn<'a>)> {
+    let addresses = batch
+        .column_by_name(column)?
+        .as_any()
+        .downcast_ref::<GenericListArray<i32>>()?;
+    let values = IntColumn::resolve(addresses.values().as_ref())?;
+
+    Some((addresses, values))
 }
 
 /// Build a boolean mask for hierarchical filtering.
 /// Also performs key-in-set check inline, so this can replace a separate KeyFilter stage.
 fn hierarchical_mask(
     batch: &RecordBatch,
-    source_addresses: &HashMap<Vec<u8>, Vec<Vec<u32>>>,
-    first_key_set: &rustc_hash::FxHashSet<u64>,
+    sources: &SourceAddresses,
     group_key_columns: &[String],
     address_column: &str,
     mode: HierarchicalMode,
@@ -436,138 +588,29 @@ fn hierarchical_mask(
     let len = batch.num_rows();
     let mut builder = BooleanBufferBuilder::new(len);
 
-    let typed_keys: Vec<Option<TypedKeyColumn>> = group_key_columns
-        .iter()
-        .map(|name| {
-            batch
-                .column_by_name(name)
-                .and_then(|c| TypedKeyColumn::resolve(c.as_ref()))
-        })
-        .collect();
-
-    let addr_col = batch.column_by_name(address_column);
-    let addr_list = addr_col.and_then(|c| c.as_any().downcast_ref::<GenericListArray<i32>>());
-
-    if addr_list.is_none() {
+    let Some((addresses, values)) = address_list(batch, address_column) else {
         builder.append_n(len, false);
         return BooleanArray::new(builder.finish(), None);
-    }
-    let addr_list = addr_list.unwrap();
+    };
+    let keys = typed_key_columns(batch, group_key_columns);
+    let offsets = addresses.value_offsets();
 
-    // Resolve the element type once for the whole column
-    let values = addr_list.values();
-    let elem_type = resolve_list_element_type(values.as_ref());
-
-    // Fast path: 2-column key (block_number + transaction_index) with first-key pre-filter
-    if typed_keys.len() == 2 {
-        if let (Some(ref c0), Some(ref c1)) = (&typed_keys[0], &typed_keys[1]) {
-            let mut key_buf = [0u8; 16];
-            for row in 0..len {
-                if addr_list.is_null(row) || c0.is_null(row) || c1.is_null(row) {
-                    builder.append(false);
-                    continue;
-                }
-                // Pre-filter: check first key (block_number) before building full composite key
-                c0.write_to_buf(&mut key_buf[..8], row);
-                let first_key = u64::from_le_bytes(key_buf[..8].try_into().unwrap());
-                if !first_key_set.contains(&first_key) {
-                    builder.append(false);
-                    continue;
-                }
-                c1.write_to_buf(&mut key_buf[8..16], row);
-                let matches = source_addresses
-                    .get(&key_buf[..16])
-                    .map(|addrs| match_address(addr_list, row, &elem_type, addrs, mode, inclusive))
-                    .unwrap_or(false);
-                builder.append(matches);
-            }
-            return BooleanArray::new(builder.finish(), None);
-        }
-    }
-
-    // General path
-    let mut key_buf = Vec::with_capacity(group_key_columns.len() * 8);
+    let mut buf = Vec::new();
+    let mut target = Vec::new();
     for row in 0..len {
-        if addr_list.is_null(row) {
-            builder.append(false);
-            continue;
-        }
-
-        key_buf.clear();
-        let complete = typed_keys
-            .iter()
-            .all(|tc| matches!(tc, Some(tc) if tc.append_to(&mut key_buf, row)));
-        if !complete {
-            builder.append(false);
-            continue;
-        }
-
-        let matches = source_addresses
-            .get(key_buf.as_slice())
-            .map(|addrs| match_address(addr_list, row, &elem_type, addrs, mode, inclusive))
-            .unwrap_or(false);
-
-        builder.append(matches);
+        let group = (!addresses.is_null(row))
+            .then(|| sources.groups.get(&keys, row, &mut buf))
+            .flatten();
+        let related = group.is_some_and(|group| {
+            target.clear();
+            let path = offsets[row] as usize..offsets[row + 1] as usize;
+            target.extend(path.map(|i| values.join_key(i)));
+            sources.relates(group, &target, mode, inclusive)
+        });
+        builder.append(related);
     }
 
     BooleanArray::new(builder.finish(), None)
-}
-
-#[inline]
-fn match_address(
-    addr_list: &GenericListArray<i32>,
-    row: usize,
-    elem_type: &ListElementType,
-    addrs: &[Vec<u32>],
-    mode: HierarchicalMode,
-    inclusive: bool,
-) -> bool {
-    let offsets = addr_list.offsets();
-    let start = offsets[row] as usize;
-    let end = offsets[row + 1] as usize;
-    let target_len = end - start;
-    match mode {
-        HierarchicalMode::Children => addrs.iter().any(|parent| {
-            let len_ok = if inclusive {
-                target_len >= parent.len()
-            } else {
-                target_len > parent.len()
-            };
-            len_ok && compare_address_prefix(elem_type, start, parent)
-        }),
-        HierarchicalMode::Parents => addrs.iter().any(|child| {
-            let len_ok = if inclusive {
-                target_len <= child.len()
-            } else {
-                target_len < child.len()
-            };
-            len_ok && compare_address_prefix(elem_type, start, &child[..target_len])
-        }),
-    }
-}
-
-/// Resolved list element array for zero-allocation address comparison.
-///
-/// `None` where the elements are not integers: an address is a path of item
-/// indices, so anything else is a chunk that disagrees with its catalog, and
-/// nothing matches.
-type ListElementType = Option<OwnedIntColumn>;
-
-fn resolve_list_element_type(values: &dyn Array) -> ListElementType {
-    OwnedIntColumn::resolve(values)
-}
-
-/// Compare address elements starting at `start` against `expected` without allocating.
-#[inline]
-fn compare_address_prefix(elem_type: &ListElementType, start: usize, expected: &[u32]) -> bool {
-    let Some(elements) = elem_type else {
-        return false;
-    };
-
-    expected
-        .iter()
-        .enumerate()
-        .all(|(i, &v)| elements.value(start + i) == v as i128)
 }
 
 /// Extract all block number values from a column into a HashSet.
@@ -667,13 +710,6 @@ impl<'a> TypedKeyColumn<'a> {
     #[inline(always)]
     fn is_integer(&self) -> bool {
         matches!(self, Self::Int(_))
-    }
-
-    /// Write normalized u64 value directly into a fixed-size buffer slice.
-    /// Only for integer types (used in optimized paths).
-    #[inline(always)]
-    fn write_to_buf(&self, buf: &mut [u8], row: usize) {
-        buf[..8].copy_from_slice(&self.get_u64(row).to_le_bytes());
     }
 }
 
@@ -1545,8 +1581,7 @@ fn scan_hierarchical_two_pass(
     filter_col_indices.dedup();
 
     let filter_proj = ProjectionMask::roots(parquet_schema, filter_col_indices);
-    let source_addresses = hf.source_addresses.clone();
-    let first_key_set = hf.first_key_set.clone();
+    let sources = hf.sources.clone();
     let group_key_columns: Vec<String> = hf.group_key_columns.clone();
     let address_column: String = hf.address_column.clone();
     let mode = hf.mode;
@@ -1557,8 +1592,7 @@ fn scan_hierarchical_two_pass(
         move |batch: RecordBatch| {
             Ok(hierarchical_mask(
                 &batch,
-                &source_addresses,
-                &first_key_set,
+                &sources,
                 &group_key_columns,
                 &address_column,
                 mode,
@@ -1878,6 +1912,140 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The address index answers what comparing a target with every source of
+    /// its group answers, in both modes, inclusive or not, over random groups,
+    /// paths of any depth including the root, repeated sources, null keys and
+    /// addresses, element widths that differ between the two sides, and keys
+    /// that pack into a pair and keys that do not.
+    #[test]
+    fn the_address_index_relates_what_a_full_comparison_relates() {
+        use arrow::datatypes::{UInt16Type, UInt32Type};
+
+        type Row = (Option<u32>, Option<u32>, Option<Vec<u32>>);
+
+        let mut seed = 0x5EED_0049u64;
+        let mut next = move |bound: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % bound
+        };
+
+        let rows = |count: usize, next: &mut dyn FnMut(u64) -> u64| -> Vec<Row> {
+            (0..count)
+                .map(|_| {
+                    let key =
+                        |next: &mut dyn FnMut(u64) -> u64| (next(10) > 0).then(|| next(3) as u32);
+                    let block = key(next);
+                    let tx = key(next);
+                    let address = (next(10) > 0).then(|| {
+                        let depth = next(4) as usize;
+                        (0..depth).map(|_| next(3) as u32).collect()
+                    });
+                    (block, tx, address)
+                })
+                .collect()
+        };
+
+        let batch = |rows: &[Row], wide: bool, text_key: bool| -> RecordBatch {
+            let blocks: ArrayRef = Arc::new(Int32Array::from_iter(
+                rows.iter().map(|r| r.0.map(|v| v as i32)),
+            ));
+            let txs: ArrayRef = if text_key {
+                Arc::new(StringArray::from_iter(
+                    rows.iter().map(|r| r.1.map(|v| v.to_string())),
+                ))
+            } else {
+                Arc::new(UInt32Array::from_iter(rows.iter().map(|r| r.1)))
+            };
+            let paths = rows.iter().map(|r| {
+                r.2.as_ref()
+                    .map(|path| path.iter().map(|&v| Some(v)).collect::<Vec<_>>())
+            });
+            let addresses: ArrayRef = if wide {
+                Arc::new(ListArray::from_iter_primitive::<UInt32Type, _, _>(paths))
+            } else {
+                let paths = paths.map(|p| p.map(|p| p.into_iter().map(|v| v.map(|v| v as u16))));
+                Arc::new(ListArray::from_iter_primitive::<UInt16Type, _, _>(paths))
+            };
+            RecordBatch::try_from_iter(vec![("block", blocks), ("tx", txs), ("address", addresses)])
+                .unwrap()
+        };
+
+        let related = |target: &[u32], source: &[u32], mode, inclusive: bool| match mode {
+            HierarchicalMode::Children => {
+                let deep_enough = if inclusive {
+                    target.len() >= source.len()
+                } else {
+                    target.len() > source.len()
+                };
+                deep_enough && target.starts_with(source)
+            }
+            HierarchicalMode::Parents => {
+                let deep_enough = if inclusive {
+                    source.len() >= target.len()
+                } else {
+                    source.len() > target.len()
+                };
+                deep_enough && source.starts_with(target)
+            }
+        };
+
+        let mut seen_both = [false; 2];
+        for case in 0..400 {
+            let sources = rows(1 + next(30) as usize, &mut next);
+            let targets = rows(1 + next(30) as usize, &mut next);
+            let mode = if case % 2 == 0 {
+                HierarchicalMode::Children
+            } else {
+                HierarchicalMode::Parents
+            };
+            let inclusive = case % 4 < 2;
+            let text_key = case % 8 >= 6;
+
+            let source_batch = batch(&sources, true, text_key);
+            let target_batch = batch(&targets, case % 3 == 0, text_key);
+            let filter = HierarchicalFilter::build(
+                &[source_batch.slice(0, sources.len())],
+                &["block", "tx"],
+                "address",
+                "address",
+                mode,
+                inclusive,
+            );
+            let mask = hierarchical_mask(
+                &target_batch,
+                &filter.sources,
+                &filter.group_key_columns,
+                "address",
+                mode,
+                inclusive,
+            );
+
+            for (row, (block, tx, address)) in targets.iter().enumerate() {
+                let expected = match (block, tx, address) {
+                    (Some(block), Some(tx), Some(target)) => sources.iter().any(|source| {
+                        source.0 == Some(*block)
+                            && source.1 == Some(*tx)
+                            && source
+                                .2
+                                .as_ref()
+                                .is_some_and(|s| related(target, s, mode, inclusive))
+                    }),
+                    _ => false,
+                };
+                seen_both[usize::from(expected)] = true;
+                assert_eq!(
+                    mask.value(row),
+                    expected,
+                    "case {case}, target {row} {:?} against {sources:?}",
+                    targets[row]
+                );
+            }
+        }
+        assert_eq!(seen_both, [true, true], "every answer was the same");
     }
 
     fn solana_chunk_path() -> PathBuf {
