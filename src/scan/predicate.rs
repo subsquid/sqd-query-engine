@@ -74,6 +74,7 @@ fn constant(array: &dyn Array, value: bool) -> BooleanArray {
 /// unsigned; reading an `Int8` of `-1` needs them taken as the value they are.
 /// The stored type decides, once, here, so that no predicate has to guess and
 /// none of them can guess differently.
+#[derive(Clone)]
 pub enum StatRange {
     Ints {
         stored: DataType,
@@ -136,9 +137,19 @@ fn stat_text(stat: &dyn Array) -> Option<String> {
 /// differently — a `uint8` 255 matched the `-1` of an `Int8` column and pruned
 /// the row group holding it.
 fn ints_outside(ints: &IntValues, stored: &DataType, min: i128, max: i128) -> Option<bool> {
+    keys_outside(ints.stored_keys(stored)?, stored, min, max)
+}
+
+/// The same, for keys already narrowed to the stored width.
+fn keys_outside(
+    mut keys: impl Iterator<Item = u64>,
+    stored: &DataType,
+    min: i128,
+    max: i128,
+) -> Option<bool> {
     let (_, signed) = width_of(stored)?;
 
-    Some(ints.stored_keys(stored)?.all(|key| {
+    Some(keys.all(|key| {
         let value = if signed {
             key as i64 as i128
         } else {
@@ -715,10 +726,14 @@ impl ArrayPredicate for InListPredicate {
                 })
             }
             StatRange::Ints { stored, min, max } => {
-                let Some(ints) = self.ints.as_ref() else {
+                let Some(keys) = self
+                    .ints
+                    .as_ref()
+                    .and_then(|ints| self.keys_at(ints, stored))
+                else {
                     return false;
                 };
-                ints_outside(ints, stored, *min, *max).unwrap_or(false)
+                keys_outside(keys.iter().copied(), stored, *min, *max).unwrap_or(false)
             }
         }
     }

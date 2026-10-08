@@ -1289,7 +1289,7 @@ fn select_row_groups(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<
 
         // Check predicate-based row group skipping
         if !request.predicates.is_empty() {
-            let stats = row_group_stats(table, rg_idx);
+            let stats = row_group_stats(table, rg_idx, &request.predicates);
             if crate::scan::predicate::can_skip_row_group_or(&request.predicates, &stats) {
                 continue;
             }
@@ -1312,23 +1312,39 @@ fn select_row_groups(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<
     Ok(row_groups)
 }
 
-/// One row group's statistics for a column, read at the type the column is
-/// stored at.
-fn row_group_stats(
+/// One row group's statistics for the columns `predicates` filter on, each read
+/// once, at the type the column is stored at. A hundred items name the same few
+/// columns, and reading a statistic allocates.
+fn row_group_stats<'p>(
     table: &ParquetTable,
     group: usize,
-) -> impl Fn(&str) -> Option<crate::scan::predicate::StatRange> + '_ {
-    move |column| {
-        // Parquet stats come at the physical type; the stored type says how to read them.
-        let stored = table.schema().field_with_name(column).ok()?.data_type();
-        let stats = table.column_stats(group, column)?;
-        let (min, max) = (stats.min?, stats.max?);
-        crate::scan::predicate::StatRange::new(
-            stored,
-            stat_value_to_array(&min).as_ref(),
-            stat_value_to_array(&max).as_ref(),
-        )
+    predicates: &[&'p RowPredicate],
+) -> impl Fn(&str) -> Option<crate::scan::predicate::StatRange> + 'p {
+    let mut columns: Vec<(&str, Option<crate::scan::predicate::StatRange>)> = Vec::new();
+    for predicate in predicates.iter().flat_map(|p| p.column_predicates()) {
+        let column = predicate.column.as_str();
+        if columns.iter().all(|(read, _)| *read != column) {
+            columns.push((column, column_stats(table, group, column)));
+        }
     }
+
+    move |column| columns.iter().find(|(read, _)| *read == column)?.1.clone()
+}
+
+fn column_stats(
+    table: &ParquetTable,
+    group: usize,
+    column: &str,
+) -> Option<crate::scan::predicate::StatRange> {
+    // Parquet stats come at the physical type; the stored type says how to read them.
+    let stored = table.schema().field_with_name(column).ok()?.data_type();
+    let stats = table.column_stats(group, column)?;
+    let (min, max) = (stats.min?, stats.max?);
+    crate::scan::predicate::StatRange::new(
+        stored,
+        stat_value_to_array(&min).as_ref(),
+        stat_value_to_array(&max).as_ref(),
+    )
 }
 
 /// Scan selected row groups using a single reader: read columns, apply predicates, project output.
@@ -1368,12 +1384,15 @@ fn scan_row_groups(
     let has_predicates = !request.predicates.is_empty();
 
     // An item whose statistics rule this row group out does not run on it.
+    let stats: Vec<_> = row_groups
+        .iter()
+        .map(|&group| row_group_stats(table, group, &request.predicates))
+        .collect();
     let active: Vec<usize> = (0..request.predicates.len())
         .filter(|&item| {
-            row_groups.iter().any(|&group| {
-                let stats = row_group_stats(table, group);
-                !request.predicates[item].can_skip_row_group(&stats)
-            })
+            stats
+                .iter()
+                .any(|stats| !request.predicates[item].can_skip_row_group(stats))
         })
         .collect();
     if has_predicates && active.is_empty() {
