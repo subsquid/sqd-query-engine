@@ -279,6 +279,7 @@ impl KeySet {
                 primary_batches,
                 &left_keys[..2],
                 left_keys[2],
+                false,
             ))
         } else if use_fixed16 {
             let mut pairs = Vec::new();
@@ -395,11 +396,14 @@ impl HierarchicalFilter {
         mode: HierarchicalMode,
         inclusive: bool,
     ) -> Self {
-        AddressIndex::build(primary_batches, group_key_columns, source_address_column).filter(
-            target_address_column,
-            mode,
-            inclusive,
+        let parents = matches!(mode, HierarchicalMode::Parents);
+        AddressIndex::build(
+            primary_batches,
+            group_key_columns,
+            source_address_column,
+            parents,
         )
+        .filter(target_address_column, mode, inclusive)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -415,13 +419,19 @@ pub struct AddressIndex {
 }
 
 impl AddressIndex {
+    /// With `parents`, it also indexes what finding a parent takes.
     pub fn build(
         primary_batches: &[RecordBatch],
         group_key_columns: &[&str],
         source_address_column: &str,
+        parents: bool,
     ) -> Self {
-        let sources =
-            SourceAddresses::build(primary_batches, group_key_columns, source_address_column);
+        let sources = SourceAddresses::build(
+            primary_batches,
+            group_key_columns,
+            source_address_column,
+            parents,
+        );
 
         AddressIndex {
             sources: Arc::new(sources),
@@ -537,8 +547,11 @@ struct SourceAddresses {
     /// bytes orders them as comparing their elements does.
     elements: Vec<u8>,
     /// For deep paths, where a binary search compares long shared prefixes:
-    /// every source path, and every strict prefix of one, by hash.
-    hashed: Option<(PathIndex, PathIndex)>,
+    /// every source path by hash.
+    exact: Option<PathIndex>,
+    /// Every strict prefix of a deep source path by hash, which only a parent
+    /// lookup needs: built beside `exact` for one, else the first time one asks.
+    prefixes: std::sync::OnceLock<PathIndex>,
 }
 
 /// Paths a lookup finds by a hash of their group and elements, then confirms
@@ -586,13 +599,18 @@ fn path_hash_start(group: u32) -> u64 {
 }
 
 #[inline]
-fn path_hash_step(hash: u64, element: &[u8]) -> u64 {
-    let element = u64::from_be_bytes(element.try_into().expect("eight bytes"));
+fn path_hash_step(hash: u64, element: &[u8; 8]) -> u64 {
+    let element = u64::from_be_bytes(*element);
     (hash.rotate_left(5) ^ element).wrapping_mul(0x517c_c1b7_2722_0a95)
 }
 
 impl SourceAddresses {
-    fn build(batches: &[RecordBatch], group_key_columns: &[&str], address_column: &str) -> Self {
+    fn build(
+        batches: &[RecordBatch],
+        group_key_columns: &[&str],
+        address_column: &str,
+        parents: bool,
+    ) -> Self {
         let pair = group_key_columns.len() == 2
             && batches.iter().filter(|b| b.num_rows() > 0).all(|batch| {
                 group_key_columns.iter().all(|name| {
@@ -680,53 +698,53 @@ impl SourceAddresses {
 
         let deep =
             paths.iter().map(|&(_, len)| len as usize).sum::<usize>() > HASHED_DEPTH * paths.len();
-        let hashed = deep.then(|| Self::index(&ranges, &paths, &elements));
-
-        SourceAddresses {
+        let mut addresses = SourceAddresses {
             groups,
             ranges,
             paths,
             elements,
-            hashed,
+            exact: None,
+            prefixes: std::sync::OnceLock::new(),
+        };
+        if deep {
+            let (exact, prefixes) = addresses.index(parents);
+            addresses.exact = Some(exact);
+            if let Some(prefixes) = prefixes {
+                let _ = addresses.prefixes.set(prefixes);
+            }
         }
+        addresses
     }
 
-    /// Every source path, and every distinct strict prefix of one. A prefix
-    /// shared by several paths is the prefix of each in a run of the sorted
-    /// paths, so it is new only where it is longer than what the path shares
-    /// with the one before, or is that whole path.
-    fn index(
-        ranges: &[std::ops::Range<u32>],
-        paths: &[(u32, u32)],
-        elements: &[u8],
-    ) -> (PathIndex, PathIndex) {
-        let bytes =
-            |(start, len): (u32, u32)| &elements[start as usize * 8..(start + len) as usize * 8];
-        let mut exact = Vec::with_capacity(paths.len());
-        let mut prefixes = Vec::new();
-
-        for (group, range) in ranges.iter().enumerate() {
+    /// Every source path by its hash, and with `prefixes` every distinct
+    /// strict prefix of one. A prefix shared by several paths is the prefix of
+    /// each in a run of the sorted paths, so it is new only where it is longer
+    /// than what the path shares with the one before, or is that whole path.
+    fn index(&self, prefixes: bool) -> (PathIndex, Option<PathIndex>) {
+        let mut exact = Vec::with_capacity(self.paths.len());
+        let mut strict = Vec::new();
+        for (group, range) in self.ranges.iter().enumerate() {
             let group = group as u32;
-            let mut previous: Option<&[u8]> = None;
-            for &(start, len) in &paths[range.start as usize..range.end as usize] {
-                let path = bytes((start, len));
-                let new_from = previous.map_or(0, |before| {
-                    let shared = before
-                        .chunks_exact(8)
-                        .zip(path.chunks_exact(8))
-                        .take_while(|(a, b)| a == b)
-                        .count();
-                    if shared * 8 == before.len() {
-                        shared
-                    } else {
-                        shared + 1
+            let mut previous: Option<&[[u8; 8]]> = None;
+            for &(start, len) in &self.paths[range.start as usize..range.end as usize] {
+                let (path, _) = self.path((start, len)).as_chunks::<8>();
+                let new_from = match previous.filter(|_| prefixes) {
+                    _ if !prefixes => path.len(),
+                    None => 0,
+                    Some(before) => {
+                        let shared = before.iter().zip(path).take_while(|(a, b)| a == b).count();
+                        if shared == before.len() {
+                            shared
+                        } else {
+                            shared + 1
+                        }
                     }
-                });
+                };
 
                 let mut hash = path_hash_start(group);
-                for (depth, element) in path.chunks_exact(8).enumerate() {
+                for (depth, element) in path.iter().enumerate() {
                     if depth >= new_from {
-                        prefixes.push((hash, group, start, depth as u32));
+                        strict.push((hash, group, start, depth as u32));
                     }
                     hash = path_hash_step(hash, element);
                 }
@@ -735,7 +753,10 @@ impl SourceAddresses {
             }
         }
 
-        (PathIndex::new(exact), PathIndex::new(prefixes))
+        (
+            PathIndex::new(exact),
+            prefixes.then(|| PathIndex::new(strict)),
+        )
     }
 
     fn path(&self, (start, len): (u32, u32)) -> &[u8] {
@@ -744,10 +765,9 @@ impl SourceAddresses {
 
     /// Whether `target` is a source address of `group`.
     fn holds(&self, group: u32, target: &[u8]) -> bool {
-        if let Some((exact, _)) = &self.hashed {
-            let hash = target
-                .chunks_exact(8)
-                .fold(path_hash_start(group), path_hash_step);
+        if let Some(exact) = &self.exact {
+            let (elements, _) = target.as_chunks::<8>();
+            let hash = elements.iter().fold(path_hash_start(group), path_hash_step);
             return exact.contains(hash, group, target, &self.elements);
         }
 
@@ -761,12 +781,13 @@ impl SourceAddresses {
 
     /// Whether `target` is related to a source address of `group`.
     fn relates(&self, group: u32, target: &[u8], mode: HierarchicalMode, inclusive: bool) -> bool {
-        if let Some((exact, prefixes)) = &self.hashed {
+        if let Some(exact) = &self.exact {
             let elements = &self.elements;
+            let (steps, _) = target.as_chunks::<8>();
             return match mode {
                 // A source that is a prefix of the target, strict unless inclusive.
                 HierarchicalMode::Children => {
-                    let depth = target.len() / 8;
+                    let depth = steps.len();
                     let mut hash = path_hash_start(group);
                     let mut found = false;
                     for d in 0..=depth {
@@ -778,7 +799,7 @@ impl SourceAddresses {
                             break;
                         }
                         if d < depth {
-                            hash = path_hash_step(hash, &target[d * 8..(d + 1) * 8]);
+                            hash = path_hash_step(hash, &steps[d]);
                         }
                     }
                     found
@@ -786,9 +807,10 @@ impl SourceAddresses {
                 // A source the target is a strict prefix of, or equal to when
                 // inclusive.
                 HierarchicalMode::Parents => {
-                    let hash = target
-                        .chunks_exact(8)
-                        .fold(path_hash_start(group), path_hash_step);
+                    let prefixes = self
+                        .prefixes
+                        .get_or_init(|| self.index(true).1.expect("prefixes were asked for"));
+                    let hash = steps.iter().fold(path_hash_start(group), path_hash_step);
                     prefixes.contains(hash, group, target, elements)
                         || (inclusive && exact.contains(hash, group, target, elements))
                 }
@@ -1362,7 +1384,19 @@ fn scan_batches(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<Scann
         let results: Vec<Result<Vec<ScannedBatch>>> = row_groups_to_scan
             .par_iter()
             .map(|&group| {
-                scan_decoded_row_group(table, group, &all_columns, request, &output_schema, cache)
+                let decoded = scan_decoded_row_group(
+                    table,
+                    group,
+                    &all_columns,
+                    request,
+                    &output_schema,
+                    cache,
+                )?;
+                match decoded {
+                    Some(batches) => Ok(batches),
+                    // The cache cannot take this row group: read it as any scan does.
+                    None => scan_row_groups(table, &[group], &all_columns, request, &output_schema),
+                }
             })
             .collect();
         return Ok(results
@@ -1450,26 +1484,16 @@ pub(crate) fn estimate_scan_bytes(
     table: &ParquetTable,
     request: &ScanRequest,
 ) -> Result<Option<u64>> {
-    let parquet = table.metadata().file_metadata().schema_descr();
     let mut leaves = Vec::new();
     for &name in &request.output_columns {
         // A column the file lacks decodes to nulls, which hold no buffers.
         let Ok(field) = table.schema().field_with_name(name) else {
             continue;
         };
-
-        let mut costs = Vec::new();
-        if leaf_costs(field.data_type(), LeafCost::default(), &mut costs).is_none() {
+        let Some(field_leaves) = field_leaves(table, field) else {
             return Ok(None);
-        }
-        let indices: Vec<usize> = (0..parquet.num_columns())
-            .filter(|&leaf| parquet.column(leaf).path().parts()[0] == name)
-            .collect();
-        if indices.len() != costs.len() {
-            return Ok(None);
-        }
-
-        leaves.extend(indices.into_iter().zip(costs));
+        };
+        leaves.extend(field_leaves);
     }
 
     let mut total = 0u64;
@@ -1487,6 +1511,34 @@ pub(crate) fn estimate_scan_bytes(
     }
 
     Ok(Some(total))
+}
+
+/// The most column `index` of row group `group` decodes to, every row of it;
+/// `None` where the footer does not bound it.
+pub(super) fn column_bytes_bound(table: &ParquetTable, group: usize, index: usize) -> Option<u64> {
+    let metadata = table.row_group(group);
+
+    field_leaves(table, table.schema().field(index))?
+        .into_iter()
+        .try_fold(0u64, |total, (leaf, cost)| {
+            Some(total.saturating_add(decoded_bytes(metadata.column(leaf), cost, 1)?))
+        })
+}
+
+/// The parquet leaves of a root column, each with what one of its level
+/// entries decodes to; `None` for a type whose decoded layout is not modelled.
+fn field_leaves(
+    table: &ParquetTable,
+    field: &arrow::datatypes::Field,
+) -> Option<Vec<(usize, LeafCost)>> {
+    let parquet = table.metadata().file_metadata().schema_descr();
+    let mut costs = Vec::new();
+    leaf_costs(field.data_type(), LeafCost::default(), &mut costs)?;
+
+    let indices: Vec<usize> = (0..parquet.num_columns())
+        .filter(|&leaf| &parquet.column(leaf).path().parts()[0] == field.name())
+        .collect();
+    (indices.len() == costs.len()).then(|| indices.into_iter().zip(costs).collect())
 }
 
 /// What one level entry of a parquet leaf decodes to, beside the contents of
@@ -1977,7 +2029,8 @@ fn scan_row_groups(
 /// pass's window decoded once for every scan that shares `cache`, and the
 /// scan's block range, key and hierarchical filters applied in memory. Rows
 /// come out as [`scan_row_groups`] returns them: a relation's rows share its
-/// sources' blocks (INV-D5), all inside the window.
+/// sources' blocks (INV-D5), all inside the window. `None` when the cache
+/// cannot take the row group.
 fn scan_decoded_row_group(
     table: &ParquetTable,
     group: usize,
@@ -1985,31 +2038,14 @@ fn scan_decoded_row_group(
     request: &ScanRequest,
     output_schema: &SchemaRef,
     cache: &super::ColumnCache,
-) -> Result<Vec<ScannedBatch>> {
+) -> Result<Option<Vec<ScannedBatch>>> {
     let window = request.window.unwrap_or_default();
-    let window_rows = cache.window_rows(table, group, window, || {
-        let rows = table.row_group(group).num_rows() as usize;
-        let bounded = window.from.is_some_and(|b| b > 0) || window.to.is_some();
-        let block_index = request
-            .block_number_column
-            .and_then(|name| table.schema().index_of(name).ok())
-            .filter(|_| bounded);
-        let Some(index) = block_index else {
-            return Ok(super::columns::WindowRows::All(rows));
-        };
-
-        let blocks = super::columns::decode_column(table, group, index)?;
-        let inside = block_range_mask(&blocks, window.from.filter(|&b| b > 0), window.to)?;
-        let inside = match inside.nulls() {
-            Some(nulls) => inside.values() & nulls.inner(),
-            None => inside.values().clone(),
-        };
-        Ok(if inside.count_set_bits() == rows {
-            super::columns::WindowRows::All(rows)
-        } else {
-            super::columns::WindowRows::Some(inside.set_indices().map(|row| row as u32).collect())
-        })
+    let found = cache.window_rows(table, group, window, || {
+        window_rows(table, group, window, request.block_number_column)
     })?;
+    let Some(window_rows) = found else {
+        return Ok(None);
+    };
     let window_rows = &window_rows.value;
     let rows = window_rows.len();
 
@@ -2019,8 +2055,11 @@ fn scan_decoded_row_group(
         let Ok(index) = table.schema().index_of(name) else {
             continue;
         };
+        let Some(column) = cache.column(table, group, index, window, window_rows)? else {
+            return Ok(None);
+        };
         fields.push(table.schema().field(index).clone());
-        columns.push(cache.column(table, group, index, window, window_rows)?);
+        columns.push(column);
     }
     let batch = RecordBatch::try_new_with_options(
         Arc::new(Schema::new(fields)),
@@ -2074,7 +2113,7 @@ fn scan_decoded_row_group(
 
     let kept = keep.count_set_bits();
     if kept == 0 {
-        return Ok(Vec::new());
+        return Ok(Some(Vec::new()));
     }
     let selected = BooleanArray::new(keep, None);
     let batch =
@@ -2098,11 +2137,62 @@ fn scan_decoded_row_group(
         .map(|items| BooleanArray::from(vec![!items.is_empty(); kept]))
         .collect();
 
-    Ok(vec![ScannedBatch {
+    Ok(Some(vec![ScannedBatch {
         batch,
         positions,
         tags,
-    }])
+    }]))
+}
+
+/// Block numbers read at a time while a window's rows are found.
+const WINDOW_BATCH: usize = 1 << 16;
+
+/// The rows of row group `group` inside `window`, found a batch of block
+/// numbers at a time.
+fn window_rows(
+    table: &ParquetTable,
+    group: usize,
+    window: super::Window,
+    block_column: Option<&str>,
+) -> Result<super::columns::WindowRows> {
+    let rows = table.row_group(group).num_rows() as usize;
+    let bounded = window.from.is_some_and(|b| b > 0) || window.to.is_some();
+    let block_index = block_column
+        .and_then(|name| table.schema().index_of(name).ok())
+        .filter(|_| bounded);
+    let Some(index) = block_index else {
+        return Ok(super::columns::WindowRows::All(rows));
+    };
+
+    let projection =
+        ProjectionMask::roots(table.metadata().file_metadata().schema_descr(), [index]);
+    let reader = ParquetRecordBatchReaderBuilder::new_with_metadata(
+        table.data(),
+        table.arrow_metadata().clone(),
+    )
+    .with_projection(projection)
+    .with_row_groups(vec![group])
+    .with_batch_size(WINDOW_BATCH)
+    .build()?;
+
+    let mut offsets: Vec<u32> = Vec::new();
+    let mut start = 0u32;
+    for batch in reader {
+        let blocks = batch?.column(0).clone();
+        let inside = block_range_mask(&blocks, window.from.filter(|&b| b > 0), window.to)?;
+        let inside = match inside.nulls() {
+            Some(nulls) => inside.values() & nulls.inner(),
+            None => inside.values().clone(),
+        };
+        offsets.extend(inside.set_indices().map(|row| start + row as u32));
+        start += blocks.len() as u32;
+    }
+
+    Ok(if offsets.len() == rows {
+        super::columns::WindowRows::All(rows)
+    } else {
+        super::columns::WindowRows::Some(offsets.into())
+    })
 }
 
 /// Hierarchical scan with merged key+address RowFilter stage.
@@ -2615,7 +2705,12 @@ mod tests {
                 inclusive,
                 None,
             );
-            seen_hashed[usize::from(filter.sources.hashed.is_some())] = true;
+            seen_hashed[usize::from(filter.sources.exact.is_some())] = true;
+            // Only a parent lookup needs every prefix of a source path.
+            let parents = matches!(mode, HierarchicalMode::Parents);
+            if !parents || filter.sources.exact.is_none() {
+                assert!(filter.sources.prefixes.get().is_none(), "case {case}");
+            }
 
             // The same sources as exact keys: a target matches one that has
             // its block, its transaction and its whole path.
@@ -2631,6 +2726,12 @@ mod tests {
             let matched =
                 composite_key_in_set_mask(&target_batch, &key_columns, &exact.key_set, None)
                     .unwrap();
+            if let CompositeKeySet::PairPath(sources) = exact.key_set.as_ref() {
+                assert!(
+                    sources.prefixes.get().is_none(),
+                    "a join built prefixes, case {case}"
+                );
+            }
             for (row, target) in targets.iter().enumerate() {
                 let expected = target.0.is_some()
                     && target.1.is_some()
@@ -2725,6 +2826,88 @@ mod tests {
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, table.num_rows() as usize);
         assert_eq!(batches[0].num_columns(), 2);
+    }
+
+    /// The rows and peak bytes of `request`, its parallel work held to the
+    /// calling thread so that every allocation is counted.
+    fn scan_counted(table: &ParquetTable, request: &ScanRequest) -> (Vec<RecordBatch>, usize) {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        pool.install(|| crate::testing::peak_bytes(|| scan(table, request).unwrap()))
+    }
+
+    /// A row group whose window the cache cannot hold is read as the reader
+    /// reads it: the scan decodes the rows its key selects, not the window.
+    #[test]
+    fn a_window_the_cache_cannot_hold_is_read_by_the_reader() {
+        let dir = tempfile::tempdir().unwrap();
+        let table = crate::testing::wide_table(dir.path());
+        let source = RecordBatch::try_from_iter([
+            (
+                "block_number",
+                Arc::new(UInt64Array::from(vec![1003])) as ArrayRef,
+            ),
+            ("index", Arc::new(UInt32Array::from(vec![7])) as ArrayRef),
+        ])
+        .unwrap();
+        let keys = ["block_number", "index"];
+        let filter = KeyFilter::build(&[source], &keys, &keys, "block_number", "block_number");
+        let window = super::super::Window {
+            from: Some(1000),
+            to: None,
+        };
+
+        let mut request = ScanRequest::new(vec!["block_number", "index", "payload"]);
+        request.block_number_column = Some("block_number");
+        request.from_block = window.from;
+        request.window = Some(window);
+        request.key_filter = Some(&filter);
+        let (expected, _) = scan_counted(&table, &request);
+
+        let cache = super::super::ColumnCache::new(16 << 10);
+        request.column_cache = Some(&cache);
+        let (rows, peak) = scan_counted(&table, &request);
+
+        assert_eq!(rows, expected);
+        assert_eq!(rows.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
+        let whole = crate::testing::WIDE_PAYLOAD;
+        assert!(peak < whole / 4, "{peak} bytes to read one row of {whole}");
+    }
+
+    /// Finding a window's rows reads the row group's block numbers a batch at
+    /// a time, not all of them at once.
+    #[test]
+    fn a_window_finds_its_rows_without_holding_every_block_number() {
+        let dir = tempfile::tempdir().unwrap();
+        let rows = 2u64 << 20;
+        let table = crate::testing::write_table(
+            dir.path(),
+            vec![arrow::datatypes::Field::new(
+                "block_number",
+                DataType::UInt64,
+                false,
+            )],
+            vec![Arc::new(UInt64Array::from_iter_values(0..rows))],
+            rows as usize,
+        );
+        let window = super::super::Window {
+            from: Some(1000),
+            to: Some(1063),
+        };
+
+        let mut request = ScanRequest::new(vec!["block_number"]);
+        request.block_number_column = Some("block_number");
+        (request.from_block, request.to_block) = (window.from, window.to);
+        request.window = Some(window);
+        let cache = super::super::ColumnCache::new(u64::MAX);
+        request.column_cache = Some(&cache);
+        let (found, peak) = scan_counted(&table, &request);
+
+        assert_eq!(found.iter().map(RecordBatch::num_rows).sum::<usize>(), 64);
+        let whole = rows as usize * 8;
+        assert!(peak < whole / 4, "{peak} bytes to find 64 rows of {whole}");
     }
 
     /// A table several scans share is decoded once and filtered in memory; each

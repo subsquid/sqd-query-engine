@@ -42,9 +42,9 @@ impl PairSet {
     }
 }
 
-/// A bitmap of second components for each first component, when the first
-/// components are close together and the bitmaps are not much larger than the
-/// pairs: a window of blocks and the item indices within each.
+/// A bitmap of second components for each first component, when the bitmaps
+/// and their slots are no larger than the pairs' keys alone: a window of blocks
+/// and the item indices within each.
 pub(super) struct DensePairs {
     first: u64,
     /// By first component, offset from `first`.
@@ -65,8 +65,8 @@ struct Slot {
 /// First components one set may span.
 const MAX_SLOTS: u64 = 1 << 16;
 
-/// Bits one set may hold beyond what its pairs would take in a hash set.
-const MIN_BITS: u64 = 1 << 20;
+/// The bytes of one pair's key, the least a hash set holds per pair.
+const KEY_BYTES: u64 = 16;
 
 impl DensePairs {
     /// `None` when the pairs are too sparse for bitmaps. `pairs` is sorted
@@ -84,23 +84,29 @@ impl DensePairs {
             return None;
         }
         let span = last - first + 1;
+        let width = |group: &[(u64, u64)]| (group[group.len() - 1].1 - group[0].1).checked_add(1);
 
-        let bit_budget = (pairs.len() as u64).saturating_mul(64).max(MIN_BITS);
-        let mut slots = vec![Slot::default(); span as usize];
+        // Sized before anything is allocated.
         let mut total = 0u64;
         for group in pairs.chunk_by(|x, y| x.0 == y.0) {
-            let low = group[0].1;
-            let high = group[group.len() - 1].1;
-            let width = (high - low).checked_add(1)?;
+            total = total.checked_add(width(group)?)?;
+        }
+        let slot_bytes = span.saturating_mul(std::mem::size_of::<Slot>() as u64);
+        let dense_bytes = slot_bytes.saturating_add(total.div_ceil(64).saturating_mul(8));
+        if dense_bytes > (pairs.len() as u64).saturating_mul(KEY_BYTES) {
+            return None;
+        }
 
+        let mut slots = vec![Slot::default(); span as usize];
+        let mut start = 0u64;
+        for group in pairs.chunk_by(|x, y| x.0 == y.0) {
+            let width = width(group).expect("checked above");
             slots[(group[0].0 - first) as usize] = Slot {
-                start: total,
-                low,
+                start,
+                low: group[0].1,
                 width,
             };
-            total = total
-                .checked_add(width)
-                .filter(|&total| total <= bit_budget)?;
+            start += width;
         }
 
         let mut bits = vec![0u64; total.div_ceil(64) as usize];
@@ -182,22 +188,59 @@ mod tests {
         let wide = vec![(0, 0), (MAX_SLOTS, 0)];
         assert!(matches!(PairSet::new(wide), PairSet::Hashed(_)));
 
-        let sparse = vec![(0, 0), (0, MIN_BITS * 4)];
+        let sparse = vec![(0, 0), (0, 1 << 22)];
         assert!(matches!(PairSet::new(sparse), PairSet::Hashed(_)));
     }
 
+    /// The heap a dense set holds.
+    fn dense_bytes(dense: &DensePairs) -> usize {
+        dense.slots.len() * std::mem::size_of::<Slot>() + dense.bits.len() * 8
+    }
+
+    /// Two keys need a few bytes in a hash set, whether their blocks or their
+    /// indices are far apart, and the choice is made before the bitmaps are.
+    #[test]
+    fn a_few_keys_far_apart_are_hashed_without_building_bitmaps() {
+        let far = [
+            vec![(0, 0), (MAX_SLOTS - 1, 0)],
+            vec![(7, 0), (7, (1 << 20) - 1)],
+            vec![(0, 0), (MAX_SLOTS - 1, (1 << 20) - 1)],
+        ];
+        for pairs in far {
+            let (set, peak) = crate::testing::peak_bytes(|| PairSet::new(pairs.clone()));
+            assert!(matches!(set, PairSet::Hashed(_)), "{pairs:?}");
+            assert!(peak < 4096, "{peak} bytes to choose a set of {pairs:?}");
+        }
+    }
+
     proptest! {
+        /// A dense set is never larger than its keys alone, the least a hash
+        /// set of them holds.
+        #[test]
+        fn a_dense_set_is_no_larger_than_its_keys(
+            pairs in prop::collection::vec((0u64..(MAX_SLOTS + 8), 0u64..(1 << 21)), 1..64),
+            window in prop::collection::vec((0u64..16, 0u64..400), 0..2000),
+        ) {
+            for pairs in [pairs, window] {
+                let mut unique = pairs.clone();
+                unique.sort_unstable();
+                unique.dedup();
+                if let PairSet::Dense(dense) = PairSet::new(pairs) {
+                    prop_assert!(dense_bytes(&dense) <= unique.len() * 16);
+                }
+            }
+        }
+
         #[test]
         fn a_dense_window_answers_like_a_set(
             base in prop_oneof![Just(0u64), Just(u64::MAX - 40), any::<u64>().prop_map(|v| v / 2)],
-            pairs in prop::collection::vec((0u64..32, 0u64..3000), 0..400),
-            probes in prop::collection::vec((0u64..40, 0u64..3100), 0..400),
+            pairs in prop::collection::vec((0u64..32, 0u64..400), 300..2000),
+            probes in prop::collection::vec((0u64..40, 0u64..500), 0..400),
         ) {
             let shift = |(a, b): (u64, u64)| (base.wrapping_add(a), b);
-            agrees(
-                pairs.into_iter().map(shift).collect(),
-                probes.into_iter().map(shift).collect(),
-            );
+            let pairs: Vec<_> = pairs.into_iter().map(shift).collect();
+            prop_assert!(matches!(PairSet::new(pairs.clone()), PairSet::Dense(_)));
+            agrees(pairs, probes.into_iter().map(shift).collect());
         }
 
         #[test]
