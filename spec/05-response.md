@@ -129,6 +129,11 @@ cheap: an engine must be able to compute a block's weight from narrow columns
 before decoding the wide ones. Its absolute accuracy does not matter. Its
 determinism does ([INV-B9](07-invariants.md#inv-b9)).
 
+Decoding the wide columns only for the blocks a page keeps is what bounds an
+engine's memory by the page. Decoding them in the same pass is allowed only where
+the engine can prove that pass fits the page
+([ADR-15](decisions/ADR-15-one-pass-only-where-the-footer-proves-it-fits.md)).
+
 Two properties of the definition are load-bearing:
 
 - Weight depends on the **projection**. Selecting fewer fields makes blocks

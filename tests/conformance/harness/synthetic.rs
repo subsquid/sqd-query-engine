@@ -94,6 +94,34 @@ pub fn catalog() -> DatasetDescription {
     parse_dataset_description(CATALOG).unwrap()
 }
 
+/// The same catalog with a header field that weighs what it carries: `extra`,
+/// sized by its `extra_size` companion.
+pub fn catalog_with_heavy_headers() -> DatasetDescription {
+    let blocks = "      fields: [number]
+    block_number_column: number
+    sort_key: [number]
+    columns:
+      number:
+        type: uint64
+";
+    let heavy = "      fields: [number, extra]
+    block_number_column: number
+    sort_key: [number]
+    columns:
+      number:
+        type: uint64
+      extra:
+        type: string
+        encoding: hex_bytes
+        weight: extra_size
+      extra_size:
+        type: uint64
+        system: true
+";
+    assert!(CATALOG.contains(blocks));
+    parse_dataset_description(&CATALOG.replacen(blocks, heavy, 1)).unwrap()
+}
+
 /// A chunk with the given blocks and one item per `(block, weight)` entry in each
 /// item table. `logs`/`txs` map a block number to the item weight it claims.
 pub fn weighted_chunk(blocks: &[u64], logs: &[(u64, u64)], txs: &[(u64, u64)]) -> TempDir {

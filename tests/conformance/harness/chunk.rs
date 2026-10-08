@@ -21,6 +21,7 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
+use parquet::file::metadata::{ColumnChunkMetaData, ParquetMetaDataReader, ParquetMetaDataWriter};
 use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use std::fs::File;
 use std::path::Path;
@@ -49,6 +50,89 @@ fn write_parquet_file(
 pub fn write_table(dir: &Path, table: &str, fields: Vec<Field>, columns: Vec<ArrayRef>) {
     let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
     write_parquet(&dir.join(format!("{table}.parquet")), &batch);
+}
+
+/// The same, under writer properties the test chooses.
+pub fn write_table_with(
+    dir: &Path,
+    table: &str,
+    fields: Vec<Field>,
+    columns: Vec<ArrayRef>,
+    props: WriterProperties,
+) {
+    let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
+    let path = dir.join(format!("{table}.parquet"));
+    write_parquet_file(
+        &path,
+        batch.schema(),
+        std::slice::from_ref(&batch),
+        Some(props),
+    );
+}
+
+/// Rewrite one table's footer and leave its pages as written. Writers differ in
+/// which facts about a column chunk they record, and a reader must infer no more
+/// than the facts it finds.
+pub fn edit_footer(
+    dir: &Path,
+    table: &str,
+    edit: impl Fn(ColumnChunkMetaData) -> ColumnChunkMetaData,
+) {
+    let path = dir.join(format!("{table}.parquet"));
+    let bytes = std::fs::read(&path).unwrap();
+    let footer_len =
+        u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap());
+    let pages_end = bytes.len() - 8 - footer_len as usize;
+
+    // Read without the page index: its bytes stay where they are, and so do the
+    // offsets that point at them.
+    let metadata = ParquetMetaDataReader::new()
+        .parse_and_finish(&File::open(&path).unwrap())
+        .unwrap();
+    let row_groups = metadata
+        .row_groups()
+        .iter()
+        .map(|group| {
+            let columns = group.columns().iter().cloned().map(&edit).collect();
+            group
+                .clone()
+                .into_builder()
+                .set_column_metadata(columns)
+                .build()
+                .unwrap()
+        })
+        .collect();
+    let metadata = metadata.into_builder().set_row_groups(row_groups).build();
+
+    let mut file = bytes[..pages_end].to_vec();
+    ParquetMetaDataWriter::new(&mut file, &metadata)
+        .finish()
+        .unwrap();
+    std::fs::write(&path, file).unwrap();
+}
+
+/// A footer without the byte count of its byte strings, which writers that keep
+/// statistics may still leave out.
+pub fn without_byte_counts(column: ColumnChunkMetaData) -> ColumnChunkMetaData {
+    column
+        .into_builder()
+        .set_unencoded_byte_array_data_bytes(None)
+        .build()
+        .unwrap()
+}
+
+/// A dictionary the footer does not point at: the column chunk starts at its
+/// dictionary page, and only the list of encodings says there is one.
+pub fn dictionary_unannounced(column: ColumnChunkMetaData) -> ColumnChunkMetaData {
+    let Some(offset) = column.dictionary_page_offset() else {
+        return column;
+    };
+    column
+        .into_builder()
+        .set_dictionary_page_offset(None)
+        .set_data_page_offset(offset)
+        .build()
+        .unwrap()
 }
 
 /// The same, one row group per entry: the writer is flushed after each, which is

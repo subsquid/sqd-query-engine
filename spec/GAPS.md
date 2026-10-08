@@ -26,7 +26,6 @@ Compared against the reference implementation, as of 2026-10-07.
 
 | # | Gap | Invariant | Sev |
 |---|---|---|---|
-| 47 | A query without relations decodes every matching row of the chunk before the page cut | — | **S3** |
 | 44 | The weight model differs from the reference in four places | [INV-B5](07-invariants.md#inv-b5) | **S4** |
 | 31 | A block number above 2³¹ stored in `Int32` is read as negative by the range filter | [INV-D7](07-invariants.md#inv-d7) | **S4** |
 | 32 | The bloom's hash function is not pinned by the manifest, and the version it resolves to today ignores the seed above 240 bytes | [INV-P9](07-invariants.md#inv-p9) | **S4** |
@@ -63,9 +62,10 @@ against both engines; about 4 100 hostile or generated requests; every
 budget-hitting probe at 1, 2, 4 and 17 threads; 50 paged walks; and the peak heap
 of about 30 query shapes on both engines, at up to 20 concurrent queries. The
 memory path the first review found on relation queries is fixed: those shapes now
-use less heap than the reference. The same path without relations is gap 47. The
-two S1 entries of that review, 45 and 46, are closed, and so are 48, 51, 52,
-54 and 56.
+use less heap than the reference. The same shapes without relations used to decode
+every matching row of the chunk before the page cut; they now peak at 28 to 79 MB
+a query, about what the reference uses. The two S1 entries of that review, 45 and
+46, are closed, and so are 47, 48, 51, 52, 54 and 56.
 
 Several of the review's entries were about what the engine does with a chunk
 that is older than its catalog. Two archiver generations wrote the chunks in the field.
@@ -92,44 +92,6 @@ transcription of the older revision. The lag is closed, and
 `the_catalogs_serve_every_field_the_reference_serves` now reads the reference's
 field macros off the checkout the fixture tree comes from, so the next such
 move fails a test rather than waiting for a review.
-
----
-
-## S3 — Loud
-
-### 47. A query without relations decodes every matching row of the chunk before the page cut
-
-The selection reader that defers payload reads until the page is chosen is
-switched on only when some table plan has relations (`execute_chunk_fmt` in
-`src/output/assembly.rs`). Without one, the scan reads every output column of
-every matching row in the range the size hint suggests. The hint is narrow only
-for a single table with no predicate and no `includeAllBlocks`; for anything else
-it is the maximum over tables, and on tables sorted by a filter column every row
-group spans the whole chunk. So the whole chunk is decoded and the weight cut
-then keeps a few dozen blocks.
-
-Measured per query, peak heap against the reference's: transactions and logs with
-all fields, 300 MB against 54 MB on the 224-block EVM chunk and 1 064 MB against
-51 MB on a 1 592-block one; every table with all fields, 3 669 MB against
-262 MB; Solana instructions and logs, 1 892 MB against 150 MB. At four concurrent
-queries the every-table shape held 14.6 GB against 0.8 GB. Answers were byte
-for byte the same. A worker serves many queries at once on a fixed amount of
-memory, so this is how a valid request takes one down.
-
-Using the selection reader for every query brought the every-table shape to
-45 MB, and transactions with logs from 71 ms and 300 MB to 51 ms and 56 MB,
-with every answer and the whole suite unchanged. It is the wrong gate, though,
-because selective single-table queries pay for it. On a quiet machine:
-`usdc_transfers` went from 7.2 to 9.5 ms, against the reference's 9.6, so its
-lead is gone; `getLogs` over 100 blocks from 4.6 to 6.5 ms; `getBlockByNumber`
-with transaction hashes from 2.2 to 3.9 ms. That is 32–77%, not the 5–25% a
-first run under load suggested. The reader should be switched on where the
-whole-chunk decode can happen — more than one table plan, `includeAllBlocks`, or
-a predicate the row-group statistics cannot bound — and the selective shapes
-measured again.
-
-*First test:* a peak-heap bound on a no-relation, all-fields shape in the memory
-bench.
 
 ---
 

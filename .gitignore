@@ -4,6 +4,8 @@
 tests/fixtures
 ISSUES.md
 .claude/settings.local.json
+CLAUDE.local.md
+AGENTS.local.md
 
 # Local working files. Not part of the engine and not for publication.
 /.release

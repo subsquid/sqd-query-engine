@@ -1,5 +1,5 @@
 use crate::integers::is_integer;
-use crate::metadata::{DatasetDescription, WeightSource};
+use crate::metadata::{DatasetDescription, TableDescription, WeightSource};
 use crate::output::arrow_out::{
     dedup_first, filter_to_blocks, hexify_group, project_columns, write_arrow_frames, ArrowOutput,
     OutputFormat,
@@ -24,7 +24,7 @@ use crate::output::weight::{
     BlockSelection, TableOutput,
 };
 use crate::output::writer::QueryOutput;
-use crate::query::{Plan, RelationKind};
+use crate::query::{Plan, RelationKind, TablePlan};
 use crate::scan::predicate::{evaluate_predicates_on_batch, RowPredicate};
 use crate::scan::{
     ChunkReader, HierarchicalFilter, HierarchicalMode, KeyFilter, ParquetChunkReader, ScanRequest,
@@ -332,6 +332,91 @@ fn next_range_end(
     end
 }
 
+/// The table whose first read range a narrow size scan can choose: the only one
+/// in the plan, unfiltered, with no relations, and with no header-only blocks
+/// to weigh beside it.
+fn prescanned_table(plan: &Plan) -> Option<&TablePlan> {
+    let [table] = plan.table_plans.as_slice() else {
+        return None;
+    };
+    let filtered = !table.predicates.iter().all(RowPredicate::matches_every_row);
+    let sized = !plan.include_all_blocks && table.relations.is_empty() && !filtered;
+
+    sized.then_some(table)
+}
+
+/// Whether reading every output column of every matching row in the request
+/// could decode more than a page (ADR-15). Relations always defer their
+/// payloads; a prescanned table bounds its own first range. Header rows are read
+/// for the whole range either way.
+fn defers_payloads(
+    plan: &Plan,
+    metadata: &DatasetDescription,
+    chunk: &dyn ChunkReader,
+    budget: u64,
+) -> bool {
+    let has_relations = plan.table_plans.iter().any(|t| !t.relations.is_empty());
+    if has_relations {
+        return true;
+    }
+
+    // A page always holds its first block whole, so one pass over one block
+    // decodes exactly the rows a deferred read would.
+    let one_block = plan.to_block == Some(plan.from_block);
+    if one_block {
+        return false;
+    }
+
+    let block_desc = metadata
+        .table(&plan.block_table)
+        .filter(|_| chunk.has_table(&plan.block_table));
+    let mut estimate = block_desc.map_or(0, |desc| {
+        let columns = block_scan_columns(&plan.block_output_columns, desc);
+        estimate_range_bytes(plan, chunk, &plan.block_table, desc, &columns, &[])
+    });
+
+    if prescanned_table(plan).is_none() {
+        for table_plan in &plan.table_plans {
+            let Some(desc) = metadata.table(&table_plan.table) else {
+                return true;
+            };
+            let columns = resolve_output_columns(table_plan, desc);
+            let bytes = estimate_range_bytes(
+                plan,
+                chunk,
+                &table_plan.table,
+                desc,
+                &columns,
+                &table_plan.predicates,
+            );
+            estimate = estimate.saturating_add(bytes);
+        }
+    }
+
+    estimate > budget
+}
+
+/// What one pass over the request's range decodes for one table. A reader that
+/// cannot tell counts as unbounded, which only an unbounded budget holds.
+fn estimate_range_bytes(
+    plan: &Plan,
+    chunk: &dyn ChunkReader,
+    table: &str,
+    desc: &TableDescription,
+    columns: &[String],
+    predicates: &[RowPredicate],
+) -> u64 {
+    let mut request = ScanRequest::new(columns.iter().map(String::as_str).collect());
+    request.predicates = predicates.iter().collect();
+    request.from_block = Some(plan.from_block);
+    request.to_block = plan.to_block;
+    request.block_number_column = Some(&desc.block_number_column);
+
+    chunk
+        .estimate_scan_bytes(table, &request)
+        .unwrap_or(u64::MAX)
+}
+
 /// A narrow size scan avoids decoding wide columns for a large unfiltered query.
 /// Its estimate only chooses the first read range; exact selection can read on.
 fn initial_range_end(
@@ -340,15 +425,9 @@ fn initial_range_end(
     chunk: &dyn ChunkReader,
     budget: u64,
 ) -> Result<Option<u64>> {
-    let [table] = plan.table_plans.as_slice() else {
+    let Some(table) = prescanned_table(plan) else {
         return Ok(next_range_end(plan, metadata, chunk, plan.from_block));
     };
-    if plan.include_all_blocks
-        || !table.relations.is_empty()
-        || !table.predicates.iter().all(RowPredicate::matches_every_row)
-    {
-        return Ok(next_range_end(plan, metadata, chunk, plan.from_block));
-    }
     let desc = metadata.table(&table.table).ok_or_else(|| {
         crate::engine_err!(
             crate::error::ErrorKind::TableNotFound,
@@ -775,12 +854,10 @@ fn execute_chunk_fmt(
     //    from the branch the client did not ask about.
     crate::output::fork::check_parent_block(plan, metadata, chunk)?;
 
-    // Keep the existing one-pass path for queries without relation expansion.
+    // A selective query reads its rows in one pass: a second pass by position
+    // costs more than the payloads it would skip.
     let selection_reader = (options.range_reads
-        && plan
-            .table_plans
-            .iter()
-            .any(|table| !table.relations.is_empty()))
+        && defers_payloads(plan, metadata, chunk, options.weight_budget))
     .then(|| SelectionReader::new(chunk, plan, metadata))
     .flatten();
     let scan_reader: &dyn ChunkReader = selection_reader

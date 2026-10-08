@@ -36,6 +36,15 @@ pub trait ChunkReader: Sync {
         None
     }
 
+    /// An upper bound on the bytes a scan's output arrays would hold, from
+    /// storage metadata alone. A query reads its payloads in one pass on it, so
+    /// it may overcount but never undercount; `None` when the reader cannot
+    /// bound them, which callers treat as unbounded.
+    fn estimate_scan_bytes(&self, table: &str, request: &ScanRequest) -> Option<u64> {
+        let _ = (table, request);
+        None
+    }
+
     /// Check if a table exists in this chunk.
     fn has_table(&self, table: &str) -> bool;
 
