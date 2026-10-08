@@ -303,6 +303,17 @@ impl KeyFilter {
     pub fn is_empty(&self) -> bool {
         self.key_set.is_empty()
     }
+
+    /// The same keys, matched against another target's columns.
+    pub fn retarget(&self, right_keys: &[&str], target_bn_col: &str) -> Self {
+        KeyFilter {
+            columns: right_keys.iter().map(|s| s.to_string()).collect(),
+            key_set: self.key_set.clone(),
+            sorted_blocks: self.sorted_blocks.clone(),
+            block_number_column: target_bn_col.to_string(),
+            materialization: self.materialization,
+        }
+    }
 }
 
 /// Mode for hierarchical address filtering.

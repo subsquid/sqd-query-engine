@@ -566,62 +566,83 @@ fn scan_tables(
                 rel_filtered_batches.push(Some(filtered));
             }
 
-            let key_filters: Vec<Option<KeyFilter>> = table_plan
+            // Key columns for pushdown; hierarchical relations push down their
+            // group keys (the non-address columns).
+            let pushdown_keys: Vec<Option<(Vec<&str>, Vec<&str>)>> = table_plan
                 .relations
                 .iter()
-                .enumerate()
-                .map(|(rel_idx, rel)| {
-                    let rel_table_desc = metadata.table(&rel.target_table);
-                    let target_bn_col = rel_table_desc
-                        .map(|d| d.block_number_column.as_str())
-                        .unwrap_or("block_number");
-
-                    // Use filtered batches if source_predicates are set
-                    let source_batches =
-                        rel_filtered_batches[rel_idx].as_deref().unwrap_or(&batches);
-
-                    // Determine key columns for pushdown
-                    let (left_keys, right_keys): (Vec<&str>, Vec<&str>) = match rel.kind {
-                        RelationKind::Join => {
-                            let lk: Vec<&str> = rel.left_key.iter().map(String::as_str).collect();
-                            let rk: Vec<&str> = rel.right_key.iter().map(String::as_str).collect();
-                            (lk, rk)
-                        }
+                .map(|rel| {
+                    let (left_keys, right_keys) = match rel.kind {
+                        RelationKind::Join => (
+                            rel.left_key.iter().map(String::as_str).collect(),
+                            rel.right_key.iter().map(String::as_str).collect(),
+                        ),
                         RelationKind::Children | RelationKind::Parents => {
-                            // Use group keys (non-address columns) for pushdown
-                            let addr_col = rel_table_desc.and_then(find_address_column);
-                            let lk = group_keys_for_relation(&rel.left_key, addr_col);
-                            let rk = group_keys_for_relation(&rel.right_key, addr_col);
-                            if lk.is_empty() || rk.is_empty() {
-                                return None;
-                            }
-                            (lk, rk)
+                            let addr_col = metadata
+                                .table(&rel.target_table)
+                                .and_then(find_address_column);
+                            (
+                                group_keys_for_relation(&rel.left_key, addr_col),
+                                group_keys_for_relation(&rel.right_key, addr_col),
+                            )
                         }
                     };
+                    let usable = !left_keys.is_empty() && !right_keys.is_empty();
+                    usable.then_some((left_keys, right_keys))
+                })
+                .collect();
 
-                    if left_keys.is_empty() {
-                        return None;
-                    }
-
-                    let kf = KeyFilter::build(
-                        source_batches,
-                        &left_keys,
-                        &right_keys,
+            // Relations that follow the same rows on the same key share one key
+            // set, and the distinct ones are built in parallel.
+            let mut distinct: Vec<usize> = Vec::new();
+            let shared_with: Vec<Option<usize>> = (0..table_plan.relations.len())
+                .map(|rel_idx| {
+                    let (left_keys, _) = pushdown_keys[rel_idx].as_ref()?;
+                    let source = &table_plan.relations[rel_idx].source_items;
+                    let same = distinct.iter().position(|&other| {
+                        pushdown_keys[other].as_ref().map(|(keys, _)| keys) == Some(left_keys)
+                            && &table_plan.relations[other].source_items == source
+                    });
+                    Some(same.unwrap_or_else(|| {
+                        distinct.push(rel_idx);
+                        distinct.len() - 1
+                    }))
+                })
+                .collect();
+            let target_bn_col = |rel_idx: usize| {
+                metadata
+                    .table(&table_plan.relations[rel_idx].target_table)
+                    .map(|d| d.block_number_column.as_str())
+                    .unwrap_or("block_number")
+            };
+            let built: Vec<KeyFilter> = distinct
+                .par_iter()
+                .map(|&rel_idx| {
+                    let (left_keys, right_keys) =
+                        pushdown_keys[rel_idx].as_ref().expect("only usable keys");
+                    KeyFilter::build(
+                        rel_filtered_batches[rel_idx].as_deref().unwrap_or(&batches),
+                        left_keys,
+                        right_keys,
                         primary_bn_col,
-                        target_bn_col,
-                    );
-                    if kf.is_empty() {
-                        None
-                    } else {
-                        Some(kf)
-                    }
+                        target_bn_col(rel_idx),
+                    )
+                })
+                .collect();
+            let key_filters: Vec<Option<KeyFilter>> = shared_with
+                .iter()
+                .enumerate()
+                .map(|(rel_idx, shared)| {
+                    let (_, right_keys) = pushdown_keys[rel_idx].as_ref()?;
+                    let kf = built[(*shared)?].retarget(right_keys, target_bn_col(rel_idx));
+                    (!kf.is_empty()).then_some(kf)
                 })
                 .collect();
 
             // Build hierarchical filters for Children/Parents relations
             let hierarchical_filters: Vec<Option<HierarchicalFilter>> = table_plan
                 .relations
-                .iter()
+                .par_iter()
                 .enumerate()
                 .map(|(rel_idx, rel)| match rel.kind {
                     RelationKind::Children | RelationKind::Parents => {

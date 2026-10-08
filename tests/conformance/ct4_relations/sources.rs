@@ -154,3 +154,38 @@ fn a_relation_follows_the_rows_its_own_items_matched() {
     }
     assert!(tagged_rows > 0, "no row was ever tagged");
 }
+
+/// Two relations on the same key, asked for by different items, follow only
+/// their own items' rows: a key set built for one is not the other's.
+///
+/// Covers CT-4 · INV-R1
+#[test]
+fn relations_on_one_key_follow_only_their_own_items() {
+    use crate::harness::evm_like;
+    use crate::harness::generator::Generator;
+    use crate::harness::json::items_of;
+
+    let chunk = evm_like::chunk();
+    let generator = Generator::new(evm_like::catalog(), chunk.path());
+    let (first, last) = generator.blocks();
+    let query = format!(
+        r#"{{"type":"test","fromBlock":{first},"toBlock":{last},
+            "fields":{{"block":{{"number":true}},
+                       "log":{{"transactionIndex":true,"logIndex":true}},
+                       "trace":{{"transactionIndex":true,"traceIndex":true}}}},
+            "transactions":[{{"transactionIndex":[0],"transactionLogs":true}},
+                            {{"transactionIndex":[1],"transactionTraces":true}}]}}"#
+    );
+    let body = generator.run(&query);
+
+    for (table, index) in [("logs", 0), ("traces", 1)] {
+        let items = items_of(&body, table);
+        assert!(!items.is_empty(), "no {table} came back");
+        for (block, item) in items {
+            assert_eq!(
+                item["transactionIndex"], index,
+                "{table} of block {block} came from another item's transaction: {item}"
+            );
+        }
+    }
+}
