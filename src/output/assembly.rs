@@ -25,12 +25,14 @@ use crate::output::weight::{
 };
 use crate::output::writer::QueryOutput;
 use crate::query::{Plan, RelationKind, TablePlan};
-use crate::scan::predicate::{evaluate_predicates_on_batch, RowPredicate};
+use crate::scan::predicate::RowPredicate;
 use crate::scan::{
-    ChunkReader, HierarchicalFilter, HierarchicalMode, KeyFilter, ParquetChunkReader, ScanRequest,
+    ChunkReader, HierarchicalFilter, HierarchicalMode, ItemTag, KeyFilter, ParquetChunkReader,
+    ScanRequest,
 };
 use crate::text::StringColumn;
 use anyhow::Result;
+use arrow::array::AsArray;
 use arrow::record_batch::RecordBatch;
 use rayon::prelude::*;
 use rustc_hash::FxHashSet as HashSet;
@@ -502,8 +504,25 @@ fn scan_tables(
         request.block_number_column = Some(table_desc.block_number_column.as_str());
         request.required_columns = req_col_refs;
 
+        // A relation some items asked for follows only the rows they matched,
+        // which the scan marks as it evaluates them.
+        let tag_columns: Vec<String> = (0..table_plan.relations.len())
+            .map(|relation| format!("__sqd_relation_{relation}"))
+            .collect();
+        request.item_tags = table_plan
+            .relations
+            .iter()
+            .zip(&tag_columns)
+            .filter_map(|(relation, column)| {
+                Some(ItemTag {
+                    column,
+                    items: relation.source_items.as_deref()?,
+                })
+            })
+            .collect();
+
         let t_primary = timer!();
-        let batches = chunk.scan(&table_plan.table, &request)?;
+        let mut batches = chunk.scan(&table_plan.table, &request)?;
         let primary_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         elapsed!(t_primary, "primary scan", "{} rows", primary_rows);
 
@@ -520,25 +539,29 @@ fn scan_tables(
             let t_kf = timer!();
             let primary_bn_col = table_desc.block_number_column.as_str();
 
-            // Pre-filter primary batches per relation when source_predicates are set
             let mut rel_filtered_batches: Vec<Option<Vec<RecordBatch>>> = Vec::new();
-            for rel in &table_plan.relations {
-                let Some(preds) = rel.source_predicates.as_ref() else {
+            for (rel, column) in table_plan.relations.iter().zip(&tag_columns) {
+                if rel.source_items.is_none() {
                     rel_filtered_batches.push(None);
                     continue;
-                };
+                }
 
                 let mut filtered = Vec::new();
                 for batch in &batches {
-                    let kept = evaluate_predicates_on_batch(batch, preds).map_err(|e| {
-                        crate::engine_err!(
-                            crate::error::ErrorKind::UnsupportedKeyType,
-                            "filter on '{}': {}",
-                            table_plan.table,
-                            e
-                        )
-                    })?;
-                    filtered.extend(kept);
+                    let tag = batch
+                        .column_by_name(column)
+                        .and_then(|tag| tag.as_boolean_opt())
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "the scan of '{}' did not mark the rows relation {} follows",
+                                table_plan.table,
+                                column
+                            )
+                        })?;
+                    let kept = arrow::compute::filter_record_batch(batch, tag)?;
+                    if kept.num_rows() > 0 {
+                        filtered.push(kept);
+                    }
                 }
                 rel_filtered_batches.push(Some(filtered));
             }
@@ -797,6 +820,15 @@ fn scan_tables(
                     );
                 }
                 relation_batches.entry(rel_idx).or_default().extend(rows);
+            }
+        }
+
+        if !request.item_tags.is_empty() {
+            for batch in &mut batches {
+                let kept: Vec<usize> = (0..batch.num_columns())
+                    .filter(|&i| !tag_columns.contains(batch.schema().field(i).name()))
+                    .collect();
+                *batch = batch.project(&kept)?;
             }
         }
 

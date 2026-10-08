@@ -1,8 +1,9 @@
+use super::predicate::or_masks;
 use super::scanner::{build_output_schema, project_batch};
 use super::{ParquetTable, ScanRequest};
 use anyhow::{Context, Result};
-use arrow::array::{Array, BooleanArray, UInt64Array};
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::array::{Array, ArrayRef, AsArray, BooleanArray, UInt64Array};
+use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::{
     ArrowPredicate, ArrowPredicateFn, ParquetRecordBatchReaderBuilder, RowSelection, RowSelector,
@@ -94,14 +95,94 @@ pub(super) fn append_positions(
     name: &str,
     positions: UInt64Array,
 ) -> Result<RecordBatch> {
+    append_column(batch, name, Arc::new(positions))
+}
+
+pub(super) fn append_column(
+    batch: &RecordBatch,
+    name: &str,
+    column: ArrayRef,
+) -> Result<RecordBatch> {
     let mut fields: Vec<_> = batch.schema().fields().iter().cloned().collect();
-    fields.push(Arc::new(Field::new(name, DataType::UInt64, false)));
+    fields.push(Arc::new(Field::new(
+        name,
+        column.data_type().clone(),
+        false,
+    )));
     let mut columns = batch.columns().to_vec();
-    columns.push(Arc::new(positions));
+    columns.push(column);
     Ok(RecordBatch::try_new(
         Arc::new(Schema::new(fields)),
         columns,
     )?)
+}
+
+/// Whether each tag's items matched a row, kept by the stage that evaluates
+/// the items. That stage is the last one, so the rows it selects are the rows
+/// the reader returns, in the same order.
+pub(super) struct ItemTags {
+    tags: Vec<Vec<usize>>,
+    recorded: Mutex<Vec<Vec<BooleanArray>>>,
+}
+
+impl ItemTags {
+    pub(super) fn new(request: &ScanRequest) -> Option<Arc<Self>> {
+        let tags = request
+            .item_tags
+            .iter()
+            .map(|tag| tag.items.to_vec())
+            .collect::<Vec<_>>();
+
+        (!tags.is_empty()).then(|| {
+            Arc::new(Self {
+                tags,
+                recorded: Mutex::new(Vec::new()),
+            })
+        })
+    }
+
+    /// Keep each tag's answer for the rows `matched` selects. A row whose
+    /// items say neither yes nor no is not one they matched.
+    pub(super) fn record(&self, masks: &[BooleanArray], matched: &BooleanArray) {
+        let tagged = self
+            .tags
+            .iter()
+            .map(|items| {
+                let mask = or_masks(masks, items, matched.len());
+                let kept = arrow::compute::filter(&mask, matched).expect("mask sized to the batch");
+                let kept = kept.as_boolean();
+                let values = match kept.nulls() {
+                    Some(nulls) => kept.values() & nulls.inner(),
+                    None => kept.values().clone(),
+                };
+                BooleanArray::new(values, None)
+            })
+            .collect();
+
+        self.recorded
+            .lock()
+            .expect("item tag recorder poisoned")
+            .push(tagged);
+    }
+
+    /// Each tag over every row the reader returned.
+    pub(super) fn finish(&self) -> Vec<BooleanArray> {
+        let recorded = self.recorded.lock().expect("item tag recorder poisoned");
+
+        (0..self.tags.len())
+            .map(|tag| {
+                let parts: Vec<&dyn Array> = recorded
+                    .iter()
+                    .map(|batch| &batch[tag] as &dyn Array)
+                    .collect();
+                if parts.is_empty() {
+                    return BooleanArray::from(Vec::<bool>::new());
+                }
+                let joined = arrow::compute::concat(&parts).expect("tags are boolean");
+                joined.as_boolean().clone()
+            })
+            .collect()
+    }
 }
 
 /// Decode only the requested physical rows, without re-reading predicate or

@@ -50,6 +50,19 @@ pub struct ScanRequest<'a> {
     /// Read these physical rows directly. Positions must be sorted and unique;
     /// predicates and block bounds must already have been applied by the caller.
     pub row_indices: Option<&'a [u64]>,
+    /// Append one boolean column per tag: whether one of its items matched
+    /// the row. Readers must honor it whenever `predicates` is not empty.
+    pub item_tags: Vec<ItemTag<'a>>,
+}
+
+/// Rows some of a scan's items matched, as a column of the scan's output, so
+/// that a relation follows the rows its own items matched without evaluating
+/// them again.
+#[derive(Clone)]
+pub struct ItemTag<'a> {
+    pub column: &'a str,
+    /// Indices into the request's `predicates`.
+    pub items: &'a [usize],
 }
 
 impl<'a> ScanRequest<'a> {
@@ -66,6 +79,7 @@ impl<'a> ScanRequest<'a> {
             required_columns: Vec::new(),
             row_index_column: None,
             row_indices: None,
+            item_tags: Vec::new(),
         }
     }
 }
@@ -1345,6 +1359,9 @@ fn scan_row_groups(
     let mut tracked = request
         .row_index_column
         .map(|_| super::positions::TrackedRows::default());
+    let item_tags = has_predicates
+        .then(|| super::positions::ItemTags::new(request))
+        .flatten();
 
     if has_predicates || has_block_filter || has_key_filter || has_hierarchical_filter {
         let mut filter_stages: Vec<Box<dyn parquet::arrow::arrow_reader::ArrowPredicate>> =
@@ -1419,8 +1436,9 @@ fn scan_row_groups(
         }
 
         // Predicate stages: first column gets its own stage (most selective — sort key leader),
-        // remaining columns are merged into a single stage.
-        if request.predicates.len() == 1 {
+        // remaining columns are merged into a single stage. Tags need each
+        // item's own answer, which only the stage evaluating all of them has.
+        if request.predicates.len() == 1 && item_tags.is_none() {
             let pred = request.predicates[0];
             let (first, rest) = match pred.columns.split_first() {
                 Some((first, rest)) => (Some(first), rest),
@@ -1481,13 +1499,25 @@ fn scan_row_groups(
             let pred_projection = ProjectionMask::roots(parquet_schema, pred_col_indices);
             let predicates: Vec<RowPredicate> =
                 request.predicates.iter().map(|&p| p.clone()).collect();
+            let every_item: Vec<usize> = (0..predicates.len()).collect();
+            let item_tags = item_tags.clone();
 
+            // Last, so that the rows it selects are the rows read.
             filter_stages.push(Box::new(ArrowPredicateFn::new(
                 pred_projection,
                 move |batch: RecordBatch| {
-                    let pred_refs: Vec<&RowPredicate> = predicates.iter().collect();
-                    crate::scan::predicate::or_row_predicates(&pred_refs, &batch)
-                        .map_err(|e| ArrowError::ComputeError(e.to_string()))
+                    let masks = predicates
+                        .iter()
+                        .map(|predicate| predicate.evaluate(&batch))
+                        .collect::<std::result::Result<Vec<_>, _>>()
+                        .map_err(|e| ArrowError::ComputeError(e.to_string()))?;
+                    let matched =
+                        crate::scan::predicate::or_masks(&masks, &every_item, batch.num_rows());
+
+                    if let Some(tags) = &item_tags {
+                        tags.record(&masks, &matched);
+                    }
+                    Ok(matched)
                 },
             )));
         }
@@ -1502,7 +1532,8 @@ fn scan_row_groups(
 
     let reader = builder.build().context("building parquet reader")?;
     let positions = tracked.map(|tracked| tracked.finish(table, row_groups));
-    let mut position_offset = 0;
+    let tag_columns = item_tags.map(|tags| tags.finish());
+    let mut rows_read = 0;
 
     let mut output_batches = Vec::new();
 
@@ -1519,10 +1550,14 @@ fn scan_row_groups(
             projected = super::positions::append_positions(
                 &projected,
                 name,
-                positions.slice(position_offset, batch.num_rows()),
+                positions.slice(rows_read, batch.num_rows()),
             )?;
-            position_offset += batch.num_rows();
         }
+        for (tag, values) in request.item_tags.iter().zip(tag_columns.iter().flatten()) {
+            let values = Arc::new(values.slice(rows_read, batch.num_rows()));
+            projected = super::positions::append_column(&projected, tag.column, values)?;
+        }
+        rows_read += batch.num_rows();
 
         output_batches.push(projected);
     }

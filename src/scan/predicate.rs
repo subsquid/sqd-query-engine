@@ -1151,6 +1151,20 @@ pub fn or_row_predicates(predicates: &[&RowPredicate], batch: &RecordBatch) -> M
     Ok(result.unwrap_or_else(|| all(batch.num_rows(), false)))
 }
 
+/// The Kleene OR of the masks `items` picks out of `masks`; no row for none.
+pub fn or_masks(masks: &[BooleanArray], items: &[usize], len: usize) -> BooleanArray {
+    items
+        .iter()
+        .map(|&item| &masks[item])
+        .fold(None, |result: Option<BooleanArray>, mask| {
+            Some(match result {
+                None => mask.clone(),
+                Some(prev) => or_kleene(&prev, mask).unwrap(),
+            })
+        })
+        .unwrap_or_else(|| all(len, false))
+}
+
 /// A row group's statistics for one column, normalized against the type the
 /// column is stored at, or `None` where the writer recorded none.
 pub type ColumnStats<'a> = dyn Fn(&str) -> Option<StatRange> + 'a;
@@ -1159,22 +1173,6 @@ pub type ColumnStats<'a> = dyn Fn(&str) -> Option<StatRange> + 'a;
 pub fn can_skip_row_group_or(predicates: &[&RowPredicate], stats_fn: &ColumnStats) -> bool {
     // OR: skip only if ALL predicates say skip
     predicates.iter().all(|p| p.can_skip_row_group(stats_fn))
-}
-
-/// Filter a RecordBatch to only include rows matching any of the given predicates (OR'd).
-/// Returns None if the filtered batch would be empty.
-pub fn evaluate_predicates_on_batch(
-    batch: &RecordBatch,
-    predicates: &[RowPredicate],
-) -> Result<Option<RecordBatch>, UnsupportedType> {
-    if batch.num_rows() == 0 {
-        return Ok(None);
-    }
-    let pred_refs: Vec<&RowPredicate> = predicates.iter().collect();
-    let mask = or_row_predicates(&pred_refs, batch)?;
-    let filtered =
-        arrow::compute::filter_record_batch(batch, &mask).expect("mask sized to the batch");
-    Ok((filtered.num_rows() > 0).then_some(filtered))
 }
 
 /// Whether a predicate can be evaluated against a column stored at

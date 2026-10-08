@@ -67,12 +67,6 @@ impl<'a> SelectionReader<'a> {
                 if relation.kind != RelationKind::Join {
                     extend_unique(primary, desc.address_column.iter().cloned());
                 }
-                for predicate in relation.source_predicates.iter().flatten() {
-                    extend_unique(
-                        primary,
-                        predicate.required_columns().into_iter().map(str::to_owned),
-                    );
-                }
             }
             for relation in &table.relations {
                 let desc = metadata.table(&relation.target_table)?;

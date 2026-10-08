@@ -1150,7 +1150,7 @@ mod tests {
                 left_key: vec!["block_number".to_string(), "transaction_index".to_string()],
                 right_key: vec!["block_number".to_string(), "transaction_index".to_string()],
                 output_columns: vec![],
-                source_predicates: None,
+                source_items: None,
             }],
         };
 
@@ -1167,40 +1167,36 @@ mod tests {
         assert!(resolved.contains(&"program_id".to_string()));
     }
 
-    /// Covers CT-4 · INV-R1
+    /// A relation some items asked for follows the rows the scan marked as
+    /// theirs, so the columns those items filter on are not read for it.
     #[test]
-    fn test_resolve_includes_source_predicate_columns() {
+    fn test_resolve_reads_no_source_predicate_columns() {
         let meta = solana_meta();
         let instr = meta.table("instructions").unwrap();
 
-        // When a relation has source_predicates (e.g., is_committed filter),
-        // resolve_output_columns adds those predicate columns.
         let table_plan = crate::query::TablePlan {
             table: "instructions".to_string(),
             output_columns: vec!["program_id".to_string()],
-            predicates: vec![],
+            predicates: vec![
+                crate::scan::predicate::RowPredicate::new(vec![crate::scan::predicate::col_eq(
+                    "is_committed",
+                    crate::scan::predicate::ScalarValue::Boolean(true),
+                )]),
+                crate::scan::predicate::RowPredicate::new(vec![]),
+            ],
             relations: vec![crate::query::RelationPlan {
                 target_table: "transactions".to_string(),
                 kind: crate::query::RelationKind::Join,
                 left_key: vec!["block_number".to_string(), "transaction_index".to_string()],
                 right_key: vec!["block_number".to_string(), "transaction_index".to_string()],
                 output_columns: vec![],
-                source_predicates: Some(vec![crate::scan::predicate::RowPredicate::new(vec![
-                    crate::scan::predicate::col_eq(
-                        "is_committed",
-                        crate::scan::predicate::ScalarValue::Boolean(true),
-                    ),
-                ])]),
+                source_items: Some(vec![0]),
             }],
         };
 
         let resolved = resolve_output_columns(&table_plan, instr);
 
-        // is_committed is added because of source_predicates
-        assert!(
-            resolved.contains(&"is_committed".to_string()),
-            "source predicate column should be in resolved columns"
-        );
+        assert!(!resolved.contains(&"is_committed".to_string()));
     }
 
     #[test]
