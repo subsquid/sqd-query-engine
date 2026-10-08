@@ -21,7 +21,7 @@ pub(super) struct SelectionReader<'a> {
     track_positions: bool,
 }
 
-const ROW_INDEX: &str = "__sqd_selected_row";
+pub(super) const ROW_INDEX: &str = "__sqd_selected_row";
 
 fn row_key(desc: &TableDescription) -> Vec<String> {
     let mut columns = vec![desc.block_number_column.clone()];
@@ -44,13 +44,6 @@ impl<'a> SelectionReader<'a> {
         metadata: &DatasetDescription,
     ) -> Option<Self> {
         let track_positions = inner.supports_row_positions();
-        let mut source_counts = HashMap::<&str, usize>::new();
-        for table in &plan.table_plans {
-            *source_counts.entry(&table.table).or_default() += 1;
-            for relation in &table.relations {
-                *source_counts.entry(&relation.target_table).or_default() += 1;
-            }
-        }
         let mut columns = HashMap::<String, Vec<String>>::new();
         let block_desc = metadata.table(&plan.block_table)?;
         columns.insert(
@@ -60,9 +53,9 @@ impl<'a> SelectionReader<'a> {
         for table in &plan.table_plans {
             let desc = metadata.table(&table.table)?;
             let primary = columns.entry(table.table.clone()).or_default();
-            // A single source needs no weight deduplication. Physical positions
-            // identify its rows later, so wide item keys can stay unread here.
-            if !track_positions || source_counts[table.table.as_str()] > 1 {
+            // Physical positions identify a row both to the weight dedup and to
+            // the later read, so wide item keys can stay unread here.
+            if !track_positions {
                 extend_unique(primary, row_key(desc));
             }
             extend_unique(
@@ -84,7 +77,7 @@ impl<'a> SelectionReader<'a> {
             for relation in &table.relations {
                 let desc = metadata.table(&relation.target_table)?;
                 let target = columns.entry(relation.target_table.clone()).or_default();
-                if !track_positions || source_counts[relation.target_table.as_str()] > 1 {
+                if !track_positions {
                     extend_unique(target, row_key(desc));
                 }
                 extend_unique(target, relation.right_key.iter().cloned());

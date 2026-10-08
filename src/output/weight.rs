@@ -1,3 +1,4 @@
+use super::materialize::ROW_INDEX;
 use crate::integers::{BlockNumbers, IntColumn};
 use crate::metadata::{DatasetDescription, TableDescription, VirtualField, WeightSource};
 use crate::query::Plan;
@@ -411,7 +412,10 @@ pub(crate) fn accumulate_block_weights(
 }
 
 /// Accumulate per-block weights with row deduplication.
-/// Rows are identified by block number and item-key values.
+///
+/// A row is its physical position when every batch carries one, as the
+/// reference dedups by row index; otherwise it is its block number and
+/// item-key values.
 fn accumulate_dedup_contributions(
     contributions: &[WeightContribution<'_>],
     bn_column: &str,
@@ -422,6 +426,26 @@ fn accumulate_dedup_contributions(
         .iter()
         .flat_map(|source| source.batches.iter().map(move |batch| (source, batch)))
         .collect();
+
+    let positions: Option<Vec<&UInt64Array>> = batches
+        .iter()
+        .map(|(_, batch)| {
+            batch
+                .column_by_name(ROW_INDEX)?
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+        })
+        .collect();
+    if let Some(positions) = positions {
+        let mut seen = FxHashSet::default();
+        for ((source, batch), positions) in batches.iter().zip(positions) {
+            accumulate_rows(source, batch, bn_column, weights, |row, _| {
+                seen.insert(positions.value(row))
+            });
+        }
+        return;
+    }
+
     let keys: Vec<Vec<Option<&dyn Array>>> = batches
         .iter()
         .map(|(_, batch)| {
@@ -433,30 +457,45 @@ fn accumulate_dedup_contributions(
         .collect();
     let mut seen = FxHashSet::default();
     for ((source, batch), columns) in batches.iter().zip(&keys) {
-        let Some(numbers) = batch.column_by_name(bn_column) else {
+        accumulate_rows(source, batch, bn_column, weights, |row, block| {
+            seen.insert((block, WeightRow { columns, row }))
+        });
+    }
+}
+
+/// Add the weight of every row of `batch` that `is_new` admits to its block.
+fn accumulate_rows(
+    source: &WeightContribution<'_>,
+    batch: &RecordBatch,
+    bn_column: &str,
+    weights: &mut FxHashMap<u64, u64>,
+    mut is_new: impl FnMut(usize, u64) -> bool,
+) {
+    let Some(numbers) = batch.column_by_name(bn_column) else {
+        return;
+    };
+    let Ok(blocks) = BlockNumbers::resolve(numbers.as_ref(), bn_column) else {
+        return;
+    };
+    let weight_columns: Vec<_> = source
+        .weight_cols
+        .iter()
+        .filter_map(|name| batch.column_by_name(name))
+        .collect();
+
+    for row in 0..batch.num_rows() {
+        let block = blocks.at(row);
+        if !is_new(row, block) {
             continue;
-        };
-        let Ok(blocks) = BlockNumbers::resolve(numbers.as_ref(), bn_column) else {
-            continue;
-        };
-        let weight_columns: Vec<_> = source
-            .weight_cols
-            .iter()
-            .filter_map(|name| batch.column_by_name(name))
-            .collect();
-        for row in 0..batch.num_rows() {
-            let block = blocks.at(row);
-            if !seen.insert((block, WeightRow { columns, row })) {
-                continue;
-            }
-            let weight = weight_columns
-                .iter()
-                .fold(source.fixed_weight, |sum, column| {
-                    sum.saturating_add(get_weight_value(column.as_ref(), row))
-                });
-            let total = weights.entry(block).or_default();
-            *total = total.saturating_add(weight);
         }
+
+        let weight = weight_columns
+            .iter()
+            .fold(source.fixed_weight, |sum, column| {
+                sum.saturating_add(get_weight_value(column.as_ref(), row))
+            });
+        let total = weights.entry(block).or_default();
+        *total = total.saturating_add(weight);
     }
 }
 
@@ -692,6 +731,58 @@ mod tests {
             );
             assert_eq!(weights[&100], 200);
         }
+    }
+
+    /// A physical row is charged once however many sources return it, and two
+    /// rows are two rows even when their keys are equal. A source without
+    /// positions sends every source back to comparing keys.
+    #[test]
+    fn positions_identify_rows_when_every_source_has_them() {
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let batch = |positions: Option<Vec<u64>>| {
+            let mut fields = vec![
+                Field::new("block_number", DataType::UInt64, false),
+                Field::new("transaction_index", DataType::UInt32, false),
+            ];
+            let mut columns: Vec<ArrayRef> = vec![
+                Arc::new(UInt64Array::from(vec![100, 100])),
+                Arc::new(UInt32Array::from(vec![7, 7])),
+            ];
+            if let Some(positions) = positions {
+                fields.push(Field::new(ROW_INDEX, DataType::UInt64, false));
+                columns.push(Arc::new(UInt64Array::from(positions)));
+            }
+            RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
+        };
+        let weigh = |primary: RecordBatch, related: RecordBatch| {
+            let (primary, related) = ([primary], [related]);
+            let contributions = [
+                WeightContribution {
+                    batches: &primary,
+                    fixed_weight: 10,
+                    weight_cols: vec![],
+                },
+                WeightContribution {
+                    batches: &related,
+                    fixed_weight: 10,
+                    weight_cols: vec![],
+                },
+            ];
+            let mut weights = FxHashMap::default();
+            accumulate_dedup_contributions(
+                &contributions,
+                "block_number",
+                &["transaction_index"],
+                &mut weights,
+            );
+            weights[&100]
+        };
+
+        assert_eq!(weigh(batch(Some(vec![3, 4])), batch(Some(vec![4, 3]))), 20);
+        assert_eq!(weigh(batch(Some(vec![3, 4])), batch(Some(vec![5, 6]))), 40);
+        assert_eq!(weigh(batch(Some(vec![3, 4])), batch(None)), 10);
     }
 
     /// Load the solana metadata for tests.
