@@ -1,9 +1,12 @@
 mod chunk;
+mod columns;
+mod pairs;
 mod positions;
 pub mod predicate;
 mod scanner;
 
 pub use chunk::*;
+pub use columns::{ColumnCache, Window};
 pub use scanner::*;
 
 use anyhow::Result;

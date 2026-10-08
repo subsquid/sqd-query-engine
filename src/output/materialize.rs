@@ -6,13 +6,13 @@ use super::weight::{weight_projection, weight_scan_columns, TableOutput};
 use crate::metadata::{DatasetDescription, TableDescription};
 use crate::query::{Plan, RelationKind};
 use crate::scan::predicate::RowPredicate;
-use crate::scan::{ChunkReader, KeyFilter, ScanRequest};
+use crate::scan::{ChunkReader, ColumnCache, KeyFilter, ScanRequest};
 use anyhow::Result;
 use arrow::array::UInt64Array;
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Read only row identities, relation inputs and size columns while selecting a
 /// page. Required output columns are still checked by the underlying scanner.
@@ -20,7 +20,14 @@ pub(super) struct SelectionReader<'a> {
     inner: &'a dyn ChunkReader,
     columns: HashMap<String, Vec<String>>,
     track_positions: bool,
+    /// Tables more than one scan reads: their columns are decoded once, kept
+    /// here, and filtered in memory by each.
+    shared: HashSet<String>,
+    decoded: ColumnCache,
 }
+
+/// Decoded key and size columns one query may keep while it selects a page.
+const SELECTION_COLUMN_BUDGET: u64 = 64 << 20;
 
 pub(super) const ROW_INDEX: &str = "__sqd_selected_row";
 
@@ -46,6 +53,28 @@ impl<'a> SelectionReader<'a> {
     ) -> Option<Self> {
         let track_positions = inner.supports_row_positions();
         let mut columns = HashMap::<String, Vec<String>>::new();
+        // Only scans that read most of a table share it: a relation from a
+        // selective item reads a few row groups, and keeping a table decoded
+        // for it costs memory and saves little.
+        let mut scans = HashMap::<&str, usize>::new();
+        for table in &plan.table_plans {
+            let unfiltered = table.predicates.iter().all(RowPredicate::matches_every_row);
+            *scans.entry(&table.table).or_default() += usize::from(unfiltered);
+            for relation in &table.relations {
+                let broad = match &relation.source_items {
+                    Some(items) => items
+                        .iter()
+                        .all(|&item| table.predicates[item].matches_every_row()),
+                    None => unfiltered,
+                };
+                *scans.entry(&relation.target_table).or_default() += usize::from(broad);
+            }
+        }
+        let shared = scans
+            .into_iter()
+            .filter(|&(_, count)| count > 1)
+            .map(|(table, _)| table.to_owned())
+            .collect();
         let block_desc = metadata.table(&plan.block_table)?;
         columns.insert(
             plan.block_table.clone(),
@@ -107,6 +136,8 @@ impl<'a> SelectionReader<'a> {
             inner,
             columns,
             track_positions,
+            shared,
+            decoded: ColumnCache::new(SELECTION_COLUMN_BUDGET),
         })
     }
 }
@@ -115,6 +146,11 @@ impl SelectionReader<'_> {
     /// Whether the rows this reader returns carry physical positions.
     pub(super) fn tracks_positions(&self) -> bool {
         self.track_positions
+    }
+
+    /// Release the columns kept for selection; payload reads do not use them.
+    pub(super) fn release_columns(&self) {
+        self.decoded.clear();
     }
 }
 
@@ -128,6 +164,7 @@ impl ChunkReader for SelectionReader<'_> {
             &ScanRequest {
                 output_columns: columns.iter().map(String::as_str).collect(),
                 row_index_column: self.track_positions.then_some(ROW_INDEX),
+                column_cache: self.shared.contains(table).then_some(&self.decoded),
                 ..request.clone()
             },
         )

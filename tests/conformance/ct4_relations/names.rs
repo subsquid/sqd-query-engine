@@ -238,6 +238,16 @@ const RELATION_QUERY: &str = r#"{"type":"test","fromBlock":100,"toBlock":115,
     "logs":[{"address":["a"],"transaction":true,"transactionLogs":true},
             {"address":["b"]}]}"#;
 
+/// Items that match every row, so that both tables are read by more than one
+/// scan and their columns are decoded once and filtered in memory.
+const SHARED_QUERY: &str = r#"{"type":"test","fromBlock":100,"toBlock":115,
+    "fields":{"block":{"number":true},
+              "log":{"logIndex":true,"transactionIndex":true,"address":true,
+                     "flag":true,"other":true},
+              "transaction":{"transactionIndex":true,"gasUsed":true}},
+    "transactions":[{}],
+    "logs":[{"transaction":true,"transactionLogs":true},{}]}"#;
+
 /// A relation's mark takes no name a stored column has: not the relation's
 /// own join key, not a selected boolean that reads like a mark, and not a
 /// selected field named like another relation's mark.
@@ -269,19 +279,23 @@ fn a_stored_column_named_like_a_relation_mark_is_a_column() {
         ),
     ];
     let mut failed = Vec::new();
-    for range_reads in [true, false] {
-        let expected = answer(PLAIN, RELATION_QUERY, DataType::UInt64, None, range_reads);
-        assert!(
-            expected.contains("gasUsed"),
-            "the relation followed nothing"
-        );
+    for (query_name, query) in [("filtered", RELATION_QUERY), ("shared", SHARED_QUERY)] {
+        for range_reads in [true, false] {
+            let expected = answer(PLAIN, query, DataType::UInt64, None, range_reads);
+            assert!(
+                expected.contains("gasUsed"),
+                "the relation followed nothing"
+            );
 
-        for (what, names) in cases {
-            let answered = std::panic::catch_unwind(|| {
-                answer(names, RELATION_QUERY, DataType::UInt64, None, range_reads)
-            });
-            if answered.ok().as_ref() != Some(&expected) {
-                failed.push(format!("{what}, range reads {range_reads}"));
+            for (what, names) in cases {
+                let answered = std::panic::catch_unwind(|| {
+                    answer(names, query, DataType::UInt64, None, range_reads)
+                });
+                if answered.ok().as_ref() != Some(&expected) {
+                    failed.push(format!(
+                        "{what}, {query_name} items, range reads {range_reads}"
+                    ));
+                }
             }
         }
     }
@@ -307,19 +321,50 @@ fn a_stored_column_named_like_row_positions_is_a_column() {
         "transactions":[{}],
         "logs":[{"address":["a"],"transaction":true}]}"#;
 
-    let positions = Names {
-        value: "__sqd_selected_row",
-        ..PLAIN
-    };
+    let shared = r#"{"type":"test","fromBlock":100,"toBlock":115,
+        "fields":{"block":{"number":true},
+                  "log":{"logIndex":true},
+                  "transaction":{"transactionIndex":true,"rowValue":true,"gasUsed":true}},
+        "transactions":[{}],
+        "logs":[{"transaction":true}]}"#;
+
+    // A payload field is read only for the rows a page holds; a join key is
+    // read while the page is chosen, beside the positions.
+    let cases = [
+        (
+            "a payload field",
+            Names {
+                value: "__sqd_selected_row",
+                ..PLAIN
+            },
+        ),
+        (
+            "the join key",
+            Names {
+                key: "__sqd_selected_row",
+                ..PLAIN
+            },
+        ),
+    ];
     let mut failed = Vec::new();
-    for range_reads in [true, false] {
-        for value_type in [DataType::UInt64, DataType::UInt32] {
-            for budget in [None, Some(512), Some(2048)] {
-                let run = |names| answer(names, query, value_type.clone(), budget, range_reads);
-                if run(positions) != run(PLAIN) {
-                    failed.push(format!(
-                        "{value_type} at a budget of {budget:?}, range reads {range_reads}"
-                    ));
+    for (what, positions) in cases {
+        for (query_name, query) in [("filtered", query), ("shared", shared)] {
+            for range_reads in [true, false] {
+                for value_type in [DataType::UInt64, DataType::UInt32] {
+                    for budget in [None, Some(512), Some(2048)] {
+                        let run = |names| {
+                            std::panic::catch_unwind(|| {
+                                answer(names, query, value_type.clone(), budget, range_reads)
+                            })
+                            .ok()
+                        };
+                        if run(positions) != run(PLAIN) {
+                            failed.push(format!(
+                                "{what}, {value_type} at a budget of {budget:?}, \
+                                 {query_name} items, range reads {range_reads}"
+                            ));
+                        }
+                    }
                 }
             }
         }

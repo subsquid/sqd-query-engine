@@ -28,7 +28,7 @@ use crate::query::{Plan, RelationKind, TablePlan};
 use crate::scan::predicate::RowPredicate;
 use crate::scan::{
     ChunkReader, HierarchicalFilter, HierarchicalMode, ItemTag, KeyFilter, ParquetChunkReader,
-    ScanRequest,
+    ScanRequest, Window,
 };
 use crate::text::StringColumn;
 use anyhow::Result;
@@ -452,6 +452,16 @@ fn initial_range_end(
     ))
 }
 
+/// What a Children or Parents relation follows: which source addresses, and how
+/// a target's address relates to them.
+struct HierarchicalSpec<'a> {
+    group_keys: Vec<&'a str>,
+    source_address: &'a str,
+    target_address: &'a str,
+    mode: HierarchicalMode,
+    inclusive: bool,
+}
+
 /// Read all primary and relation rows for one complete block range.
 fn scan_tables(
     plan: &Plan,
@@ -498,10 +508,15 @@ fn scan_tables(
         let req_col_refs: Vec<&str> = req_cols.iter().map(|s| s.as_str()).collect();
         let pred_refs: Vec<&RowPredicate> = table_plan.predicates.iter().collect();
 
+        let window = Window {
+            from: Some(from_block),
+            to: to_block,
+        };
         let mut request = ScanRequest::new(output_col_refs);
         request.predicates = pred_refs;
         request.from_block = Some(from_block);
         request.to_block = to_block;
+        request.window = Some(window);
         request.block_number_column = Some(table_desc.block_number_column.as_str());
         request.required_columns = req_col_refs;
 
@@ -648,46 +663,75 @@ fn scan_tables(
                 })
                 .collect();
 
-            // Build hierarchical filters for Children/Parents relations
-            let hierarchical_filters: Vec<Option<HierarchicalFilter>> = table_plan
+            // Build hierarchical filters for Children/Parents relations. Inner
+            // and parent relations of the same rows share their source index.
+            let hierarchical_specs: Vec<Option<HierarchicalSpec>> = table_plan
                 .relations
-                .par_iter()
+                .iter()
+                .map(|rel| {
+                    let mode = match rel.kind {
+                        RelationKind::Children => HierarchicalMode::Children,
+                        RelationKind::Parents => HierarchicalMode::Parents,
+                        RelationKind::Join => return None,
+                    };
+                    let rel_table_desc = metadata.table(&rel.target_table)?;
+                    let target_address = find_address_column(rel_table_desc)?;
+                    let source_address = find_address_column(table_desc).unwrap_or(target_address);
+                    // Cross-table relations use inclusive prefix matching because the
+                    // source and target address columns are different (e.g., calls.address
+                    // vs events.call_address). Same-table uses strict matching.
+                    let inclusive = source_address != target_address;
+                    let group_keys = group_keys_for_relation(&rel.left_key, Some(target_address));
+                    (!group_keys.is_empty()).then_some(HierarchicalSpec {
+                        group_keys,
+                        source_address,
+                        target_address,
+                        mode,
+                        inclusive,
+                    })
+                })
+                .collect();
+            let mut distinct_sources: Vec<usize> = Vec::new();
+            let source_of: Vec<Option<usize>> = hierarchical_specs
+                .iter()
                 .enumerate()
-                .map(|(rel_idx, rel)| match rel.kind {
-                    RelationKind::Children | RelationKind::Parents => {
-                        let rel_table_desc = metadata.table(&rel.target_table)?;
-                        let target_addr_col = find_address_column(rel_table_desc)?;
-                        let source_addr_col =
-                            find_address_column(table_desc).unwrap_or(target_addr_col);
-                        // Cross-table relations use inclusive prefix matching because the
-                        // source and target address columns are different (e.g., calls.address
-                        // vs events.call_address). Same-table uses strict matching.
-                        let inclusive = source_addr_col != target_addr_col;
-                        let gk = group_keys_for_relation(&rel.left_key, Some(target_addr_col));
-                        if gk.is_empty() {
-                            return None;
-                        }
-                        let mode = match rel.kind {
-                            RelationKind::Children => HierarchicalMode::Children,
-                            _ => HierarchicalMode::Parents,
-                        };
-                        let source_batches =
-                            rel_filtered_batches[rel_idx].as_deref().unwrap_or(&batches);
-                        let hf = HierarchicalFilter::build(
-                            source_batches,
-                            &gk,
-                            source_addr_col,
-                            target_addr_col,
-                            mode,
-                            inclusive,
-                        );
-                        if hf.is_empty() {
-                            None
-                        } else {
-                            Some(hf)
-                        }
-                    }
-                    _ => None,
+                .map(|(rel_idx, spec)| {
+                    let spec = spec.as_ref()?;
+                    let items = &table_plan.relations[rel_idx].source_items;
+                    let same = distinct_sources.iter().position(|&other| {
+                        let other_spec = hierarchical_specs[other].as_ref().expect("built specs");
+                        other_spec.group_keys == spec.group_keys
+                            && other_spec.source_address == spec.source_address
+                            && &table_plan.relations[other].source_items == items
+                    });
+                    Some(same.unwrap_or_else(|| {
+                        distinct_sources.push(rel_idx);
+                        distinct_sources.len() - 1
+                    }))
+                })
+                .collect();
+            let built_sources: Vec<HierarchicalFilter> = distinct_sources
+                .par_iter()
+                .map(|&rel_idx| {
+                    let spec = hierarchical_specs[rel_idx].as_ref().expect("built specs");
+                    HierarchicalFilter::build(
+                        rel_filtered_batches[rel_idx].as_deref().unwrap_or(&batches),
+                        &spec.group_keys,
+                        spec.source_address,
+                        spec.target_address,
+                        spec.mode,
+                        spec.inclusive,
+                    )
+                })
+                .collect();
+            let hierarchical_filters: Vec<Option<HierarchicalFilter>> = hierarchical_specs
+                .iter()
+                .zip(&source_of)
+                .map(|(spec, source)| {
+                    let spec = spec.as_ref()?;
+                    let built = &built_sources[(*source)?];
+                    let filter = built.with_mode(spec.target_address, spec.mode, spec.inclusive);
+                    (!filter.is_empty()).then_some(filter)
                 })
                 .collect();
 
@@ -726,6 +770,7 @@ fn scan_tables(
                     let mut rel_request = ScanRequest::new(rel_col_refs);
                     rel_request.from_block = actual_min_block;
                     rel_request.to_block = actual_max_block;
+                    rel_request.window = Some(window);
                     rel_request.required_columns = rel_req_refs;
                     if let Some(desc) = rel_table_desc {
                         rel_request.block_number_column = Some(desc.block_number_column.as_str());
@@ -1116,7 +1161,8 @@ fn execute_chunk_fmt(
         });
     }
 
-    if selection_reader.is_some() {
+    if let Some(reader) = &selection_reader {
+        reader.release_columns();
         let t_materialize = timer!();
         let headers = std::mem::take(&mut block_batches);
         let (tables, headers) = rayon::join(

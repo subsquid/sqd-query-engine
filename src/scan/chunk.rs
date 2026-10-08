@@ -200,6 +200,11 @@ impl ParquetTable {
         &self.metadata
     }
 
+    /// The parquet metadata, shared.
+    pub(crate) fn metadata_arc(&self) -> Arc<ParquetMetaData> {
+        self.metadata.clone()
+    }
+
     /// Pre-built Arrow reader metadata (avoids re-reading parquet footer).
     pub fn arrow_metadata(&self) -> &ArrowReaderMetadata {
         &self.arrow_metadata

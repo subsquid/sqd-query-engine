@@ -1,0 +1,211 @@
+//! Sets of two-integer join keys: a block number and an item's index in the
+//! block, the key of nearly every relation. A relation scan asks one of these
+//! about every row of its target table.
+
+use rustc_hash::FxHashSet;
+
+/// Pack two join keys into one (bijective; build and probe must agree).
+#[inline(always)]
+pub(super) fn pack16(a: u64, b: u64) -> u128 {
+    ((a as u128) << 64) | (b as u128)
+}
+
+pub(super) enum PairSet {
+    Dense(DensePairs),
+    Hashed(FxHashSet<u128>),
+}
+
+impl PairSet {
+    pub(super) fn new(mut pairs: Vec<(u64, u64)>) -> Self {
+        pairs.sort_unstable();
+        pairs.dedup();
+
+        match DensePairs::build(&pairs) {
+            Some(dense) => Self::Dense(dense),
+            None => Self::Hashed(pairs.iter().map(|&(a, b)| pack16(a, b)).collect()),
+        }
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        match self {
+            Self::Dense(dense) => dense.len == 0,
+            Self::Hashed(set) => set.is_empty(),
+        }
+    }
+
+    #[inline]
+    pub(super) fn contains(&self, a: u64, b: u64) -> bool {
+        match self {
+            Self::Dense(dense) => dense.contains(a, b),
+            Self::Hashed(set) => set.contains(&pack16(a, b)),
+        }
+    }
+}
+
+/// A bitmap of second components for each first component, when the first
+/// components are close together and the bitmaps are not much larger than the
+/// pairs: a window of blocks and the item indices within each.
+pub(super) struct DensePairs {
+    first: u64,
+    /// By first component, offset from `first`.
+    slots: Vec<Slot>,
+    bits: Vec<u64>,
+    len: usize,
+}
+
+/// Where a first component's bitmap starts in `bits`, the second component its
+/// first bit stands for, and how many bits it has.
+#[derive(Clone, Copy, Default)]
+struct Slot {
+    start: u64,
+    low: u64,
+    width: u64,
+}
+
+/// First components one set may span.
+const MAX_SLOTS: u64 = 1 << 16;
+
+/// Bits one set may hold beyond what its pairs would take in a hash set.
+const MIN_BITS: u64 = 1 << 20;
+
+impl DensePairs {
+    /// `None` when the pairs are too sparse for bitmaps. `pairs` is sorted
+    /// and unique.
+    fn build(pairs: &[(u64, u64)]) -> Option<Self> {
+        let (Some(&(first, _)), Some(&(last, _))) = (pairs.first(), pairs.last()) else {
+            return Some(Self {
+                first: 0,
+                slots: Vec::new(),
+                bits: Vec::new(),
+                len: 0,
+            });
+        };
+        if last - first >= MAX_SLOTS {
+            return None;
+        }
+        let span = last - first + 1;
+
+        let bit_budget = (pairs.len() as u64).saturating_mul(64).max(MIN_BITS);
+        let mut slots = vec![Slot::default(); span as usize];
+        let mut total = 0u64;
+        for group in pairs.chunk_by(|x, y| x.0 == y.0) {
+            let low = group[0].1;
+            let high = group[group.len() - 1].1;
+            let width = (high - low).checked_add(1)?;
+
+            slots[(group[0].0 - first) as usize] = Slot {
+                start: total,
+                low,
+                width,
+            };
+            total = total
+                .checked_add(width)
+                .filter(|&total| total <= bit_budget)?;
+        }
+
+        let mut bits = vec![0u64; total.div_ceil(64) as usize];
+        for &(a, b) in pairs {
+            let slot = slots[(a - first) as usize];
+            let bit = slot.start + (b - slot.low);
+            bits[(bit >> 6) as usize] |= 1 << (bit & 63);
+        }
+
+        Some(Self {
+            first,
+            slots,
+            bits,
+            len: pairs.len(),
+        })
+    }
+
+    #[inline]
+    fn contains(&self, a: u64, b: u64) -> bool {
+        let Some(slot) = usize::try_from(a.wrapping_sub(self.first))
+            .ok()
+            .and_then(|index| self.slots.get(index))
+        else {
+            return false;
+        };
+        let offset = b.wrapping_sub(slot.low);
+        if offset >= slot.width {
+            return false;
+        }
+
+        let bit = slot.start + offset;
+        (self.bits[(bit >> 6) as usize] >> (bit & 63)) & 1 == 1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn agrees(pairs: Vec<(u64, u64)>, probes: Vec<(u64, u64)>) {
+        let set = PairSet::new(pairs.clone());
+        let oracle: FxHashSet<(u64, u64)> = pairs.into_iter().collect();
+
+        assert_eq!(set.is_empty(), oracle.is_empty());
+        for (a, b) in oracle.iter().copied().chain(probes) {
+            assert_eq!(set.contains(a, b), oracle.contains(&(a, b)), "({a}, {b})");
+        }
+    }
+
+    #[test]
+    fn edges_of_the_key_space_are_members_or_not() {
+        let max = u64::MAX;
+        agrees(vec![], vec![(0, 0), (max, max)]);
+        agrees(vec![(0, 0)], vec![(0, 1), (1, 0), (max, 0), (0, max)]);
+        agrees(
+            vec![(max, max)],
+            vec![(max, max - 1), (max - 1, max), (0, 0)],
+        );
+        agrees(
+            vec![(5, 0), (5, max)],
+            vec![(5, 1), (5, max - 1), (4, 0), (6, max)],
+        );
+        agrees(vec![(0, 7), (max, 7)], vec![(1, 7), (max - 1, 7)]);
+        // Sign-extended keys of negative values sit at the top of the space.
+        agrees(
+            vec![(max - 2, 3), (max, 1)],
+            vec![(max - 1, 3), (max, 3), (2, 3)],
+        );
+    }
+
+    #[test]
+    fn a_window_of_blocks_is_dense_and_a_wide_one_is_hashed() {
+        let window: Vec<_> = (1000..1016)
+            .flat_map(|b| (0..200).map(move |t| (b, t)))
+            .collect();
+        assert!(matches!(PairSet::new(window), PairSet::Dense(_)));
+
+        let wide = vec![(0, 0), (MAX_SLOTS, 0)];
+        assert!(matches!(PairSet::new(wide), PairSet::Hashed(_)));
+
+        let sparse = vec![(0, 0), (0, MIN_BITS * 4)];
+        assert!(matches!(PairSet::new(sparse), PairSet::Hashed(_)));
+    }
+
+    proptest! {
+        #[test]
+        fn a_dense_window_answers_like_a_set(
+            base in prop_oneof![Just(0u64), Just(u64::MAX - 40), any::<u64>().prop_map(|v| v / 2)],
+            pairs in prop::collection::vec((0u64..32, 0u64..3000), 0..400),
+            probes in prop::collection::vec((0u64..40, 0u64..3100), 0..400),
+        ) {
+            let shift = |(a, b): (u64, u64)| (base.wrapping_add(a), b);
+            agrees(
+                pairs.into_iter().map(shift).collect(),
+                probes.into_iter().map(shift).collect(),
+            );
+        }
+
+        #[test]
+        fn any_pairs_answer_like_a_set(
+            pairs in prop::collection::vec((any::<u64>(), any::<u64>()), 0..64),
+            probes in prop::collection::vec((any::<u64>(), any::<u64>()), 0..64),
+        ) {
+            agrees(pairs, probes);
+        }
+    }
+}
