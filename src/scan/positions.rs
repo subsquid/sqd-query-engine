@@ -126,11 +126,18 @@ pub(super) struct ItemTags {
 }
 
 impl ItemTags {
-    pub(super) fn new(request: &ScanRequest) -> Option<Arc<Self>> {
+    /// Tags over the `active` items only, the ones the scan evaluates; an
+    /// item left out matches no row.
+    pub(super) fn new(request: &ScanRequest, active: &[usize]) -> Option<Arc<Self>> {
         let tags = request
             .item_tags
             .iter()
-            .map(|tag| tag.items.to_vec())
+            .map(|tag| {
+                tag.items
+                    .iter()
+                    .filter_map(|item| active.iter().position(|a| a == item))
+                    .collect()
+            })
             .collect::<Vec<_>>();
 
         (!tags.is_empty()).then(|| {

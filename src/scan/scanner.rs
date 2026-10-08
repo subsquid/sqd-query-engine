@@ -1278,20 +1278,8 @@ fn select_row_groups(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<
 
         // Check predicate-based row group skipping
         if !request.predicates.is_empty() {
-            let stats_fn = |col_name: &str| -> Option<crate::scan::predicate::StatRange> {
-                // Parquet stats come at the physical type; the stored type says how to read them.
-                let stored = table.schema().field_with_name(col_name).ok()?.data_type();
-                let stats = table.column_stats(rg_idx, col_name)?;
-                let (min, max) = (stats.min?, stats.max?);
-                crate::scan::predicate::StatRange::new(
-                    stored,
-                    stat_value_to_array(&min).as_ref(),
-                    stat_value_to_array(&max).as_ref(),
-                )
-            };
-
-            let pred_refs: Vec<&RowPredicate> = request.predicates.clone();
-            if crate::scan::predicate::can_skip_row_group_or(&pred_refs, &stats_fn) {
+            let stats = row_group_stats(table, rg_idx);
+            if crate::scan::predicate::can_skip_row_group_or(&request.predicates, &stats) {
                 continue;
             }
         }
@@ -1311,6 +1299,25 @@ fn select_row_groups(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<
     }
 
     Ok(row_groups)
+}
+
+/// One row group's statistics for a column, read at the type the column is
+/// stored at.
+fn row_group_stats(
+    table: &ParquetTable,
+    group: usize,
+) -> impl Fn(&str) -> Option<crate::scan::predicate::StatRange> + '_ {
+    move |column| {
+        // Parquet stats come at the physical type; the stored type says how to read them.
+        let stored = table.schema().field_with_name(column).ok()?.data_type();
+        let stats = table.column_stats(group, column)?;
+        let (min, max) = (stats.min?, stats.max?);
+        crate::scan::predicate::StatRange::new(
+            stored,
+            stat_value_to_array(&min).as_ref(),
+            stat_value_to_array(&max).as_ref(),
+        )
+    }
 }
 
 /// Scan selected row groups using a single reader: read columns, apply predicates, project output.
@@ -1348,6 +1355,23 @@ fn scan_row_groups(
     // Each stage reads only its own columns; rows eliminated by early stages
     // avoid column decoding in later stages.
     let has_predicates = !request.predicates.is_empty();
+
+    // An item whose statistics rule this row group out does not run on it.
+    let active: Vec<usize> = (0..request.predicates.len())
+        .filter(|&item| {
+            row_groups.iter().any(|&group| {
+                let stats = row_group_stats(table, group);
+                !request.predicates[item].can_skip_row_group(&stats)
+            })
+        })
+        .collect();
+    if has_predicates && active.is_empty() {
+        return Ok(Vec::new());
+    }
+    let predicates: Vec<&RowPredicate> = active
+        .iter()
+        .map(|&item| request.predicates[item])
+        .collect();
     let effective_from = request.from_block.filter(|&b| b > 0);
     // Relation keys already restrict blocks. Materialization keys can include
     // wide strings or lists, so reject blocks before decoding those components.
@@ -1360,7 +1384,7 @@ fn scan_row_groups(
         .row_index_column
         .map(|_| super::positions::TrackedRows::default());
     let item_tags = has_predicates
-        .then(|| super::positions::ItemTags::new(request))
+        .then(|| super::positions::ItemTags::new(request, &active))
         .flatten();
 
     if has_predicates || has_block_filter || has_key_filter || has_hierarchical_filter {
@@ -1438,8 +1462,8 @@ fn scan_row_groups(
         // Predicate stages: first column gets its own stage (most selective — sort key leader),
         // remaining columns are merged into a single stage. Tags need each
         // item's own answer, which only the stage evaluating all of them has.
-        if request.predicates.len() == 1 && item_tags.is_none() {
-            let pred = request.predicates[0];
+        if predicates.len() == 1 && item_tags.is_none() {
+            let pred = predicates[0];
             let (first, rest) = match pred.columns.split_first() {
                 Some((first, rest)) => (Some(first), rest),
                 None => (None, &[][..]),
@@ -1486,7 +1510,7 @@ fn scan_row_groups(
             }
         } else if has_predicates {
             let mut pred_col_indices: Vec<usize> = Vec::new();
-            for pred in &request.predicates {
+            for pred in &predicates {
                 for col in pred.required_columns() {
                     if let Ok(idx) = table.schema().index_of(col) {
                         pred_col_indices.push(idx);
@@ -1498,8 +1522,8 @@ fn scan_row_groups(
 
             // One list per column admits every row an item could match, so
             // the items themselves run only on the rows it admits.
-            let union = (request.predicates.len() > 1)
-                .then(|| crate::scan::predicate::listed_union(&request.predicates))
+            let union = (predicates.len() > 1)
+                .then(|| crate::scan::predicate::listed_union(&predicates))
                 .flatten();
             if let Some(union) = union {
                 let indices: Vec<usize> = union
@@ -1518,8 +1542,7 @@ fn scan_row_groups(
             }
 
             let pred_projection = ProjectionMask::roots(parquet_schema, pred_col_indices);
-            let predicates: Vec<RowPredicate> =
-                request.predicates.iter().map(|&p| p.clone()).collect();
+            let predicates: Vec<RowPredicate> = predicates.iter().map(|&p| p.clone()).collect();
             let every_item: Vec<usize> = (0..predicates.len()).collect();
             let item_tags = item_tags.clone();
 

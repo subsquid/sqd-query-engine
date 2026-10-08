@@ -71,9 +71,14 @@ fn a_relation_follows_the_rows_its_own_items_matched() {
         RowPredicate::new(vec![]),
         // Unknown on a null flag, and the kernel leaves the value bit set there.
         RowPredicate::new(vec![col_eq("flag", ScalarValue::Boolean(false))]),
+        // Statistics rule it out of every row group but the second.
+        RowPredicate::new(vec![col_in_list(
+            BN,
+            Arc::new(UInt64Array::from(vec![204, 206])),
+        )]),
     ];
-    let item_sets: [&[usize]; 4] = [&[0, 1, 2], &[0, 1, 2, 3], &[1], &[0, 4]];
-    let tag_sets: [&[usize]; 5] = [&[0], &[1, 2], &[2], &[0, 1, 2], &[4]];
+    let item_sets: [&[usize]; 6] = [&[0, 1, 2], &[0, 1, 2, 3], &[1], &[0, 4], &[5, 1], &[0, 5]];
+    let tag_sets: [&[usize]; 7] = [&[0], &[1, 2], &[2], &[0, 1, 2], &[4], &[5], &[1, 5]];
 
     let mut tagged_rows = 0;
     for chosen in item_sets {
