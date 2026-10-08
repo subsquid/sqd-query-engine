@@ -114,7 +114,12 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
 
     let mut table_plans = Vec::new();
 
-    for (table_name, items) in &query.items {
+    // Catalog order, since the request's map has none: it decides which of two
+    // failing tables a query reports, and that must not change between runs.
+    let mut requested: Vec<_> = query.items.iter().collect();
+    requested.sort_by_key(|(name, _)| (metadata.tables.get_index_of(name.as_str()), *name));
+
+    for (table_name, items) in requested {
         let table_desc = metadata.table(table_name).ok_or_else(|| {
             engine_err!(
                 ErrorKind::UnknownTable,

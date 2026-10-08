@@ -502,3 +502,49 @@ fn every_generated_query_pages_the_same() {
         DETERMINISM_BUDGETS.len()
     );
 }
+
+/// Tables are scanned side by side, so two that fail fail at once. The error a
+/// client sees must still be one error, not whichever thread lost the race:
+/// the kind is what a client switches on (INV-E6).
+///
+/// Covers CT-6 · INV-O13
+#[test]
+fn the_error_of_two_failing_tables_does_not_depend_on_the_pool() {
+    use crate::harness::chunk::{chunk_with_column_retyped, chunk_without_column_at};
+    use arrow::datatypes::DataType;
+
+    let meta = evm_like::catalog();
+    let source = evm_like::chunk();
+    let no_address = chunk_without_column_at(source.path(), "logs", "address");
+    let broken = chunk_with_column_retyped(
+        no_address.path(),
+        "transactions",
+        "transaction_index",
+        DataType::Utf8,
+    );
+    let query = format!(
+        r#"{{"type":"test","fromBlock":100,"toBlock":115,
+            "fields":{{"log":{{"logIndex":true}},"transaction":{{"gasUsed":true}}}},
+            "logs":[{{"address":["{}"]}}],
+            "transactions":[{{"transactionIndex":[0]}}]}}"#,
+        evm_like::address(evm_like::PRESENT_ADDRESS)
+    );
+    let error = |threads: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| {
+                crate::harness::fixtures::run_against(&meta, broken.path(), &query)
+                    .expect_err("both tables are broken")
+                    .to_string()
+            })
+    };
+
+    let single = error(1);
+    for threads in [2, 4, 16] {
+        for _ in 0..20 {
+            assert_eq!(error(threads), single, "at {threads} threads");
+        }
+    }
+}
