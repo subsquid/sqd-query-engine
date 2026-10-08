@@ -111,6 +111,13 @@ impl<'a> SelectionReader<'a> {
     }
 }
 
+impl SelectionReader<'_> {
+    /// Whether the rows this reader returns carry physical positions.
+    pub(super) fn tracks_positions(&self) -> bool {
+        self.track_positions
+    }
+}
+
 impl ChunkReader for SelectionReader<'_> {
     fn scan(&self, table: &str, request: &ScanRequest) -> Result<Vec<RecordBatch>> {
         let Some(columns) = self.columns.get(table) else {
@@ -152,17 +159,20 @@ pub(super) fn retain_blocks(
     Ok(kept)
 }
 
+/// Read back `batches`' rows with `output_columns`: by the positions the scan
+/// recorded when `positions` says it did, and by their keys otherwise.
 pub(super) fn read_rows(
     chunk: &dyn ChunkReader,
     table: &str,
     desc: &TableDescription,
     batches: &[RecordBatch],
     output_columns: &[String],
+    positions: bool,
 ) -> Result<Vec<RecordBatch>> {
     if batches.is_empty() {
         return Ok(Vec::new());
     }
-    if let Some(rows) = physical_rows(batches) {
+    if let Some(rows) = positions.then(|| physical_rows(batches)).flatten() {
         let mut request = ScanRequest::new(output_columns.iter().map(String::as_str).collect());
         request.block_number_column = Some(&desc.block_number_column);
         request.row_indices = Some(&rows);
@@ -232,6 +242,7 @@ pub(super) fn materialize_tables(
     plan: &Plan,
     metadata: &DatasetDescription,
     chunk: &dyn ChunkReader,
+    positions: bool,
 ) -> Result<()> {
     struct Source<'a> {
         owner: String,
@@ -305,7 +316,7 @@ pub(super) fn materialize_tables(
                 .table(&source.table)
                 .expect("planned table has a catalog");
             let columns = resolve_relation_output_columns(&source.projection, Some(desc));
-            if let Some(rows) = physical_rows(&source.batches) {
+            if let Some(rows) = positions.then(|| physical_rows(&source.batches)).flatten() {
                 let mut request = ScanRequest::new(columns.iter().map(String::as_str).collect());
                 request.block_number_column = Some(&desc.block_number_column);
                 request.row_indices = Some(&rows);
@@ -321,7 +332,7 @@ pub(super) fn materialize_tables(
                     compute_block_range(&source.batches, &desc.block_number_column)?;
                 chunk.scan(&source.table, &request)
             } else {
-                read_rows(chunk, &source.table, desc, &source.batches, &columns)
+                read_rows(chunk, &source.table, desc, &source.batches, &columns, false)
             }
         })
         .collect();

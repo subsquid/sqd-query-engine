@@ -42,11 +42,16 @@ struct WeightContribution<'a> {
 /// Weight is computed per target table with row deduplication, matching legacy behavior:
 /// - Direct scan results and relation results targeting the same table are merged
 /// - Duplicate rows (same block_number + item_order_keys) are counted only once
+///
+/// `positions` says the scan tagged every row with its physical position, under
+/// [`ROW_INDEX`]. Only then is that column a position: otherwise a column of that
+/// name is the chunk's own.
 pub(crate) fn compute_block_weights(
     table_outputs: &HashMap<String, TableOutput>,
     block_batches: &[RecordBatch],
     metadata: &DatasetDescription,
     plan: &Plan,
+    positions: bool,
 ) -> FxHashMap<u64, u64> {
     // 1. Group all batch contributions by TARGET table name.
     // Direct batches → target is the table_plan's own table.
@@ -119,7 +124,13 @@ pub(crate) fn compute_block_weights(
                 &mut block_weights,
             );
         } else {
-            accumulate_dedup_contributions(contribs, bn_col_name, &dedup_keys, &mut block_weights);
+            accumulate_dedup_contributions(
+                contribs,
+                bn_col_name,
+                &dedup_keys,
+                positions,
+                &mut block_weights,
+            );
         }
     }
 
@@ -413,13 +424,13 @@ pub(crate) fn accumulate_block_weights(
 
 /// Accumulate per-block weights with row deduplication.
 ///
-/// A row is its physical position when every batch carries one, as the
-/// reference dedups by row index; otherwise it is its block number and
-/// item-key values.
+/// A row is its physical position when the scan recorded one, as the reference
+/// dedups by row index; otherwise it is its block number and item-key values.
 fn accumulate_dedup_contributions(
     contributions: &[WeightContribution<'_>],
     bn_column: &str,
     key_columns: &[&str],
+    positions: bool,
     weights: &mut FxHashMap<u64, u64>,
 ) {
     let batches: Vec<_> = contributions
@@ -427,15 +438,19 @@ fn accumulate_dedup_contributions(
         .flat_map(|source| source.batches.iter().map(move |batch| (source, batch)))
         .collect();
 
-    let positions: Option<Vec<&UInt64Array>> = batches
-        .iter()
-        .map(|(_, batch)| {
-            batch
-                .column_by_name(ROW_INDEX)?
-                .as_any()
-                .downcast_ref::<UInt64Array>()
+    let positions: Option<Vec<&UInt64Array>> = positions
+        .then(|| {
+            batches
+                .iter()
+                .map(|(_, batch)| {
+                    batch
+                        .column_by_name(ROW_INDEX)?
+                        .as_any()
+                        .downcast_ref::<UInt64Array>()
+                })
+                .collect()
         })
-        .collect();
+        .flatten();
     if let Some(positions) = positions {
         let mut seen = FxHashSet::default();
         for ((source, batch), positions) in batches.iter().zip(positions) {
@@ -727,6 +742,7 @@ mod tests {
                 &contributions,
                 "block_number",
                 &["transaction_index", "trace_address"],
+                false,
                 &mut weights,
             );
             assert_eq!(weights[&100], 200);
@@ -735,7 +751,8 @@ mod tests {
 
     /// A physical row is charged once however many sources return it, and two
     /// rows are two rows even when their keys are equal. A source without
-    /// positions sends every source back to comparing keys.
+    /// positions sends every source back to comparing keys, and so does a scan
+    /// that recorded none.
     #[test]
     fn positions_identify_rows_when_every_source_has_them() {
         use arrow::datatypes::{DataType, Field, Schema};
@@ -756,7 +773,7 @@ mod tests {
             }
             RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
         };
-        let weigh = |primary: RecordBatch, related: RecordBatch| {
+        let weigh_with = |positions: bool, primary: RecordBatch, related: RecordBatch| {
             let (primary, related) = ([primary], [related]);
             let contributions = [
                 WeightContribution {
@@ -775,14 +792,22 @@ mod tests {
                 &contributions,
                 "block_number",
                 &["transaction_index"],
+                positions,
                 &mut weights,
             );
             weights[&100]
         };
+        let weigh = |primary, related| weigh_with(true, primary, related);
 
         assert_eq!(weigh(batch(Some(vec![3, 4])), batch(Some(vec![4, 3]))), 20);
         assert_eq!(weigh(batch(Some(vec![3, 4])), batch(Some(vec![5, 6]))), 40);
         assert_eq!(weigh(batch(Some(vec![3, 4])), batch(None)), 10);
+
+        // A column the scan did not write is no position, whatever its name.
+        assert_eq!(
+            weigh_with(false, batch(Some(vec![3, 4])), batch(Some(vec![5, 6]))),
+            10
+        );
     }
 
     /// Load the solana metadata for tests.

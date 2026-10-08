@@ -103,6 +103,12 @@ pub(super) fn append_column(
     name: &str,
     column: ArrayRef,
 ) -> Result<RecordBatch> {
+    // A column the engine adds must never be read back as one the chunk stores.
+    anyhow::ensure!(
+        batch.schema().index_of(name).is_err(),
+        "the scan output already has a column named '{name}'"
+    );
+
     let mut fields: Vec<_> = batch.schema().fields().iter().cloned().collect();
     fields.push(Arc::new(Field::new(
         name,

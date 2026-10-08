@@ -506,9 +506,17 @@ fn scan_tables(
         request.required_columns = req_col_refs;
 
         // A relation some items asked for follows only the rows they matched,
-        // which the scan marks as it evaluates them.
+        // which the scan marks as it evaluates them, under names the table
+        // does not store.
+        let schema = chunk.table_schema(&table_plan.table);
         let tag_columns: Vec<String> = (0..table_plan.relations.len())
-            .map(|relation| format!("__sqd_relation_{relation}"))
+            .map(|relation| {
+                let mut name = format!("__sqd_relation_{relation}");
+                while schema.as_ref().is_some_and(|s| s.index_of(&name).is_ok()) {
+                    name.push('_');
+                }
+                name
+            })
             .collect();
         request.item_tags = table_plan
             .relations
@@ -920,6 +928,9 @@ fn execute_chunk_fmt(
     let scan_reader: &dyn ChunkReader = selection_reader
         .as_ref()
         .map_or(chunk, |reader| reader as &dyn ChunkReader);
+    let positions = selection_reader
+        .as_ref()
+        .is_some_and(SelectionReader::tracks_positions);
 
     // Read header identities once so internal ranges never add boundary blocks.
     let t_blocks = timer!();
@@ -1059,7 +1070,8 @@ fn execute_chunk_fmt(
         let exhausted = if sorted_blocks.is_empty() {
             false
         } else {
-            let weights = compute_block_weights(&range_outputs, &range_headers, metadata, plan);
+            let weights =
+                compute_block_weights(&range_outputs, &range_headers, metadata, plan, positions);
             selection.extend(&sorted_blocks, &weights)
         };
 
@@ -1108,7 +1120,7 @@ fn execute_chunk_fmt(
         let t_materialize = timer!();
         let headers = std::mem::take(&mut block_batches);
         let (tables, headers) = rayon::join(
-            || materialize_tables(&mut table_outputs, plan, metadata, chunk),
+            || materialize_tables(&mut table_outputs, plan, metadata, chunk, positions),
             || -> Result<Vec<RecordBatch>> {
                 let Some(desc) = block_table_desc else {
                     return Ok(headers);
@@ -1120,6 +1132,7 @@ fn execute_chunk_fmt(
                     desc,
                     &headers,
                     &block_scan_columns(&plan.block_output_columns, desc),
+                    positions,
                 )
             },
         );
