@@ -480,8 +480,9 @@ fn scan_tables(
         };
     }
 
-    let mut table_outputs = HashMap::new();
-    for table_plan in &plan.table_plans {
+    // Tables are independent, and one table's scan rarely has row groups
+    // enough to keep every thread busy.
+    let scan_table = |table_plan: &TablePlan| -> Result<(String, TableOutput)> {
         let table_desc = metadata.table(&table_plan.table).ok_or_else(|| {
             crate::engine_err!(
                 crate::error::ErrorKind::TableNotFound,
@@ -853,16 +854,19 @@ fn scan_tables(
             }
         }
 
-        table_outputs.insert(
+        Ok((
             table_plan.table.clone(),
             TableOutput {
                 batches,
                 relation_batches,
             },
-        );
-    }
+        ))
+    };
 
-    Ok(table_outputs)
+    // The first failure in plan order, the one a serial scan would report.
+    let scanned: Vec<Result<(String, TableOutput)>> =
+        plan.table_plans.par_iter().map(scan_table).collect();
+    scanned.into_iter().collect()
 }
 
 /// Core execution: scan → block selection → output assembly. The `format`
@@ -1102,17 +1106,25 @@ fn execute_chunk_fmt(
 
     if selection_reader.is_some() {
         let t_materialize = timer!();
-        materialize_tables(&mut table_outputs, plan, metadata, chunk)?;
-        if let Some(desc) = block_table_desc {
-            block_batches = retain_blocks(block_batches, bn_column, &selected_blocks)?;
-            block_batches = read_rows(
-                chunk,
-                &plan.block_table,
-                desc,
-                &block_batches,
-                &block_scan_columns(&plan.block_output_columns, desc),
-            )?;
-        }
+        let headers = std::mem::take(&mut block_batches);
+        let (tables, headers) = rayon::join(
+            || materialize_tables(&mut table_outputs, plan, metadata, chunk),
+            || -> Result<Vec<RecordBatch>> {
+                let Some(desc) = block_table_desc else {
+                    return Ok(headers);
+                };
+                let headers = retain_blocks(headers, bn_column, &selected_blocks)?;
+                read_rows(
+                    chunk,
+                    &plan.block_table,
+                    desc,
+                    &headers,
+                    &block_scan_columns(&plan.block_output_columns, desc),
+                )
+            },
+        );
+        tables?;
+        block_batches = headers?;
         elapsed!(t_materialize, "materialize selected rows");
     }
 
