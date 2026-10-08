@@ -1,6 +1,6 @@
 use super::scanner;
 use super::ChunkReader;
-use super::ScanRequest;
+use super::{ScanRequest, Scanned};
 use anyhow::{Context, Result};
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
@@ -116,7 +116,7 @@ impl ChunkReader for ParquetChunkReader {
         true
     }
 
-    fn scan(&self, table: &str, request: &ScanRequest) -> Result<Vec<RecordBatch>> {
+    fn scan_rows(&self, table: &str, request: &ScanRequest) -> Result<Scanned> {
         let Some(parquet_table) = self.table(table)? else {
             crate::engine_bail!(
                 crate::error::ErrorKind::TableNotFound,
@@ -124,7 +124,7 @@ impl ChunkReader for ParquetChunkReader {
                 table
             );
         };
-        scanner::scan(&parquet_table, request)
+        scanner::scan_rows(&parquet_table, request)
     }
 
     fn next_block_range_end(
@@ -198,6 +198,11 @@ impl ParquetTable {
     /// Parquet metadata.
     pub fn metadata(&self) -> &ParquetMetaData {
         &self.metadata
+    }
+
+    /// The parquet metadata, shared.
+    pub(crate) fn metadata_arc(&self) -> Arc<ParquetMetaData> {
+        self.metadata.clone()
     }
 
     /// Pre-built Arrow reader metadata (avoids re-reading parquet footer).

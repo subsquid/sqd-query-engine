@@ -11,6 +11,7 @@
 mod bloom;
 mod case_folding;
 mod gte_const;
+mod items;
 mod laws;
 mod pruning;
 mod surface;

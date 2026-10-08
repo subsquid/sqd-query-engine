@@ -27,6 +27,178 @@ pub(crate) struct IndexedBatches {
     pub(crate) sort_columns: Vec<String>,
     /// Pre-resolved typed sort columns per batch (eliminates per-comparison downcast chain).
     pub(crate) sort_col_resolved: Vec<Vec<Option<TypedSortColumn>>>,
+    /// The same keys as byte strings, where they order rows exactly as the
+    /// typed columns do: two rows then compare as two byte strings.
+    pub(crate) sort_rows: Option<SortKeys>,
+}
+
+/// Every batch's sort keys, in a form two rows compare by without resolving
+/// their columns' types.
+pub(crate) enum SortKeys {
+    /// Integer columns and at most a trailing path of integers, read at their
+    /// stored types, null slots as stored, as the typed columns read them.
+    Typed(Vec<TypedKeys>),
+    /// The same, written out as bytes for deep paths: each value at its
+    /// stored width, big-endian, sign bit flipped, so a long shared prefix
+    /// compares as one run of bytes rather than element by element.
+    Packed(Vec<PackedKeys>),
+    /// Arrow's row format, for any other columns without nulls.
+    Rows(Vec<arrow::row::Rows>),
+}
+
+pub(crate) struct PackedKeys {
+    ends: Vec<usize>,
+    bytes: Vec<u8>,
+}
+
+impl PackedKeys {
+    #[inline]
+    fn key(&self, row: usize) -> &[u8] {
+        let start = if row == 0 { 0 } else { self.ends[row - 1] };
+        &self.bytes[start..self.ends[row]]
+    }
+}
+
+pub(crate) struct TypedKeys {
+    fixed: Vec<Vec<i128>>,
+    path: Option<(arrow::buffer::OffsetBuffer<i32>, PathValues)>,
+}
+
+/// A path's elements at their stored type.
+pub(crate) enum PathValues {
+    U8(arrow::buffer::ScalarBuffer<u8>),
+    U16(arrow::buffer::ScalarBuffer<u16>),
+    U32(arrow::buffer::ScalarBuffer<u32>),
+    U64(arrow::buffer::ScalarBuffer<u64>),
+    I8(arrow::buffer::ScalarBuffer<i8>),
+    I16(arrow::buffer::ScalarBuffer<i16>),
+    I32(arrow::buffer::ScalarBuffer<i32>),
+    I64(arrow::buffer::ScalarBuffer<i64>),
+}
+
+impl PathValues {
+    fn resolve(values: &dyn Array) -> Option<Self> {
+        macro_rules! resolve {
+            ($($variant:ident($array:ty)),+) => {
+                $(if let Some(a) = values.as_any().downcast_ref::<$array>() {
+                    return Some(Self::$variant(a.values().clone()));
+                })+
+            };
+        }
+        resolve!(
+            U8(UInt8Array),
+            U16(UInt16Array),
+            U32(UInt32Array),
+            U64(UInt64Array),
+            I8(Int8Array),
+            I16(Int16Array),
+            I32(Int32Array),
+            I64(Int64Array)
+        );
+        None
+    }
+
+    /// The stored width in bytes.
+    fn width(&self) -> usize {
+        match self {
+            Self::U8(_) | Self::I8(_) => 1,
+            Self::U16(_) | Self::I16(_) => 2,
+            Self::U32(_) | Self::I32(_) => 4,
+            Self::U64(_) | Self::I64(_) => 8,
+        }
+    }
+
+    /// Write elements `range` as order-preserving bytes into `out`.
+    fn pack(&self, range: std::ops::Range<usize>, out: &mut [u8]) {
+        macro_rules! pack {
+            ($values:expr, $flip:expr) => {
+                for (chunk, &value) in out
+                    .chunks_exact_mut(std::mem::size_of_val(&$values[0]))
+                    .zip(&$values[range])
+                {
+                    chunk.copy_from_slice(&$flip(value).to_be_bytes());
+                }
+            };
+        }
+        match self {
+            Self::U8(v) if !v.is_empty() => pack!(v, |x: u8| x),
+            Self::U16(v) if !v.is_empty() => pack!(v, |x: u16| x),
+            Self::U32(v) if !v.is_empty() => pack!(v, |x: u32| x),
+            Self::U64(v) if !v.is_empty() => pack!(v, |x: u64| x),
+            Self::I8(v) if !v.is_empty() => pack!(v, |x: i8| (x as u8) ^ 0x80),
+            Self::I16(v) if !v.is_empty() => pack!(v, |x: i16| (x as u16) ^ 0x8000),
+            Self::I32(v) if !v.is_empty() => pack!(v, |x: i32| (x as u32) ^ 0x8000_0000),
+            Self::I64(v) if !v.is_empty() => pack!(v, |x: i64| (x as u64) ^ (1 << 63)),
+            _ => {}
+        }
+    }
+
+    fn value(&self, i: usize) -> i128 {
+        match self {
+            Self::U8(v) => v[i] as i128,
+            Self::U16(v) => v[i] as i128,
+            Self::U32(v) => v[i] as i128,
+            Self::U64(v) => v[i] as i128,
+            Self::I8(v) => v[i] as i128,
+            Self::I16(v) => v[i] as i128,
+            Self::I32(v) => v[i] as i128,
+            Self::I64(v) => v[i] as i128,
+        }
+    }
+
+    /// Two paths compared element by element, then by length.
+    fn compare(
+        &self,
+        a: std::ops::Range<usize>,
+        other: &Self,
+        b: std::ops::Range<usize>,
+    ) -> std::cmp::Ordering {
+        match (self, other) {
+            (Self::U8(x), Self::U8(y)) => x[a].cmp(&y[b]),
+            (Self::U16(x), Self::U16(y)) => x[a].cmp(&y[b]),
+            (Self::U32(x), Self::U32(y)) => x[a].cmp(&y[b]),
+            (Self::U64(x), Self::U64(y)) => x[a].cmp(&y[b]),
+            (Self::I8(x), Self::I8(y)) => x[a].cmp(&y[b]),
+            (Self::I16(x), Self::I16(y)) => x[a].cmp(&y[b]),
+            (Self::I32(x), Self::I32(y)) => x[a].cmp(&y[b]),
+            (Self::I64(x), Self::I64(y)) => x[a].cmp(&y[b]),
+            _ => {
+                let pairs = a.clone().zip(b.clone());
+                pairs
+                    .map(|(i, j)| self.value(i).cmp(&other.value(j)))
+                    .find(|order| order.is_ne())
+                    .unwrap_or(a.len().cmp(&b.len()))
+            }
+        }
+    }
+}
+
+impl SortKeys {
+    #[inline]
+    fn compare(&self, (ba, ra): (usize, usize), (bb, rb): (usize, usize)) -> std::cmp::Ordering {
+        match self {
+            Self::Typed(keys) => {
+                let (a, b) = (&keys[ba], &keys[bb]);
+                for (x, y) in a.fixed.iter().zip(&b.fixed) {
+                    let order = x[ra].cmp(&y[rb]);
+                    if order.is_ne() {
+                        return order;
+                    }
+                }
+                match (&a.path, &b.path) {
+                    (Some((oa, va)), Some((ob, vb))) => {
+                        let path = |o: &arrow::buffer::OffsetBuffer<i32>, r: usize| {
+                            o[r] as usize..o[r + 1] as usize
+                        };
+                        va.compare(path(oa, ra), vb, path(ob, rb))
+                    }
+                    _ => std::cmp::Ordering::Equal,
+                }
+            }
+            Self::Packed(keys) => keys[ba].key(ra).cmp(keys[bb].key(rb)),
+            Self::Rows(rows) => rows[ba].row(ra).cmp(&rows[bb].row(rb)),
+        }
+    }
 }
 
 /// Pre-resolved typed array (Arc-backed, cheap to clone) for sort comparisons.
@@ -35,7 +207,8 @@ pub(crate) struct IndexedBatches {
 pub(crate) enum TypedSortColumn {
     Int(OwnedIntColumn),
     Text(OwnedStringColumn),
-    List(GenericListArray<i32>),
+    /// A list and its elements, when they are integers.
+    List(GenericListArray<i32>, Option<OwnedIntColumn>),
 }
 
 impl TypedSortColumn {
@@ -47,7 +220,8 @@ impl TypedSortColumn {
             return Some(Self::Text(text));
         }
         if let Some(a) = col.as_any().downcast_ref::<GenericListArray<i32>>() {
-            return Some(Self::List(a.clone()));
+            let elements = OwnedIntColumn::resolve(a.values().as_ref());
+            return Some(Self::List(a.clone(), elements));
         }
 
         None
@@ -62,7 +236,9 @@ impl TypedSortColumn {
         match (self, other) {
             (Self::Int(a), Self::Int(b)) => a.value(row_a).cmp(&b.value(row_b)),
             (Self::Text(a), Self::Text(b)) => a.value(row_a).cmp(&b.value(row_b)),
-            (Self::List(a), Self::List(b)) => compare_list_values(a, row_a, b, row_b),
+            (Self::List(a, ea), Self::List(b, eb)) => {
+                compare_list_values((a, ea.as_ref()), row_a, (b, eb.as_ref()), row_b)
+            }
             _ => {
                 debug_assert!(false, "TypedSortColumn type mismatch in cmp_rows");
                 std::cmp::Ordering::Equal
@@ -521,6 +697,7 @@ fn write_table_items_indexed(
     batches: &[RecordBatch],
     block_index: &FxHashMap<u64, Vec<(usize, usize)>>,
     sort_col_resolved: &[Vec<Option<TypedSortColumn>>],
+    sort_rows: Option<&SortKeys>,
     json_array_prefix: &[u8],
     resolved_by_batch: &[Vec<ResolvedFieldWriter>],
     grouped_resolved: Option<&[ResolvedGroupedWriters]>,
@@ -538,7 +715,7 @@ fn write_table_items_indexed(
     rows.extend_from_slice(row_refs);
 
     // Sort by pre-resolved typed sort columns (item_order_keys + address)
-    sort_rows_by_order_keys_indexed(rows, sort_col_resolved);
+    sort_rows_by_order_keys_indexed(rows, sort_col_resolved, sort_rows);
 
     // Write array
     buf.extend_from_slice(json_array_prefix);
@@ -584,6 +761,7 @@ pub(crate) fn write_merged_table_items(
             &idx.batches,
             &idx.index,
             &idx.sort_col_resolved,
+            idx.sort_rows.as_ref(),
             json_array_prefix,
             &all_resolved[si],
             all_grouped_resolved[si].as_deref(),
@@ -616,7 +794,7 @@ pub(crate) fn write_merged_table_items(
     if !sort_columns.is_empty() {
         let dedup_key_count = sort_columns.len();
 
-        rows.sort_by(|a, b| {
+        rows.sort_unstable_by(|a, b| {
             let res_a = &all_indexes[a.0].sort_col_resolved[a.1];
             let res_b = &all_indexes[b.0].sort_col_resolved[b.1];
             for (col_a, col_b) in res_a.iter().zip(res_b.iter()) {
@@ -727,13 +905,156 @@ pub(crate) fn resolve_sort_columns(
         .collect()
 }
 
+/// The sort keys of every batch in Arrow's row format, when that orders rows
+/// as the typed columns do: every key column resolved, of one type across the
+/// batches, and without nulls, whose placement the two orders disagree on.
+pub(crate) fn row_sort_keys(
+    batches: &[RecordBatch],
+    sort_columns: &[String],
+    resolved: &[Vec<Option<TypedSortColumn>>],
+) -> Option<SortKeys> {
+    use arrow::row::{RowConverter, SortField};
+
+    let first = batches.first()?;
+    if sort_columns.is_empty() || resolved.iter().flatten().any(Option::is_none) {
+        return None;
+    }
+    let types: Vec<arrow::datatypes::DataType> = sort_columns
+        .iter()
+        .map(|name| Some(first.column_by_name(name)?.data_type().clone()))
+        .collect::<Option<_>>()?;
+    let columns: Vec<Vec<arrow::array::ArrayRef>> = batches
+        .iter()
+        .map(|batch| {
+            sort_columns
+                .iter()
+                .map(|name| batch.column_by_name(name).cloned())
+                .collect::<Option<_>>()
+        })
+        .collect::<Option<_>>()?;
+    let same_types = columns
+        .iter()
+        .all(|columns| columns.iter().zip(&types).all(|(c, t)| c.data_type() == t));
+    if !same_types {
+        return None;
+    }
+
+    if let Some(typed) = columns
+        .iter()
+        .map(|columns| typed_keys(columns))
+        .collect::<Option<Vec<_>>>()
+    {
+        let deep = typed.iter().any(|keys| {
+            keys.path.as_ref().is_some_and(|(offsets, _)| {
+                let rows = offsets.len() - 1;
+                let elements = (offsets[rows] - offsets[0]) as usize;
+                elements >= PACKED_DEPTH * rows.max(1)
+            })
+        });
+        if deep {
+            return Some(SortKeys::Packed(typed.iter().map(packed_keys).collect()));
+        }
+        return Some(SortKeys::Typed(typed));
+    }
+
+    // The row format places nulls where the typed columns do not, and orders
+    // list elements the typed columns hold equal when they are not integers.
+    let representable = columns.iter().flatten().all(|column| {
+        let list = matches!(column.data_type(), arrow::datatypes::DataType::List(_));
+        column.null_count() == 0 && !list
+    });
+    if !representable {
+        return None;
+    }
+    let converter = RowConverter::new(types.into_iter().map(SortField::new).collect()).ok()?;
+    columns
+        .iter()
+        .map(|columns| converter.convert_columns(columns).ok())
+        .collect::<Option<_>>()
+        .map(SortKeys::Rows)
+}
+
+/// Paths at least this deep on average are compared as bytes.
+const PACKED_DEPTH: usize = 8;
+
+/// Typed keys written out as bytes.
+fn packed_keys(keys: &TypedKeys) -> PackedKeys {
+    let rows = keys.fixed.first().map_or_else(
+        || {
+            keys.path
+                .as_ref()
+                .map_or(0, |(offsets, _)| offsets.len() - 1)
+        },
+        Vec::len,
+    );
+    // Fixed columns are compared at i128, sign included.
+    let fixed_bytes = keys.fixed.len() * 16;
+    let mut ends = Vec::with_capacity(rows);
+    let mut total = 0;
+    for row in 0..rows {
+        total += fixed_bytes;
+        if let Some((offsets, values)) = &keys.path {
+            total += (offsets[row + 1] - offsets[row]) as usize * values.width();
+        }
+        ends.push(total);
+    }
+
+    let mut bytes = vec![0u8; total];
+    let mut start = 0;
+    for row in 0..rows {
+        let mut at = start;
+        for column in &keys.fixed {
+            let ordered = (column[row] as u128) ^ (1 << 127);
+            bytes[at..at + 16].copy_from_slice(&ordered.to_be_bytes());
+            at += 16;
+        }
+        if let Some((offsets, values)) = &keys.path {
+            let path = offsets[row] as usize..offsets[row + 1] as usize;
+            values.pack(path, &mut bytes[at..ends[row]]);
+        }
+        start = ends[row];
+    }
+
+    PackedKeys { ends, bytes }
+}
+
+/// One batch's keys when its columns are integers with at most a trailing
+/// list of integers.
+fn typed_keys(columns: &[arrow::array::ArrayRef]) -> Option<TypedKeys> {
+    let (last, leading) = columns.split_last()?;
+    let list = last.as_any().downcast_ref::<GenericListArray<i32>>();
+    let fixed = if list.is_some() { leading } else { columns };
+
+    let fixed = fixed
+        .iter()
+        .map(|column| {
+            let values = OwnedIntColumn::resolve(column.as_ref())?;
+            Some((0..column.len()).map(|row| values.value(row)).collect())
+        })
+        .collect::<Option<_>>()?;
+    let path = match list {
+        Some(list) => Some((
+            list.offsets().clone(),
+            PathValues::resolve(list.values().as_ref())?,
+        )),
+        None => None,
+    };
+
+    Some(TypedKeys { fixed, path })
+}
+
 /// Sort (batch_idx, row) references by pre-resolved typed sort columns.
 /// Uses (batch_idx, row_idx) as final tiebreaker to preserve parquet file order.
 fn sort_rows_by_order_keys_indexed(
     rows: &mut [(usize, usize)],
     sort_col_resolved: &[Vec<Option<TypedSortColumn>>],
+    sort_rows: Option<&SortKeys>,
 ) {
     if rows.is_empty() {
+        return;
+    }
+    if let Some(keys) = sort_rows {
+        rows.sort_unstable_by(|&a, &b| keys.compare(a, b).then(a.cmp(&b)));
         return;
     }
     let has_sort_cols = sort_col_resolved.first().is_some_and(|v| !v.is_empty());
@@ -743,7 +1064,8 @@ fn sort_rows_by_order_keys_indexed(
         return;
     }
 
-    rows.sort_by(|&(bi_a, row_a), &(bi_b, row_b)| {
+    // The file-order tiebreaker makes the order total, so stability buys nothing.
+    rows.sort_unstable_by(|&(bi_a, row_a), &(bi_b, row_b)| {
         let res_a = &sort_col_resolved[bi_a];
         let res_b = &sort_col_resolved[bi_b];
         for (col_a, col_b) in res_a.iter().zip(res_b.iter()) {
@@ -766,31 +1088,30 @@ fn sort_rows_by_order_keys_indexed(
 /// are not integers order as equal, which leaves the file-order tiebreaker to
 /// decide; there is no order to invent for them.
 fn compare_list_values(
-    a: &GenericListArray<i32>,
+    (a, elements_a): (&GenericListArray<i32>, Option<&OwnedIntColumn>),
     row_a: usize,
-    b: &GenericListArray<i32>,
+    (b, elements_b): (&GenericListArray<i32>, Option<&OwnedIntColumn>),
     row_b: usize,
 ) -> std::cmp::Ordering {
     use std::cmp::Ordering;
 
-    let va = a.value(row_a);
-    let vb = b.value(row_b);
-
-    let (Some(ea), Some(eb)) = (
-        OwnedIntColumn::resolve(va.as_ref()),
-        OwnedIntColumn::resolve(vb.as_ref()),
-    ) else {
+    let (Some(ea), Some(eb)) = (elements_a, elements_b) else {
         return Ordering::Equal;
     };
+    let path = |list: &GenericListArray<i32>, row: usize| {
+        let offsets = list.value_offsets();
+        offsets[row] as usize..offsets[row + 1] as usize
+    };
+    let (pa, pb) = (path(a, row_a), path(b, row_b));
 
-    for i in 0..ea.len().min(eb.len()) {
-        let ord = ea.value(i).cmp(&eb.value(i));
+    for (i, j) in pa.clone().zip(pb.clone()) {
+        let ord = ea.value(i).cmp(&eb.value(j));
         if ord != Ordering::Equal {
             return ord;
         }
     }
 
-    ea.len().cmp(&eb.len())
+    pa.len().cmp(&pb.len())
 }
 
 /// Replace trailing comma with closing bracket, or just add closing bracket.
@@ -980,5 +1301,189 @@ tables:
         let number = sort_column(UInt32Array::from(vec![10]));
         let text = sort_column(StringArray::from(vec!["10"]));
         number.cmp_rows(0, &text, 0);
+    }
+
+    mod sort_keys {
+        use super::super::*;
+        use arrow::array::{ArrayRef, Int32Array, ListArray, StringArray, UInt64Array};
+        use arrow::datatypes::{Field, Int32Type, Schema, UInt16Type, UInt32Type};
+        use proptest::prelude::*;
+        use std::sync::Arc;
+
+        /// With `nulls`, a value of 1 is stored as a null, in a slot that
+        /// holds zero.
+        /// With `deep`, every path starts with the same eight elements, deep
+        /// enough to be compared as bytes.
+        fn batch(
+            rows: &[(i32, u64, String, Vec<u16>)],
+            width: u8,
+            nulls: bool,
+            deep: bool,
+        ) -> RecordBatch {
+            let kept = |v: i64| (!nulls || v != 1).then_some(v);
+            let rows: Vec<_> = rows
+                .iter()
+                .map(|r| {
+                    let mut path = if deep { vec![258u16; 8] } else { Vec::new() };
+                    path.extend(&r.3);
+                    (r.0, r.1, r.2.clone(), path)
+                })
+                .collect();
+            let signed: ArrayRef = Arc::new(Int32Array::from_iter(
+                rows.iter().map(|r| kept(r.0 as i64).map(|v| v as i32)),
+            ));
+            let unsigned: ArrayRef =
+                Arc::new(UInt64Array::from_iter_values(rows.iter().map(|r| r.1)));
+            let text: ArrayRef = Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|r| r.2.clone()),
+            ));
+            let path: ArrayRef = if width == 2 {
+                // Signed elements, some below zero.
+                Arc::new(ListArray::from_iter_primitive::<Int32Type, _, _>(
+                    rows.iter().map(|r| {
+                        Some(
+                            r.3.iter()
+                                .map(|&e| kept(e as i64).map(|v| v as i32 - 257))
+                                .collect::<Vec<_>>(),
+                        )
+                    }),
+                ))
+            } else if width == 1 {
+                Arc::new(ListArray::from_iter_primitive::<UInt32Type, _, _>(
+                    rows.iter().map(|r| {
+                        Some(
+                            r.3.iter()
+                                .map(|&e| kept(e as i64).map(|v| v as u32))
+                                .collect::<Vec<_>>(),
+                        )
+                    }),
+                ))
+            } else {
+                Arc::new(ListArray::from_iter_primitive::<UInt16Type, _, _>(
+                    rows.iter().map(|r| {
+                        Some(
+                            r.3.iter()
+                                .map(|&e| kept(e as i64).map(|v| v as u16))
+                                .collect::<Vec<_>>(),
+                        )
+                    }),
+                ))
+            };
+            let schema = Schema::new(vec![
+                Field::new("signed", signed.data_type().clone(), true),
+                Field::new("unsigned", unsigned.data_type().clone(), false),
+                Field::new("text", text.data_type().clone(), false),
+                Field::new("path", path.data_type().clone(), true),
+            ]);
+            RecordBatch::try_new(Arc::new(schema), vec![signed, unsigned, text, path]).unwrap()
+        }
+
+        fn row() -> impl Strategy<Value = (i32, u64, String, Vec<u16>)> {
+            (
+                prop_oneof![
+                    Just(i32::MIN),
+                    Just(-1),
+                    Just(0),
+                    Just(1),
+                    Just(i32::MAX),
+                    -3i32..3
+                ],
+                prop_oneof![Just(0u64), Just(u64::MAX), Just(1 << 63), 0u64..3],
+                "[a-c]{0,3}",
+                // Both bytes of an element vary, so their order shows.
+                prop::collection::vec(
+                    prop_oneof![Just(0u16), Just(u16::MAX), 0u16..3, 254u16..259],
+                    0..4,
+                ),
+            )
+        }
+
+        proptest! {
+            #[test]
+            fn row_keys_order_rows_as_the_typed_columns_do(
+                parts in prop::collection::vec(prop::collection::vec(row(), 0..12), 1..4),
+                columns in prop::sample::subsequence(vec!["signed", "unsigned", "text", "path"], 1..=4),
+                order in Just(()).prop_perturb(|_, mut rng| {
+                    let mut all = vec!["signed", "unsigned", "text", "path"];
+                    for i in (1..all.len()).rev() { all.swap(i, rng.random_range(0..=i)); }
+                    all
+                }),
+                width in 0u8..3,
+                nulls in any::<bool>(),
+                deep in any::<bool>(),
+            ) {
+                let batches: Vec<RecordBatch> =
+                    parts.iter().map(|rows| batch(rows, width, nulls, deep)).collect();
+                let columns: Vec<String> = order
+                    .iter()
+                    .filter(|name| columns.contains(name))
+                    .map(|name| name.to_string())
+                    .collect();
+                let resolved = resolve_sort_columns(&batches, &columns);
+                let keys = row_sort_keys(&batches, &columns, &resolved);
+
+                let all: Vec<(usize, usize)> = batches
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(b, batch)| (0..batch.num_rows()).map(move |r| (b, r)))
+                    .collect();
+                let mut typed = all.clone();
+                sort_rows_by_order_keys_indexed(&mut typed, &resolved, None);
+                let mut by_rows = all;
+                sort_rows_by_order_keys_indexed(&mut by_rows, &resolved, keys.as_ref());
+                let has = |name: &str| columns.iter().any(|c| c == name);
+                let path_last = columns
+                    .iter()
+                    .position(|c| c == "path")
+                    .is_none_or(|at| at + 1 == columns.len());
+                // Integers with a trailing path are compared at their types;
+                // other columns in the row format, which has no lists and no
+                // nulls; the rest by the typed columns themselves.
+                let expected = if !has("text") && path_last {
+                    "typed"
+                } else if !has("path") && !columns.iter().any(|c| {
+                    batches.iter().any(|b| b.column_by_name(c).unwrap().null_count() > 0)
+                }) {
+                    "rows"
+                } else {
+                    "none"
+                };
+                let found = match &keys {
+                    Some(SortKeys::Typed(_)) | Some(SortKeys::Packed(_)) => "typed",
+                    Some(SortKeys::Rows(_)) => "rows",
+                    None => "none",
+                };
+                prop_assert_eq!(found, expected);
+                let rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
+                let packed = matches!(keys, Some(SortKeys::Packed(_)));
+                prop_assert_eq!(packed, expected == "typed" && deep && has("path") && rows > 0);
+                prop_assert_eq!(by_rows, typed);
+            }
+        }
+
+        #[test]
+        fn a_null_path_sorts_as_the_empty_path_its_slot_holds() {
+            let path: ArrayRef =
+                Arc::new(ListArray::from_iter_primitive::<UInt16Type, _, _>(vec![
+                    Some(vec![Some(1)]),
+                    None,
+                    Some(vec![]),
+                    Some(vec![Some(0)]),
+                ]));
+            let schema = Schema::new(vec![Field::new("path", path.data_type().clone(), true)]);
+            let batch = RecordBatch::try_new(Arc::new(schema), vec![path]).unwrap();
+            let columns = vec!["path".to_string()];
+            let batches = [batch];
+            let resolved = resolve_sort_columns(&batches, &columns);
+            let keys = row_sort_keys(&batches, &columns, &resolved);
+            assert!(matches!(keys, Some(SortKeys::Typed(_))));
+
+            let mut typed: Vec<(usize, usize)> = (0..4).map(|row| (0, row)).collect();
+            let mut by_keys = typed.clone();
+            sort_rows_by_order_keys_indexed(&mut typed, &resolved, None);
+            sort_rows_by_order_keys_indexed(&mut by_keys, &resolved, keys.as_ref());
+            assert_eq!(by_keys, typed);
+            assert_eq!(typed, vec![(0, 1), (0, 2), (0, 3), (0, 0)]);
+        }
     }
 }

@@ -78,14 +78,6 @@ pub(crate) fn resolve_output_columns(
         for key in &rel.left_key {
             cols.insert(key.clone());
         }
-        // Source predicate columns (needed for post-hoc filtering of relation sources)
-        if let Some(preds) = &rel.source_predicates {
-            for pred in preds {
-                for column in pred.required_columns() {
-                    cols.insert(column.to_owned());
-                }
-            }
-        }
     }
 
     // Weight columns (needed for response size limiting)

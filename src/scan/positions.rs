@@ -1,9 +1,9 @@
+use super::predicate::or_masks;
+use super::rows::ScannedBatch;
 use super::scanner::{build_output_schema, project_batch};
 use super::{ParquetTable, ScanRequest};
 use anyhow::{Context, Result};
-use arrow::array::{Array, BooleanArray, UInt64Array};
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::record_batch::RecordBatch;
+use arrow::array::{Array, AsArray, BooleanArray, UInt64Array};
 use parquet::arrow::arrow_reader::{
     ArrowPredicate, ArrowPredicateFn, ParquetRecordBatchReaderBuilder, RowSelection, RowSelector,
 };
@@ -89,19 +89,79 @@ impl TrackedRows {
     }
 }
 
-pub(super) fn append_positions(
-    batch: &RecordBatch,
-    name: &str,
-    positions: UInt64Array,
-) -> Result<RecordBatch> {
-    let mut fields: Vec<_> = batch.schema().fields().iter().cloned().collect();
-    fields.push(Arc::new(Field::new(name, DataType::UInt64, false)));
-    let mut columns = batch.columns().to_vec();
-    columns.push(Arc::new(positions));
-    Ok(RecordBatch::try_new(
-        Arc::new(Schema::new(fields)),
-        columns,
-    )?)
+/// Whether each tag's items matched a row, kept by the stage that evaluates
+/// the items. That stage is the last one, so the rows it selects are the rows
+/// the reader returns, in the same order.
+pub(super) struct ItemTags {
+    tags: Vec<Vec<usize>>,
+    recorded: Mutex<Vec<Vec<BooleanArray>>>,
+}
+
+impl ItemTags {
+    /// Tags over the `active` items only, the ones the scan evaluates; an
+    /// item left out matches no row.
+    pub(super) fn new(request: &ScanRequest, active: &[usize]) -> Option<Arc<Self>> {
+        let tags = request
+            .item_tags
+            .iter()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| active.iter().position(|a| a == item))
+                    .collect()
+            })
+            .collect::<Vec<_>>();
+
+        (!tags.is_empty()).then(|| {
+            Arc::new(Self {
+                tags,
+                recorded: Mutex::new(Vec::new()),
+            })
+        })
+    }
+
+    /// Keep each tag's answer for the rows `matched` selects. A row whose
+    /// items say neither yes nor no is not one they matched.
+    pub(super) fn record(&self, masks: &[BooleanArray], matched: &BooleanArray) {
+        let tagged = self
+            .tags
+            .iter()
+            .map(|items| {
+                let mask = or_masks(masks, items, matched.len());
+                let kept = arrow::compute::filter(&mask, matched).expect("mask sized to the batch");
+                let kept = kept.as_boolean();
+                let values = match kept.nulls() {
+                    Some(nulls) => kept.values() & nulls.inner(),
+                    None => kept.values().clone(),
+                };
+                BooleanArray::new(values, None)
+            })
+            .collect();
+
+        self.recorded
+            .lock()
+            .expect("item tag recorder poisoned")
+            .push(tagged);
+    }
+
+    /// Each tag over every row the reader returned.
+    pub(super) fn finish(&self) -> Vec<BooleanArray> {
+        let recorded = self.recorded.lock().expect("item tag recorder poisoned");
+
+        (0..self.tags.len())
+            .map(|tag| {
+                let parts: Vec<&dyn Array> = recorded
+                    .iter()
+                    .map(|batch| &batch[tag] as &dyn Array)
+                    .collect();
+                if parts.is_empty() {
+                    return BooleanArray::from(Vec::<bool>::new());
+                }
+                let joined = arrow::compute::concat(&parts).expect("tags are boolean");
+                joined.as_boolean().clone()
+            })
+            .collect()
+    }
 }
 
 /// Decode only the requested physical rows, without re-reading predicate or
@@ -110,7 +170,7 @@ pub(super) fn read_rows(
     table: &ParquetTable,
     request: &ScanRequest,
     rows: &[u64],
-) -> Result<Vec<RecordBatch>> {
+) -> Result<Vec<ScannedBatch>> {
     crate::engine_ensure!(
         rows.windows(2).all(|pair| pair[0] < pair[1])
             && rows
@@ -165,14 +225,12 @@ pub(super) fn read_rows(
             reader
                 .map(|batch| {
                     let batch = project_batch(&batch.context("reading selected rows")?, &schema)?;
-                    if let Some(name) = request.row_index_column {
-                        let end = position_offset + batch.num_rows();
-                        let positions = UInt64Array::from(selected[position_offset..end].to_vec());
-                        position_offset = end;
-                        append_positions(&batch, name, positions)
-                    } else {
-                        Ok(batch)
-                    }
+                    let end = position_offset + batch.num_rows();
+                    let positions = request
+                        .positions
+                        .then(|| UInt64Array::from(selected[position_offset..end].to_vec()));
+                    position_offset = end;
+                    Ok(ScannedBatch::untagged(request, batch, positions))
                 })
                 .collect::<Result<Vec<_>>>()
         })

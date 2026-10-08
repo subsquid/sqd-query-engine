@@ -3,7 +3,6 @@ use crate::error::ErrorKind;
 use crate::integers::IntColumn;
 use anyhow::Result;
 use arrow::array::*;
-use arrow::compute;
 use arrow::datatypes::SchemaRef;
 use std::collections::HashMap;
 
@@ -97,8 +96,28 @@ pub fn find_children(
     target_address_column: &str,
     inclusive: bool,
 ) -> Result<Vec<RecordBatch>> {
+    let masks = children_masks(
+        source_batches,
+        target_batches,
+        group_key_columns,
+        source_address_column,
+        target_address_column,
+        inclusive,
+    )?;
+    super::keep_matching(target_batches, masks)
+}
+
+/// Which rows of each target batch [`find_children`] keeps.
+pub fn children_masks(
+    source_batches: &[RecordBatch],
+    target_batches: &[RecordBatch],
+    group_key_columns: &[&str],
+    source_address_column: &str,
+    target_address_column: &str,
+    inclusive: bool,
+) -> Result<Vec<BooleanArray>> {
     if source_batches.is_empty() || target_batches.is_empty() {
-        return Ok(Vec::new());
+        return Ok(super::no_rows(target_batches));
     }
 
     // Build an index: group_key -> set of source addresses
@@ -144,7 +163,7 @@ pub fn find_children(
     }
 
     // Probe target batches: keep rows whose address is a child of any source address
-    let mut result = Vec::new();
+    let mut masks = Vec::with_capacity(target_batches.len());
     for batch in target_batches {
         let key_indices = resolve_indices(batch.schema_ref(), group_key_columns)?;
         let addr_idx = batch
@@ -199,19 +218,10 @@ pub fn find_children(
             matches.push(is_child);
         }
 
-        let mask = BooleanArray::from(matches);
-        let tc = mask.true_count();
-        if tc == 0 {
-            continue;
-        }
-        if tc == batch.num_rows() {
-            result.push(batch.clone());
-        } else {
-            result.push(compute::filter_record_batch(batch, &mask)?);
-        }
+        masks.push(BooleanArray::from(matches));
     }
 
-    Ok(result)
+    Ok(masks)
 }
 
 /// Find all parents (ancestors) of the given rows. A parent is a row in `target_batches`
@@ -232,8 +242,28 @@ pub fn find_parents(
     target_address_column: &str,
     inclusive: bool,
 ) -> Result<Vec<RecordBatch>> {
+    let masks = parents_masks(
+        source_batches,
+        target_batches,
+        group_key_columns,
+        source_address_column,
+        target_address_column,
+        inclusive,
+    )?;
+    super::keep_matching(target_batches, masks)
+}
+
+/// Which rows of each target batch [`find_parents`] keeps.
+pub fn parents_masks(
+    source_batches: &[RecordBatch],
+    target_batches: &[RecordBatch],
+    group_key_columns: &[&str],
+    source_address_column: &str,
+    target_address_column: &str,
+    inclusive: bool,
+) -> Result<Vec<BooleanArray>> {
     if source_batches.is_empty() || target_batches.is_empty() {
-        return Ok(Vec::new());
+        return Ok(super::no_rows(target_batches));
     }
 
     // Build index: group_key -> set of source addresses
@@ -279,7 +309,7 @@ pub fn find_parents(
     }
 
     // Probe: keep rows whose address is a prefix of any source address
-    let mut result = Vec::new();
+    let mut masks = Vec::with_capacity(target_batches.len());
     for batch in target_batches {
         let key_indices = resolve_indices(batch.schema_ref(), group_key_columns)?;
         let addr_idx = batch
@@ -333,24 +363,16 @@ pub fn find_parents(
             matches.push(is_parent);
         }
 
-        let mask = BooleanArray::from(matches);
-        let tc = mask.true_count();
-        if tc == 0 {
-            continue;
-        }
-        if tc == batch.num_rows() {
-            result.push(batch.clone());
-        } else {
-            result.push(compute::filter_record_batch(batch, &mask)?);
-        }
+        masks.push(BooleanArray::from(matches));
     }
 
-    Ok(result)
+    Ok(masks)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::compute;
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
 

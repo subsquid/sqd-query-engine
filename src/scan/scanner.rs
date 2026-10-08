@@ -1,15 +1,18 @@
+use super::pairs::{pack16, PairSet};
 use crate::engine_err;
 use crate::error::ErrorKind;
-use crate::integers::{IntColumn, OwnedIntColumn};
+use crate::integers::IntColumn;
 use crate::scan::chunk::ParquetTable;
 use crate::scan::predicate::RowPredicate;
+use crate::scan::rows::{Scanned, ScannedBatch};
 use crate::text::StringColumn;
 use anyhow::{Context, Result};
 use arrow::array::builder::BooleanBufferBuilder;
 use arrow::array::*;
+use arrow::buffer::BooleanBuffer;
 use arrow::compute::kernels::boolean::and;
 use arrow::compute::kernels::cmp::{gt_eq, lt_eq};
-use arrow::datatypes::{DataType, Schema, SchemaRef};
+use arrow::datatypes::{DataType, Schema, SchemaRef, UInt64Type};
 use arrow::error::ArrowError;
 use arrow::row::{RowConverter, SortField};
 use parquet::arrow::arrow_reader::{ArrowPredicateFn, ParquetRecordBatchReaderBuilder, RowFilter};
@@ -17,8 +20,7 @@ use parquet::arrow::ProjectionMask;
 use parquet::basic::Encoding;
 use parquet::file::metadata::ColumnChunkMetaData;
 use rayon::prelude::*;
-use rustc_hash::FxHashSet as HashSet;
-use std::collections::HashMap;
+use rustc_hash::{FxHashMap, FxHashSet as HashSet};
 use std::sync::Arc;
 
 /// A scan request: which columns to read, what predicates to apply.
@@ -45,12 +47,23 @@ pub struct ScanRequest<'a> {
     /// `ColumnDoesNotExist`), as opposed to engine-internal columns that are
     /// tolerated when absent.
     pub required_columns: Vec<&'a str>,
-    /// Append absolute physical row positions under this synthetic column name.
-    /// Readers that support this must also support `row_indices` on later scans.
-    pub row_index_column: Option<&'a str>,
+    /// Record each returned row's absolute physical position. Only readers
+    /// that support row positions can.
+    pub positions: bool,
     /// Read these physical rows directly. Positions must be sorted and unique;
     /// predicates and block bounds must already have been applied by the caller.
     pub row_indices: Option<&'a [u64]>,
+    /// Lists of items, by index into `predicates`: for each list the scan
+    /// reports which rows one of its items matched, so that a relation follows
+    /// the rows its own items matched without evaluating them again.
+    pub item_tags: Vec<&'a [usize]>,
+    /// Where to keep this scan's columns decoded whole, for a table several
+    /// scans of the query filter: each then filters them in memory instead of
+    /// decoding them again. Used when the scan's items match every row.
+    pub column_cache: Option<&'a super::ColumnCache>,
+    /// The block range of the query pass this scan belongs to, which holds
+    /// every row the scan can return. Decoded columns keep only its rows.
+    pub window: Option<super::Window>,
 }
 
 impl<'a> ScanRequest<'a> {
@@ -65,8 +78,11 @@ impl<'a> ScanRequest<'a> {
             key_filter: None,
             hierarchical_filter: None,
             required_columns: Vec::new(),
-            row_index_column: None,
+            positions: false,
             row_indices: None,
+            item_tags: Vec::new(),
+            column_cache: None,
+            window: None,
         }
     }
 }
@@ -76,8 +92,11 @@ impl<'a> ScanRequest<'a> {
 /// into a `u128` avoids a per-key heap allocation on build and a slice hash on
 /// probe. Wider or string/list keys fall back to serialized `Vec<u8>`.
 enum CompositeKeySet {
-    /// Two integer key columns, packed `(c0 << 64) | c1`.
-    Fixed16(HashSet<u128>),
+    /// Two integer key columns.
+    Fixed16(PairSet),
+    /// Two integer columns and a path of item indices: an instruction's or a
+    /// call's identity.
+    PairPath(SourceAddresses),
     /// Arbitrary key: serialized bytes (see `TypedKeyColumn::append_to`).
     Wide(HashSet<Vec<u8>>),
     /// Row identity during materialization, including null key components.
@@ -92,17 +111,11 @@ impl CompositeKeySet {
     fn is_empty(&self) -> bool {
         match self {
             Self::Fixed16(s) => s.is_empty(),
+            Self::PairPath(s) => s.paths.is_empty(),
             Self::Wide(s) => s.is_empty(),
             Self::Rows { values, .. } => values.is_empty(),
         }
     }
-}
-
-/// Pack two normalized u64 key components into a single u128 (bijective; build
-/// and probe must agree — they both call this).
-#[inline(always)]
-fn pack16(a: u64, b: u64) -> u128 {
-    ((a as u128) << 64) | (b as u128)
 }
 
 /// A set-based filter for join key pushdown during relation scans.
@@ -199,8 +212,31 @@ impl KeyFilter {
         primary_bn_col: &str,
         target_bn_col: &str,
     ) -> Self {
-        assert_eq!(left_keys.len(), right_keys.len());
+        KeySet::build(primary_batches, left_keys, primary_bn_col).filter(right_keys, target_bn_col)
+    }
 
+    pub fn is_empty(&self) -> bool {
+        self.key_set.is_empty()
+    }
+}
+
+/// The keys of some source rows, built once and matched against any target
+/// whose key columns line up with them.
+pub struct KeySet {
+    key_set: Arc<CompositeKeySet>,
+    /// Sorted unique block numbers for efficient row group pruning.
+    sorted_blocks: Vec<u64>,
+    /// How many columns a key has.
+    width: usize,
+}
+
+impl KeySet {
+    /// The `left_keys` values of every row of `primary_batches`.
+    pub fn build(
+        primary_batches: &[RecordBatch],
+        left_keys: &[&str],
+        primary_bn_col: &str,
+    ) -> Self {
         let mut block_numbers = HashSet::default();
 
         // Fast path when the key is exactly two integer columns (block_number +
@@ -219,8 +255,33 @@ impl KeyFilter {
                 })
                 .unwrap_or(false);
 
-        let key_set = if use_fixed16 {
-            let mut set: HashSet<u128> = HashSet::default();
+        let use_pair_path = left_keys.len() == 3
+            && primary_batches
+                .iter()
+                .find(|b| b.num_rows() > 0)
+                .is_some_and(|b| {
+                    let int = |name: &str| {
+                        b.column_by_name(name)
+                            .is_some_and(|c| IntColumn::resolve(c.as_ref()).is_some())
+                    };
+                    int(left_keys[0])
+                        && int(left_keys[1])
+                        && address_list(b, left_keys[2]).is_some()
+                });
+
+        let key_set = if use_pair_path {
+            for batch in primary_batches {
+                if let Some(col) = batch.column_by_name(primary_bn_col) {
+                    extract_block_numbers(col.as_ref(), &mut block_numbers);
+                }
+            }
+            CompositeKeySet::PairPath(SourceAddresses::build(
+                primary_batches,
+                &left_keys[..2],
+                left_keys[2],
+            ))
+        } else if use_fixed16 {
+            let mut pairs = Vec::new();
             for batch in primary_batches {
                 if batch.num_rows() == 0 {
                     continue;
@@ -228,22 +289,16 @@ impl KeyFilter {
                 if let Some(col) = batch.column_by_name(primary_bn_col) {
                     extract_block_numbers(col.as_ref(), &mut block_numbers);
                 }
-                let c0 = batch
-                    .column_by_name(left_keys[0])
-                    .and_then(|c| TypedKeyColumn::resolve(c.as_ref()));
-                let c1 = batch
-                    .column_by_name(left_keys[1])
-                    .and_then(|c| TypedKeyColumn::resolve(c.as_ref()));
-                if let (Some(c0), Some(c1)) = (c0, c1) {
-                    for row in 0..batch.num_rows() {
-                        if c0.is_null(row) || c1.is_null(row) {
-                            continue;
-                        }
-                        set.insert(pack16(c0.get_u64(row), c1.get_u64(row)));
-                    }
+                if let Some((first, second, nulls)) = pair_keys(batch, left_keys) {
+                    let present = |row: &usize| nulls.as_ref().is_none_or(|n| n.is_valid(*row));
+                    pairs.extend(
+                        (0..batch.num_rows())
+                            .filter(present)
+                            .map(|row| (first[row], second[row])),
+                    );
                 }
             }
-            CompositeKeySet::Fixed16(set)
+            CompositeKeySet::Fixed16(PairSet::new(pairs))
         } else {
             let mut set: HashSet<Vec<u8>> = HashSet::default();
             for batch in primary_batches {
@@ -278,17 +333,25 @@ impl KeyFilter {
         let mut sorted_blocks: Vec<u64> = block_numbers.iter().copied().collect();
         sorted_blocks.sort_unstable();
 
-        KeyFilter {
-            columns: right_keys.iter().map(|s| s.to_string()).collect(),
+        KeySet {
             key_set: Arc::new(key_set),
             sorted_blocks,
-            block_number_column: target_bn_col.to_string(),
-            materialization: false,
+            width: left_keys.len(),
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.key_set.is_empty()
+    /// Target rows whose `right_keys` columns hold one of the keys, paired with
+    /// `left_keys` in order.
+    pub fn filter(&self, right_keys: &[&str], target_bn_col: &str) -> KeyFilter {
+        assert_eq!(self.width, right_keys.len());
+
+        KeyFilter {
+            columns: right_keys.iter().map(|s| s.to_string()).collect(),
+            key_set: self.key_set.clone(),
+            sorted_blocks: self.sorted_blocks.clone(),
+            block_number_column: target_bn_col.to_string(),
+            materialization: false,
+        }
     }
 }
 
@@ -304,12 +367,8 @@ pub enum HierarchicalMode {
 /// A filter for hierarchical joins (find_children / find_parents) that can be
 /// applied as a RowFilter stage, avoiding decode of data columns for non-matching rows.
 pub struct HierarchicalFilter {
-    /// Source addresses indexed by group key (serialized block_number + transaction_index).
-    source_addresses: Arc<HashMap<Vec<u8>, Vec<Vec<u32>>>>,
-    /// Set of first-key values (block_number as u64) for fast pre-filtering.
-    /// Most rows don't match any source block, so this cheap check skips ~85-99% of rows
-    /// before the expensive composite key build + HashMap lookup.
-    first_key_set: Arc<rustc_hash::FxHashSet<u64>>,
+    /// Every source address, by the group it belongs to.
+    sources: Arc<SourceAddresses>,
     /// Group key column names in the target table (e.g., ["block_number", "transaction_index"]).
     pub group_key_columns: Vec<String>,
     /// Address column name in target table (e.g., "instruction_address", "call_address").
@@ -336,238 +395,514 @@ impl HierarchicalFilter {
         mode: HierarchicalMode,
         inclusive: bool,
     ) -> Self {
-        let mut source_addresses: HashMap<Vec<u8>, Vec<Vec<u32>>> = HashMap::new();
+        AddressIndex::build(primary_batches, group_key_columns, source_address_column).filter(
+            target_address_column,
+            mode,
+            inclusive,
+        )
+    }
 
-        for batch in primary_batches {
-            if batch.num_rows() == 0 {
-                continue;
-            }
-            let typed_keys: Vec<Option<TypedKeyColumn>> = group_key_columns
-                .iter()
-                .map(|name| {
-                    batch
-                        .column_by_name(name)
-                        .and_then(|c| TypedKeyColumn::resolve(c.as_ref()))
-                })
-                .collect();
+    pub fn is_empty(&self) -> bool {
+        self.sources.paths.is_empty()
+    }
+}
 
-            let addr_col = batch.column_by_name(source_address_column);
-            let addr_list =
-                addr_col.and_then(|c| c.as_any().downcast_ref::<GenericListArray<i32>>());
+/// The addresses of some source rows by group, built once and related to any
+/// target by [`AddressIndex::filter`].
+pub struct AddressIndex {
+    sources: Arc<SourceAddresses>,
+    group_key_columns: Vec<String>,
+}
 
-            if addr_list.is_none() {
-                continue;
-            }
-            let addr_list = addr_list.unwrap();
+impl AddressIndex {
+    pub fn build(
+        primary_batches: &[RecordBatch],
+        group_key_columns: &[&str],
+        source_address_column: &str,
+    ) -> Self {
+        let sources =
+            SourceAddresses::build(primary_batches, group_key_columns, source_address_column);
 
-            let mut key_buf = Vec::with_capacity(group_key_columns.len() * 8);
-            for row in 0..batch.num_rows() {
-                if addr_list.is_null(row) {
-                    continue;
-                }
-
-                key_buf.clear();
-                let complete = typed_keys
-                    .iter()
-                    .all(|tc| matches!(tc, Some(tc) if tc.append_to(&mut key_buf, row)));
-                if !complete {
-                    continue;
-                }
-                let addr = extract_address_values(addr_list, row);
-                source_addresses
-                    .entry(key_buf.clone())
-                    .or_default()
-                    .push(addr);
-            }
-        }
-
-        // Extract unique first-key values (block_number) for fast pre-filtering
-        let mut first_key_set = rustc_hash::FxHashSet::default();
-        for key in source_addresses.keys() {
-            if key.len() >= 8 {
-                let v = u64::from_le_bytes(key[..8].try_into().unwrap());
-                first_key_set.insert(v);
-            }
-        }
-
-        HierarchicalFilter {
-            source_addresses: Arc::new(source_addresses),
-            first_key_set: Arc::new(first_key_set),
+        AddressIndex {
+            sources: Arc::new(sources),
             group_key_columns: group_key_columns.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// Target rows whose `target_address_column` relates to a source address
+    /// as `mode` and `inclusive` say.
+    pub fn filter(
+        &self,
+        target_address_column: &str,
+        mode: HierarchicalMode,
+        inclusive: bool,
+    ) -> HierarchicalFilter {
+        HierarchicalFilter {
+            sources: self.sources.clone(),
+            group_key_columns: self.group_key_columns.clone(),
             address_column: target_address_column.to_string(),
             mode,
             inclusive,
         }
     }
+}
 
-    pub fn is_empty(&self) -> bool {
-        self.source_addresses.is_empty()
+/// Group ids by group key. Two integer columns, the key of every bundled
+/// relation, pack into one `u128`; any other key is the bytes
+/// [`TypedKeyColumn::append_to`] writes.
+enum GroupIds {
+    Pair(FxHashMap<u128, u32>),
+    Bytes(FxHashMap<Vec<u8>, u32>),
+}
+
+impl GroupIds {
+    fn len(&self) -> usize {
+        match self {
+            Self::Pair(ids) => ids.len(),
+            Self::Bytes(ids) => ids.len(),
+        }
+    }
+
+    /// The id of the group `row` belongs to, assigned on first sight.
+    fn insert(
+        &mut self,
+        keys: &[Option<TypedKeyColumn>],
+        row: usize,
+        buf: &mut Vec<u8>,
+    ) -> Option<u32> {
+        let next = self.len() as u32;
+        match self {
+            Self::Pair(ids) => Some(*ids.entry(pair_key(keys, row)?).or_insert(next)),
+            Self::Bytes(ids) => {
+                let key = bytes_key(keys, row, buf)?;
+                if let Some(&id) = ids.get(key) {
+                    return Some(id);
+                }
+                ids.insert(key.to_vec(), next);
+                Some(next)
+            }
+        }
+    }
+
+    /// The id of the group `row` belongs to, if any source does.
+    fn get(&self, keys: &[Option<TypedKeyColumn>], row: usize, buf: &mut Vec<u8>) -> Option<u32> {
+        match self {
+            Self::Pair(ids) => ids.get(&pair_key(keys, row)?).copied(),
+            Self::Bytes(ids) => ids.get(bytes_key(keys, row, buf)?).copied(),
+        }
     }
 }
 
-/// A hierarchical address as a path of item indices, at whatever width the
-/// writer stored the elements.
-fn extract_address_values(array: &GenericListArray<i32>, row: usize) -> Vec<u32> {
-    if array.is_null(row) {
-        return Vec::new();
+/// A two-integer group key, or `None` when the row has none.
+#[inline]
+fn pair_key(keys: &[Option<TypedKeyColumn>], row: usize) -> Option<u128> {
+    let [Some(TypedKeyColumn::Int(first)), Some(TypedKeyColumn::Int(second))] = keys else {
+        return None;
+    };
+    let present = !first.is_null(row) && !second.is_null(row);
+
+    present.then(|| pack16(first.join_key(row), second.join_key(row)))
+}
+
+/// A group key as bytes, or `None` when a component is missing or null.
+#[inline]
+fn bytes_key<'b>(
+    keys: &[Option<TypedKeyColumn>],
+    row: usize,
+    buf: &'b mut Vec<u8>,
+) -> Option<&'b [u8]> {
+    buf.clear();
+    let complete = keys
+        .iter()
+        .all(|key| matches!(key, Some(key) if key.append_to(buf, row)));
+
+    complete.then_some(buf.as_slice())
+}
+
+/// The relation's source addresses, sorted within each group, so a target row
+/// finds its relatives by binary search instead of by comparing itself with
+/// every source of its transaction.
+///
+/// Address elements are kept as join keys, so a path compares by value
+/// whatever width each side stored it at, and big-endian, so a deep path
+/// compares as one run of bytes.
+struct SourceAddresses {
+    groups: GroupIds,
+    /// Per group id, the range of `paths` holding the group's addresses.
+    ranges: Vec<std::ops::Range<u32>>,
+    /// `(start, len)` into `elements`, sorted by group and then by path, with
+    /// no path twice in one group.
+    paths: Vec<(u32, u32)>,
+    /// Each element's join key, big-endian, so that comparing two paths'
+    /// bytes orders them as comparing their elements does.
+    elements: Vec<u8>,
+    /// For deep paths, where a binary search compares long shared prefixes:
+    /// every source path, and every strict prefix of one, by hash.
+    hashed: Option<(PathIndex, PathIndex)>,
+}
+
+/// Paths a lookup finds by a hash of their group and elements, then confirms
+/// by comparing the elements.
+struct PathIndex {
+    /// The first entry with a hash.
+    first: FxHashMap<u64, u32>,
+    /// `(hash, group, start, len)`, sorted by hash.
+    entries: Vec<(u64, u32, u32, u32)>,
+}
+
+impl PathIndex {
+    fn new(mut entries: Vec<(u64, u32, u32, u32)>) -> Self {
+        entries.sort_unstable_by_key(|entry| entry.0);
+        let mut first = FxHashMap::default();
+        for (index, entry) in entries.iter().enumerate().rev() {
+            first.insert(entry.0, index as u32);
+        }
+
+        Self { first, entries }
     }
 
-    let values = array.value(row);
-    let Some(elements) = IntColumn::resolve(values.as_ref()) else {
-        return Vec::new();
-    };
+    fn contains(&self, hash: u64, group: u32, path: &[u8], elements: &[u8]) -> bool {
+        let Some(&first) = self.first.get(&hash) else {
+            return false;
+        };
 
-    (0..elements.len())
-        .map(|i| elements.block_number(i) as u32)
+        self.entries[first as usize..]
+            .iter()
+            .take_while(|entry| entry.0 == hash)
+            .any(|&(_, g, start, len)| {
+                g == group && &elements[start as usize * 8..(start + len) as usize * 8] == path
+            })
+    }
+}
+
+/// Paths deeper than this on average are looked up by hash.
+const HASHED_DEPTH: usize = 4;
+
+/// The hash of a group's empty path; [`path_hash_step`] extends it by one
+/// element.
+#[inline]
+fn path_hash_start(group: u32) -> u64 {
+    (group as u64 ^ 0x9e37_79b9_7f4a_7c15).wrapping_mul(0x517c_c1b7_2722_0a95)
+}
+
+#[inline]
+fn path_hash_step(hash: u64, element: &[u8]) -> u64 {
+    let element = u64::from_be_bytes(element.try_into().expect("eight bytes"));
+    (hash.rotate_left(5) ^ element).wrapping_mul(0x517c_c1b7_2722_0a95)
+}
+
+impl SourceAddresses {
+    fn build(batches: &[RecordBatch], group_key_columns: &[&str], address_column: &str) -> Self {
+        let pair = group_key_columns.len() == 2
+            && batches.iter().filter(|b| b.num_rows() > 0).all(|batch| {
+                group_key_columns.iter().all(|name| {
+                    batch
+                        .column_by_name(name)
+                        .is_some_and(|c| IntColumn::resolve(c.as_ref()).is_some())
+                })
+            });
+        let mut groups = if pair {
+            GroupIds::Pair(Default::default())
+        } else {
+            GroupIds::Bytes(Default::default())
+        };
+
+        let mut entries: Vec<(u32, u32, u32)> = Vec::new();
+        let mut elements: Vec<u8> = Vec::new();
+        let mut buf = Vec::new();
+        for batch in batches {
+            let keys = typed_key_columns(batch, group_key_columns);
+            let Some((addresses, values)) = address_list(batch, address_column) else {
+                continue;
+            };
+            let offsets = addresses.value_offsets();
+            let element_bytes = values.join_key_bytes();
+            let pairs = pair_keys(batch, group_key_columns);
+            let group_of =
+                |groups: &mut GroupIds, row: usize, buf: &mut Vec<u8>| match (&pairs, groups) {
+                    (Some((first, second, nulls)), GroupIds::Pair(ids)) => {
+                        let present = nulls.as_ref().is_none_or(|n| n.is_valid(row));
+                        let next = ids.len() as u32;
+                        present.then(|| *ids.entry(pack16(first[row], second[row])).or_insert(next))
+                    }
+                    (_, groups) => groups.insert(&keys, row, buf),
+                };
+
+            for row in 0..batch.num_rows() {
+                // A null address is not the empty one, which is the root call.
+                if addresses.is_null(row) {
+                    continue;
+                }
+                let Some(group) = group_of(&mut groups, row, &mut buf) else {
+                    continue;
+                };
+
+                let start = (elements.len() / 8) as u32;
+                let path = offsets[row] as usize * 8..offsets[row + 1] as usize * 8;
+                elements.extend_from_slice(&element_bytes[path]);
+                entries.push((group, start, (elements.len() / 8) as u32 - start));
+            }
+        }
+
+        // Group ids are dense, so one counting pass orders the paths by group,
+        // and only each group's few paths are compared.
+        let mut starts = vec![0u32; groups.len() + 1];
+        for &(group, ..) in &entries {
+            starts[group as usize + 1] += 1;
+        }
+        for group in 0..groups.len() {
+            starts[group + 1] += starts[group];
+        }
+        let mut ordered = vec![(0u32, 0u32); entries.len()];
+        let mut next = starts.clone();
+        for &(group, start, len) in &entries {
+            ordered[next[group as usize] as usize] = (start, len);
+            next[group as usize] += 1;
+        }
+
+        let path =
+            |&(start, len): &(u32, u32)| &elements[start as usize * 8..(start + len) as usize * 8];
+        let mut ranges = Vec::with_capacity(groups.len());
+        let mut paths = Vec::with_capacity(ordered.len());
+        for group in 0..groups.len() {
+            let own = &mut ordered[starts[group] as usize..starts[group + 1] as usize];
+            own.sort_unstable_by(|a, b| path(a).cmp(path(b)));
+            let first = paths.len() as u32;
+            for &entry in own.iter() {
+                let repeated =
+                    paths.len() as u32 > first && path(paths.last().unwrap()) == path(&entry);
+                if !repeated {
+                    paths.push(entry);
+                }
+            }
+            ranges.push(first..paths.len() as u32);
+        }
+
+        let deep =
+            paths.iter().map(|&(_, len)| len as usize).sum::<usize>() > HASHED_DEPTH * paths.len();
+        let hashed = deep.then(|| Self::index(&ranges, &paths, &elements));
+
+        SourceAddresses {
+            groups,
+            ranges,
+            paths,
+            elements,
+            hashed,
+        }
+    }
+
+    /// Every source path, and every distinct strict prefix of one. A prefix
+    /// shared by several paths is the prefix of each in a run of the sorted
+    /// paths, so it is new only where it is longer than what the path shares
+    /// with the one before, or is that whole path.
+    fn index(
+        ranges: &[std::ops::Range<u32>],
+        paths: &[(u32, u32)],
+        elements: &[u8],
+    ) -> (PathIndex, PathIndex) {
+        let bytes =
+            |(start, len): (u32, u32)| &elements[start as usize * 8..(start + len) as usize * 8];
+        let mut exact = Vec::with_capacity(paths.len());
+        let mut prefixes = Vec::new();
+
+        for (group, range) in ranges.iter().enumerate() {
+            let group = group as u32;
+            let mut previous: Option<&[u8]> = None;
+            for &(start, len) in &paths[range.start as usize..range.end as usize] {
+                let path = bytes((start, len));
+                let new_from = previous.map_or(0, |before| {
+                    let shared = before
+                        .chunks_exact(8)
+                        .zip(path.chunks_exact(8))
+                        .take_while(|(a, b)| a == b)
+                        .count();
+                    if shared * 8 == before.len() {
+                        shared
+                    } else {
+                        shared + 1
+                    }
+                });
+
+                let mut hash = path_hash_start(group);
+                for (depth, element) in path.chunks_exact(8).enumerate() {
+                    if depth >= new_from {
+                        prefixes.push((hash, group, start, depth as u32));
+                    }
+                    hash = path_hash_step(hash, element);
+                }
+                exact.push((hash, group, start, len));
+                previous = Some(path);
+            }
+        }
+
+        (PathIndex::new(exact), PathIndex::new(prefixes))
+    }
+
+    fn path(&self, (start, len): (u32, u32)) -> &[u8] {
+        &self.elements[start as usize * 8..(start + len) as usize * 8]
+    }
+
+    /// Whether `target` is a source address of `group`.
+    fn holds(&self, group: u32, target: &[u8]) -> bool {
+        if let Some((exact, _)) = &self.hashed {
+            let hash = target
+                .chunks_exact(8)
+                .fold(path_hash_start(group), path_hash_step);
+            return exact.contains(hash, group, target, &self.elements);
+        }
+
+        let range = &self.ranges[group as usize];
+        let paths = &self.paths[range.start as usize..range.end as usize];
+
+        paths
+            .binary_search_by(|&path| self.path(path).cmp(target))
+            .is_ok()
+    }
+
+    /// Whether `target` is related to a source address of `group`.
+    fn relates(&self, group: u32, target: &[u8], mode: HierarchicalMode, inclusive: bool) -> bool {
+        if let Some((exact, prefixes)) = &self.hashed {
+            let elements = &self.elements;
+            return match mode {
+                // A source that is a prefix of the target, strict unless inclusive.
+                HierarchicalMode::Children => {
+                    let depth = target.len() / 8;
+                    let mut hash = path_hash_start(group);
+                    let mut found = false;
+                    for d in 0..=depth {
+                        if d == depth && !inclusive {
+                            break;
+                        }
+                        if exact.contains(hash, group, &target[..d * 8], elements) {
+                            found = true;
+                            break;
+                        }
+                        if d < depth {
+                            hash = path_hash_step(hash, &target[d * 8..(d + 1) * 8]);
+                        }
+                    }
+                    found
+                }
+                // A source the target is a strict prefix of, or equal to when
+                // inclusive.
+                HierarchicalMode::Parents => {
+                    let hash = target
+                        .chunks_exact(8)
+                        .fold(path_hash_start(group), path_hash_step);
+                    prefixes.contains(hash, group, target, elements)
+                        || (inclusive && exact.contains(hash, group, target, elements))
+                }
+            };
+        }
+
+        let range = &self.ranges[group as usize];
+        let paths = &self.paths[range.start as usize..range.end as usize];
+
+        match mode {
+            // A parent is one of the target's prefixes, one lookup per depth.
+            HierarchicalMode::Children => {
+                let depth = target.len() / 8;
+                let depths = if inclusive { depth + 1 } else { depth };
+                (0..depths).any(|depth| {
+                    paths
+                        .binary_search_by(|&path| self.path(path).cmp(&target[..depth * 8]))
+                        .is_ok()
+                })
+            }
+            // The addresses that extend the target sort right after it.
+            HierarchicalMode::Parents => {
+                let first = paths.partition_point(|&path| self.path(path) < target);
+                let mut extensions = paths[first..].iter().map(|&path| self.path(path));
+
+                match extensions.next() {
+                    Some(path) if path == target => {
+                        inclusive || extensions.next().is_some_and(|p| p.starts_with(target))
+                    }
+                    Some(path) => path.starts_with(target),
+                    None => false,
+                }
+            }
+        }
+    }
+}
+
+fn typed_key_columns<'a>(
+    batch: &'a RecordBatch,
+    names: &[impl AsRef<str>],
+) -> Vec<Option<TypedKeyColumn<'a>>> {
+    names
+        .iter()
+        .map(|name| {
+            batch
+                .column_by_name(name.as_ref())
+                .and_then(|c| TypedKeyColumn::resolve(c.as_ref()))
+        })
         .collect()
+}
+
+/// A hierarchical address column and its elements. `None` where the column is
+/// absent or its elements are not integers: an address is a path of item
+/// indices, so anything else is a chunk that disagrees with its catalog, and
+/// nothing matches.
+fn address_list<'a>(
+    batch: &'a RecordBatch,
+    column: &str,
+) -> Option<(&'a GenericListArray<i32>, IntColumn<'a>)> {
+    let addresses = batch
+        .column_by_name(column)?
+        .as_any()
+        .downcast_ref::<GenericListArray<i32>>()?;
+    let values = IntColumn::resolve(addresses.values().as_ref())?;
+
+    Some((addresses, values))
 }
 
 /// Build a boolean mask for hierarchical filtering.
 /// Also performs key-in-set check inline, so this can replace a separate KeyFilter stage.
 fn hierarchical_mask(
     batch: &RecordBatch,
-    source_addresses: &HashMap<Vec<u8>, Vec<Vec<u32>>>,
-    first_key_set: &rustc_hash::FxHashSet<u64>,
+    sources: &SourceAddresses,
     group_key_columns: &[String],
     address_column: &str,
     mode: HierarchicalMode,
     inclusive: bool,
+    candidates: Option<&BooleanBuffer>,
 ) -> BooleanArray {
     let len = batch.num_rows();
     let mut builder = BooleanBufferBuilder::new(len);
 
-    let typed_keys: Vec<Option<TypedKeyColumn>> = group_key_columns
-        .iter()
-        .map(|name| {
-            batch
-                .column_by_name(name)
-                .and_then(|c| TypedKeyColumn::resolve(c.as_ref()))
-        })
-        .collect();
-
-    let addr_col = batch.column_by_name(address_column);
-    let addr_list = addr_col.and_then(|c| c.as_any().downcast_ref::<GenericListArray<i32>>());
-
-    if addr_list.is_none() {
+    let Some((addresses, values)) = address_list(batch, address_column) else {
         builder.append_n(len, false);
         return BooleanArray::new(builder.finish(), None);
-    }
-    let addr_list = addr_list.unwrap();
+    };
+    let keys = typed_key_columns(batch, group_key_columns);
+    let pairs = match &sources.groups {
+        GroupIds::Pair(_) => pair_keys(batch, group_key_columns),
+        GroupIds::Bytes(_) => None,
+    };
+    let offsets = addresses.value_offsets();
+    let element_bytes = values.join_key_bytes();
 
-    // Resolve the element type once for the whole column
-    let values = addr_list.values();
-    let elem_type = resolve_list_element_type(values.as_ref());
-
-    // Fast path: 2-column key (block_number + transaction_index) with first-key pre-filter
-    if typed_keys.len() == 2 {
-        if let (Some(ref c0), Some(ref c1)) = (&typed_keys[0], &typed_keys[1]) {
-            let mut key_buf = [0u8; 16];
-            for row in 0..len {
-                if addr_list.is_null(row) || c0.is_null(row) || c1.is_null(row) {
-                    builder.append(false);
-                    continue;
-                }
-                // Pre-filter: check first key (block_number) before building full composite key
-                c0.write_to_buf(&mut key_buf[..8], row);
-                let first_key = u64::from_le_bytes(key_buf[..8].try_into().unwrap());
-                if !first_key_set.contains(&first_key) {
-                    builder.append(false);
-                    continue;
-                }
-                c1.write_to_buf(&mut key_buf[8..16], row);
-                let matches = source_addresses
-                    .get(&key_buf[..16])
-                    .map(|addrs| match_address(addr_list, row, &elem_type, addrs, mode, inclusive))
-                    .unwrap_or(false);
-                builder.append(matches);
-            }
-            return BooleanArray::new(builder.finish(), None);
-        }
-    }
-
-    // General path
-    let mut key_buf = Vec::with_capacity(group_key_columns.len() * 8);
+    let mut buf = Vec::new();
     for row in 0..len {
-        if addr_list.is_null(row) {
-            builder.append(false);
-            continue;
-        }
-
-        key_buf.clear();
-        let complete = typed_keys
-            .iter()
-            .all(|tc| matches!(tc, Some(tc) if tc.append_to(&mut key_buf, row)));
-        if !complete {
-            builder.append(false);
-            continue;
-        }
-
-        let matches = source_addresses
-            .get(key_buf.as_slice())
-            .map(|addrs| match_address(addr_list, row, &elem_type, addrs, mode, inclusive))
-            .unwrap_or(false);
-
-        builder.append(matches);
+        let candidate = candidates.is_none_or(|c| c.value(row)) && !addresses.is_null(row);
+        let group = match (&pairs, &sources.groups) {
+            _ if !candidate => None,
+            (Some((first, second, nulls)), GroupIds::Pair(ids)) => nulls
+                .as_ref()
+                .is_none_or(|n| n.is_valid(row))
+                .then(|| ids.get(&pack16(first[row], second[row])).copied())
+                .flatten(),
+            (_, groups) => groups.get(&keys, row, &mut buf),
+        };
+        let related = group.is_some_and(|group| {
+            let target = &element_bytes[offsets[row] as usize * 8..offsets[row + 1] as usize * 8];
+            sources.relates(group, target, mode, inclusive)
+        });
+        builder.append(related);
     }
 
     BooleanArray::new(builder.finish(), None)
-}
-
-#[inline]
-fn match_address(
-    addr_list: &GenericListArray<i32>,
-    row: usize,
-    elem_type: &ListElementType,
-    addrs: &[Vec<u32>],
-    mode: HierarchicalMode,
-    inclusive: bool,
-) -> bool {
-    let offsets = addr_list.offsets();
-    let start = offsets[row] as usize;
-    let end = offsets[row + 1] as usize;
-    let target_len = end - start;
-    match mode {
-        HierarchicalMode::Children => addrs.iter().any(|parent| {
-            let len_ok = if inclusive {
-                target_len >= parent.len()
-            } else {
-                target_len > parent.len()
-            };
-            len_ok && compare_address_prefix(elem_type, start, parent)
-        }),
-        HierarchicalMode::Parents => addrs.iter().any(|child| {
-            let len_ok = if inclusive {
-                target_len <= child.len()
-            } else {
-                target_len < child.len()
-            };
-            len_ok && compare_address_prefix(elem_type, start, &child[..target_len])
-        }),
-    }
-}
-
-/// Resolved list element array for zero-allocation address comparison.
-///
-/// `None` where the elements are not integers: an address is a path of item
-/// indices, so anything else is a chunk that disagrees with its catalog, and
-/// nothing matches.
-type ListElementType = Option<OwnedIntColumn>;
-
-fn resolve_list_element_type(values: &dyn Array) -> ListElementType {
-    OwnedIntColumn::resolve(values)
-}
-
-/// Compare address elements starting at `start` against `expected` without allocating.
-#[inline]
-fn compare_address_prefix(elem_type: &ListElementType, start: usize, expected: &[u32]) -> bool {
-    let Some(elements) = elem_type else {
-        return false;
-    };
-
-    expected
-        .iter()
-        .enumerate()
-        .all(|(i, &v)| elements.value(start + i) == v as i128)
 }
 
 /// Extract all block number values from a column into a HashSet.
@@ -589,7 +924,9 @@ fn extract_block_numbers(col: &dyn Array, out: &mut HashSet<u64>) {
 enum TypedKeyColumn<'a> {
     Int(IntColumn<'a>),
     Str(StringColumn<'a>),
-    List(&'a GenericListArray<i32>),
+    /// A path of item indices. `None` elements are not integers, so no row of
+    /// the list has a key.
+    List(&'a GenericListArray<i32>, Option<IntColumn<'a>>),
 }
 
 impl<'a> TypedKeyColumn<'a> {
@@ -601,7 +938,7 @@ impl<'a> TypedKeyColumn<'a> {
             return Some(Self::Str(text));
         }
         if let Some(a) = col.as_any().downcast_ref::<GenericListArray<i32>>() {
-            return Some(Self::List(a));
+            return Some(Self::List(a, IntColumn::resolve(a.values().as_ref())));
         }
 
         None
@@ -612,7 +949,7 @@ impl<'a> TypedKeyColumn<'a> {
         match self {
             Self::Int(a) => a.is_null(row),
             Self::Str(a) => a.value(row).is_none(),
-            Self::List(a) => a.is_null(row),
+            Self::List(a, _) => a.is_null(row),
         }
     }
 
@@ -632,17 +969,18 @@ impl<'a> TypedKeyColumn<'a> {
                 buf.extend_from_slice(&(v.len() as u32).to_le_bytes());
                 buf.extend_from_slice(v.as_bytes());
             }
-            Self::List(a) => {
-                let arr = a.value(row);
-                buf.extend_from_slice(&(arr.len() as u32).to_le_bytes());
-
+            Self::List(a, elements) => {
                 // A list key is a path of item indices, so its elements are
                 // integers at whatever width the writer chose, and each is
                 // written the fixed eight bytes the scalar arm writes.
-                let Some(elements) = IntColumn::resolve(arr.as_ref()) else {
+                let Some(elements) = elements else {
                     return false;
                 };
-                for i in 0..elements.len() {
+                let offsets = a.value_offsets();
+                let (start, end) = (offsets[row] as usize, offsets[row + 1] as usize);
+
+                buf.extend_from_slice(&((end - start) as u32).to_le_bytes());
+                for i in start..end {
                     buf.extend_from_slice(&elements.join_key(i).to_le_bytes());
                 }
             }
@@ -651,27 +989,27 @@ impl<'a> TypedKeyColumn<'a> {
         true
     }
 
-    /// Get value as u64. Only for integer types.
-    #[inline(always)]
-    fn get_u64(&self, row: usize) -> u64 {
-        match self {
-            Self::Int(a) => a.join_key(row),
-            _ => 0,
-        }
-    }
-
     /// True for integer key columns (eligible for the packed-u128 fast path).
     #[inline(always)]
     fn is_integer(&self) -> bool {
         matches!(self, Self::Int(_))
     }
+}
 
-    /// Write normalized u64 value directly into a fixed-size buffer slice.
-    /// Only for integer types (used in optimized paths).
-    #[inline(always)]
-    fn write_to_buf(&self, buf: &mut [u8], row: usize) {
-        buf[..8].copy_from_slice(&self.get_u64(row).to_le_bytes());
-    }
+/// The join keys of a batch's two integer key columns, and the rows where
+/// either is null; `None` when they are not two integer columns.
+fn pair_keys<S: AsRef<str>>(
+    batch: &RecordBatch,
+    columns: &[S],
+) -> Option<(Vec<u64>, Vec<u64>, Option<arrow::buffer::NullBuffer>)> {
+    let [first, second] = columns else {
+        return None;
+    };
+    let column = |name: &S| IntColumn::resolve(batch.column_by_name(name.as_ref())?.as_ref());
+    let (first, second) = (column(first)?, column(second)?);
+    let nulls = arrow::buffer::NullBuffer::union(first.nulls(), second.nulls());
+
+    Some((first.join_keys(), second.join_keys(), nulls))
 }
 
 /// Build a boolean mask: true for rows where composite key is in the set.
@@ -680,7 +1018,9 @@ fn composite_key_in_set_mask(
     batch: &RecordBatch,
     key_columns: &[String],
     key_set: &CompositeKeySet,
+    candidates: Option<&BooleanBuffer>,
 ) -> std::result::Result<BooleanArray, ArrowError> {
+    let candidate = |row: usize| candidates.is_none_or(|c| c.value(row));
     let len = batch.num_rows();
     if let CompositeKeySet::Rows { converter, values } = key_set {
         let arrays: Vec<_> = key_columns
@@ -713,27 +1053,62 @@ fn composite_key_in_set_mask(
         // Fast path: exactly two integer columns packed as u128 (matches
         // `KeyFilter::build`'s `pack16`). No per-row allocation, no slice hash.
         CompositeKeySet::Fixed16(set) => {
-            if let [Some(c0), Some(c1)] = typed_cols.as_slice() {
-                for row in 0..len {
-                    let present = !c0.is_null(row) && !c1.is_null(row);
-                    builder
-                        .append(present && set.contains(&pack16(c0.get_u64(row), c1.get_u64(row))));
-                }
-            } else {
-                builder.append_n(len, false);
-            }
+            let Some((first, second, nulls)) = pair_keys(batch, key_columns) else {
+                return Ok(BooleanArray::new(BooleanBuffer::new_unset(len), None));
+            };
+            let found = BooleanBuffer::collect_bool(len, |row| {
+                candidate(row) && set.contains(first[row], second[row])
+            });
+            let found = match nulls {
+                Some(nulls) => &found & nulls.inner(),
+                None => found,
+            };
+            return Ok(BooleanArray::new(found, None));
         }
         // General path: serialize each key column with `append_to` (matches
         // build), reusing one scratch buffer. Correct for string/list keys.
         CompositeKeySet::Wide(set) => {
             let mut key_buf = Vec::with_capacity(key_columns.len() * 8);
             for row in 0..len {
+                if !candidate(row) {
+                    builder.append(false);
+                    continue;
+                }
                 key_buf.clear();
                 let complete = typed_cols
                     .iter()
                     .all(|tc| matches!(tc, Some(tc) if tc.append_to(&mut key_buf, row)));
                 builder.append(complete && set.contains(key_buf.as_slice()));
             }
+        }
+        CompositeKeySet::PairPath(sources) => {
+            let Some((addresses, values)) = address_list(batch, &key_columns[2]) else {
+                return Ok(BooleanArray::new(BooleanBuffer::new_unset(len), None));
+            };
+            let groups = &key_columns[..2];
+            let keys = typed_key_columns(batch, groups);
+            let pairs = pair_keys(batch, groups);
+            let offsets = addresses.value_offsets();
+            let element_bytes = values.join_key_bytes();
+            let mut buf = Vec::new();
+            let found = BooleanBuffer::collect_bool(len, |row| {
+                if !candidate(row) || addresses.is_null(row) {
+                    return false;
+                }
+                let group = match (&pairs, &sources.groups) {
+                    (Some((first, second, nulls)), GroupIds::Pair(ids)) => nulls
+                        .as_ref()
+                        .is_none_or(|n| n.is_valid(row))
+                        .then(|| ids.get(&pack16(first[row], second[row])).copied())
+                        .flatten(),
+                    (_, groups) => groups.get(&keys, row, &mut buf),
+                };
+                group.is_some_and(|group| {
+                    let path = offsets[row] as usize * 8..offsets[row + 1] as usize * 8;
+                    sources.holds(group, &element_bytes[path])
+                })
+            });
+            return Ok(BooleanArray::new(found, None));
         }
         CompositeKeySet::Rows { .. } => unreachable!(),
     }
@@ -948,8 +1323,18 @@ fn ensure_predicates_comparable(table: &ParquetTable, request: &ScanRequest) -> 
 }
 
 /// Execute a scan against a parquet table: read, filter, project.
-/// Returns filtered RecordBatches with only the output columns.
+/// Returns the filtered rows with only the output columns.
 pub fn scan(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<RecordBatch>> {
+    Ok(scan_rows(table, request)?.rows.into_batches())
+}
+
+/// [`scan`], with what the request asked to learn about the rows.
+pub fn scan_rows(table: &ParquetTable, request: &ScanRequest) -> Result<Scanned> {
+    let batches = scan_batches(table, request)?;
+    Ok(Scanned::collect(request, batches))
+}
+
+fn scan_batches(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<ScannedBatch>> {
     ensure_columns_present(table, request)?;
     ensure_predicates_comparable(table, request)?;
     ensure_block_numbers_readable(table, request)?;
@@ -971,6 +1356,23 @@ pub fn scan(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<RecordBat
     // 3. Read and filter across row groups
     let output_schema = build_output_schema(table.schema(), &request.output_columns);
 
+    let in_memory =
+        request.row_indices.is_none() && request.predicates.iter().all(|p| p.matches_every_row());
+    if let Some(cache) = request.column_cache.filter(|_| in_memory) {
+        let results: Vec<Result<Vec<ScannedBatch>>> = row_groups_to_scan
+            .par_iter()
+            .map(|&group| {
+                scan_decoded_row_group(table, group, &all_columns, request, &output_schema, cache)
+            })
+            .collect();
+        return Ok(results
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect());
+    }
+
     // Parallelize across row groups for all scans with >1 RG.
     // Each RG gets its own RowFilter pipeline, evaluated independently.
     let mut all_batches = Vec::new();
@@ -983,7 +1385,7 @@ pub fn scan(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<RecordBat
             &output_schema,
         )?);
     } else {
-        let results: Vec<Result<Vec<RecordBatch>>> = row_groups_to_scan
+        let results: Vec<Result<Vec<ScannedBatch>>> = row_groups_to_scan
             .par_iter()
             .map(|&rg_idx| scan_row_groups(table, &[rg_idx], &all_columns, request, &output_schema))
             .collect();
@@ -1225,20 +1627,8 @@ fn select_row_groups(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<
 
         // Check predicate-based row group skipping
         if !request.predicates.is_empty() {
-            let stats_fn = |col_name: &str| -> Option<crate::scan::predicate::StatRange> {
-                // Parquet stats come at the physical type; the stored type says how to read them.
-                let stored = table.schema().field_with_name(col_name).ok()?.data_type();
-                let stats = table.column_stats(rg_idx, col_name)?;
-                let (min, max) = (stats.min?, stats.max?);
-                crate::scan::predicate::StatRange::new(
-                    stored,
-                    stat_value_to_array(&min).as_ref(),
-                    stat_value_to_array(&max).as_ref(),
-                )
-            };
-
-            let pred_refs: Vec<&RowPredicate> = request.predicates.clone();
-            if crate::scan::predicate::can_skip_row_group_or(&pred_refs, &stats_fn) {
+            let stats = row_group_stats(table, rg_idx, &request.predicates);
+            if crate::scan::predicate::can_skip_row_group_or(&request.predicates, &stats) {
                 continue;
             }
         }
@@ -1260,6 +1650,41 @@ fn select_row_groups(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<
     Ok(row_groups)
 }
 
+/// One row group's statistics for the columns `predicates` filter on, each read
+/// once, at the type the column is stored at. A hundred items name the same few
+/// columns, and reading a statistic allocates.
+fn row_group_stats<'p>(
+    table: &ParquetTable,
+    group: usize,
+    predicates: &[&'p RowPredicate],
+) -> impl Fn(&str) -> Option<crate::scan::predicate::StatRange> + 'p {
+    let mut columns: Vec<(&str, Option<crate::scan::predicate::StatRange>)> = Vec::new();
+    for predicate in predicates.iter().flat_map(|p| p.column_predicates()) {
+        let column = predicate.column.as_str();
+        if columns.iter().all(|(read, _)| *read != column) {
+            columns.push((column, column_stats(table, group, column)));
+        }
+    }
+
+    move |column| columns.iter().find(|(read, _)| *read == column)?.1.clone()
+}
+
+fn column_stats(
+    table: &ParquetTable,
+    group: usize,
+    column: &str,
+) -> Option<crate::scan::predicate::StatRange> {
+    // Parquet stats come at the physical type; the stored type says how to read them.
+    let stored = table.schema().field_with_name(column).ok()?.data_type();
+    let stats = table.column_stats(group, column)?;
+    let (min, max) = (stats.min?, stats.max?);
+    crate::scan::predicate::StatRange::new(
+        stored,
+        stat_value_to_array(&min).as_ref(),
+        stat_value_to_array(&max).as_ref(),
+    )
+}
+
 /// Scan selected row groups using a single reader: read columns, apply predicates, project output.
 ///
 /// Strategy:
@@ -1274,7 +1699,7 @@ fn scan_row_groups(
     read_columns: &[&str],
     request: &ScanRequest,
     output_schema: &SchemaRef,
-) -> Result<Vec<RecordBatch>> {
+) -> Result<Vec<ScannedBatch>> {
     let parquet_schema = table.metadata().file_metadata().schema_descr();
     let indices: Vec<usize> = read_columns
         .iter()
@@ -1283,18 +1708,30 @@ fn scan_row_groups(
 
     let mask = ProjectionMask::roots(parquet_schema, indices);
 
-    let mut builder = ParquetRecordBatchReaderBuilder::new_with_metadata(
-        table.data(),
-        table.arrow_metadata().clone(),
-    )
-    .with_projection(mask)
-    .with_batch_size(request.batch_size)
-    .with_row_groups(row_groups.to_vec());
-
     // Use RowFilter for predicate pushdown with multi-stage cascading.
     // Each stage reads only its own columns; rows eliminated by early stages
     // avoid column decoding in later stages.
     let has_predicates = !request.predicates.is_empty();
+
+    // An item whose statistics rule this row group out does not run on it.
+    let stats: Vec<_> = row_groups
+        .iter()
+        .map(|&group| row_group_stats(table, group, &request.predicates))
+        .collect();
+    let active: Vec<usize> = (0..request.predicates.len())
+        .filter(|&item| {
+            stats
+                .iter()
+                .any(|stats| !request.predicates[item].can_skip_row_group(stats))
+        })
+        .collect();
+    if has_predicates && active.is_empty() {
+        return Ok(Vec::new());
+    }
+    let predicates: Vec<&RowPredicate> = active
+        .iter()
+        .map(|&item| request.predicates[item])
+        .collect();
     let effective_from = request.from_block.filter(|&b| b > 0);
     // Relation keys already restrict blocks. Materialization keys can include
     // wide strings or lists, so reject blocks before decoding those components.
@@ -1304,13 +1741,14 @@ fn scan_row_groups(
     let has_key_filter = request.key_filter.is_some();
     let has_hierarchical_filter = request.hierarchical_filter.is_some();
     let mut tracked = request
-        .row_index_column
-        .map(|_| super::positions::TrackedRows::default());
+        .positions
+        .then(super::positions::TrackedRows::default);
+    let item_tags = has_predicates
+        .then(|| super::positions::ItemTags::new(request, &active))
+        .flatten();
+    let mut filter_stages: Vec<Box<dyn parquet::arrow::arrow_reader::ArrowPredicate>> = Vec::new();
 
     if has_predicates || has_block_filter || has_key_filter || has_hierarchical_filter {
-        let mut filter_stages: Vec<Box<dyn parquet::arrow::arrow_reader::ArrowPredicate>> =
-            Vec::new();
-
         // Stage 0: block range filter
         if has_block_filter {
             let bn_col = request.block_number_column.unwrap();
@@ -1373,16 +1811,17 @@ fn scan_row_groups(
                 filter_stages.push(Box::new(ArrowPredicateFn::new(
                     key_proj,
                     move |batch: RecordBatch| {
-                        composite_key_in_set_mask(&batch, &key_columns, &key_set)
+                        composite_key_in_set_mask(&batch, &key_columns, &key_set, None)
                     },
                 )));
             }
         }
 
         // Predicate stages: first column gets its own stage (most selective — sort key leader),
-        // remaining columns are merged into a single stage.
-        if request.predicates.len() == 1 {
-            let pred = request.predicates[0];
+        // remaining columns are merged into a single stage. Tags need each
+        // item's own answer, which only the stage evaluating all of them has.
+        if predicates.len() == 1 && item_tags.is_none() {
+            let pred = predicates[0];
             let (first, rest) = match pred.columns.split_first() {
                 Some((first, rest)) => (Some(first), rest),
                 None => (None, &[][..]),
@@ -1429,7 +1868,7 @@ fn scan_row_groups(
             }
         } else if has_predicates {
             let mut pred_col_indices: Vec<usize> = Vec::new();
-            for pred in &request.predicates {
+            for pred in &predicates {
                 for col in pred.required_columns() {
                     if let Ok(idx) = table.schema().index_of(col) {
                         pred_col_indices.push(idx);
@@ -1439,16 +1878,48 @@ fn scan_row_groups(
             pred_col_indices.sort_unstable();
             pred_col_indices.dedup();
 
-            let pred_projection = ProjectionMask::roots(parquet_schema, pred_col_indices);
-            let predicates: Vec<RowPredicate> =
-                request.predicates.iter().map(|&p| p.clone()).collect();
+            // One list per column admits every row an item could match, so
+            // the items themselves run only on the rows it admits.
+            let union = (predicates.len() > 1)
+                .then(|| crate::scan::predicate::listed_union(&predicates))
+                .flatten();
+            if let Some(union) = union {
+                let indices: Vec<usize> = union
+                    .required_columns()
+                    .into_iter()
+                    .filter_map(|column| table.schema().index_of(column).ok())
+                    .collect();
+                filter_stages.push(Box::new(ArrowPredicateFn::new(
+                    ProjectionMask::roots(parquet_schema, indices),
+                    move |batch: RecordBatch| {
+                        union
+                            .evaluate(&batch)
+                            .map_err(|e| ArrowError::ComputeError(e.to_string()))
+                    },
+                )));
+            }
 
+            let pred_projection = ProjectionMask::roots(parquet_schema, pred_col_indices);
+            let predicates: Vec<RowPredicate> = predicates.iter().map(|&p| p.clone()).collect();
+            let every_item: Vec<usize> = (0..predicates.len()).collect();
+            let item_tags = item_tags.clone();
+
+            // Last, so that the rows it selects are the rows read.
             filter_stages.push(Box::new(ArrowPredicateFn::new(
                 pred_projection,
                 move |batch: RecordBatch| {
-                    let pred_refs: Vec<&RowPredicate> = predicates.iter().collect();
-                    crate::scan::predicate::or_row_predicates(&pred_refs, &batch)
-                        .map_err(|e| ArrowError::ComputeError(e.to_string()))
+                    let masks = predicates
+                        .iter()
+                        .map(|predicate| predicate.evaluate(&batch))
+                        .collect::<std::result::Result<Vec<_>, _>>()
+                        .map_err(|e| ArrowError::ComputeError(e.to_string()))?;
+                    let matched =
+                        crate::scan::predicate::or_masks(&masks, &every_item, batch.num_rows());
+
+                    if let Some(tags) = &item_tags {
+                        tags.record(&masks, &matched);
+                    }
+                    Ok(matched)
                 },
             )));
         }
@@ -1457,38 +1928,181 @@ fn scan_row_groups(
             if let Some(tracked) = &mut tracked {
                 filter_stages = tracked.wrap(filter_stages);
             }
-            builder = builder.with_row_filter(RowFilter::new(filter_stages));
         }
     }
 
+    let mut builder = ParquetRecordBatchReaderBuilder::new_with_metadata(
+        table.data(),
+        table.arrow_metadata().clone(),
+    )
+    .with_projection(mask)
+    .with_batch_size(request.batch_size)
+    .with_row_groups(row_groups.to_vec());
+    if !filter_stages.is_empty() {
+        builder = builder.with_row_filter(RowFilter::new(filter_stages));
+    }
     let reader = builder.build().context("building parquet reader")?;
     let positions = tracked.map(|tracked| tracked.finish(table, row_groups));
-    let mut position_offset = 0;
+    let tags = item_tags.map(|tags| tags.finish());
+    let mut rows_read = 0;
 
     let mut output_batches = Vec::new();
 
     for batch_result in reader {
         let batch = batch_result.context("reading batch")?;
-
-        if batch.num_rows() == 0 {
+        let rows = batch.num_rows();
+        if rows == 0 {
             continue;
         }
 
-        // Project to output columns only
-        let mut projected = project_batch(&batch, output_schema)?;
-        if let (Some(name), Some(positions)) = (request.row_index_column, &positions) {
-            projected = super::positions::append_positions(
-                &projected,
-                name,
-                positions.slice(position_offset, batch.num_rows()),
-            )?;
-            position_offset += batch.num_rows();
-        }
-
-        output_batches.push(projected);
+        let batch = project_batch(&batch, output_schema)?;
+        let positions = positions
+            .as_ref()
+            .map(|positions| positions.slice(rows_read, rows));
+        output_batches.push(match &tags {
+            Some(tags) => ScannedBatch {
+                batch,
+                positions,
+                tags: tags.iter().map(|tag| tag.slice(rows_read, rows)).collect(),
+            },
+            None => ScannedBatch::untagged(request, batch, positions),
+        });
+        rows_read += rows;
     }
 
     Ok(output_batches)
+}
+
+/// One row group of a scan whose items match every row: the rows inside the
+/// pass's window decoded once for every scan that shares `cache`, and the
+/// scan's block range, key and hierarchical filters applied in memory. Rows
+/// come out as [`scan_row_groups`] returns them: a relation's rows share its
+/// sources' blocks (INV-D5), all inside the window.
+fn scan_decoded_row_group(
+    table: &ParquetTable,
+    group: usize,
+    read_columns: &[&str],
+    request: &ScanRequest,
+    output_schema: &SchemaRef,
+    cache: &super::ColumnCache,
+) -> Result<Vec<ScannedBatch>> {
+    let window = request.window.unwrap_or_default();
+    let window_rows = cache.window_rows(table, group, window, || {
+        let rows = table.row_group(group).num_rows() as usize;
+        let bounded = window.from.is_some_and(|b| b > 0) || window.to.is_some();
+        let block_index = request
+            .block_number_column
+            .and_then(|name| table.schema().index_of(name).ok())
+            .filter(|_| bounded);
+        let Some(index) = block_index else {
+            return Ok(super::columns::WindowRows::All(rows));
+        };
+
+        let blocks = super::columns::decode_column(table, group, index)?;
+        let inside = block_range_mask(&blocks, window.from.filter(|&b| b > 0), window.to)?;
+        let inside = match inside.nulls() {
+            Some(nulls) => inside.values() & nulls.inner(),
+            None => inside.values().clone(),
+        };
+        Ok(if inside.count_set_bits() == rows {
+            super::columns::WindowRows::All(rows)
+        } else {
+            super::columns::WindowRows::Some(inside.set_indices().map(|row| row as u32).collect())
+        })
+    })?;
+    let window_rows = &window_rows.value;
+    let rows = window_rows.len();
+
+    let mut fields = Vec::new();
+    let mut columns = Vec::new();
+    for &name in read_columns {
+        let Ok(index) = table.schema().index_of(name) else {
+            continue;
+        };
+        fields.push(table.schema().field(index).clone());
+        columns.push(cache.column(table, group, index, window, window_rows)?);
+    }
+    let batch = RecordBatch::try_new_with_options(
+        Arc::new(Schema::new(fields)),
+        columns,
+        &RecordBatchOptions::new().with_row_count(Some(rows)),
+    )?;
+
+    let mut keep = BooleanBuffer::new_set(rows);
+    let block_column = request
+        .block_number_column
+        .and_then(|name| batch.column_by_name(name));
+    let bounded = request.from_block.is_some_and(|b| b > 0) || request.to_block.is_some();
+    // The same rule as the reader's: relation keys already bound the blocks.
+    let block_filter = match request.hierarchical_filter {
+        Some(_) => bounded,
+        None => request.key_filter.is_none_or(|key| key.materialization) && bounded,
+    };
+    if let Some(column) = block_column.filter(|_| block_filter) {
+        let from = request.from_block.filter(|&b| b > 0);
+        keep = &keep & block_range_mask(column, from, request.to_block)?.values();
+    }
+
+    if let Some(hf) = request.hierarchical_filter {
+        let mask = hierarchical_mask(
+            &batch,
+            &hf.sources,
+            &hf.group_key_columns,
+            &hf.address_column,
+            hf.mode,
+            hf.inclusive,
+            Some(&keep),
+        );
+        keep = &keep & mask.values();
+    } else if let Some(kf) = request.key_filter {
+        let stored = kf
+            .columns
+            .iter()
+            .any(|name| table.schema().index_of(name).is_ok());
+        if stored {
+            // A row of a block no key names cannot match one; the row group
+            // pruning above relies on the same.
+            let bounds = kf.sorted_blocks.first().zip(kf.sorted_blocks.last());
+            let target_blocks = batch.column_by_name(&kf.block_number_column);
+            if let (Some((&first, &last)), Some(column)) = (bounds, target_blocks) {
+                keep = &keep & block_range_mask(column, Some(first), Some(last))?.values();
+            }
+            let mask = composite_key_in_set_mask(&batch, &kf.columns, &kf.key_set, Some(&keep))?;
+            keep = &keep & mask.values();
+        }
+    }
+
+    let kept = keep.count_set_bits();
+    if kept == 0 {
+        return Ok(Vec::new());
+    }
+    let selected = BooleanArray::new(keep, None);
+    let batch =
+        arrow::compute::filter_record_batch(&project_batch(&batch, output_schema)?, &selected)?;
+
+    let positions = request.positions.then(|| {
+        let start: u64 = (0..group)
+            .map(|g| table.row_group(g).num_rows() as u64)
+            .sum();
+        selected
+            .values()
+            .set_indices()
+            .map(|row| start + window_rows.offset(row) as u64)
+            .collect::<UInt64Array>()
+    });
+    // Every item matches every row it reads, so a tag holds wherever one of
+    // its items runs.
+    let tags = request
+        .item_tags
+        .iter()
+        .map(|items| BooleanArray::from(vec![!items.is_empty(); kept]))
+        .collect();
+
+    Ok(vec![ScannedBatch {
+        batch,
+        positions,
+        tags,
+    }])
 }
 
 /// Hierarchical scan with merged key+address RowFilter stage.
@@ -1504,7 +2118,7 @@ fn scan_hierarchical_two_pass(
     request: &ScanRequest,
     hf: &HierarchicalFilter,
     output_schema: &SchemaRef,
-) -> Result<Vec<RecordBatch>> {
+) -> Result<Vec<ScannedBatch>> {
     let parquet_schema = table.metadata().file_metadata().schema_descr();
 
     // Collect all columns needed: output + key + address + block range
@@ -1542,8 +2156,7 @@ fn scan_hierarchical_two_pass(
     filter_col_indices.dedup();
 
     let filter_proj = ProjectionMask::roots(parquet_schema, filter_col_indices);
-    let source_addresses = hf.source_addresses.clone();
-    let first_key_set = hf.first_key_set.clone();
+    let sources = hf.sources.clone();
     let group_key_columns: Vec<String> = hf.group_key_columns.clone();
     let address_column: String = hf.address_column.clone();
     let mode = hf.mode;
@@ -1554,19 +2167,19 @@ fn scan_hierarchical_two_pass(
         move |batch: RecordBatch| {
             Ok(hierarchical_mask(
                 &batch,
-                &source_addresses,
-                &first_key_set,
+                &sources,
                 &group_key_columns,
                 &address_column,
                 mode,
                 inclusive,
+                None,
             ))
         },
     ));
 
     let mut tracked = request
-        .row_index_column
-        .map(|_| super::positions::TrackedRows::default());
+        .positions
+        .then(super::positions::TrackedRows::default);
     let stages: Vec<Box<dyn parquet::arrow::arrow_reader::ArrowPredicate>> = match &mut tracked {
         Some(tracked) => tracked.wrap(vec![filter_stage]),
         None => vec![filter_stage],
@@ -1587,50 +2200,42 @@ fn scan_hierarchical_two_pass(
     let mut output_batches = Vec::new();
 
     for batch_result in reader {
-        let mut batch = batch_result.context("reading hierarchical batch")?;
-        if batch.num_rows() == 0 {
+        let batch = batch_result.context("reading hierarchical batch")?;
+        let count = batch.num_rows();
+        if count == 0 {
             continue;
         }
-        if let (Some(name), Some(positions)) = (request.row_index_column, &positions) {
-            let count = batch.num_rows();
-            batch = super::positions::append_positions(
-                &batch,
-                name,
-                positions.slice(position_offset, count),
-            )?;
-            position_offset += count;
-        }
+        let batch_positions = positions
+            .as_ref()
+            .map(|positions| positions.slice(position_offset, count));
+        position_offset += count;
 
         // Apply block range filter if needed
         let bounded = request.from_block.filter(|&b| b > 0).is_some() || request.to_block.is_some();
-        let batch = if let Some(bn_col) = request.block_number_column.filter(|_| bounded) {
-            if let Some(col) = batch.column_by_name(bn_col) {
-                let br_mask = block_range_mask(col, request.from_block, request.to_block)?;
-                arrow::compute::filter_record_batch(&batch, &br_mask)
-                    .context("block range filter in hierarchical scan")?
-            } else {
-                batch
+        let block_column = request
+            .block_number_column
+            .filter(|_| bounded)
+            .and_then(|name| batch.column_by_name(name));
+        let (batch, batch_positions) = match block_column {
+            Some(column) => {
+                let in_range = block_range_mask(column, request.from_block, request.to_block)?;
+                let batch = arrow::compute::filter_record_batch(&batch, &in_range)
+                    .context("block range filter in hierarchical scan")?;
+                let batch_positions = batch_positions
+                    .map(|positions| arrow::compute::filter(&positions, &in_range))
+                    .transpose()?
+                    .map(|positions| positions.as_primitive::<UInt64Type>().clone());
+                (batch, batch_positions)
             }
-        } else {
-            batch
+            None => (batch, batch_positions),
         };
 
         if batch.num_rows() == 0 {
             continue;
         }
 
-        let mut projected = project_batch(&batch, output_schema)?;
-        if let Some(name) = request.row_index_column {
-            let positions = batch
-                .column_by_name(name)
-                .expect("tracked rows have positions");
-            let positions = positions
-                .as_any()
-                .downcast_ref::<UInt64Array>()
-                .expect("physical positions are u64");
-            projected = super::positions::append_positions(&projected, name, positions.clone())?;
-        }
-        output_batches.push(projected);
+        let projected = project_batch(&batch, output_schema)?;
+        output_batches.push(ScannedBatch::untagged(request, projected, batch_positions));
     }
 
     Ok(output_batches)
@@ -1651,22 +2256,23 @@ fn block_range_mask(
         ($($array:ty, $native:ty);+ $(;)?) => {
             $(if let Some(arr) = column.as_any().downcast_ref::<$array>() {
                 let ceiling = <$native>::MAX as u64;
-                let mut mask = BooleanArray::from(vec![true; arr.len()]);
-
-                if let Some(from) = from_block {
-                    if from > ceiling {
-                        return Ok(BooleanArray::from(vec![false; arr.len()]));
-                    }
-                    let ge = gt_eq(&arr, &<$array>::new_scalar(from as $native))?;
-                    mask = and(&mask, &ge)?;
+                if from_block.is_some_and(|from| from > ceiling) {
+                    return Ok(BooleanArray::new(BooleanBuffer::new_unset(arr.len()), None));
                 }
 
-                if let Some(to) = to_block.filter(|to| *to <= ceiling) {
-                    let le = lt_eq(&arr, &<$array>::new_scalar(to as $native))?;
-                    mask = and(&mask, &le)?;
-                }
+                let from = from_block
+                    .map(|from| gt_eq(&arr, &<$array>::new_scalar(from as $native)))
+                    .transpose()?;
+                let to = to_block
+                    .filter(|to| *to <= ceiling)
+                    .map(|to| lt_eq(&arr, &<$array>::new_scalar(to as $native)))
+                    .transpose()?;
 
-                return Ok(mask);
+                return Ok(match (from, to) {
+                    (Some(from), Some(to)) => and(&from, &to)?,
+                    (Some(bound), None) | (None, Some(bound)) => bound,
+                    (None, None) => BooleanArray::new(BooleanBuffer::new_set(arr.len()), None),
+                });
             })+
         };
     }
@@ -1809,9 +2415,261 @@ mod tests {
             .unwrap();
             let columns = vec!["number".to_owned(), "identity".to_owned()];
             let selected = KeyFilter::for_rows(&[batch.slice(1, 2)], &columns, "number").unwrap();
-            let mask = composite_key_in_set_mask(&batch, &columns, &selected.key_set).unwrap();
+            let mask =
+                composite_key_in_set_mask(&batch, &columns, &selected.key_set, None).unwrap();
             assert_eq!(mask, BooleanArray::from(vec![false, true, true, false]));
         }
+    }
+
+    /// A list key reads its elements through the list's offsets, so it must
+    /// write what the row's own slice holds: at every width, on a sliced list,
+    /// for null and empty lists and a null element. Elements that are not
+    /// integers give no row a key.
+    #[test]
+    fn a_list_key_writes_what_its_row_slice_holds() {
+        use crate::integers::IntColumn;
+        use arrow::datatypes::*;
+
+        fn lists<T: ArrowPrimitiveType>() -> ArrayRef {
+            let value = |v: usize| T::Native::from_usize(v);
+            Arc::new(ListArray::from_iter_primitive::<T, _, _>(vec![
+                Some(vec![value(9)]),
+                Some(vec![value(0), value(3)]),
+                None,
+                Some(vec![]),
+                Some(vec![value(1), None, value(2)]),
+                Some(vec![value(4)]),
+            ]))
+        }
+
+        let oracle = |list: &GenericListArray<i32>, row: usize| -> Option<Vec<u8>> {
+            if list.is_null(row) {
+                return None;
+            }
+            let slice = list.value(row);
+            let elements = IntColumn::resolve(slice.as_ref())?;
+            let mut buf = (slice.len() as u32).to_le_bytes().to_vec();
+            for i in 0..elements.len() {
+                buf.extend_from_slice(&elements.join_key(i).to_le_bytes());
+            }
+            Some(buf)
+        };
+
+        let columns = [
+            lists::<UInt8Type>(),
+            lists::<UInt16Type>(),
+            lists::<UInt32Type>(),
+            lists::<UInt64Type>(),
+            lists::<Int8Type>(),
+            lists::<Int16Type>(),
+            lists::<Int32Type>(),
+            lists::<Int64Type>(),
+            lists::<Float64Type>(),
+        ];
+        for column in &columns {
+            for column in [column.clone(), column.slice(1, 5)] {
+                let list = column.as_any().downcast_ref::<ListArray>().unwrap();
+                let key = TypedKeyColumn::resolve(column.as_ref()).unwrap();
+                for row in 0..list.len() {
+                    let mut buf = Vec::new();
+                    let written = key.append_to(&mut buf, row).then_some(buf);
+                    assert_eq!(
+                        written,
+                        oracle(list, row),
+                        "row {row} of a {} list",
+                        column.data_type()
+                    );
+                }
+            }
+        }
+    }
+
+    /// The address index answers what comparing a target with every source of
+    /// its group answers, in both modes, inclusive or not, over random groups,
+    /// paths of any depth including the root, repeated sources, null keys and
+    /// addresses, element widths that differ between the two sides, and keys
+    /// that pack into a pair and keys that do not.
+    #[test]
+    fn the_address_index_relates_what_a_full_comparison_relates() {
+        use arrow::datatypes::{UInt16Type, UInt32Type};
+
+        type Row = (Option<u32>, Option<u32>, Option<Vec<u32>>);
+
+        let mut seed = 0x5EED_0049u64;
+        let mut next = move |bound: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % bound
+        };
+
+        // Deep paths are looked up by hash, shallow ones by binary search.
+        let rows = |count: usize, deep: bool, next: &mut dyn FnMut(u64) -> u64| -> Vec<Row> {
+            (0..count)
+                .map(|_| {
+                    let groups = if deep { 2 } else { 3 };
+                    let key = |next: &mut dyn FnMut(u64) -> u64| {
+                        (next(10) > 0).then(|| next(groups) as u32)
+                    };
+                    let block = key(next);
+                    let tx = key(next);
+                    let address = (next(10) > 0).then(|| {
+                        let depth = if deep { 4 + next(7) } else { next(4) } as usize;
+                        (0..depth)
+                            .map(|_| next(if deep { 2 } else { 3 }) as u32)
+                            .collect()
+                    });
+                    (block, tx, address)
+                })
+                .collect()
+        };
+
+        let batch = |rows: &[Row], wide: bool, text_key: bool| -> RecordBatch {
+            let blocks: ArrayRef = Arc::new(Int32Array::from_iter(
+                rows.iter().map(|r| r.0.map(|v| v as i32)),
+            ));
+            let txs: ArrayRef = if text_key {
+                Arc::new(StringArray::from_iter(
+                    rows.iter().map(|r| r.1.map(|v| v.to_string())),
+                ))
+            } else {
+                Arc::new(UInt32Array::from_iter(rows.iter().map(|r| r.1)))
+            };
+            let paths = rows.iter().map(|r| {
+                r.2.as_ref()
+                    .map(|path| path.iter().map(|&v| Some(v)).collect::<Vec<_>>())
+            });
+            let addresses: ArrayRef = if wide {
+                Arc::new(ListArray::from_iter_primitive::<UInt32Type, _, _>(paths))
+            } else {
+                let paths = paths.map(|p| p.map(|p| p.into_iter().map(|v| v.map(|v| v as u16))));
+                Arc::new(ListArray::from_iter_primitive::<UInt16Type, _, _>(paths))
+            };
+            RecordBatch::try_from_iter(vec![("block", blocks), ("tx", txs), ("address", addresses)])
+                .unwrap()
+        };
+
+        let related = |target: &[u32], source: &[u32], mode, inclusive: bool| match mode {
+            HierarchicalMode::Children => {
+                let deep_enough = if inclusive {
+                    target.len() >= source.len()
+                } else {
+                    target.len() > source.len()
+                };
+                deep_enough && target.starts_with(source)
+            }
+            HierarchicalMode::Parents => {
+                let deep_enough = if inclusive {
+                    source.len() >= target.len()
+                } else {
+                    source.len() > target.len()
+                };
+                deep_enough && source.starts_with(target)
+            }
+        };
+
+        let mut seen_both = [false; 2];
+        let mut seen_hashed = [false; 2];
+        for case in 0..800 {
+            let deep = case % 16 >= 8;
+            let sources = rows(1 + next(30) as usize, deep, &mut next);
+            let mut targets = rows(1 + next(30) as usize, deep, &mut next);
+            // Half the targets cut or extend a source's path, which is where a
+            // prefix the index left out would show.
+            for target in targets.iter_mut() {
+                if next(2) == 0 {
+                    continue;
+                }
+                let source = &sources[next(sources.len() as u64) as usize];
+                let Some(path) = &source.2 else { continue };
+                let mut path = path[..next(path.len() as u64 + 1) as usize].to_vec();
+                if next(3) == 0 {
+                    path.push(next(2) as u32);
+                }
+                *target = (source.0, source.1, Some(path));
+            }
+            let mode = if case % 2 == 0 {
+                HierarchicalMode::Children
+            } else {
+                HierarchicalMode::Parents
+            };
+            let inclusive = case % 4 < 2;
+            let text_key = case % 8 >= 6;
+
+            let source_batch = batch(&sources, true, text_key);
+            let target_batch = batch(&targets, case % 3 == 0, text_key);
+            let filter = HierarchicalFilter::build(
+                &[source_batch.slice(0, sources.len())],
+                &["block", "tx"],
+                "address",
+                "address",
+                mode,
+                inclusive,
+            );
+            let mask = hierarchical_mask(
+                &target_batch,
+                &filter.sources,
+                &filter.group_key_columns,
+                "address",
+                mode,
+                inclusive,
+                None,
+            );
+            seen_hashed[usize::from(filter.sources.hashed.is_some())] = true;
+
+            // The same sources as exact keys: a target matches one that has
+            // its block, its transaction and its whole path.
+            let keys = ["block", "tx", "address"];
+            let exact = KeyFilter::build(
+                &[source_batch.slice(0, sources.len())],
+                &keys,
+                &keys,
+                "block",
+                "block",
+            );
+            let key_columns: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
+            let matched =
+                composite_key_in_set_mask(&target_batch, &key_columns, &exact.key_set, None)
+                    .unwrap();
+            for (row, target) in targets.iter().enumerate() {
+                let expected = target.0.is_some()
+                    && target.1.is_some()
+                    && target.2.is_some()
+                    && sources.contains(target);
+                assert_eq!(
+                    matched.value(row),
+                    expected,
+                    "case {case}, exact key {target:?}"
+                );
+            }
+
+            for (row, (block, tx, address)) in targets.iter().enumerate() {
+                let expected = match (block, tx, address) {
+                    (Some(block), Some(tx), Some(target)) => sources.iter().any(|source| {
+                        source.0 == Some(*block)
+                            && source.1 == Some(*tx)
+                            && source
+                                .2
+                                .as_ref()
+                                .is_some_and(|s| related(target, s, mode, inclusive))
+                    }),
+                    _ => false,
+                };
+                seen_both[usize::from(expected)] = true;
+                assert_eq!(
+                    mask.value(row),
+                    expected,
+                    "case {case}, target {row} {:?} against {sources:?}",
+                    targets[row]
+                );
+            }
+        }
+        assert_eq!(seen_both, [true, true], "every answer was the same");
+        assert_eq!(
+            seen_hashed,
+            [true, true],
+            "one way of finding paths went untested"
+        );
     }
 
     fn solana_chunk_path() -> PathBuf {
@@ -1867,6 +2725,148 @@ mod tests {
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, table.num_rows() as usize);
         assert_eq!(batches[0].num_columns(), 2);
+    }
+
+    /// A table several scans share is decoded once and filtered in memory; each
+    /// scan must return the rows, columns, positions and marks the reader
+    /// returns, in the same order, inside any window holding its rows.
+    #[test]
+    #[ignore = "requires external chunk data"]
+    fn a_decoded_scan_returns_what_the_reader_returns() {
+        if !crate::testing::chunks_present() {
+            return;
+        }
+
+        let instructions =
+            ParquetTable::open(&solana_chunk_path().join("instructions.parquet")).unwrap();
+        let first = 406021645u64;
+        let windows = [
+            super::super::Window {
+                from: Some(first),
+                to: Some(first + 3),
+            },
+            super::super::Window {
+                from: Some(first + 10),
+                to: None,
+            },
+            super::super::Window::default(),
+        ];
+        let concat = |batches: Vec<RecordBatch>| -> Option<RecordBatch> {
+            let schema = batches.first()?.schema();
+            Some(arrow::compute::concat_batches(&schema, &batches).unwrap())
+        };
+        let columns = vec![
+            "block_number",
+            "transaction_index",
+            "instruction_address",
+            "program_id",
+            "data_size",
+        ];
+
+        for window in windows {
+            let bounded = |request: &mut ScanRequest| {
+                request.block_number_column = Some("block_number");
+                request.from_block = window.from;
+                request.to_block = window.to;
+                request.window = Some(window);
+            };
+
+            // The sources: some of the window's instructions.
+            let mut source = ScanRequest::new(columns.clone());
+            bounded(&mut source);
+            let sources: Vec<RecordBatch> = scan(&instructions, &source)
+                .unwrap()
+                .iter()
+                .map(|batch| batch.slice(0, batch.num_rows().min(500)))
+                .collect();
+
+            let pair_keys = ["block_number", "transaction_index"];
+            let pair = KeyFilter::build(
+                &sources,
+                &pair_keys,
+                &pair_keys,
+                "block_number",
+                "block_number",
+            );
+            let path_keys = ["block_number", "transaction_index", "instruction_address"];
+            let path = KeyFilter::build(
+                &sources,
+                &path_keys,
+                &path_keys,
+                "block_number",
+                "block_number",
+            );
+            assert!(matches!(
+                path.key_set.as_ref(),
+                CompositeKeySet::PairPath(_)
+            ));
+            let hierarchical = |mode| {
+                HierarchicalFilter::build(
+                    &sources,
+                    &pair_keys,
+                    "instruction_address",
+                    "instruction_address",
+                    mode,
+                    false,
+                )
+            };
+            let children = hierarchical(HierarchicalMode::Children);
+            let parents = hierarchical(HierarchicalMode::Parents);
+            let everything = RowPredicate::new(Vec::new());
+            let tags = [&[0][..], &[][..]];
+            let flatten = |scanned: Scanned| {
+                let positions: Option<Vec<u64>> = scanned.rows.positions().map(|positions| {
+                    positions
+                        .iter()
+                        .flat_map(|batch| batch.values().iter().copied())
+                        .collect()
+                });
+                let tagged: Vec<_> = tags
+                    .iter()
+                    .map(|items| scanned.matched_by(items).and_then(concat))
+                    .collect();
+                (concat(scanned.rows.into_batches()), positions, tagged)
+            };
+
+            let mut requests = Vec::new();
+            for filter in [&pair, &path] {
+                let mut request = ScanRequest::new(columns.clone());
+                bounded(&mut request);
+                request.key_filter = Some(filter);
+                requests.push(("key", request));
+            }
+            for filter in [&children, &parents] {
+                let mut request = ScanRequest::new(columns.clone());
+                bounded(&mut request);
+                request.key_filter = Some(&pair);
+                request.hierarchical_filter = Some(filter);
+                requests.push(("hierarchical", request));
+            }
+            let mut unfiltered = ScanRequest::new(columns.clone());
+            bounded(&mut unfiltered);
+            unfiltered.predicates = vec![&everything];
+            unfiltered.item_tags = tags.to_vec();
+            requests.push(("unfiltered", unfiltered));
+
+            let cache = super::super::ColumnCache::new(u64::MAX);
+            for (what, request) in requests {
+                for positions in [false, true] {
+                    let mut request = request.clone();
+                    request.positions = positions;
+                    let expected = flatten(scan_rows(&instructions, &request).unwrap());
+                    request.column_cache = Some(&cache);
+                    // Twice: the second scan reads what the first decoded.
+                    for _ in 0..2 {
+                        let decoded = flatten(scan_rows(&instructions, &request).unwrap());
+                        assert_eq!(
+                            decoded, expected,
+                            "{what} scan, positions {positions:?}, window {window:?}"
+                        );
+                    }
+                }
+            }
+            assert!(cache.used() > 0, "the decoded scans kept nothing");
+        }
     }
 
     /// Covers CT-5 · INV-B1
