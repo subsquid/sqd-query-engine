@@ -111,6 +111,11 @@ pub struct TableDescription {
     #[serde(default)]
     pub item_order_keys: Vec<String>,
 
+    /// The columns every row is weighed for, selected or not, when they are not
+    /// the default. Read it through [`TableDescription::weight_key`].
+    #[serde(default, rename = "weight_key")]
+    pub declared_weight_key: Option<Vec<String>>,
+
     /// The sort key used when writing parquet files.
     /// Data is physically sorted by these columns.
     /// E.g., ["program_id", "d1", "b9", "block_number", "transaction_index"]
@@ -278,7 +283,7 @@ fn default_block_number_column() -> String {
 }
 
 /// Weight source for a column — either a reference to a size column or a fixed value.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum WeightSource {
     Column(String),
@@ -616,6 +621,22 @@ impl TableDescription {
     /// may depend on it (INV-D8).
     pub fn is_block_table(&self) -> bool {
         self.item_order_keys.is_empty() && self.address_column.is_none()
+    }
+
+    /// The columns every row of this table is weighed for, whether or not a
+    /// client selects them (§5.4): the declared `weight_key`, or else the item
+    /// key and the variant column. A row is read as one variant or another by
+    /// that column, so it is charged for it like its key.
+    pub fn weight_key(&self) -> Vec<&str> {
+        if let Some(declared) = &self.declared_weight_key {
+            return declared.iter().map(String::as_str).collect();
+        }
+
+        let mut key = vec![self.block_number_column.as_str()];
+        key.extend(self.item_order_keys.iter().map(String::as_str));
+        key.extend(self.address_column.as_deref());
+        key.extend(self.output.variant_column.as_deref());
+        key
     }
 
     /// Get a column description by name.

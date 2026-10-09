@@ -26,10 +26,11 @@ and a conformance suite checks them without touching a chunk.
 
 ### INV-D1
 **Every catalog reference resolves.** Every column named by a
-`blockNumberColumn`, `addressColumn`, `itemOrderKeys` entry, `sortKey` entry,
-`weight` source, filter target, `gteConst` target, discriminator length mapping,
-virtual-field roll member, variant column or variant field mapping, alias implicit
-filter, or alias `columnAlias` target MUST exist in the table it is declared on.
+`blockNumberColumn`, `addressColumn`, `itemOrderKeys` entry, `weightKey` entry,
+`sortKey` entry, `weight` source, filter target, `gteConst` target,
+discriminator length mapping, virtual-field roll member, variant column or
+variant field mapping, alias implicit filter, or alias `columnAlias` target MUST
+exist in the table it is declared on.
 
 *Why:* an unresolved reference fails at query time, on a query nobody ran during testing, in production.
 *Test:* walk the catalog; assert every name resolves. No chunk needed.
@@ -449,8 +450,10 @@ response's byte length. It MUST be a pure function of the selected projection an
 the chunk's values.
 
 ### INV-B10
-**Weight is computed over the emitted projection.** Selecting fewer fields makes
-blocks lighter and lets more of them fit. System columns contribute zero.
+**Weight is computed over the emitted projection and the weight key.** Selecting
+fewer fields makes blocks lighter and lets more of them fit. The weight key's
+columns are charged in every row, selected or not (§1.3). System columns
+contribute zero.
 
 *Test:* a narrow projection returns at least as many blocks as a wide one over the same range.
 

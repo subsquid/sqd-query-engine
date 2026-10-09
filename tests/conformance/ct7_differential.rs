@@ -12,10 +12,13 @@
 //! cargo test --test conformance --features legacy-query ct7_ -- --nocapture
 //! ```
 
-use sqd_query_engine::metadata::{load_dataset_description, DatasetDescription};
-use sqd_query_engine::output::execute_plan;
+use sqd_query_engine::metadata::{
+    load_dataset_description, DatasetDescription, TableDescription, VirtualField, WeightSource,
+};
+use sqd_query_engine::output::{execute_chunk_with, execute_plan, ExecOptions};
 use sqd_query_engine::query::{compile, parse_query};
-use std::collections::BTreeSet;
+use sqd_query_engine::scan::ParquetChunkReader;
+use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 
 use crate::harness::fixtures::fixture_chunk;
@@ -400,4 +403,240 @@ fn the_fork_check_answers_the_same_as_the_reference() {
             .join("\n  - ")
     );
     eprintln!("{checked} fork probes agree with the reference ({skipped_numbers} skipped numbers)");
+}
+
+/// How many `fromBlock` values each page shape starts from, spread over the
+/// chunk. A page checks one running sum of block weights, the one at its cut, so
+/// one start per shape would leave most blocks of the chunk unweighed.
+const PAGE_STARTS: u64 = 6;
+
+/// The same for the shapes selecting every field, which read the most.
+const WIDE_PAGE_STARTS: u64 = 2;
+
+/// The last block of the page each engine returns, at its default budget.
+fn page_end_new(
+    query: &str,
+    metadata: &DatasetDescription,
+    chunk: &Path,
+) -> Result<Option<u64>, String> {
+    let parsed = parse_query(query.as_bytes(), metadata).map_err(|e| format!("{e:#}"))?;
+    let plan = compile(&parsed, metadata).map_err(|e| format!("{e:#}"))?;
+    let reader = ParquetChunkReader::open(chunk).map_err(|e| format!("{e:#}"))?;
+    let page = execute_chunk_with(&plan, metadata, &reader, ExecOptions::default())
+        .map_err(|e| format!("{e:#}"))?;
+
+    Ok(page.map(|page| page.last_block()))
+}
+
+fn page_end_legacy(query: &str, chunk: &Path) -> Result<Option<u64>, String> {
+    let chunk = sqd_query::ParquetChunk::new(chunk.to_string_lossy().into_owned());
+    let query =
+        sqd_query::Query::from_json_bytes(query.as_bytes()).map_err(|e| format!("{e:#}"))?;
+    let page = query
+        .compile()
+        .execute(&chunk)
+        .map_err(|e| format!("{e:#}"))?;
+
+    Ok(page.map(|page| page.last_block()))
+}
+
+/// The fields of `table` whose columns the chunk stores, with the size columns
+/// that weigh them. A fixture chunk predates some of the catalog's fields, and a
+/// request for one is refused by both engines, which compares nothing.
+fn stored_fields(table: &TableDescription, name: &str, chunk: &Path) -> Vec<String> {
+    use parquet::file::reader::{FileReader, SerializedFileReader};
+
+    let Ok(file) = std::fs::File::open(chunk.join(format!("{name}.parquet"))) else {
+        return Vec::new();
+    };
+    let reader = SerializedFileReader::new(file).unwrap();
+    let stored: HashSet<String> = reader
+        .metadata()
+        .file_metadata()
+        .schema()
+        .get_fields()
+        .iter()
+        .map(|field| field.name().to_string())
+        .collect();
+
+    let is_stored = |column: &String| {
+        let size = match table.column(column).and_then(|c| c.weight.as_ref()) {
+            Some(WeightSource::Column(size)) => Some(size),
+            _ => None,
+        };
+        stored.contains(column) && size.is_none_or(|size| stored.contains(size))
+    };
+
+    table
+        .output
+        .fields
+        .iter()
+        .filter(|field| {
+            let columns = match table.output.virtual_fields.get(field.as_str()) {
+                Some(VirtualField::Roll { columns }) => columns.clone(),
+                None => table
+                    .physical_output_column(field)
+                    .map(|column| vec![column.to_string()])
+                    .unwrap_or_default(),
+            };
+            !columns.is_empty() && columns.iter().all(is_stored)
+        })
+        .cloned()
+        .collect()
+}
+
+fn selection(fields: &[String]) -> String {
+    let fields: Vec<String> = fields
+        .iter()
+        .map(|field| format!(r#""{}":true"#, snake_to_camel(field)))
+        .collect();
+    format!("{{{}}}", fields.join(","))
+}
+
+/// Page shapes over one chunk, each with how many starts it gets. `FROM` stands
+/// for the start.
+fn page_shapes(metadata: &DatasetDescription, chunk: &Path) -> Vec<(String, String, u64)> {
+    let ty = &metadata.name;
+    let (block_key, block) = metadata
+        .tables
+        .iter()
+        .find(|(_, table)| table.is_block_table())
+        .unwrap();
+    let headers = selection(&stored_fields(block, block_key, chunk));
+    let block_output = block.output.name.as_deref().unwrap_or("block");
+
+    let mut shapes = vec![(
+        "bare headers".to_string(),
+        format!(r#"{{"type":"{ty}","fromBlock":FROM,"includeAllBlocks":true,"fields":{{}}}}"#),
+        PAGE_STARTS,
+    )];
+
+    for (name, table) in &metadata.tables {
+        let (Some(request), Some(output)) = (table.request().name.as_deref(), &table.output.name)
+        else {
+            continue;
+        };
+        if !chunk.join(format!("{name}.parquet")).is_file() {
+            continue;
+        }
+        let relations: Vec<String> = table
+            .request()
+            .relations
+            .keys()
+            .map(|r| format!(r#""{}":true"#, snake_to_camel(r)))
+            .collect();
+        let fields = selection(&stored_fields(table, name, chunk));
+
+        shapes.push((
+            format!("{name}: no field"),
+            format!(r#"{{"type":"{ty}","fromBlock":FROM,"{request}":[{{}}],"fields":{{}}}}"#),
+            PAGE_STARTS,
+        ));
+        shapes.push((
+            format!("{name}: no field, every block"),
+            format!(
+                r#"{{"type":"{ty}","fromBlock":FROM,"includeAllBlocks":true,
+                     "{request}":[{{}}],"fields":{{}}}}"#
+            ),
+            PAGE_STARTS,
+        ));
+        if !relations.is_empty() {
+            shapes.push((
+                format!("{name}: no field, every relation"),
+                format!(
+                    r#"{{"type":"{ty}","fromBlock":FROM,"{request}":[{{{}}}],"fields":{{}}}}"#,
+                    relations.join(",")
+                ),
+                PAGE_STARTS,
+            ));
+        }
+        shapes.push((
+            format!("{name}: every field"),
+            format!(
+                r#"{{"type":"{ty}","fromBlock":FROM,"{request}":[{{}}],
+                     "fields":{{"{output}":{fields},"{block_output}":{headers}}}}}"#
+            ),
+            WIDE_PAGE_STARTS,
+        ));
+    }
+
+    shapes
+}
+
+/// Each engine ends a page where its weight model says the budget runs out, so
+/// a page that ends at another block than the reference's is a weight model
+/// that charges something else for some block before the cut.
+///
+/// The shapes select no field, where the weight key is all a row is charged
+/// for, and every field the chunk stores, where the projection is; each starts
+/// from several blocks of every fixture chunk, so the boundary blocks are not
+/// always the chunk's own.
+///
+/// Covers CT-7 · INV-B5
+#[test]
+fn every_page_ends_where_the_reference_ends() {
+    let mut checked = 0usize;
+    let mut cut = 0usize;
+    let mut mismatches: Vec<String> = Vec::new();
+
+    for (catalog, dataset) in DATASETS {
+        let chunk = fixture_chunk(dataset);
+        if !chunk.is_dir() {
+            continue;
+        }
+        let metadata =
+            load_dataset_description(Path::new(&format!("metadata/{catalog}.yaml"))).unwrap();
+        let Some(first) = first_block(&metadata, &chunk) else {
+            continue;
+        };
+        let all_blocks = format!(
+            r#"{{"type":"{}","fromBlock":0,"includeAllBlocks":true,"fields":{{}}}}"#,
+            metadata.name
+        );
+        let last = page_end_new(&all_blocks, &metadata, &chunk)
+            .unwrap()
+            .unwrap();
+
+        for (shape, query, starts) in page_shapes(&metadata, &chunk) {
+            for start in 0..starts {
+                let from = first + start * (last - first) / starts;
+                let query = query.replace("FROM", &from.to_string());
+
+                let ours = page_end_new(&query, &metadata, &chunk);
+                let theirs = page_end_legacy(&query, &chunk);
+
+                match (ours, theirs) {
+                    (Ok(ours), Ok(theirs)) => {
+                        checked += 1;
+                        cut += usize::from(theirs.is_some_and(|end| end < last));
+                        if ours != theirs {
+                            mismatches.push(format!(
+                                "{dataset}/{shape} from {from}: the page ends at {ours:?}, \
+                                 the reference's at {theirs:?}"
+                            ));
+                        }
+                    }
+                    // A request the reference does not serve compares nothing.
+                    (Ok(_), Err(_)) => {}
+                    (Err(ours), _) => {
+                        mismatches.push(format!("{dataset}/{shape} from {from}: {ours}"))
+                    }
+                }
+            }
+        }
+    }
+
+    assert!(checked > 400, "only {checked} pages were compared");
+    assert!(
+        cut > 50,
+        "only {cut} of {checked} pages ended before their chunk did, so the rest \
+         compared two whole chunks and said nothing about where a budget runs out"
+    );
+    assert!(
+        mismatches.is_empty(),
+        "{} of {checked} pages end elsewhere than the reference's:\n  - {}",
+        mismatches.len(),
+        mismatches.join("\n  - ")
+    );
+    eprintln!("{checked} pages end where the reference's do ({cut} cut short)");
 }

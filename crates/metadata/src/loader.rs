@@ -178,6 +178,15 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
             );
         }
 
+        for key in table.declared_weight_key.iter().flatten() {
+            anyhow::ensure!(
+                table.columns.contains_key(key),
+                "table '{}': weight_key column '{}' not found in columns",
+                table_name,
+                key
+            );
+        }
+
         // Validate sort_key columns exist
         for key in &table.sort_key {
             anyhow::ensure!(
@@ -2219,6 +2228,7 @@ tables:
         call:
           action: [ { column: payload, as: payload } ]
     address_column: seq
+    weight_key: [ block_number, seq ]
 "#;
         parse_dataset_description(&catalog(GOOD))
             .expect("a catalog whose every reference resolves must load");
@@ -2242,6 +2252,11 @@ tables:
                 "an item order key that is not there",
                 "    item_order_keys: [ nope ]\n",
                 "item_order_key 'nope'",
+            ),
+            (
+                "a weight key column that is not there",
+                "    weight_key: [ block_number, nope ]\n",
+                "weight_key column 'nope'",
             ),
             (
                 "a roll over a column that is not there",

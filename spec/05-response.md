@@ -114,8 +114,10 @@ Every response is bounded by a **weight budget** rather than a row count, becaus
 rows differ in size by four orders of magnitude
 ([ADR-2](decisions/ADR-2-weight-budget-not-row-count.md)).
 
-The weight of a row is the sum of the weights of the columns *actually emitted*
-for it ([INV-B10](07-invariants.md#inv-b10)):
+The weight of a row is the sum of the weights of its columns: the ones *actually
+emitted* for it, and the columns of its table's weight key (§1.3), emitted or not
+([INV-B10](07-invariants.md#inv-b10)). A header row is a row of the block table,
+so it is charged its block number even when no header field is selected.
 
 | Column's catalog `weight` | Contribution per row |
 |---|---|
@@ -128,6 +130,13 @@ Weight is a *model* of response size, not a measurement of it. It exists to be
 cheap: an engine must be able to compute a block's weight from narrow columns
 before decoding the wide ones. Its absolute accuracy does not matter. Its
 determinism does ([INV-B9](07-invariants.md#inv-b9)).
+
+Its agreement with the reference implementation matters too. Two engines that
+charge every block the same end every page at the same block, so a client sees
+the same `lastBlock` from either, and a parity suite can compare the two page for
+page. That is why the weight key exists: the reference charges each row for its
+primary key whether or not it is selected, and for a trace's `type`, which it
+reads to tell a call from a create.
 
 Decoding the wide columns only for the blocks a page keeps is what bounds an
 engine's memory by the page. Decoding them in the same pass is allowed only where

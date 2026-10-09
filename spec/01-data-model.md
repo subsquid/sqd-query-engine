@@ -62,6 +62,7 @@ nothing dispatches to are both catalogs that say less than they look like, and
 | `blockNumberColumn` | The column holding the block number. |
 | `addressColumn` | For hierarchical tables, the column holding the tree path. Absent otherwise. |
 | `itemOrderKeys` | Ordered columns that, together with the block number, totally order the table's rows within a block. |
+| `weightKey` | The columns every row is weighed for, selected or not. Defaults to the item key and the variant column. See §1.3. |
 | `sortKey` | The order rows physically sit in. See §1.3. |
 | `columns` | An ordered map of column name → column description. Order is significant; it fixes output field order. |
 
@@ -94,7 +95,7 @@ normative: it determines the order item arrays appear in a block object
 
 ## 1.3 Keys
 
-Three distinct notions of "key" appear in this system, and conflating them
+Four distinct notions of "key" appear in this system, and conflating them
 causes real bugs.
 
 **Item key.** For an item table, `[blockNumberColumn] ++ itemOrderKeys` (with
@@ -108,6 +109,15 @@ are unrelated to item keys except for one hard constraint: the first column on
 each side MUST be that side's block number column
 ([INV-D5](07-invariants.md#inv-d5)). This is what confines relations to a single
 block, and hence what makes chunks independently evaluable.
+
+**Weight key.** The columns every row is charged for in the weight model,
+whether or not a client selects them (§5.4). By default it is the item key, plus
+the variant column for a table with variants: a row is read as one shape or
+another by that column, so it costs what a key column costs. A table may declare
+its own, and two do, to weigh rows as the reference implementation does: an EVM
+log is weighed for its block number and log index, though its item key holds its
+transaction index too. The weight key decides where a page ends and nothing
+else; it does not identify, order or deduplicate a row.
 
 **Storage sort key.** The order rows physically sit in. It is chosen to make
 filtering fast, so it usually leads with high-selectivity filter columns rather
@@ -328,7 +338,7 @@ They are collected as [INV-D1](07-invariants.md#inv-d1) … [INV-D10](07-invaria
   says nothing about it.
 - Every table but that one declares a request surface.
 - `blockNumberColumn`, `addressColumn`, every `itemOrderKeys` entry, every
-  `sortKey` entry: exists in `columns`.
+  `weightKey` entry, every `sortKey` entry: exists in `columns`.
 - Every `weight` that names a size column: that column exists.
 - Every relation: its target table exists; `leftKey` and `rightKey` have equal
   length; both begin with the respective block number column; `children` and
