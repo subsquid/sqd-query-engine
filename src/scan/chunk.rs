@@ -234,6 +234,14 @@ impl ParquetTable {
         self.metadata.row_group(index)
     }
 
+    /// The file position of row group `index`'s first row.
+    pub fn row_group_start(&self, index: usize) -> u64 {
+        self.metadata.row_groups()[..index]
+            .iter()
+            .map(|rg| rg.num_rows() as u64)
+            .sum()
+    }
+
     /// The column's position in the *Arrow* schema, which is what a projection
     /// is built from. It is not where the column's statistics live — see
     /// [`statistics_leaves`].

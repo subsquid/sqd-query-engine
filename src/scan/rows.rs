@@ -85,17 +85,21 @@ impl Rows {
         Ok(Self { batches, positions })
     }
 
-    /// Replace each batch with what `f` makes of it, which has the same rows.
-    pub fn map_batches(self, f: impl FnMut(&RecordBatch) -> Result<RecordBatch>) -> Result<Self> {
-        let batches = self.batches.iter().map(f).collect::<Result<Vec<_>>>()?;
-        let same_rows = batches
+    /// Keep only `columns` of each batch, in their order, leaving out those a
+    /// batch lacks. Every row keeps its position.
+    pub fn project(self, columns: &[impl AsRef<str>]) -> Result<Self> {
+        let batches = self
+            .batches
             .iter()
-            .zip(&self.batches)
-            .all(|(new, old)| new.num_rows() == old.num_rows());
-        anyhow::ensure!(
-            same_rows,
-            "a batch changed its rows where only its columns may change"
-        );
+            .map(|batch| {
+                let schema = batch.schema();
+                let indices: Vec<usize> = columns
+                    .iter()
+                    .filter_map(|name| schema.index_of(name.as_ref()).ok())
+                    .collect();
+                batch.project(&indices)
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(Self {
             batches,
@@ -264,6 +268,26 @@ impl ScannedBatch {
             .collect()
     }
 
+    /// The rows `mask` selects, with their positions and tags.
+    pub(super) fn filter(self, mask: &BooleanArray) -> Result<Self> {
+        let positions = self
+            .positions
+            .map(|positions| filter(&positions, mask))
+            .transpose()?
+            .map(|positions| positions.as_primitive::<UInt64Type>().clone());
+        let tags = self
+            .tags
+            .iter()
+            .map(|tag| Ok(filter(tag, mask)?.as_boolean().clone()))
+            .collect::<Result<_>>()?;
+
+        Ok(Self {
+            batch: filter_record_batch(&self.batch, mask)?,
+            positions,
+            tags,
+        })
+    }
+
     /// A batch no item ran on, so no tag holds for any of its rows.
     pub(super) fn untagged(
         request: &ScanRequest,
@@ -339,5 +363,69 @@ mod tests {
 
         let short = Rows::with_positions(vec![batch(2)], vec![UInt64Array::from(vec![0])]);
         assert!(short.is_err(), "a row without a position");
+    }
+
+    /// A projection keeps every row and its position: in the order asked,
+    /// without the columns a batch lacks, and with none of them at all.
+    #[test]
+    fn a_projection_keeps_every_row_and_its_position() {
+        let columns: Vec<(&str, ArrayRef)> = vec![
+            ("a", Arc::new(UInt64Array::from(vec![1, 2, 3]))),
+            ("b", Arc::new(UInt64Array::from(vec![4, 5, 6]))),
+        ];
+        let three = RecordBatch::try_from_iter(columns).unwrap();
+        let positions = vec![UInt64Array::from(vec![7, 8, 9]), UInt64Array::from(vec![3])];
+        let rows = Rows::with_positions(vec![three, batch(1)], positions.clone()).unwrap();
+
+        for asked in [vec!["b", "a"], vec!["b", "n", "missing"], vec![]] {
+            let projected = rows.clone().project(&asked).unwrap();
+
+            assert_eq!(projected.positions(), Some(&positions[..]), "{asked:?}");
+            for (batch, before) in projected.batches().iter().zip(rows.batches()) {
+                assert_eq!(batch.num_rows(), before.num_rows(), "{asked:?}");
+                let names: Vec<&str> = asked
+                    .iter()
+                    .copied()
+                    .filter(|name| before.column_by_name(name).is_some())
+                    .collect();
+                let kept: Vec<String> = batch
+                    .schema()
+                    .fields()
+                    .iter()
+                    .map(|field| field.name().clone())
+                    .collect();
+                assert_eq!(kept, names, "{asked:?}");
+            }
+        }
+    }
+
+    /// Filtering a scanned batch keeps each kept row's position and tags.
+    #[test]
+    fn a_filtered_batch_keeps_its_rows_positions_and_tags() {
+        let scanned = ScannedBatch {
+            batch: batch(4),
+            positions: Some(UInt64Array::from(vec![10, 11, 12, 13])),
+            tags: vec![
+                BooleanArray::from(vec![true, false, true, false]),
+                BooleanArray::from(vec![false, false, true, true]),
+            ],
+        };
+        let mask = BooleanArray::from(vec![Some(false), Some(true), None, Some(true)]);
+
+        let kept = scanned.filter(&mask).unwrap();
+
+        let values: ArrayRef = Arc::new(UInt64Array::from(vec![1, 3]));
+        assert_eq!(
+            kept.batch,
+            RecordBatch::try_from_iter([("n", values)]).unwrap()
+        );
+        assert_eq!(kept.positions, Some(UInt64Array::from(vec![11, 13])));
+        assert_eq!(
+            kept.tags,
+            vec![
+                BooleanArray::from(vec![false, false]),
+                BooleanArray::from(vec![false, true]),
+            ]
+        );
     }
 }

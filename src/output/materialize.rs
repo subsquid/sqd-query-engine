@@ -1,4 +1,4 @@
-use super::arrow_out::{blocks_mask, project_columns};
+use super::arrow_out::blocks_mask;
 use super::block_index::compute_block_range;
 use super::columns::resolve_relation_output_columns;
 use super::row_order::build_full_sort_columns;
@@ -211,8 +211,7 @@ pub(super) fn read_rows(
 /// identity, and the weight columns no longer needed.
 fn retain_identity(rows: &Rows, desc: &TableDescription, selected: &[u64]) -> Result<Rows> {
     let key = row_key(desc);
-    retain_blocks(rows, &desc.block_number_column, selected)?
-        .map_batches(|batch| project_columns(batch, &key))
+    retain_blocks(rows, &desc.block_number_column, selected)?.project(&key)
 }
 
 pub(super) fn retain_selected_keys(
@@ -275,7 +274,7 @@ pub(super) fn materialize_tables(
             }
             let desc = metadata.table(target).expect("planned table has a catalog");
             let key = row_key(desc);
-            let rows = rows.map_batches(|batch| project_columns(batch, &key))?;
+            let rows = rows.project(&key)?;
             let is_unfiltered = |predicates: &[RowPredicate]| {
                 predicates.iter().any(RowPredicate::matches_every_row)
             };

@@ -69,11 +69,30 @@ fn identities(batches: &[RecordBatch]) -> Vec<(u64, u32)> {
         .collect()
 }
 
+/// The rows one of `predicates` matches; a row an item can say neither yes nor
+/// no about is not one it matched.
+fn any_item(predicates: &[&RowPredicate], batch: &RecordBatch) -> BooleanArray {
+    let masks: Vec<BooleanArray> = predicates
+        .iter()
+        .map(|p| p.evaluate(batch).unwrap())
+        .collect();
+    let every: Vec<usize> = (0..masks.len()).collect();
+
+    or_masks(&masks, &every, batch.num_rows())
+        .iter()
+        .map(|v| Some(v == Some(true)))
+        .collect()
+}
+
 /// Covers CT-4 · INV-R1
 #[test]
 fn a_relation_follows_the_rows_its_own_items_matched() {
     let dir = chunk();
     let reader = ParquetChunkReader::open(dir.path()).unwrap();
+    let columns = vec![BN, "index", "kind", "flag"];
+    let whole = reader
+        .scan("items", &ScanRequest::new(columns.clone()))
+        .unwrap();
 
     let items = [
         RowPredicate::new(vec![col_in_list(
@@ -115,7 +134,7 @@ fn a_relation_follows_the_rows_its_own_items_matched() {
         for batch_size in [1, 3, usize::MAX] {
             for range in [None, Some((102, 305))] {
                 for positions in [false, true] {
-                    let mut request = ScanRequest::new(vec![BN, "index", "kind", "flag"]);
+                    let mut request = ScanRequest::new(columns.clone());
                     request.predicates = predicates.clone();
                     request.block_number_column = Some(BN);
                     (request.from_block, request.to_block) =
@@ -130,6 +149,20 @@ fn a_relation_follows_the_rows_its_own_items_matched() {
                         "items {chosen:?}, batches of {batch_size}, range {range:?}, \
                          positions {positions}"
                     );
+
+                    // Every row one of the items matches comes back, whichever
+                    // row groups the others' statistics rule out.
+                    let matched: Vec<RecordBatch> = whole
+                        .iter()
+                        .map(|batch| filter_record_batch(batch, &any_item(&predicates, batch)))
+                        .collect::<Result<_, _>>()
+                        .unwrap();
+                    let in_range = |&(block, _): &(u64, u32)| {
+                        range.is_none_or(|(from, to)| (from..=to).contains(&block))
+                    };
+                    let wanted: Vec<_> =
+                        identities(&matched).into_iter().filter(in_range).collect();
+                    assert_eq!(identities(batches), wanted, "rows: {context}");
 
                     let mut expected: Vec<Vec<RecordBatch>> = vec![Vec::new(); tags.len()];
                     for batch in batches {

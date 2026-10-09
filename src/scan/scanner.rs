@@ -1,20 +1,20 @@
-use super::addresses::{address_list, HierarchicalFilter, SourceAddresses};
-use super::pairs::PairSet;
+use super::addresses::HierarchicalFilter;
+use super::keys::KeyFilter;
+use super::positions::{ItemTags, TrackedRows};
 use crate::engine_err;
 use crate::error::ErrorKind;
 use crate::integers::IntColumn;
 use crate::scan::chunk::ParquetTable;
 use crate::scan::predicate::RowPredicate;
 use crate::scan::rows::{Scanned, ScannedBatch};
-use crate::text::StringColumn;
 use anyhow::{Context, Result};
-use arrow::array::builder::BooleanBufferBuilder;
 use arrow::array::*;
 use arrow::buffer::BooleanBuffer;
-use arrow::datatypes::{DataType, Schema, SchemaRef, UInt64Type};
+use arrow::datatypes::{DataType, Schema, SchemaRef};
 use arrow::error::ArrowError;
-use arrow::row::{RowConverter, SortField};
-use parquet::arrow::arrow_reader::{ArrowPredicateFn, ParquetRecordBatchReaderBuilder, RowFilter};
+use parquet::arrow::arrow_reader::{
+    ArrowPredicate, ArrowPredicateFn, ParquetRecordBatchReaderBuilder, RowFilter,
+};
 use parquet::arrow::ProjectionMask;
 use parquet::basic::Encoding;
 use parquet::file::metadata::ColumnChunkMetaData;
@@ -86,480 +86,6 @@ impl<'a> ScanRequest<'a> {
     }
 }
 
-/// Composite-key set with an inline fast path. The common join key is two
-/// integer columns (block_number + transaction_index = 16 bytes); packing it
-/// into a `u128` avoids a per-key heap allocation on build and a slice hash on
-/// probe. Wider or string/list keys fall back to serialized `Vec<u8>`.
-pub(super) enum CompositeKeySet {
-    /// Two integer key columns.
-    Fixed16(PairSet),
-    /// Two integer columns and a path of item indices: an instruction's or a
-    /// call's identity.
-    PairPath(SourceAddresses),
-    /// Arbitrary key: serialized bytes (see `TypedKeyColumn::append_to`).
-    Wide(HashSet<Vec<u8>>),
-    /// Row identity during materialization, including null key components.
-    Rows {
-        converter: RowConverter,
-        values: HashSet<Vec<u8>>,
-    },
-}
-
-impl CompositeKeySet {
-    #[inline]
-    fn is_empty(&self) -> bool {
-        match self {
-            Self::Fixed16(s) => s.is_empty(),
-            Self::PairPath(s) => s.is_empty(),
-            Self::Wide(s) => s.is_empty(),
-            Self::Rows { values, .. } => values.is_empty(),
-        }
-    }
-}
-
-/// A set-based filter for join key pushdown during relation scans.
-/// Filters rows to only those matching specific composite keys from a primary scan.
-/// Uses Arc-wrapped sets for cheap cloning into RowFilter closures.
-pub struct KeyFilter {
-    /// Column names forming the composite key (in the target/relation table).
-    pub columns: Vec<String>,
-    /// Pre-built set of composite keys (Arc for cheap clone into closures).
-    pub(super) key_set: Arc<CompositeKeySet>,
-    /// Sorted unique block numbers for efficient row group pruning.
-    sorted_blocks: Vec<u64>,
-    /// Block number column name in the target table.
-    block_number_column: String,
-    /// Apply the cheap block predicate before decoding a complete row identity.
-    materialization: bool,
-}
-
-impl KeyFilter {
-    /// Select rows from the same physical table. Unlike a relation join, null
-    /// components are part of a row's identity and must match themselves.
-    pub(crate) fn for_rows(
-        batches: &[RecordBatch],
-        columns: &[String],
-        block_column: &str,
-    ) -> Result<Self> {
-        let first = batches.first().ok_or_else(|| {
-            engine_err!(ErrorKind::MalformedChunkData, "row selection has no schema")
-        })?;
-        let indices = columns
-            .iter()
-            .map(|name| first.schema().index_of(name))
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        if batches.iter().all(|batch| {
-            columns.iter().all(|name| {
-                batch.column_by_name(name).is_some_and(|column| {
-                    column.null_count() == 0
-                        && (crate::integers::is_integer(column.data_type())
-                            || matches!(column.data_type(), arrow::datatypes::DataType::Utf8))
-                })
-            })
-        }) {
-            let keys: Vec<_> = columns.iter().map(String::as_str).collect();
-            let mut filter = Self::build(batches, &keys, &keys, block_column, block_column);
-            filter.materialization = true;
-            return Ok(filter);
-        }
-        let converter = RowConverter::new(
-            indices
-                .iter()
-                .map(|&i| SortField::new(first.column(i).data_type().clone()))
-                .collect(),
-        )?;
-        let mut values = HashSet::default();
-        let mut blocks = HashSet::default();
-        for batch in batches {
-            let arrays: Vec<_> = columns
-                .iter()
-                .map(|name| {
-                    batch
-                        .schema()
-                        .index_of(name)
-                        .map(|i| batch.column(i).clone())
-                })
-                .collect::<std::result::Result<_, _>>()?;
-            let rows = converter.convert_columns(&arrays)?;
-            values.extend(rows.iter().map(|row| row.as_ref().to_vec()));
-            if let Some(column) = batch.column_by_name(block_column) {
-                extract_block_numbers(column.as_ref(), &mut blocks);
-            }
-        }
-        let mut sorted_blocks: Vec<_> = blocks.into_iter().collect();
-        sorted_blocks.sort_unstable();
-        Ok(Self {
-            columns: columns.to_vec(),
-            key_set: Arc::new(CompositeKeySet::Rows { converter, values }),
-            sorted_blocks,
-            block_number_column: block_column.to_owned(),
-            materialization: true,
-        })
-    }
-
-    /// Build a key filter from primary scan results.
-    ///
-    /// - `primary_batches`: results from the primary table scan
-    /// - `left_keys`: column names in primary_batches
-    /// - `right_keys`: column names in the target/relation table
-    /// - `primary_bn_col`: block number column name in primary_batches
-    /// - `target_bn_col`: block number column name in the target table
-    pub fn build(
-        primary_batches: &[RecordBatch],
-        left_keys: &[&str],
-        right_keys: &[&str],
-        primary_bn_col: &str,
-        target_bn_col: &str,
-    ) -> Self {
-        KeySet::build(primary_batches, left_keys, primary_bn_col).filter(right_keys, target_bn_col)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.key_set.is_empty()
-    }
-}
-
-/// The keys of some source rows, built once and matched against any target
-/// whose key columns line up with them.
-pub struct KeySet {
-    key_set: Arc<CompositeKeySet>,
-    /// Sorted unique block numbers for efficient row group pruning.
-    sorted_blocks: Vec<u64>,
-    /// How many columns a key has.
-    width: usize,
-}
-
-impl KeySet {
-    /// The `left_keys` values of every row of `primary_batches`.
-    pub fn build(
-        primary_batches: &[RecordBatch],
-        left_keys: &[&str],
-        primary_bn_col: &str,
-    ) -> Self {
-        let mut block_numbers = HashSet::default();
-
-        // Fast path when the key is exactly two integer columns (block_number +
-        // transaction_index): pack into a u128, avoiding a per-key heap alloc.
-        let use_fixed16 = left_keys.len() == 2
-            && primary_batches
-                .iter()
-                .find(|b| b.num_rows() > 0)
-                .map(|b| {
-                    left_keys.iter().all(|name| {
-                        b.column_by_name(name)
-                            .and_then(|c| TypedKeyColumn::resolve(c.as_ref()))
-                            .map(|tc| tc.is_integer())
-                            .unwrap_or(false)
-                    })
-                })
-                .unwrap_or(false);
-
-        let use_pair_path = left_keys.len() == 3
-            && primary_batches
-                .iter()
-                .find(|b| b.num_rows() > 0)
-                .is_some_and(|b| {
-                    let int = |name: &str| {
-                        b.column_by_name(name)
-                            .is_some_and(|c| IntColumn::resolve(c.as_ref()).is_some())
-                    };
-                    int(left_keys[0])
-                        && int(left_keys[1])
-                        && address_list(b, left_keys[2]).is_some()
-                });
-
-        let key_set = if use_pair_path {
-            for batch in primary_batches {
-                if let Some(col) = batch.column_by_name(primary_bn_col) {
-                    extract_block_numbers(col.as_ref(), &mut block_numbers);
-                }
-            }
-            CompositeKeySet::PairPath(SourceAddresses::build(
-                primary_batches,
-                &left_keys[..2],
-                left_keys[2],
-            ))
-        } else if use_fixed16 {
-            let mut pairs = Vec::new();
-            for batch in primary_batches {
-                if batch.num_rows() == 0 {
-                    continue;
-                }
-                if let Some(col) = batch.column_by_name(primary_bn_col) {
-                    extract_block_numbers(col.as_ref(), &mut block_numbers);
-                }
-                if let Some((first, second, nulls)) = pair_keys(batch, left_keys) {
-                    let present = |row: &usize| nulls.as_ref().is_none_or(|n| n.is_valid(*row));
-                    pairs.extend(
-                        (0..batch.num_rows())
-                            .filter(present)
-                            .map(|row| (first[row], second[row])),
-                    );
-                }
-            }
-            CompositeKeySet::Fixed16(PairSet::new(pairs))
-        } else {
-            let mut set: HashSet<Vec<u8>> = HashSet::default();
-            for batch in primary_batches {
-                if batch.num_rows() == 0 {
-                    continue;
-                }
-                if let Some(col) = batch.column_by_name(primary_bn_col) {
-                    extract_block_numbers(col.as_ref(), &mut block_numbers);
-                }
-                let typed_cols: Vec<Option<TypedKeyColumn>> = left_keys
-                    .iter()
-                    .map(|name| {
-                        batch
-                            .column_by_name(name)
-                            .and_then(|c| TypedKeyColumn::resolve(c.as_ref()))
-                    })
-                    .collect();
-                let mut key_buf = Vec::with_capacity(left_keys.len() * 8);
-                for row in 0..batch.num_rows() {
-                    key_buf.clear();
-                    let complete = typed_cols
-                        .iter()
-                        .all(|tc| matches!(tc, Some(tc) if tc.append_to(&mut key_buf, row)));
-                    if complete {
-                        set.insert(key_buf.clone());
-                    }
-                }
-            }
-            CompositeKeySet::Wide(set)
-        };
-
-        let mut sorted_blocks: Vec<u64> = block_numbers.iter().copied().collect();
-        sorted_blocks.sort_unstable();
-
-        KeySet {
-            key_set: Arc::new(key_set),
-            sorted_blocks,
-            width: left_keys.len(),
-        }
-    }
-
-    /// Target rows whose `right_keys` columns hold one of the keys, paired with
-    /// `left_keys` in order.
-    pub fn filter(&self, right_keys: &[&str], target_bn_col: &str) -> KeyFilter {
-        assert_eq!(self.width, right_keys.len());
-
-        KeyFilter {
-            columns: right_keys.iter().map(|s| s.to_string()).collect(),
-            key_set: self.key_set.clone(),
-            sorted_blocks: self.sorted_blocks.clone(),
-            block_number_column: target_bn_col.to_string(),
-            materialization: false,
-        }
-    }
-}
-
-pub(super) fn typed_key_columns<'a>(
-    batch: &'a RecordBatch,
-    names: &[impl AsRef<str>],
-) -> Vec<Option<TypedKeyColumn<'a>>> {
-    names
-        .iter()
-        .map(|name| {
-            batch
-                .column_by_name(name.as_ref())
-                .and_then(|c| TypedKeyColumn::resolve(c.as_ref()))
-        })
-        .collect()
-}
-
-/// Extract all block number values from a column into a HashSet.
-///
-/// A column that is not an integer contributes nothing, which is what it has:
-/// the block-number readers that must not fail silently are the ones the
-/// assembly uses, and they raise `UnsupportedKeyType` on the same input.
-fn extract_block_numbers(col: &dyn Array, out: &mut HashSet<u64>) {
-    let Some(reader) = IntColumn::resolve(col) else {
-        return;
-    };
-
-    for row in 0..reader.len() {
-        out.insert(reader.block_number(row));
-    }
-}
-
-/// A typed column extractor that avoids per-row type dispatch.
-pub(super) enum TypedKeyColumn<'a> {
-    Int(IntColumn<'a>),
-    Str(StringColumn<'a>),
-    /// A path of item indices. `None` elements are not integers, so no row of
-    /// the list has a key.
-    List(&'a GenericListArray<i32>, Option<IntColumn<'a>>),
-}
-
-impl<'a> TypedKeyColumn<'a> {
-    fn resolve(col: &'a dyn Array) -> Option<Self> {
-        if let Some(ints) = IntColumn::resolve(col) {
-            return Some(Self::Int(ints));
-        }
-        if let Some(text) = StringColumn::resolve(col) {
-            return Some(Self::Str(text));
-        }
-        if let Some(a) = col.as_any().downcast_ref::<GenericListArray<i32>>() {
-            return Some(Self::List(a, IntColumn::resolve(a.values().as_ref())));
-        }
-
-        None
-    }
-
-    #[inline(always)]
-    fn is_null(&self, row: usize) -> bool {
-        match self {
-            Self::Int(a) => a.is_null(row),
-            Self::Str(a) => a.value(row).is_none(),
-            Self::List(a, _) => a.is_null(row),
-        }
-    }
-
-    /// Append this column's value at `row`, or report that there is none. A null
-    /// list serializes byte-for-byte like an empty one, so without this a row
-    /// that says "no call" joins to the call at the empty address.
-    #[inline(always)]
-    pub(super) fn append_to(&self, buf: &mut Vec<u8>, row: usize) -> bool {
-        if self.is_null(row) {
-            return false;
-        }
-
-        match self {
-            Self::Int(a) => buf.extend_from_slice(&a.join_key(row).to_le_bytes()),
-            Self::Str(a) => {
-                let v = a.value(row).expect("checked above");
-                buf.extend_from_slice(&(v.len() as u32).to_le_bytes());
-                buf.extend_from_slice(v.as_bytes());
-            }
-            Self::List(a, elements) => {
-                // A list key is a path of item indices, so its elements are
-                // integers at whatever width the writer chose, and each is
-                // written the fixed eight bytes the scalar arm writes.
-                let Some(elements) = elements else {
-                    return false;
-                };
-                let offsets = a.value_offsets();
-                let (start, end) = (offsets[row] as usize, offsets[row + 1] as usize);
-
-                buf.extend_from_slice(&((end - start) as u32).to_le_bytes());
-                for i in start..end {
-                    buf.extend_from_slice(&elements.join_key(i).to_le_bytes());
-                }
-            }
-        }
-
-        true
-    }
-
-    /// True for integer key columns (eligible for the packed-u128 fast path).
-    #[inline(always)]
-    fn is_integer(&self) -> bool {
-        matches!(self, Self::Int(_))
-    }
-}
-
-/// The join keys of a batch's two integer key columns, and the rows where
-/// either is null; `None` when they are not two integer columns.
-pub(super) fn pair_keys<S: AsRef<str>>(
-    batch: &RecordBatch,
-    columns: &[S],
-) -> Option<(Vec<u64>, Vec<u64>, Option<arrow::buffer::NullBuffer>)> {
-    let [first, second] = columns else {
-        return None;
-    };
-    let column = |name: &S| IntColumn::resolve(batch.column_by_name(name.as_ref())?.as_ref());
-    let (first, second) = (column(first)?, column(second)?);
-    let nulls = arrow::buffer::NullBuffer::union(first.nulls(), second.nulls());
-
-    Some((first.join_keys(), second.join_keys(), nulls))
-}
-
-/// Build a boolean mask: true for rows where composite key is in the set.
-/// Resolves column types once per batch, then uses tight typed loops.
-pub(super) fn composite_key_in_set_mask(
-    batch: &RecordBatch,
-    key_columns: &[String],
-    key_set: &CompositeKeySet,
-    candidates: Option<&BooleanBuffer>,
-) -> std::result::Result<BooleanArray, ArrowError> {
-    let candidate = |row: usize| candidates.is_none_or(|c| c.value(row));
-    let len = batch.num_rows();
-    if let CompositeKeySet::Rows { converter, values } = key_set {
-        let arrays: Vec<_> = key_columns
-            .iter()
-            .map(|name| {
-                batch
-                    .schema()
-                    .index_of(name)
-                    .map(|i| batch.column(i).clone())
-            })
-            .collect::<std::result::Result<_, _>>()?;
-        let rows = converter.convert_columns(&arrays)?;
-        return Ok(BooleanArray::from_iter(
-            rows.iter().map(|row| Some(values.contains(row.as_ref()))),
-        ));
-    }
-    let mut builder = BooleanBufferBuilder::new(len);
-
-    // Resolve column types once (avoids per-row type dispatch)
-    let typed_cols: Vec<Option<TypedKeyColumn>> = key_columns
-        .iter()
-        .map(|name| {
-            batch
-                .column_by_name(name)
-                .and_then(|c| TypedKeyColumn::resolve(c.as_ref()))
-        })
-        .collect();
-
-    match key_set {
-        // Fast path: exactly two integer columns packed as u128 (matches
-        // `KeyFilter::build`'s `pack16`). No per-row allocation, no slice hash.
-        CompositeKeySet::Fixed16(set) => {
-            let Some((first, second, nulls)) = pair_keys(batch, key_columns) else {
-                return Ok(BooleanArray::new(BooleanBuffer::new_unset(len), None));
-            };
-            let found = BooleanBuffer::collect_bool(len, |row| {
-                candidate(row) && set.contains(first[row], second[row])
-            });
-            let found = match nulls {
-                Some(nulls) => &found & nulls.inner(),
-                None => found,
-            };
-            return Ok(BooleanArray::new(found, None));
-        }
-        // General path: serialize each key column with `append_to` (matches
-        // build), reusing one scratch buffer. Correct for string/list keys.
-        CompositeKeySet::Wide(set) => {
-            let mut key_buf = Vec::with_capacity(key_columns.len() * 8);
-            for row in 0..len {
-                if !candidate(row) {
-                    builder.append(false);
-                    continue;
-                }
-                key_buf.clear();
-                let complete = typed_cols
-                    .iter()
-                    .all(|tc| matches!(tc, Some(tc) if tc.append_to(&mut key_buf, row)));
-                builder.append(complete && set.contains(key_buf.as_slice()));
-            }
-        }
-        CompositeKeySet::PairPath(sources) => {
-            let mask = sources.mask(
-                batch,
-                &key_columns[..2],
-                &key_columns[2],
-                candidates,
-                |sources, group, path| sources.holds(group, path),
-            );
-            return Ok(mask);
-        }
-        CompositeKeySet::Rows { .. } => unreachable!(),
-    }
-
-    Ok(BooleanArray::new(builder.finish(), None))
-}
-
 /// Determine all columns a scan must read: requested output, predicate columns,
 /// the block-number column and any key or hierarchical filter columns —
 /// restricted to those that actually exist in the table.
@@ -581,7 +107,7 @@ where
     }
     // Key filter columns must be available for RowFilter
     if let Some(kf) = &request.key_filter {
-        all_columns.insert(&kf.block_number_column);
+        all_columns.insert(kf.block_column());
         for col in &kf.columns {
             all_columns.insert(col);
         }
@@ -711,7 +237,7 @@ fn ensure_columns_present(table: &ParquetTable, request: &ScanRequest) -> Result
     }
 
     if let Some(kf) = &request.key_filter {
-        required.push(&kf.block_number_column);
+        required.push(kf.block_column());
         required.extend(kf.columns.iter().map(String::as_str));
     }
 
@@ -791,9 +317,9 @@ fn scan_batches(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<Scann
     let all_columns = collect_read_columns(table, request);
 
     // 2. Determine which row groups to scan (skip via statistics)
-    let row_groups_to_scan = select_row_groups(table, request)?;
+    let row_groups = select_row_groups(table, request);
 
-    if row_groups_to_scan.is_empty() {
+    if row_groups.is_empty() {
         return Ok(Vec::new());
     }
 
@@ -804,22 +330,25 @@ fn scan_batches(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<Scann
     let cache = request
         .column_cache
         .filter(|_| request.predicates.iter().all(|p| p.matches_every_row()));
-    let scan_group = |group: usize| {
+    let scan_group = |group: &PreparedRowGroup| {
         if let Some(cache) = cache {
-            let decoded =
-                scan_decoded_row_group(table, group, &all_columns, request, &output_schema, cache)?;
+            let decoded = scan_decoded_row_group(
+                table,
+                group.index,
+                &all_columns,
+                request,
+                &output_schema,
+                cache,
+            )?;
             if let Some(batches) = decoded {
                 return Ok(batches);
             }
             // The cache cannot take this row group: read it as any scan does.
         }
-        scan_row_groups(table, &[group], &all_columns, request, &output_schema)
+        scan_row_group(table, group, &all_columns, request, &output_schema)
     };
 
-    let results: Vec<Result<Vec<ScannedBatch>>> = row_groups_to_scan
-        .par_iter()
-        .map(|&group| scan_group(group))
-        .collect();
+    let results: Vec<Result<Vec<ScannedBatch>>> = row_groups.par_iter().map(scan_group).collect();
     // The first failure in row group order, whichever finished first.
     let mut batches = Vec::new();
     for result in results {
@@ -830,7 +359,7 @@ fn scan_batches(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<Scann
 }
 
 /// What a scan filters rows by beside its items, decided once, so that the
-/// reader's row filter, the hierarchical passes and the cache apply the same.
+/// reader and the cache apply the same.
 struct RowFilters<'r> {
     /// The `[from, to]` blocks a row must fall in, when a filter checks them.
     blocks: Option<(Option<u64>, Option<u64>)>,
@@ -855,10 +384,8 @@ impl<'r> RowFilters<'r> {
             (None, None) => Relation::None,
         };
 
-        // Relation keys fix the blocks of the rows they pick. Materialization
-        // keys can hold wide strings or lists, so their blocks are still
-        // checked, before those are decoded.
-        let keyed = matches!(relation, Relation::Keys(keys) if !keys.materialization);
+        // Relation keys fix the blocks of the rows they pick.
+        let keyed = matches!(relation, Relation::Keys(keys) if !keys.checks_blocks_first());
         let from = request.from_block.filter(|&block| block > 0);
         let bounded = from.is_some() || request.to_block.is_some();
         let checked = bounded && !keyed && request.block_number_column.is_some();
@@ -936,8 +463,8 @@ pub(crate) fn estimate_scan_bytes(
     }
 
     let mut total = 0u64;
-    for group in select_row_groups(table, request)? {
-        let metadata = table.row_group(group);
+    for group in select_row_groups(table, request) {
+        let metadata = table.row_group(group.index);
         let rows = metadata.num_rows().max(0) as u64;
         let batches = rows.div_ceil(request.batch_size.max(1) as u64);
 
@@ -1093,52 +620,62 @@ fn byte_string_bytes(column: &ColumnChunkMetaData) -> Option<u64> {
     whole.then(|| column.uncompressed_size().max(0) as u64)
 }
 
-fn select_row_groups(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<usize>> {
-    let mut row_groups = Vec::new();
+/// A row group a scan reads, with the items its statistics leave to run on it.
+struct PreparedRowGroup {
+    index: usize,
+    /// Indices into the request's predicates, ascending; empty when the scan
+    /// has none.
+    active_items: Vec<usize>,
+}
 
-    for rg_idx in 0..table.num_row_groups() {
-        // Check block range filter
-        // Bounds the file does not state, or states in a way no reader can
-        // trust, prune nothing: reading the group costs time, skipping it costs
-        // the rows, and it costs them silently.
-        if let Some(bn_col) = request.block_number_column {
-            if let Some((rg_min, rg_max)) = block_bounds(table, rg_idx, bn_col) {
-                if let Some(from_block) = request.from_block {
-                    if rg_max < from_block {
-                        continue; // Entire row group is before our range
-                    }
-                }
-                if let Some(to_block) = request.to_block {
-                    if rg_min > to_block {
-                        continue; // Entire row group is after our range
-                    }
-                }
-            }
+fn select_row_groups(table: &ParquetTable, request: &ScanRequest) -> Vec<PreparedRowGroup> {
+    (0..table.num_row_groups())
+        .filter_map(|index| prepare_row_group(table, request, index))
+        .collect()
+}
+
+/// Row group `index` as `request` reads it, or `None` when its statistics rule
+/// out every row the scan could return.
+///
+/// Bounds the file does not state, or states in a way no reader can trust,
+/// prune nothing: reading the group costs time, skipping it costs the rows, and
+/// it costs them silently.
+fn prepare_row_group(
+    table: &ParquetTable,
+    request: &ScanRequest,
+    index: usize,
+) -> Option<PreparedRowGroup> {
+    let block_bounds_of = |column| block_bounds(table, index, column);
+
+    if let Some((min, max)) = request.block_number_column.and_then(block_bounds_of) {
+        let before = request.from_block.is_some_and(|from| max < from);
+        let after = request.to_block.is_some_and(|to| min > to);
+        if before || after {
+            return None;
         }
-
-        // Check predicate-based row group skipping
-        if !request.predicates.is_empty() {
-            let stats = row_group_stats(table, rg_idx, &request.predicates);
-            if crate::scan::predicate::can_skip_row_group_or(&request.predicates, &stats) {
-                continue;
-            }
-        }
-
-        // Key filter: skip row groups whose block_number range has no overlap with key set
-        if let Some(kf) = &request.key_filter {
-            if let Some((rg_min, rg_max)) = block_bounds(table, rg_idx, &kf.block_number_column) {
-                // Binary search: any key block number in [rg_min, rg_max]?
-                let first = kf.sorted_blocks.partition_point(|&bn| bn < rg_min);
-                if first >= kf.sorted_blocks.len() || kf.sorted_blocks[first] > rg_max {
-                    continue; // No matching block numbers in this row group
-                }
-            }
-        }
-
-        row_groups.push(rg_idx);
     }
 
-    Ok(row_groups)
+    if let Some(keys) = request.key_filter {
+        if let Some((min, max)) = block_bounds_of(keys.block_column()) {
+            if !keys.has_block_within(min, max) {
+                return None;
+            }
+        }
+    }
+
+    // An item whose statistics rule this row group out does not run on it.
+    let stats = row_group_stats(table, index, &request.predicates);
+    let active_items: Vec<usize> = (0..request.predicates.len())
+        .filter(|&item| !request.predicates[item].can_skip_row_group(&stats))
+        .collect();
+    if !request.predicates.is_empty() && active_items.is_empty() {
+        return None;
+    }
+
+    Some(PreparedRowGroup {
+        index,
+        active_items,
+    })
 }
 
 /// One row group's statistics for the columns `predicates` filter on, each read
@@ -1176,278 +713,316 @@ fn column_stats(
     )
 }
 
-/// Scan selected row groups using a single reader: read columns, apply predicates, project output.
-///
-/// Strategy:
-/// - For scans with predicates: Use RowFilter with cascading stages (most selective first).
-///   This reads predicate columns eagerly during build(), builds a RowSelection, then reads
-///   output columns only for matching rows.
-/// - For scans with key/hierarchical filters: read all columns including filter columns,
-///   apply filters as RowFilter stages to avoid decoding output columns for non-matching rows.
-fn scan_row_groups(
+/// Read one row group through a parquet reader whose row filter applies the
+/// scan's filters, and project what it returns to the output columns.
+fn scan_row_group(
     table: &ParquetTable,
-    row_groups: &[usize],
+    group: &PreparedRowGroup,
     read_columns: &[&str],
     request: &ScanRequest,
     output_schema: &SchemaRef,
 ) -> Result<Vec<ScannedBatch>> {
-    let parquet_schema = table.metadata().file_metadata().schema_descr();
-    let indices: Vec<usize> = read_columns
-        .iter()
-        .filter_map(|name| table.schema().index_of(name).ok())
-        .collect();
+    let filter = reader_filter(table, request, &group.active_items);
 
-    let mask = ProjectionMask::roots(parquet_schema, indices);
+    read_row_group(
+        table,
+        group.index,
+        read_columns,
+        request,
+        output_schema,
+        filter,
+    )
+}
 
-    // Use RowFilter for predicate pushdown with multi-stage cascading.
-    // Each stage reads only its own columns; rows eliminated by early stages
-    // avoid column decoding in later stages.
-    let has_predicates = !request.predicates.is_empty();
+/// How a reader picks a row group's rows.
+struct ReaderFilter {
+    /// The row filter's stages, in the order the reader runs them. Each reads
+    /// only its own columns, and only for the rows the stages before it kept.
+    stages: Vec<Box<dyn ArrowPredicate>>,
+    /// Block bounds checked on the rows the reader returns, not by a stage.
+    blocks_after: Option<(Option<u64>, Option<u64>)>,
+    /// Which rows each tag's items matched, recorded by the last stage.
+    tags: Option<Arc<ItemTags>>,
+}
 
-    // An item whose statistics rule this row group out does not run on it.
-    let stats: Vec<_> = row_groups
-        .iter()
-        .map(|&group| row_group_stats(table, group, &request.predicates))
-        .collect();
-    let active: Vec<usize> = (0..request.predicates.len())
-        .filter(|&item| {
-            stats
-                .iter()
-                .any(|stats| !request.predicates[item].can_skip_row_group(stats))
-        })
-        .collect();
-    if has_predicates && active.is_empty() {
-        return Ok(Vec::new());
-    }
-    let predicates: Vec<&RowPredicate> = active
-        .iter()
-        .map(|&item| request.predicates[item])
-        .collect();
+/// The reader filter that applies `request` to a row group on which the
+/// `active` items run.
+fn reader_filter(table: &ParquetTable, request: &ScanRequest, active: &[usize]) -> ReaderFilter {
     let filters = RowFilters::of(request);
-    if let Relation::Addresses(hf) = filters.relation {
+
+    if let Relation::Addresses(addresses) = filters.relation {
         // Hierarchical filter and predicates are structurally mutually exclusive:
         // predicates apply to primary scans, hierarchical filters to relation scans.
         assert!(
             request.predicates.is_empty(),
             "hierarchical_filter and predicates must not be set simultaneously"
         );
-        // Two-pass approach for hierarchical filters:
-        // Pass 1: Read only key columns (cheap integers), find matching row indices
-        // Pass 2: Read address + data columns only for matching rows via RowSelection
-        // This avoids decoding the expensive List column for 98%+ of rows.
-        return scan_hierarchical_two_pass(
-            table,
-            row_groups,
-            request,
-            hf,
-            filters.blocks,
-            output_schema,
-        );
-    }
 
-    let mut tracked = request
-        .positions
-        .then(super::positions::TrackedRows::default);
-    let item_tags = has_predicates
-        .then(|| super::positions::ItemTags::new(request, &active))
-        .flatten();
-    let mut filter_stages: Vec<Box<dyn parquet::arrow::arrow_reader::ArrowPredicate>> = Vec::new();
-    if let (Some((from_block, to_block)), Some(bn_col)) =
-        (filters.blocks, request.block_number_column)
-    {
-        if let Ok(idx) = table.schema().index_of(bn_col) {
-            let bn_projection = ProjectionMask::roots(parquet_schema, vec![idx]);
-            let bn_col_name = bn_col.to_string();
-            filter_stages.push(Box::new(ArrowPredicateFn::new(
-                bn_projection,
-                move |batch: RecordBatch| {
-                    let Some(col) = batch.column_by_name(&bn_col_name) else {
-                        return Ok(BooleanArray::from(vec![true; batch.num_rows()]));
-                    };
-
-                    block_range_mask(col, from_block, to_block)
-                        .map_err(|e| ArrowError::InvalidArgumentError(e.to_string()))
-                },
-            )));
-        }
-    }
-
-    if let Relation::Keys(kf) = filters.relation {
-        let key_col_indices: Vec<usize> = kf
-            .columns
-            .iter()
-            .filter_map(|name| table.schema().index_of(name).ok())
-            .collect();
-        let key_proj = ProjectionMask::roots(parquet_schema, key_col_indices);
-        let key_columns = Arc::new(kf.columns.clone());
-        let key_set = kf.key_set.clone();
-        filter_stages.push(Box::new(ArrowPredicateFn::new(
-            key_proj,
-            move |batch: RecordBatch| {
-                composite_key_in_set_mask(&batch, &key_columns, &key_set, None)
-            },
-        )));
-    }
-
-    // Predicate stages: first column gets its own stage (most selective — sort key leader),
-    // remaining columns are merged into a single stage. Tags need each
-    // item's own answer, which only the stage evaluating all of them has.
-    if predicates.len() == 1 && item_tags.is_none() {
-        let pred = predicates[0];
-        let (first, rest) = match pred.columns.split_first() {
-            Some((first, rest)) => (Some(first), rest),
-            None => (None, &[][..]),
+        return ReaderFilter {
+            stages: vec![address_stage(table, addresses)],
+            blocks_after: filters.blocks,
+            tags: None,
         };
-        if let Some(first) = first {
-            if let Ok(idx) = table.schema().index_of(&first.column) {
-                let col_projection = ProjectionMask::roots(parquet_schema, vec![idx]);
-                let col_name = first.column.clone();
-                let evaluator = first.predicate.clone();
-                filter_stages.push(Box::new(ArrowPredicateFn::new(
-                    col_projection,
-                    move |batch: RecordBatch| {
-                        if let Some(col) = batch.column_by_name(&col_name) {
-                            evaluator
-                                .evaluate(col.as_ref())
-                                .map_err(|e| ArrowError::ComputeError(e.to_string()))
-                        } else {
-                            Ok(BooleanArray::from(vec![true; batch.num_rows()]))
-                        }
-                    },
-                )));
-            }
-        }
+    }
 
-        let rest = RowPredicate::with_alternatives(rest.to_vec(), pred.alternatives.clone());
-        if !rest.matches_every_row() {
-            let mut rest_indices: Vec<usize> = rest
-                .required_columns()
-                .into_iter()
-                .filter_map(|column| table.schema().index_of(column).ok())
-                .collect();
-            rest_indices.sort_unstable();
-            rest_indices.dedup();
-            if !rest_indices.is_empty() {
-                let rest_proj = ProjectionMask::roots(parquet_schema, rest_indices);
-                filter_stages.push(Box::new(ArrowPredicateFn::new(
-                    rest_proj,
-                    move |batch: RecordBatch| {
-                        rest.evaluate(&batch)
-                            .map_err(|e| ArrowError::ComputeError(e.to_string()))
-                    },
-                )));
-            }
-        }
-    } else if has_predicates {
-        let mut pred_col_indices: Vec<usize> = Vec::new();
-        for pred in &predicates {
-            for col in pred.required_columns() {
-                if let Ok(idx) = table.schema().index_of(col) {
-                    pred_col_indices.push(idx);
-                }
-            }
-        }
-        pred_col_indices.sort_unstable();
-        pred_col_indices.dedup();
+    let mut stages = Vec::new();
+    if let Some(((from, to), column)) = filters.blocks.zip(request.block_number_column) {
+        stages.push(block_stage(table, column, from, to));
+    }
+    if let Relation::Keys(keys) = filters.relation {
+        stages.push(key_stage(table, keys));
+    }
 
-        // One list per column admits every row an item could match, so
-        // the items themselves run only on the rows it admits.
-        let union = (predicates.len() > 1)
-            .then(|| crate::scan::predicate::listed_union(&predicates))
-            .flatten();
-        if let Some(union) = union {
-            let indices: Vec<usize> = union
-                .required_columns()
-                .into_iter()
-                .filter_map(|column| table.schema().index_of(column).ok())
-                .collect();
-            filter_stages.push(Box::new(ArrowPredicateFn::new(
-                ProjectionMask::roots(parquet_schema, indices),
-                move |batch: RecordBatch| {
-                    union
-                        .evaluate(&batch)
-                        .map_err(|e| ArrowError::ComputeError(e.to_string()))
-                },
-            )));
-        }
+    let items: Vec<&RowPredicate> = active
+        .iter()
+        .map(|&item| request.predicates[item])
+        .collect();
+    let tags = (!items.is_empty())
+        .then(|| ItemTags::new(request, active))
+        .flatten();
+    stages.extend(item_stages(table, &items, tags.clone()));
 
-        let pred_projection = ProjectionMask::roots(parquet_schema, pred_col_indices);
-        let predicates: Vec<RowPredicate> = predicates.iter().map(|&p| p.clone()).collect();
-        let every_item: Vec<usize> = (0..predicates.len()).collect();
-        let item_tags = item_tags.clone();
+    ReaderFilter {
+        stages,
+        blocks_after: None,
+        tags,
+    }
+}
 
-        // Last, so that the rows it selects are the rows read.
-        filter_stages.push(Box::new(ArrowPredicateFn::new(
-            pred_projection,
+/// The projection reading `columns`, those the table has.
+fn roots<'c>(table: &ParquetTable, columns: impl IntoIterator<Item = &'c str>) -> ProjectionMask {
+    let indices = columns
+        .into_iter()
+        .filter_map(|name| table.schema().index_of(name).ok());
+
+    ProjectionMask::roots(table.metadata().file_metadata().schema_descr(), indices)
+}
+
+fn block_stage(
+    table: &ParquetTable,
+    column: &str,
+    from: Option<u64>,
+    to: Option<u64>,
+) -> Box<dyn ArrowPredicate> {
+    let name = column.to_string();
+
+    Box::new(ArrowPredicateFn::new(
+        roots(table, [column]),
+        move |batch: RecordBatch| {
+            let Some(column) = batch.column_by_name(&name) else {
+                return Ok(BooleanArray::from(vec![true; batch.num_rows()]));
+            };
+
+            block_range_mask(column, from, to)
+                .map_err(|e| ArrowError::InvalidArgumentError(e.to_string()))
+        },
+    ))
+}
+
+fn key_stage(table: &ParquetTable, keys: &KeyFilter) -> Box<dyn ArrowPredicate> {
+    let projection = roots(table, keys.columns.iter().map(String::as_str));
+    let keys = keys.clone();
+
+    Box::new(ArrowPredicateFn::new(
+        projection,
+        move |batch: RecordBatch| keys.mask(&batch, None),
+    ))
+}
+
+/// One stage reads the group keys and the addresses together, and drops most
+/// rows before the reader decodes an output column. The alternatives measured
+/// slower: see "Hierarchical Filter Approach Comparison" in
+/// docs/architecture.md.
+fn address_stage(table: &ParquetTable, addresses: &HierarchicalFilter) -> Box<dyn ArrowPredicate> {
+    let columns = addresses
+        .group_key_columns
+        .iter()
+        .chain([&addresses.address_column]);
+    let projection = roots(table, columns.map(String::as_str));
+    let addresses = addresses.clone();
+
+    Box::new(ArrowPredicateFn::new(
+        projection,
+        move |batch: RecordBatch| Ok(addresses.mask(&batch, None)),
+    ))
+}
+
+/// The stages that evaluate `items`. Tags need each item's own answer, which
+/// only a stage that evaluates all of them has.
+fn item_stages(
+    table: &ParquetTable,
+    items: &[&RowPredicate],
+    tags: Option<Arc<ItemTags>>,
+) -> Vec<Box<dyn ArrowPredicate>> {
+    match items {
+        [] => Vec::new(),
+        [item] if tags.is_none() => lone_item_stages(table, item),
+        _ => every_item_stages(table, items, tags),
+    }
+}
+
+/// A lone item's first column gets a stage of its own, since it leads the sort
+/// key and is the most selective; its other columns share one.
+fn lone_item_stages(table: &ParquetTable, item: &RowPredicate) -> Vec<Box<dyn ArrowPredicate>> {
+    let mut stages: Vec<Box<dyn ArrowPredicate>> = Vec::new();
+    let (first, rest) = match item.columns.split_first() {
+        Some((first, rest)) => (Some(first), rest),
+        None => (None, &[][..]),
+    };
+
+    if let Some(first) = first {
+        let name = first.column.clone();
+        let evaluator = first.predicate.clone();
+        stages.push(Box::new(ArrowPredicateFn::new(
+            roots(table, [first.column.as_str()]),
             move |batch: RecordBatch| {
-                let masks = predicates
-                    .iter()
-                    .map(|predicate| predicate.evaluate(&batch))
-                    .collect::<std::result::Result<Vec<_>, _>>()
-                    .map_err(|e| ArrowError::ComputeError(e.to_string()))?;
-                let matched =
-                    crate::scan::predicate::or_masks(&masks, &every_item, batch.num_rows());
+                let Some(column) = batch.column_by_name(&name) else {
+                    return Ok(BooleanArray::from(vec![true; batch.num_rows()]));
+                };
 
-                if let Some(tags) = &item_tags {
-                    tags.record(&masks, &matched);
-                }
-                Ok(matched)
+                evaluator
+                    .evaluate(column.as_ref())
+                    .map_err(|e| ArrowError::ComputeError(e.to_string()))
             },
         )));
     }
 
-    if !filter_stages.is_empty() {
-        if let Some(tracked) = &mut tracked {
-            filter_stages = tracked.wrap(filter_stages);
-        }
+    let rest = RowPredicate::with_alternatives(rest.to_vec(), item.alternatives.clone());
+    if !rest.matches_every_row() {
+        stages.push(Box::new(ArrowPredicateFn::new(
+            roots(table, rest.required_columns()),
+            move |batch: RecordBatch| {
+                rest.evaluate(&batch)
+                    .map_err(|e| ArrowError::ComputeError(e.to_string()))
+            },
+        )));
     }
+
+    stages
+}
+
+/// Several items, or items whose tags are asked for: one stage evaluates them
+/// all, after a stage that admits only the rows one of them could match.
+fn every_item_stages(
+    table: &ParquetTable,
+    items: &[&RowPredicate],
+    tags: Option<Arc<ItemTags>>,
+) -> Vec<Box<dyn ArrowPredicate>> {
+    let mut stages: Vec<Box<dyn ArrowPredicate>> = Vec::new();
+
+    // One list per column admits every row an item could match, so
+    // the items themselves run only on the rows it admits.
+    let union = (items.len() > 1)
+        .then(|| crate::scan::predicate::listed_union(items))
+        .flatten();
+    if let Some(union) = union {
+        stages.push(Box::new(ArrowPredicateFn::new(
+            roots(table, union.required_columns()),
+            move |batch: RecordBatch| {
+                union
+                    .evaluate(&batch)
+                    .map_err(|e| ArrowError::ComputeError(e.to_string()))
+            },
+        )));
+    }
+
+    let projection = roots(table, items.iter().flat_map(|item| item.required_columns()));
+    let items: Vec<RowPredicate> = items.iter().map(|&item| item.clone()).collect();
+    let every_item: Vec<usize> = (0..items.len()).collect();
+
+    // Last, so that the rows it selects are the rows read.
+    stages.push(Box::new(ArrowPredicateFn::new(
+        projection,
+        move |batch: RecordBatch| {
+            let masks = items
+                .iter()
+                .map(|item| item.evaluate(&batch))
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|e| ArrowError::ComputeError(e.to_string()))?;
+            let matched = crate::scan::predicate::or_masks(&masks, &every_item, batch.num_rows());
+
+            if let Some(tags) = &tags {
+                tags.record(&masks, &matched);
+            }
+            Ok(matched)
+        },
+    )));
+
+    stages
+}
+
+/// Read row group `group` through `filter`. Each row comes with its position
+/// and tags when the request asks for them.
+fn read_row_group(
+    table: &ParquetTable,
+    group: usize,
+    read_columns: &[&str],
+    request: &ScanRequest,
+    output_schema: &SchemaRef,
+    filter: ReaderFilter,
+) -> Result<Vec<ScannedBatch>> {
+    let mut tracked = request.positions.then(TrackedRows::default);
+    let stages = match &mut tracked {
+        Some(tracked) => tracked.wrap(filter.stages),
+        None => filter.stages,
+    };
 
     let mut builder = ParquetRecordBatchReaderBuilder::new_with_metadata(
         table.data(),
         table.arrow_metadata().clone(),
     )
-    .with_projection(mask)
+    .with_projection(roots(table, read_columns.iter().copied()))
     .with_batch_size(request.batch_size)
-    .with_row_groups(row_groups.to_vec());
-    if !filter_stages.is_empty() {
-        builder = builder.with_row_filter(RowFilter::new(filter_stages));
+    .with_row_groups(vec![group]);
+    if !stages.is_empty() {
+        builder = builder.with_row_filter(RowFilter::new(stages));
     }
     let reader = builder.build().context("building parquet reader")?;
-    let positions = tracked.map(|tracked| tracked.finish(table, row_groups));
-    let tags = item_tags.map(|tags| tags.finish());
+    let positions = tracked.map(|tracked| tracked.finish(table, group));
+    let tags = filter.tags.map(|tags| tags.finish());
+
+    let mut batches = Vec::new();
     let mut rows_read = 0;
-
-    let mut output_batches = Vec::new();
-
-    for batch_result in reader {
-        let batch = batch_result.context("reading batch")?;
+    for batch in reader {
+        let batch = batch.context("reading batch")?;
         let rows = batch.num_rows();
         if rows == 0 {
             continue;
         }
 
-        let batch = project_batch(&batch, output_schema)?;
+        let projected = project_batch(&batch, output_schema)?;
         let positions = positions
             .as_ref()
             .map(|positions| positions.slice(rows_read, rows));
-        output_batches.push(match &tags {
+        let mut scanned = match &tags {
             Some(tags) => ScannedBatch {
-                batch,
+                batch: projected,
                 positions,
                 tags: tags.iter().map(|tag| tag.slice(rows_read, rows)).collect(),
             },
-            None => ScannedBatch::untagged(request, batch, positions),
-        });
+            None => ScannedBatch::untagged(request, projected, positions),
+        };
         rows_read += rows;
+
+        let block_column = request
+            .block_number_column
+            .and_then(|name| batch.column_by_name(name));
+        if let Some(((from, to), column)) = filter.blocks_after.zip(block_column) {
+            scanned = scanned.filter(&block_range_mask(column, from, to)?)?;
+        }
+
+        if scanned.batch.num_rows() > 0 {
+            batches.push(scanned);
+        }
     }
 
-    Ok(output_batches)
+    Ok(batches)
 }
 
 /// One row group of a scan whose items match every row: the rows inside the
 /// pass's window decoded once for every scan that shares `cache`, and the
 /// scan's block range, key and hierarchical filters applied in memory. Rows
-/// come out as [`scan_row_groups`] returns them: a relation's rows share its
+/// come out as [`read_row_group`] returns them: a relation's rows share its
 /// sources' blocks (INV-D5), all inside the window. `None` when the cache
 /// cannot take the row group.
 fn scan_decoded_row_group(
@@ -1500,8 +1075,7 @@ fn scan_decoded_row_group(
             keep = &keep & hf.mask(&batch, Some(&keep)).values();
         }
         Relation::Keys(kf) => {
-            let mask = composite_key_in_set_mask(&batch, &kf.columns, &kf.key_set, Some(&keep))?;
-            keep = &keep & mask.values();
+            keep = &keep & kf.mask(&batch, Some(&keep))?.values();
         }
         Relation::None => {}
     }
@@ -1515,9 +1089,7 @@ fn scan_decoded_row_group(
         arrow::compute::filter_record_batch(&project_batch(&batch, output_schema)?, &selected)?;
 
     let positions = request.positions.then(|| {
-        let start: u64 = (0..group)
-            .map(|g| table.row_group(g).num_rows() as u64)
-            .sum();
+        let start = table.row_group_start(group);
         selected
             .values()
             .set_indices()
@@ -1594,125 +1166,6 @@ fn window_rows(
     }
 
     Ok(super::columns::WindowRows::Some(offsets.into()))
-}
-
-/// Hierarchical scan with merged key+address RowFilter stage.
-/// Reads key + address columns for all rows in a single RowFilter stage (cheap integer + List),
-/// which eliminates ~98.8% of rows before the reader decodes heavy output columns
-/// (instruction data, accounts, etc.). This is faster than:
-/// - No RowFilter: decodes all output columns for all rows (14ms vs 4ms)
-/// - Key-only RowFilter + post-filter: RowFilter machinery overhead exceeds savings (6ms vs 4ms)
-/// - Two-pass with RowSelection: RowSelection can't skip pages (single page per RG), overhead (7ms)
-fn scan_hierarchical_two_pass(
-    table: &ParquetTable,
-    row_groups: &[usize],
-    request: &ScanRequest,
-    hf: &HierarchicalFilter,
-    blocks: Option<(Option<u64>, Option<u64>)>,
-    output_schema: &SchemaRef,
-) -> Result<Vec<ScannedBatch>> {
-    let parquet_schema = table.metadata().file_metadata().schema_descr();
-
-    // Collect all columns needed: output + key + address + block range
-    let mut all_columns: HashSet<&str> = HashSet::default();
-    for col in &request.output_columns {
-        all_columns.insert(col);
-    }
-    for col in &hf.group_key_columns {
-        all_columns.insert(col);
-    }
-    all_columns.insert(&hf.address_column);
-    if let Some(bn_col) = request.block_number_column {
-        all_columns.insert(bn_col);
-    }
-
-    let all_indices: Vec<usize> = all_columns
-        .iter()
-        .filter_map(|name| table.schema().index_of(name).ok())
-        .collect();
-    let main_mask = ProjectionMask::roots(parquet_schema, all_indices);
-
-    // Merged KF+HF RowFilter stage: reads key + address columns,
-    // applies hierarchical_mask which does first_key_set pre-filter + composite key lookup
-    // + address prefix matching in a single pass.
-    let mut filter_col_indices: Vec<usize> = Vec::new();
-    for col in &hf.group_key_columns {
-        if let Ok(idx) = table.schema().index_of(col) {
-            filter_col_indices.push(idx);
-        }
-    }
-    if let Ok(idx) = table.schema().index_of(&hf.address_column) {
-        filter_col_indices.push(idx);
-    }
-    filter_col_indices.sort_unstable();
-    filter_col_indices.dedup();
-
-    let filter_proj = ProjectionMask::roots(parquet_schema, filter_col_indices);
-    let filter = hf.clone();
-    let filter_stage = Box::new(ArrowPredicateFn::new(
-        filter_proj,
-        move |batch: RecordBatch| Ok(filter.mask(&batch, None)),
-    ));
-
-    let mut tracked = request
-        .positions
-        .then(super::positions::TrackedRows::default);
-    let stages: Vec<Box<dyn parquet::arrow::arrow_reader::ArrowPredicate>> = match &mut tracked {
-        Some(tracked) => tracked.wrap(vec![filter_stage]),
-        None => vec![filter_stage],
-    };
-    let reader = ParquetRecordBatchReaderBuilder::new_with_metadata(
-        table.data(),
-        table.arrow_metadata().clone(),
-    )
-    .with_projection(main_mask)
-    .with_batch_size(request.batch_size)
-    .with_row_groups(row_groups.to_vec())
-    .with_row_filter(RowFilter::new(stages))
-    .build()
-    .context("building hierarchical reader")?;
-    let positions = tracked.map(|tracked| tracked.finish(table, row_groups));
-    let mut position_offset = 0;
-
-    let mut output_batches = Vec::new();
-
-    for batch_result in reader {
-        let batch = batch_result.context("reading hierarchical batch")?;
-        let count = batch.num_rows();
-        if count == 0 {
-            continue;
-        }
-        let batch_positions = positions
-            .as_ref()
-            .map(|positions| positions.slice(position_offset, count));
-        position_offset += count;
-
-        let block_column = request
-            .block_number_column
-            .and_then(|name| batch.column_by_name(name));
-        let (batch, batch_positions) = match blocks.zip(block_column) {
-            Some(((from, to), column)) => {
-                let in_range = block_range_mask(column, from, to)?;
-                let batch = arrow::compute::filter_record_batch(&batch, &in_range)
-                    .context("block range filter in hierarchical scan")?;
-                let batch_positions = batch_positions
-                    .map(|positions| arrow::compute::filter(&positions, &in_range))
-                    .transpose()?
-                    .map(|positions| positions.as_primitive::<UInt64Type>().clone());
-                (batch, batch_positions)
-            }
-            None => (batch, batch_positions),
-        };
-
-        if batch.num_rows() == 0 {
-            continue;
-        }
-
-        let projected = project_batch(&batch, output_schema)?;
-        output_batches.push(ScannedBatch::untagged(request, projected, batch_positions));
-    }
-
-    Ok(output_batches)
 }
 
 /// Rows whose block number falls in `[from_block, to_block]`.
@@ -1836,98 +1289,6 @@ mod tests {
             .expect("valid utf8 still reads");
         assert!(InListPredicate::from_strings(&["0xdef"]).can_skip(&range));
         assert!(!InListPredicate::from_strings(&["0xabc"]).can_skip(&range));
-    }
-
-    #[test]
-    fn materialization_keys_preserve_nulls_and_list_components() {
-        use arrow::datatypes::UInt32Type;
-        let identities: Vec<ArrayRef> = vec![
-            Arc::new(UInt32Array::from(vec![Some(0), None, Some(2), Some(3)])),
-            Arc::new(ListArray::from_iter_primitive::<UInt32Type, _, _>(vec![
-                Some(vec![Some(0)]),
-                None,
-                Some(vec![None, Some(2)]),
-                Some(vec![Some(3)]),
-            ])),
-        ];
-        for identity in identities {
-            let batch = RecordBatch::try_from_iter(vec![
-                (
-                    "number",
-                    Arc::new(UInt64Array::from(vec![7; 4])) as ArrayRef,
-                ),
-                ("identity", identity),
-            ])
-            .unwrap();
-            let columns = vec!["number".to_owned(), "identity".to_owned()];
-            let selected = KeyFilter::for_rows(&[batch.slice(1, 2)], &columns, "number").unwrap();
-            let mask =
-                composite_key_in_set_mask(&batch, &columns, &selected.key_set, None).unwrap();
-            assert_eq!(mask, BooleanArray::from(vec![false, true, true, false]));
-        }
-    }
-
-    /// A list key reads its elements through the list's offsets, so it must
-    /// write what the row's own slice holds: at every width, on a sliced list,
-    /// for null and empty lists and a null element. Elements that are not
-    /// integers give no row a key.
-    #[test]
-    fn a_list_key_writes_what_its_row_slice_holds() {
-        use crate::integers::IntColumn;
-        use arrow::datatypes::*;
-
-        fn lists<T: ArrowPrimitiveType>() -> ArrayRef {
-            let value = |v: usize| T::Native::from_usize(v);
-            Arc::new(ListArray::from_iter_primitive::<T, _, _>(vec![
-                Some(vec![value(9)]),
-                Some(vec![value(0), value(3)]),
-                None,
-                Some(vec![]),
-                Some(vec![value(1), None, value(2)]),
-                Some(vec![value(4)]),
-            ]))
-        }
-
-        let oracle = |list: &GenericListArray<i32>, row: usize| -> Option<Vec<u8>> {
-            if list.is_null(row) {
-                return None;
-            }
-            let slice = list.value(row);
-            let elements = IntColumn::resolve(slice.as_ref())?;
-            let mut buf = (slice.len() as u32).to_le_bytes().to_vec();
-            for i in 0..elements.len() {
-                buf.extend_from_slice(&elements.join_key(i).to_le_bytes());
-            }
-            Some(buf)
-        };
-
-        let columns = [
-            lists::<UInt8Type>(),
-            lists::<UInt16Type>(),
-            lists::<UInt32Type>(),
-            lists::<UInt64Type>(),
-            lists::<Int8Type>(),
-            lists::<Int16Type>(),
-            lists::<Int32Type>(),
-            lists::<Int64Type>(),
-            lists::<Float64Type>(),
-        ];
-        for column in &columns {
-            for column in [column.clone(), column.slice(1, 5)] {
-                let list = column.as_any().downcast_ref::<ListArray>().unwrap();
-                let key = TypedKeyColumn::resolve(column.as_ref()).unwrap();
-                for row in 0..list.len() {
-                    let mut buf = Vec::new();
-                    let written = key.append_to(&mut buf, row).then_some(buf);
-                    assert_eq!(
-                        written,
-                        oracle(list, row),
-                        "row {row} of a {} list",
-                        column.data_type()
-                    );
-                }
-            }
-        }
     }
 
     fn solana_chunk_path() -> PathBuf {
@@ -2400,8 +1761,8 @@ mod tests {
                 "block_number",
             );
             assert!(matches!(
-                path.key_set.as_ref(),
-                CompositeKeySet::PairPath(_)
+                path.key_set(),
+                crate::scan::keys::CompositeKeySet::PairPath(_)
             ));
             let hierarchical = |mode| {
                 HierarchicalFilter::build(
