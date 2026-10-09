@@ -6,10 +6,12 @@
 //! reads the same columns, so [`ColumnCache`] decodes a row group's rows inside
 //! the pass's block range once, and each scan filters them in memory.
 //!
-//! The budget bounds what the cache decodes, not only what it keeps: a column
-//! is decoded at the window's rows alone, after the most it can decode to is
-//! counted against the budget. A row group the budget cannot take is read by
-//! each scan as any other scan reads it.
+//! The budget bounds what the cache holds, and it is checked before anything is
+//! decoded: a column is decoded at the window's rows alone, after the most it
+//! can hold is counted against the budget. A row group the budget cannot take
+//! is read by each scan as any other scan reads it. While a column decodes, the
+//! reader's buffers grow by doubling, so for a moment it takes up to twice what
+//! it then holds.
 
 use super::ParquetTable;
 use arrow::array::{Array, ArrayRef, UInt32Array};
@@ -141,25 +143,18 @@ impl ColumnCache {
         let file = table.metadata_arc();
         let (from, to) = window.bounds();
         let key = (Arc::as_ptr(&file) as usize, group, from, to);
-        let most = table.row_group(group).num_rows().max(0) as u64 * 4;
+        let most = || Some(window_reservation(table, group));
         let size = |held: &Held<WindowRows>| match &held.value {
             WindowRows::All(_) => 0,
             WindowRows::Some(offsets) => offsets.get_array_memory_size() as u64,
         };
 
-        hold(
-            &self.inner.windows,
-            &self.inner,
-            key,
-            Some(most),
-            size,
-            || {
-                Ok(Held {
-                    _file: file.clone(),
-                    value: rows()?,
-                })
-            },
-        )
+        hold(&self.inner.windows, &self.inner, key, most, size, || {
+            Ok(Held {
+                _file: file.clone(),
+                value: rows()?,
+            })
+        })
     }
 
     /// Column `index` of row group `group`, at the window's `rows`. `None`
@@ -176,7 +171,7 @@ impl ColumnCache {
         let file = table.metadata_arc();
         let (from, to) = window.bounds();
         let key = (Arc::as_ptr(&file) as usize, group, index, from, to);
-        let most = super::scanner::column_bytes_bound(table, group, index);
+        let most = || column_reservation(table, group, index);
         let size = |held: &Held<ArrayRef>| held.value.get_array_memory_size() as u64;
 
         let held = hold(&self.inner.columns, &self.inner, key, most, size, || {
@@ -187,6 +182,29 @@ impl ColumnCache {
         })?;
         Ok(held.map(|held| held.value.clone()))
     }
+}
+
+/// The most the rows of row group `group` inside a window hold: an offset for
+/// each, and the array around them.
+pub(super) fn window_reservation(table: &ParquetTable, group: usize) -> u64 {
+    let offsets = table.row_group(group).num_rows().max(0) as u64 * 4;
+    offsets.saturating_add(empty_size(&arrow::datatypes::DataType::UInt32))
+}
+
+/// The most column `index` of row group `group` holds once decoded, at any of
+/// its rows: its values, and the arrays around them. `None` where the footer
+/// does not bound it.
+fn column_reservation(table: &ParquetTable, group: usize, index: usize) -> Option<u64> {
+    let values = super::scanner::column_bytes_bound(table, group, index)?;
+    let data_type = table.schema().field(index).data_type();
+
+    Some(values.saturating_add(empty_size(data_type)))
+}
+
+/// What an empty array of `data_type` holds: the arrays a column of it is made
+/// of, with an offset of each list in it.
+fn empty_size(data_type: &arrow::datatypes::DataType) -> u64 {
+    arrow::array::new_empty_array(data_type).get_array_memory_size() as u64
 }
 
 /// Column `index` of row group `group` at `rows` alone: the reader skips the
@@ -212,15 +230,24 @@ fn decode_rows(
             builder.with_row_selection(RowSelection::from_consecutive_ranges(runs(offsets), total));
     }
 
-    let batches = builder.build()?.collect::<Result<Vec<_>, _>>()?;
-    Ok(match batches.as_slice() {
-        [] => arrow::array::new_empty_array(table.schema().field(index).data_type()),
-        [batch] => batch.column(0).clone(),
+    // Each batch is dropped as its column is taken, so the column is the only
+    // owner of its buffers and can trim them.
+    let mut parts = builder
+        .build()?
+        .map(|batch| Ok(batch?.column(0).clone()))
+        .collect::<anyhow::Result<Vec<ArrayRef>>>()?;
+    let mut column = match parts.len() {
+        0 => arrow::array::new_empty_array(table.schema().field(index).data_type()),
+        1 => parts.pop().expect("one part"),
         _ => {
-            let parts: Vec<&dyn Array> = batches.iter().map(|b| b.column(0).as_ref()).collect();
+            let parts: Vec<&dyn Array> = parts.iter().map(|part| part.as_ref()).collect();
             arrow::compute::concat(&parts)?
         }
-    })
+    };
+
+    // The reader leaves spare capacity, up to as much again as the values.
+    column.shrink_to_fit();
+    Ok(column)
 }
 
 /// Sorted offsets as runs of consecutive rows.
@@ -242,13 +269,16 @@ fn runs(offsets: &UInt32Array) -> impl Iterator<Item = std::ops::Range<usize>> +
 }
 
 /// The value `map` holds under `key`, loaded by the first caller while the
-/// others wait. The `most` it may take is counted against the budget before it
-/// is loaded, and what it takes once it is; `None` when that does not fit.
+/// others wait. The `most` it may take, asked only when it is to be loaded, is
+/// counted against the budget before it is loaded, and what it takes once it
+/// is; `None` when that does not fit. A
+/// value that takes more than `most` is kept only if the budget takes the
+/// rest; this caller gets it either way.
 fn hold<K: std::hash::Hash + Eq, T>(
     map: &Mutex<FxHashMap<K, Arc<Slot<T>>>>,
     inner: &Inner,
     key: K,
-    most: Option<u64>,
+    most: impl FnOnce() -> Option<u64>,
     size: impl FnOnce(&T) -> u64,
     load: impl FnOnce() -> anyhow::Result<T>,
 ) -> anyhow::Result<Option<Arc<T>>> {
@@ -264,7 +294,7 @@ fn hold<K: std::hash::Hash + Eq, T>(
         return Ok(Some(value.clone()));
     }
 
-    let Some(most) = most.filter(|&most| inner.reserve(most)) else {
+    let Some(most) = most().filter(|&most| inner.reserve(most)) else {
         return Ok(None);
     };
     let value = match load() {
@@ -275,8 +305,9 @@ fn hold<K: std::hash::Hash + Eq, T>(
         }
     };
 
-    inner.settle(most, size(&value));
-    *held = Some(value.clone());
+    if inner.settle(most, size(&value)) {
+        *held = Some(value.clone());
+    }
     Ok(Some(value))
 }
 
@@ -289,14 +320,23 @@ impl Inner {
         })
     }
 
-    /// Count `actual` bytes in place of the `reserved` ones.
-    fn settle(&self, reserved: u64, actual: u64) {
-        self.update(|used| Some(used.saturating_sub(reserved).saturating_add(actual)));
+    /// Count `actual` bytes in place of the `reserved` ones, if the budget
+    /// takes them; else release the reservation and return `false`.
+    fn settle(&self, reserved: u64, actual: u64) -> bool {
+        let mut taken = false;
+        self.update(|used| {
+            let rest = used.saturating_sub(reserved);
+            let total = rest.saturating_add(actual);
+            taken = total <= self.budget;
+
+            Some(if taken { total } else { rest })
+        });
+        taken
     }
 
     /// Replace the bytes counted with what `next` makes of them, unless it
     /// declines.
-    fn update(&self, next: impl Fn(u64) -> Option<u64>) -> bool {
+    fn update(&self, mut next: impl FnMut(u64) -> Option<u64>) -> bool {
         let mut used = self.used.load(Ordering::Relaxed);
         loop {
             let Some(updated) = next(used) else {
@@ -318,14 +358,19 @@ impl Inner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Int32Array, ListArray, RecordBatch, StringArray};
-    use arrow::datatypes::{DataType, Field, Schema, UInt16Type};
+    use arrow::array::{
+        BinaryArray, BooleanArray, FixedSizeBinaryArray, Int32Array, Int64Array, LargeStringArray,
+        ListArray, RecordBatch, StringArray, StructArray,
+    };
+    use arrow::buffer::NullBuffer;
+    use arrow::datatypes::{DataType, Field, Fields, Schema, UInt16Type};
     use parquet::arrow::ArrowWriter;
     use parquet::basic::Compression;
     use parquet::file::properties::WriterProperties;
+    use std::sync::atomic::AtomicUsize;
 
-    /// Nullable integers, strings and paths, in row groups of 64 rows and
-    /// pages of 3.
+    /// Nullable columns of every layout the footer bound models, in row
+    /// groups of 64 rows and pages of 3.
     fn write(dir: &std::path::Path) -> ParquetTable {
         let rows = 250;
         let number = Int32Array::from_iter((0..rows).map(|i| (i % 5 != 4).then_some(i / 3)));
@@ -338,14 +383,51 @@ mod tests {
                     .collect::<Vec<_>>()
             })
         }));
+        let flag = BooleanArray::from_iter((0..rows).map(|i| (i % 6 != 5).then_some(i % 2 == 0)));
+        let hash = FixedSizeBinaryArray::try_from_sparse_iter_with_size(
+            (0..rows).map(|i| (i % 8 != 7).then_some([i as u8; 5])),
+            5,
+        )
+        .unwrap();
+        let long = LargeStringArray::from_iter(
+            (0..rows).map(|i| (i % 4 != 3).then(|| "w".repeat(i as usize % 13))),
+        );
+        let pair_fields = Fields::from(vec![
+            Field::new("id", DataType::Int64, true),
+            Field::new("data", DataType::Binary, true),
+        ]);
+        let pair = StructArray::new(
+            pair_fields.clone(),
+            vec![
+                Arc::new(Int64Array::from_iter(
+                    (0..rows).map(|i| (i % 3 != 2).then_some(i as i64 * 7)),
+                )),
+                Arc::new(BinaryArray::from_iter(
+                    (0..rows).map(|i| (i % 5 != 1).then(|| vec![i as u8; i as usize % 9])),
+                )),
+            ],
+            Some(NullBuffer::from_iter((0..rows).map(|i| i % 10 != 9))),
+        );
         let schema = Arc::new(Schema::new(vec![
             Field::new("number", DataType::Int32, true),
             Field::new("text", DataType::Utf8, true),
             Field::new("path", path.data_type().clone(), true),
+            Field::new("flag", DataType::Boolean, true),
+            Field::new("hash", DataType::FixedSizeBinary(5), true),
+            Field::new("long", DataType::LargeUtf8, true),
+            Field::new("pair", DataType::Struct(pair_fields), true),
         ]));
         let batch = RecordBatch::try_new(
             schema.clone(),
-            vec![Arc::new(number), Arc::new(text), Arc::new(path)],
+            vec![
+                Arc::new(number),
+                Arc::new(text),
+                Arc::new(path),
+                Arc::new(flag),
+                Arc::new(hash),
+                Arc::new(long),
+                Arc::new(pair),
+            ],
         )
         .unwrap();
         let properties = WriterProperties::builder()
@@ -410,7 +492,7 @@ mod tests {
             for group in 0..table.num_row_groups() {
                 let rows = table.row_group(group).num_rows() as usize;
                 let some: UInt32Array = (0..rows as u32).filter(|row| row % 3 != 1).collect();
-                for column in 0..3 {
+                for column in 0..table.schema().fields().len() {
                     let mask = ProjectionMask::roots(
                         table.metadata().file_metadata().schema_descr(),
                         [column],
@@ -453,6 +535,105 @@ mod tests {
             assert_eq!(cache.used() > 0, budget > 0);
             cache.clear();
             assert_eq!(cache.used(), 0);
+        }
+    }
+
+    /// Every column of the first `groups` row groups of `table`, at any of its
+    /// rows, holds no more than the cache reserves for it before decoding it.
+    /// Returns how many columns the footer bounds, which are the ones checked.
+    fn columns_hold_what_was_reserved(table: &ParquetTable, groups: usize) -> usize {
+        let mut checked = 0;
+        for group in 0..groups.min(table.num_row_groups()) {
+            let rows = table.row_group(group).num_rows() as usize;
+            let windows = [
+                WindowRows::All(rows),
+                WindowRows::Some((0..rows as u32).step_by(2).collect()),
+                WindowRows::Some(UInt32Array::from(vec![rows as u32 - 1])),
+                WindowRows::Some(UInt32Array::from(Vec::<u32>::new())),
+            ];
+            for index in 0..table.schema().fields().len() {
+                let Some(reserved) = column_reservation(table, group, index) else {
+                    continue;
+                };
+                checked += 1;
+                for rows in &windows {
+                    let cache = ColumnCache::new(u64::MAX);
+                    let column = cache.column(table, group, index, Window::default(), rows);
+
+                    assert!(column.unwrap().is_some());
+                    let name = table.schema().field(index).name();
+                    assert!(
+                        cache.used() <= reserved,
+                        "{name} of group {group} holds {} rows in {} bytes, {reserved} reserved",
+                        rows.len(),
+                        cache.used()
+                    );
+                }
+            }
+        }
+        checked
+    }
+
+    #[test]
+    fn a_column_holds_no_more_than_the_cache_reserves() {
+        let dir = tempfile::tempdir().unwrap();
+        let table = write(dir.path());
+
+        let checked = columns_hold_what_was_reserved(&table, usize::MAX);
+
+        let columns = table.num_row_groups() * table.schema().fields().len();
+        assert_eq!(checked, columns, "the footer left a column unbounded");
+    }
+
+    #[test]
+    #[ignore = "requires external chunk data"]
+    fn a_chunk_column_holds_no_more_than_the_cache_reserves() {
+        if !crate::testing::chunks_present() {
+            return;
+        }
+
+        let mut checked = 0;
+        for dataset in ["evm", "solana"] {
+            let dir = crate::testing::chunk_dir(dataset).unwrap();
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.extension().is_some_and(|ext| ext == "parquet") {
+                    let table = ParquetTable::open(&path).unwrap();
+                    checked += columns_hold_what_was_reserved(&table, 2);
+                }
+            }
+        }
+        assert!(checked > 100, "{checked} columns checked");
+    }
+
+    /// A value that takes more than was reserved for it is kept only if the
+    /// budget takes the rest. The asker gets it either way, and a value not
+    /// kept is loaded again.
+    #[test]
+    fn a_value_past_its_reservation_is_kept_only_inside_the_budget() {
+        for (budget, kept) in [(15, false), (20, true)] {
+            let cache = ColumnCache::new(budget);
+            let slots = Mutex::new(FxHashMap::default());
+            let loads = AtomicUsize::new(0);
+            let ask = || {
+                hold(
+                    &slots,
+                    &cache.inner,
+                    (),
+                    || Some(10),
+                    |value| *value,
+                    || {
+                        loads.fetch_add(1, Ordering::Relaxed);
+                        Ok(20u64)
+                    },
+                )
+            };
+
+            for _ in 0..2 {
+                assert_eq!(ask().unwrap().as_deref(), Some(&20));
+                assert_eq!(cache.used(), if kept { 20 } else { 0 });
+            }
+            assert_eq!(loads.load(Ordering::Relaxed), if kept { 1 } else { 2 });
         }
     }
 }
