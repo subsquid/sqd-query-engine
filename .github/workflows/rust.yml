@@ -42,8 +42,9 @@ jobs:
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
 
-      - name: Install components
-        run: rustup component add rustfmt clippy
+      # rust-toolchain.toml names the compiler and its components.
+      - name: Install toolchain
+        run: rustup toolchain install
 
       # MG-8. Both run before the suite: they are seconds against minutes, and a
       # PR that fails them fails them whatever the tests say.

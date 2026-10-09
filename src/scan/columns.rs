@@ -314,44 +314,31 @@ fn hold<K: std::hash::Hash + Eq, T>(
 impl Inner {
     /// Count `bytes` against the budget, if they fit in what is left of it.
     fn reserve(&self, bytes: u64) -> bool {
-        self.update(|used| {
-            used.checked_add(bytes)
-                .filter(|&total| total <= self.budget)
-        })
+        self.used
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                used.checked_add(bytes)
+                    .filter(|&total| total <= self.budget)
+            })
+            .is_ok()
     }
 
     /// Count `actual` bytes in place of the `reserved` ones, if the budget
     /// takes them; else release the reservation and return `false`.
     fn settle(&self, reserved: u64, actual: u64) -> bool {
         let mut taken = false;
-        self.update(|used| {
-            let rest = used.saturating_sub(reserved);
-            let total = rest.saturating_add(actual);
-            taken = total <= self.budget;
+        self.used
+            .update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                let rest = used.saturating_sub(reserved);
+                let total = rest.saturating_add(actual);
+                taken = total <= self.budget;
 
-            Some(if taken { total } else { rest })
-        });
+                if taken {
+                    total
+                } else {
+                    rest
+                }
+            });
         taken
-    }
-
-    /// Replace the bytes counted with what `next` makes of them, unless it
-    /// declines.
-    fn update(&self, mut next: impl FnMut(u64) -> Option<u64>) -> bool {
-        let mut used = self.used.load(Ordering::Relaxed);
-        loop {
-            let Some(updated) = next(used) else {
-                return false;
-            };
-            match self.used.compare_exchange_weak(
-                used,
-                updated,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return true,
-                Err(now) => used = now,
-            }
-        }
     }
 }
 
