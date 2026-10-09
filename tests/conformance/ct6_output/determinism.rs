@@ -16,10 +16,16 @@ use parquet::basic::Compression;
 use crate::harness::chunk::{
     chunk_relaid, chunk_with_column_retyped, chunk_with_list_elements_retyped, Layout,
 };
+use crate::harness::columnar::{run_columnar, MemoryChunk};
 use crate::harness::evm_like;
-use crate::harness::fixtures::{answers_the_same, fixture_chunk, fixture_tree_is_present, meta};
+use crate::harness::fixtures::{
+    answers_the_same, fixture_chunk, fixture_tree_has, fixture_tree_is_present, meta, run,
+    run_against, FIXTURE_DATASETS,
+};
 use crate::harness::generator::{Generator, ItemRequest, Rng, TableCorpus};
+use crate::harness::guard::fixture_dir;
 use crate::harness::json::{assert_same_response, block_numbers, parse_response};
+use crate::harness::sol_like;
 use crate::harness::synthetic::{catalog, paged_at, part_blocks, partitioned_chunk, MB};
 use sqd_query_engine::output::ExecOptions;
 
@@ -193,6 +199,113 @@ fn storage_layout_does_not_reach_the_answer() {
     }
 }
 
+/// Parquet is one storage among several: the hot store keeps chunks in a
+/// key-value database and hands the engine columns by row range. Its reader
+/// filters in memory what the parquet reader filters in a row filter, and
+/// prunes by statistics windows of its own, so every case runs with no
+/// statistics, with one window larger than the table, with windows of a few
+/// rows and with a window per row, where every bound prunes exactly.
+///
+/// Covers CT-6 · INV-D8
+#[test]
+fn a_columnar_reader_answers_what_the_parquet_reader_does() {
+    for (catalog, chunk, cases) in columnar_cases() {
+        let readers = [None, Some(1 << 20), Some(5), Some(1)]
+            .map(|w| (w, MemoryChunk::load(chunk.path(), w)));
+        for (what, query) in cases {
+            let expected = run_against(&catalog, chunk.path(), &query).unwrap();
+            assert!(!expected.is_empty(), "{what} must return a response");
+
+            for (window, reader) in &readers {
+                let what = format!("{what}, statistics windows {window:?}");
+                let actual = run_columnar(&catalog, reader, query.as_bytes())
+                    .unwrap_or_else(|e| panic!("{what} made the query fail: {e:#}"));
+                assert_same_response(&expected, &actual, &what);
+            }
+        }
+    }
+}
+
+/// A store's window offsets are its word on which rows each window holds. A
+/// word that does not cover the table once and in order prunes nothing:
+/// trusted, it drops the rows before its first offset, or reads rows twice.
+/// Empty windows still cover it.
+///
+/// Covers CT-6 · INV-D8
+#[test]
+fn window_offsets_that_do_not_cover_the_table_prune_nothing() {
+    let offsets: [(&str, Offsets); 8] = [
+        ("windows from row 1", |rows| vec![1, rows]),
+        ("an end and no window", |rows| vec![rows]),
+        ("a window that steps back", |rows| vec![0, 2, 1, rows]),
+        ("a window past the table", |rows| vec![0, rows + 2, rows]),
+        ("a window past the table and back", |rows| {
+            vec![0, rows + 2, rows - 1, rows]
+        }),
+        ("windows that end short", |rows| vec![0, rows - 1]),
+        ("windows that end past the table", |rows| vec![0, rows + 1]),
+        ("empty windows", |rows| vec![0, 0, 1, 1, rows]),
+    ];
+
+    for (catalog, chunk, cases) in columnar_cases() {
+        let readers =
+            offsets.map(|(how, at)| (how, MemoryChunk::load_with_offsets(chunk.path(), at)));
+        for (what, query) in cases {
+            let expected = run_against(&catalog, chunk.path(), &query).unwrap();
+
+            for (how, reader) in &readers {
+                let what = format!("{what}, {how}");
+                let actual = run_columnar(&catalog, reader, query.as_bytes())
+                    .unwrap_or_else(|e| panic!("{what} made the query fail: {e:#}"));
+                assert_same_response(&expected, &actual, &what);
+            }
+        }
+    }
+}
+
+/// The window offsets a store reports for a table of so many rows.
+type Offsets = fn(usize) -> Vec<usize>;
+
+/// A chain's catalog, a chunk of it, and the queries the chunk is read with.
+type ColumnarCase = (
+    sqd_query_engine::metadata::DatasetDescription,
+    tempfile::TempDir,
+    Vec<(String, String)>,
+);
+
+/// The evm-like and solana-like chunks, each with the queries it is read with.
+fn columnar_cases() -> Vec<ColumnarCase> {
+    let evm_cases = evm_like::item_requests()
+        .into_iter()
+        .map(|(what, items)| (what.to_string(), evm_like::query_with(103, 113, &items)))
+        .collect();
+
+    let solana_cases = [
+        ("no instruction filter", "{}".to_string()),
+        ("a program filter", r#"{"programId":["100"]}"#.to_string()),
+        (
+            "a discriminator of mixed lengths",
+            r#"{"discriminator":["0x07","0x0700","0x2a0001"]}"#.to_string(),
+        ),
+        (
+            "an account mention",
+            format!(r#"{{"mentionsAccount":["{}"]}}"#, sol_like::account(4)),
+        ),
+        (
+            "two items",
+            r#"{"programId":["100"]},{"d1":["0x07"],"isCommitted":true}"#.to_string(),
+        ),
+    ]
+    .into_iter()
+    .map(|(what, items)| (what.to_string(), sol_like::query_with(&items)))
+    .collect();
+
+    vec![
+        (evm_like::catalog(), evm_like::chunk(), evm_cases),
+        (sol_like::catalog(), sol_like::chunk(), solana_cases),
+    ]
+}
+
 // ---------------------------------------------------------------------------
 // INV-O12, INV-O13 — the same chunk, read again
 // ---------------------------------------------------------------------------
@@ -287,6 +400,63 @@ fn a_fixture_chunk_answers_the_same_under_any_layout() {
         let relaid = chunk_relaid(&source, &layout);
         answers_the_same(&ethereum, EVM_QUERY, &source, relaid.path(), what);
     }
+}
+
+/// Every fixture query of every dataset, through the parquet reader and the
+/// columnar one. A query the parquet reader refuses must be refused with the
+/// same message.
+///
+/// Covers CT-6 · INV-D8
+#[test]
+#[ignore = "requires external fixture data"]
+fn every_fixture_query_answers_the_same_through_the_columnar_reader() {
+    if !fixture_tree_is_present() {
+        return;
+    }
+
+    let mut compared = 0;
+    for (dataset, catalog) in FIXTURE_DATASETS {
+        if !fixture_tree_has(dataset) {
+            continue;
+        }
+        let catalog = meta(catalog);
+        let chunk = fixture_chunk(dataset);
+        let readers = [None, Some(4096), Some(100)].map(|w| (w, MemoryChunk::load(&chunk, w)));
+
+        let mut queries: Vec<_> = std::fs::read_dir(fixture_dir().join(dataset).join("queries"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|dir| dir.join("query.json").is_file())
+            .collect();
+        queries.sort();
+
+        for dir in queries {
+            let query = std::fs::read(dir.join("query.json")).unwrap();
+            let expected = run(dataset, &catalog, &query);
+            for (window, reader) in &readers {
+                let what = format!("{}, statistics windows {window:?}", dir.display());
+                match (&expected, run_columnar(&catalog, reader, &query)) {
+                    (Ok(expected), Ok(actual)) => assert_same_response(expected, &actual, &what),
+                    (Err(expected), Err(actual)) => assert_eq!(
+                        expected.root_cause().to_string(),
+                        actual.root_cause().to_string(),
+                        "{what}"
+                    ),
+                    (expected, actual) => panic!(
+                        "{what}: parquet answered {:?}, columnar {:?}",
+                        expected
+                            .as_ref()
+                            .map(Vec::len)
+                            .map_err(|e| format!("{e:#}")),
+                        actual.as_ref().map(Vec::len).map_err(|e| format!("{e:#}"))
+                    ),
+                }
+                compared += 1;
+            }
+        }
+    }
+
+    assert!(compared > 300, "only {compared} fixture runs were compared");
 }
 
 /// Covers CT-6 · INV-D7
