@@ -418,6 +418,19 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
                 );
             }
 
+            // A name both a virtual field and a column or a variant field is
+            // read as one by the writer and the weight model and as the other
+            // by the planner (INV-D10).
+            let shares_name = table.columns.contains_key(field_name)
+                || table.variant_source(field_name).is_some();
+            anyhow::ensure!(
+                !shares_name,
+                "table '{}': virtual field '{}' shares its name with a column or a \
+                 variant field",
+                table_name,
+                field_name
+            );
+
             // Only a trailing list is spread into the array; anywhere earlier it
             // nests instead, and the field comes back a different shape than the
             // one it exists to present.
@@ -2690,6 +2703,72 @@ aliases:
             assert!(
                 parse_dataset_description(&catalog(request_name, output_name)).is_err(),
                 "{what} must be refused"
+            );
+        }
+    }
+
+    /// A name both a virtual field and a column, or a variant field, is
+    /// resolved virtual-first by the writer and the weight model and
+    /// column-first by the planner. A weight key column `token` was charged as
+    /// the virtual `token`, a roll of size-weighed columns read for selected
+    /// fields only, so the key weighed nothing and the page ran past its budget.
+    ///
+    /// Covers CT-1 · INV-D10
+    #[test]
+    fn test_validate_rejects_a_virtual_field_that_shares_a_name() {
+        const CATALOG: &str = r#"
+version: v2
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    sort_key: [number]
+    columns:
+      number: { type: uint64 }
+  logs:
+    request:
+      name: logs
+      filters: []
+    output:
+      name: log
+      fields: [log_index, token, data, topics, call_payload]
+      virtual_fields:
+        topics: { kind: roll, columns: [ t0, data ] }
+      variant_column: kind
+      variants:
+        call:
+          action: [ { column: payload, field_key: call_payload, as: payload } ]
+    item_order_keys: [log_index]
+    weight_key: [block_number, log_index, token]
+    sort_key: [block_number, log_index]
+    columns:
+      block_number: { type: uint64 }
+      log_index: { type: uint32 }
+      token: { type: string }
+      t0: { type: string }
+      data: { type: string, weight: data_size }
+      data_size: { type: uint64, system: true }
+      kind: { type: string }
+      payload: { type: string }
+"#;
+        parse_dataset_description(CATALOG).expect("distinct field names must load");
+
+        for (what, name) in [
+            ("a declared weight key column", "token"),
+            ("an item order key", "log_index"),
+            ("a column it rolls", "data"),
+            ("a column nothing else uses", "kind"),
+            ("a variant field", "call_payload"),
+        ] {
+            let renamed = CATALOG
+                .replace("data, topics,", "data,")
+                .replace("topics: {", &format!("{name}: {{"));
+            let error = parse_dataset_description(&renamed).expect_err(&format!(
+                "a virtual field named like {what} must be refused"
+            ));
+            assert!(
+                format!("{error:#}").contains(&format!("virtual field '{name}' shares its name")),
+                "{what}: refused for another reason: {error:#}"
             );
         }
     }
