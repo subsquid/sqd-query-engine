@@ -117,7 +117,9 @@ another by that column, so it costs what a key column costs. A table may declare
 its own, and two do, to weigh rows as the reference implementation does: an EVM
 log is weighed for its block number and log index, though its item key holds its
 transaction index too. The weight key decides where a page ends and nothing
-else; it does not identify, order or deduplicate a row.
+else; it does not identify, order or deduplicate a row. Every column of it
+weighs a fixed amount ([INV-D11](07-invariants.md#inv-d11)), so charging it
+reads nothing.
 
 **Storage sort key.** The order rows physically sit in. It is chosen to make
 filtering fast, so it usually leads with high-selectivity filter columns rather
@@ -331,7 +333,7 @@ serving any query — at build time if the catalog is compiled in, at load time
 otherwise. A catalog that fails validation MUST NOT be used to answer queries.
 
 Every check below is a static property of the catalog alone, requiring no chunk.
-They are collected as [INV-D1](07-invariants.md#inv-d1) … [INV-D10](07-invariants.md#inv-d10).
+They are collected as [INV-D1](07-invariants.md#inv-d1) … [INV-D11](07-invariants.md#inv-d11).
 
 - Exactly one block table: a block number alone identifies its rows, which is
   to say `itemOrderKeys` is empty and there is no `addressColumn`. Storage order
@@ -340,6 +342,8 @@ They are collected as [INV-D1](07-invariants.md#inv-d1) … [INV-D10](07-invaria
 - `blockNumberColumn`, `addressColumn`, every `itemOrderKeys` entry, every
   `weightKey` entry, every `sortKey` entry: exists in `columns`.
 - Every `weight` that names a size column: that column exists.
+- Every weight key column, declared or default: weighs a fixed amount, so it
+  names no size column and is not `system`.
 - Every relation: its target table exists; `leftKey` and `rightKey` have equal
   length; both begin with the respective block number column; `children` and
   `parents` relations have `addressColumn` on both sides.

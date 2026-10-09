@@ -52,7 +52,8 @@ each class needs and whether it exists.
 
 Static, no chunk, runs in milliseconds. Checks [INV-D1](07-invariants.md#inv-d1)
 – [INV-D3](07-invariants.md#inv-d3), [INV-D5](07-invariants.md#inv-d5),
-[INV-D6](07-invariants.md#inv-d6), [INV-D10](07-invariants.md#inv-d10).
+[INV-D6](07-invariants.md#inv-d6), [INV-D10](07-invariants.md#inv-d10),
+[INV-D11](07-invariants.md#inv-d11).
 
 For each bundled dataset assert every catalog reference resolves; every relation
 key begins with the block number column on both sides; every hierarchical
@@ -323,6 +324,7 @@ renamed out from under a comment inside it.
 | [INV-D8](07-invariants.md#inv-d8) | CT-6 | **C** | `storage_layout_does_not_reach_the_answer` turns one knob per case, one per mechanism the invariant names — row groups of 1, 7 and more than the table holds; data pages of 1 and 5; uncompressed and snappy; no dictionary; no statistics; and the rows stored back to front and then in no order at all, which is a permutation no sort key produces. `a_fixture_chunk_answers_the_same_under_any_layout` repeats six of them on an archiver's chunk. Storage that is not parquet at all: `a_columnar_reader_answers_what_the_parquet_reader_does` reads the same chunks through the columnar reader, with no statistics and with windows from larger than the table down to one row, and `every_fixture_query_answers_the_same_through_the_columnar_reader` repeats every fixture query of every dataset that way. Statistics windows that do not cover the table — offsets that start past row 0, step back, overshoot, or end elsewhere — prune nothing: `window_offsets_that_do_not_cover_the_table_prune_nothing` |
 | [INV-D9](07-invariants.md#inv-d9) | CT-1 | **C** | `test_system_columns_excluded_from_weight`, `undeclared_columns_are_not_filterable`, `test_validate_rejects_fields_backed_by_system_columns` — direct, virtual-field and variant-field exposure |
 | [INV-D10](07-invariants.md#inv-d10) | CT-1 | **C** | `test_validate_rejects_duplicate_names` — two tables on one request name, two on one output name, an alias on a table's request name, and a table on the name another holds without declaring it |
+| [INV-D11](07-invariants.md#inv-d11) | CT-1 | **C** | `test_validate_rejects_a_weight_key_with_no_fixed_weight` — a declared key column weighed by its size or marked `system`, and each default key column weighed by its size: the item order key, the address column, the variant column, an item table's block number and the block table's number |
 | [INV-Q1](07-invariants.md#inv-q1) | CT-2 | **P** | reached through every fixture; no negative case for an unknown `type` |
 | [INV-Q2](07-invariants.md#inv-q2) | CT-2 | **C** | `test_parse_unknown_table_error`; `test_internal_table_names_are_not_request_keys` tries every table name and snake-cased alias of every bundled catalog that is not a request name |
 | [INV-Q3](07-invariants.md#inv-q3) | CT-2 | **C** | `test_parse_block_range_validation` |
@@ -399,19 +401,19 @@ renamed out from under a comment inside it.
 | [INV-X2](07-invariants.md#inv-x2) | CT-8 | **C** | `an_ignored_nullable_column_does_not_change_output` |
 | [INV-X3](07-invariants.md#inv-x3) | CT-8 | **C** | `filtering_an_absent_column_is_an_error` on both scan entry points, `filtering_a_present_column_still_works` for the other direction, `one_unanswerable_item_rejects_the_whole_request` for a filter one item request of several carries, and `an_alias_filter_on_a_column_the_chunk_lacks_is_an_error` for one reached through an alias's extraction column |
 
-**Totals: 62 C, 23 P, 0 U** of 85. Property coverage is therefore 0.73
+**Totals: 63 C, 23 P, 0 U** of 86. Property coverage is therefore 0.73
 (`P-COV-PROPERTY` in [09-parameters.md](09-parameters.md)).
 
 The figure fell from 0.73 to 0.69 on 2026-09-12, and no test was removed to make it fall. [INV-D6](07-invariants.md#inv-d6), [INV-P13](07-invariants.md#inv-p13) and [INV-Q14](07-invariants.md#inv-q14) were read against the tests they name and did not hold at **C**; their rows now say what those tests actually do. A ratchet on a number three rows had inflated would have locked the inflation in, so the baseline moved down once, deliberately, and ratchets from there. INV-Q14 earned its **C** back the same day with a test that recomputes the transcription from the reference, and INV-P13 later with tests that send a mixed-length discriminator and an empty prefix and check the rows.
 
-Of the 85 rows at **C** or **P**, 73 are backed by a tagged test and 12 rest on
+Of the 86 rows at **C** or **P**, 74 are backed by a tagged test and 12 rest on
 prose alone. Those 12 are the rows whose note says "fixtures only" or describes a
 group of cases without naming one, and they are the ones nothing recomputes: the
 status is what somebody believed on the day they typed it. Shrinking that number
 is what turns MG-1's ratchet from an intention into an arithmetic fact, so the
 checker recomputes all three numbers in this paragraph rather than trusting them.
 
-A tag is not the same as a gate. 4 of the 73 are backed only by tests marked
+A tag is not the same as a gate. 4 of the 74 are backed only by tests marked
 `#[ignore]`, which MG-3's portable job does not run: the test would fail if the
 invariant broke, but only on a machine that has the chunks. The checker reports
 those rows on every run too, because a status that no job can falsify is a status

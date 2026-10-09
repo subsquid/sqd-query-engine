@@ -253,7 +253,7 @@ catalogs.
 | `parent_number_column` | no | Block table only. The parent block's number, for chains that skip numbers (Solana slots). Absent means `number - 1`. |
 | `address_column` | no | The tree path of a hierarchical table: `trace_address`, `instruction_address`. Used by `children`/`parents` relations and appended to the item order. |
 | `item_order_keys` | no | The columns that, with the block number, order items within a block. The block table has none — a block number alone identifies its rows, and that is how the engine knows which table is the block table. |
-| `weight_key` | no | The columns every row is weighed for, selected or not. Defaults to the block number, `item_order_keys`, `address_column` and the variant column. Declared where the reference implementation weighs a different set, so that both end a page at the same block: `evm` `logs` and `substrate` `events`. A release that predates the key skips it and weighs the default. |
+| `weight_key` | no | The columns every row is weighed for, selected or not. Defaults to the block number, `item_order_keys`, `address_column` and the variant column. Declared where the reference implementation weighs a different set, so that both end a page at the same block: `evm` `logs` and `substrate` `events`. Each column must weigh a fixed amount. A release that predates the key skips it and weighs the default. |
 | `sort_key` | no | The order rows physically sit in. Filter columns first, then block number. The engine may use it to prune work; it never affects a result. |
 | `columns` | **yes** | The columns, in output order. |
 
@@ -373,6 +373,8 @@ checks need no chunk:
 - every column a `block_number_column`, `address_column`, `item_order_keys`,
   `weight_key`, `sort_key`, `weight`, special filter, virtual field, variant or
   alias names exists;
+- every column of the weight key, declared or default, weighs a fixed amount: it
+  names no size column and is not `system`;
 - every entry of `filters` is a special filter or a non-system column, and every
   special filter is in `filters`;
 - every entry of `fields` is a non-system column, a virtual field or a variant

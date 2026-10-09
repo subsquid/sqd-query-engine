@@ -107,6 +107,13 @@ and aliases; the output name is unique across tables.
 *Why:* a duplicate makes a client's request ambiguous, resolved by iteration order — arbitrarily.
 *Test:* static.
 
+### INV-D11
+**A weight key weighs a fixed amount.** No column of a table's weight key,
+declared or default, is weighed by a size column or is a `system` column.
+
+*Why:* a row is charged its weight key whether or not a client selects it. A size column is read only for a selected field, so a key column weighed by one is charged nothing while the field is off, and a system column weighs nothing at all; either way the page runs past its budget.
+*Test:* static; one refused catalog per kind of key column.
+
 ---
 
 ## Q — Request validation

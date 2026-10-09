@@ -187,6 +187,30 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
             );
         }
 
+        // A key is charged in every row, selected or not, and a scan reads a
+        // size column only for a selected field (INV-D11).
+        for key in table.weight_key() {
+            let Some(column) = table.columns.get(key) else {
+                continue;
+            };
+            if let Some(crate::WeightSource::Column(size)) = &column.weight {
+                anyhow::bail!(
+                    "table '{}': weight key column '{}' is weighed by '{}'; a key is \
+                     charged in every row, so it must weigh a fixed amount",
+                    table_name,
+                    key,
+                    size
+                );
+            }
+            anyhow::ensure!(
+                !column.system,
+                "table '{}': weight key column '{}' is a system column, which weighs \
+                 nothing; a key is charged in every row, so it must weigh a fixed amount",
+                table_name,
+                key
+            );
+        }
+
         // Validate sort_key columns exist
         for key in &table.sort_key {
             anyhow::ensure!(
@@ -2393,6 +2417,131 @@ tables:
                 .to_string();
             assert!(err.contains("system column"), "{field}: {err}");
         }
+    }
+
+    /// A row is charged its weight key whether or not a client selects it. A key
+    /// column weighed by a size column needs that column read for every row,
+    /// and a scan reads a size column only for a selected field, so the key
+    /// was charged nothing while the field was off; a system column weighs
+    /// nothing at all. Either way the row costs less than the catalog says, and
+    /// the page runs past its budget. A weight key column weighs a fixed amount,
+    /// whether the key is declared or the default one.
+    ///
+    /// Covers CT-1 · INV-D11
+    #[test]
+    fn test_validate_rejects_a_weight_key_with_no_fixed_weight() {
+        const CATALOG: &str = r#"
+version: v2
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    sort_key: [number]
+    columns:
+      number: { type: uint64 }
+      number_size: { type: uint64, system: true }
+  items:
+    request:
+      name: items
+      filters: []
+    output:
+      name: item
+      fields: [seq, path, kind, payload]
+      variant_column: kind
+      variants:
+        call:
+          action: [ { column: payload, as: payload } ]
+    item_order_keys: [seq]
+    address_column: path
+    sort_key: [block_number, seq]
+    columns:
+      block_number: { type: uint64 }
+      seq: { type: uint32 }
+      path: { type: list_uint32 }
+      kind: { type: string }
+      payload: { type: string }
+      hidden: { type: string, system: true }
+      sized: { type: uint64, system: true }
+"#;
+        parse_dataset_description(CATALOG).expect("every weight key column weighs a fixed amount");
+        let declared = CATALOG.replace(
+            "    item_order_keys: [seq]\n",
+            "    item_order_keys: [seq]\n    weight_key: [block_number, seq, payload]\n",
+        );
+        parse_dataset_description(&declared).expect("a declared key of fixed-weight columns");
+
+        let rejected = [
+            (
+                "a declared key column weighed by its size",
+                declared.replace(
+                    "payload: { type: string }",
+                    "payload: { type: string, weight: sized }",
+                ),
+                "'payload'",
+            ),
+            (
+                "a declared key column that is a system column",
+                CATALOG.replace(
+                    "    item_order_keys: [seq]\n",
+                    "    item_order_keys: [seq]\n    weight_key: [block_number, hidden]\n",
+                ),
+                "'hidden'",
+            ),
+            (
+                "an item order key weighed by its size",
+                CATALOG.replace(
+                    "seq: { type: uint32 }",
+                    "seq: { type: uint32, weight: sized }",
+                ),
+                "'seq'",
+            ),
+            (
+                "an address column weighed by its size",
+                CATALOG.replace(
+                    "path: { type: list_uint32 }",
+                    "path: { type: list_uint32, weight: sized }",
+                ),
+                "'path'",
+            ),
+            (
+                "a variant column weighed by its size",
+                CATALOG.replace(
+                    "kind: { type: string }",
+                    "kind: { type: string, weight: sized }",
+                ),
+                "'kind'",
+            ),
+            (
+                "an item table's block number weighed by its size",
+                CATALOG.replace(
+                    "block_number: { type: uint64 }",
+                    "block_number: { type: uint64, weight: sized }",
+                ),
+                "'block_number'",
+            ),
+            (
+                "the block table's number weighed by its size",
+                CATALOG.replace(
+                    "number: { type: uint64 }\n      number_size",
+                    "number: { type: uint64, weight: number_size }\n      number_size",
+                ),
+                "'number'",
+            ),
+        ];
+
+        let mut accepted = Vec::new();
+        for (what, catalog, column) in rejected {
+            let Err(err) = parse_dataset_description(&catalog) else {
+                accepted.push(what);
+                continue;
+            };
+            let err = format!("{err:#}");
+            assert!(
+                err.contains("weight key") && err.contains(column),
+                "{what}: wanted the weight key column {column} named, got: {err}"
+            );
+        }
+        assert!(accepted.is_empty(), "loaded: {accepted:#?}");
     }
 
     /// A response is a sequence of blocks, so there has to be exactly one thing a
