@@ -102,9 +102,10 @@ weight is unchanged by its presence.
 
 ### INV-D10
 **Names are unique.** Within a dataset, the request name is unique across tables
-and aliases; the output name is unique across tables.
+and aliases; the output name is unique across tables. Within a table, no virtual
+field shares its name with a column or a variant field.
 
-*Why:* a duplicate makes a client's request ambiguous, resolved by iteration order — arbitrarily.
+*Why:* a duplicate makes a client's request ambiguous, resolved by iteration order — arbitrarily. A field name that is two things is read as one by the writer and the weight model and as the other by the planner; a weight key column read as a roll of size-weighed columns is charged nothing.
 *Test:* static.
 
 ### INV-D11
