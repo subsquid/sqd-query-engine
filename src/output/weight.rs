@@ -572,6 +572,8 @@ fn equal_key_value(a: &dyn Array, ai: usize, b: &dyn Array, bi: usize) -> bool {
 /// Unlike `resolve_output_columns`, this does NOT include:
 /// - Join key columns (for relations)
 /// - Source predicate columns (e.g., is_committed)
+/// - Size columns: one is read to weigh the column it sizes, and charged for
+///   itself only when it is selected or in the weight key
 fn weight_projection(
     user_output_columns: &[String],
     table_desc: Option<&TableDescription>,
@@ -600,15 +602,6 @@ fn weight_projection(
             }
         } else if let Some(phys) = desc.physical_output_column(col_name) {
             cols.insert(phys.to_string());
-        }
-    }
-
-    // 3. Weight/size columns for any projected column that uses dynamic weight
-    for (col_name, col_desc) in &desc.columns {
-        if cols.contains(col_name) {
-            if let Some(WeightSource::Column(wc)) = &col_desc.weight {
-                cols.insert(wc.clone());
-            }
         }
     }
 

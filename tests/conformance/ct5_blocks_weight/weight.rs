@@ -177,6 +177,152 @@ fn a_field_group_request_key_weighs_what_its_column_weighs() {
     );
 }
 
+/// A table whose size columns are fields of their own: `payload` is weighed by
+/// `size` and `extra` by `extra_size`, and a client may select either size.
+/// `weight_key` is spliced in after `item_order_keys`.
+fn sized_catalog(weight_key: &str) -> DatasetDescription {
+    sqd_query_engine::metadata::parse_dataset_description(&format!(
+        r#"
+version: v2
+name: test
+tables:
+  blocks:
+    output:
+      name: block
+      fields: [number, extra, extra_size]
+    block_number_column: number
+    sort_key: [number]
+    columns:
+      number: {{ type: uint64 }}
+      extra: {{ type: uint64, weight: extra_size }}
+      extra_size: {{ type: uint64 }}
+  items:
+    request:
+      name: items
+      filters: []
+    output:
+      name: item
+      fields: [seq, payload, size]
+    item_order_keys: [seq]
+{weight_key}    sort_key: [block_number, seq]
+    columns:
+      block_number: {{ type: uint64 }}
+      seq: {{ type: uint64 }}
+      payload: {{ type: uint64, weight: size }}
+      size: {{ type: uint64 }}
+"#
+    ))
+    .unwrap()
+}
+
+/// Blocks 1 and 2, each with `extra_size` 10 and one item of `size` 1.
+fn sized_chunk() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let column = |values: [u64; 2]| Arc::new(UInt64Array::from(values.to_vec())) as ArrayRef;
+    let field = |name: &str| Field::new(name, DataType::UInt64, false);
+
+    write_table(
+        dir.path(),
+        "blocks",
+        vec![field("number"), field("extra"), field("extra_size")],
+        vec![column([1, 2]), column([7, 8]), column([10, 10])],
+    );
+    write_table(
+        dir.path(),
+        "items",
+        vec![
+            field("block_number"),
+            field("seq"),
+            field("payload"),
+            field("size"),
+        ],
+        vec![
+            column([1, 2]),
+            column([0, 0]),
+            column([7, 9]),
+            column([1, 1]),
+        ],
+    );
+    dir
+}
+
+/// A size column is read to weigh the field it sizes, and charged for itself
+/// only when a client selects it or it is in the weight key, as the reference
+/// charges it. Charged for merely being read, it ends a page early by a word a
+/// row; on headers, since the header is weighed like any row.
+///
+/// Covers CT-5 · INV-B10
+#[test]
+fn a_size_column_is_charged_only_when_selected() {
+    let chunk = sized_chunk();
+    let plain = sized_catalog("");
+    let keyed = sized_catalog("    weight_key: [block_number, seq, size]\n");
+
+    let items = |fields: &str| {
+        format!(
+            r#"{{"type":"test","fromBlock":1,"toBlock":2,"items":[{{}}],
+                 "fields":{{"item":{fields}}}}}"#
+        )
+    };
+    let headers = |fields: &str| {
+        format!(
+            r#"{{"type":"test","fromBlock":1,"toBlock":2,"includeAllBlocks":true,
+                 "fields":{{"block":{fields}}}}}"#
+        )
+    };
+
+    // Each block: its header's `number`, then what the case selects.
+    let cases = [
+        (
+            "an item's payload",
+            &plain,
+            items(r#"{"payload":true}"#),
+            WORD + 2 * WORD + 1,
+        ),
+        (
+            "an item's payload and its size",
+            &plain,
+            items(r#"{"payload":true,"size":true}"#),
+            WORD + 2 * WORD + 1 + WORD,
+        ),
+        (
+            "an item's payload, its size in the weight key",
+            &keyed,
+            items(r#"{"payload":true}"#),
+            WORD + 3 * WORD + 1,
+        ),
+        (
+            "a header's extra",
+            &plain,
+            headers(r#"{"extra":true}"#),
+            WORD + 10,
+        ),
+        (
+            "a header's extra and its size",
+            &plain,
+            headers(r#"{"extra":true,"extraSize":true}"#),
+            WORD + 10 + WORD,
+        ),
+    ];
+
+    let mut wrong = Vec::new();
+    for (what, catalog, query, block) in cases {
+        let ends = (
+            page_end(catalog, chunk.path(), &query, 2 * block),
+            page_end(catalog, chunk.path(), &query, 2 * block - 1),
+        );
+        if ends != (Some(2), Some(1)) {
+            wrong.push(format!(
+                "{what}: a block weighs {block}, and the pages at {} and {} end at {ends:?}",
+                2 * block,
+                2 * block - 1
+            ));
+        }
+    }
+
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
 /// A table as the reference's query sources declare it: its primary key, and
 /// the weight it sets for a column, fixed or read from a size column.
 struct ReferenceTable {

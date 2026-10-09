@@ -126,6 +126,10 @@ so it is charged its block number even when no header field is selected.
 | the name of a size column | the value of that size column in this row |
 | — and the column is `system` | 0 ([INV-D9](07-invariants.md#inv-d9)) |
 
+A size column is read to weigh the column it sizes. That costs the row nothing
+more: the size column is charged for itself only when it is selected or in the
+weight key, as any other column is.
+
 Weight is a *model* of response size, not a measurement of it. It exists to be
 cheap: an engine must be able to compute a block's weight from narrow columns
 before decoding the wide ones. Its absolute accuracy does not matter. Its
