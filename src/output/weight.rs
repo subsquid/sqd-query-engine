@@ -1,5 +1,6 @@
 use crate::integers::{BlockNumbers, IntColumn};
 use crate::metadata::{DatasetDescription, TableDescription, WeightSource};
+use crate::output::columns::physical_output_columns;
 use crate::query::Plan;
 use crate::scan::Rows;
 use crate::text::StringColumn;
@@ -232,20 +233,23 @@ pub(crate) fn weight_scan_columns(
     cols
 }
 
-/// Columns the block-header scan must read: the block number, the requested
-/// header columns, and the `*_size` companion of any of them whose weight is
-/// data-dependent. A declared `weight: <column>` that is never projected is a
-/// weight of zero, so the header under-weighs and truncation lands past the cap
-/// (INV-B10).
+/// Columns the block-header scan must read: the block number, the columns the
+/// requested header fields render, and the `*_size` companion of any of them
+/// whose weight is data-dependent. A field is not always a column of its name: a
+/// roll renders the columns it rolls, and reading the field's name reads
+/// nothing, so the field is left out of every header (INV-O7). A declared
+/// `weight: <column>` that is never projected is a weight of zero, so the
+/// header under-weighs and truncation lands past the cap (INV-B10).
 pub(crate) fn block_scan_columns(
     block_output_columns: &[String],
     block_desc: &TableDescription,
 ) -> Vec<String> {
     let (_fixed, weight_cols) = row_weight(block_output_columns, Some(block_desc));
+    let rendered = physical_output_columns(block_output_columns, block_desc);
 
-    let mut cols = Vec::with_capacity(block_output_columns.len() + weight_cols.len() + 1);
+    let mut cols = Vec::with_capacity(rendered.len() + weight_cols.len() + 1);
     cols.push(block_desc.block_number_column.clone());
-    for col in block_output_columns.iter().chain(weight_cols.iter()) {
+    for col in rendered.iter().chain(weight_cols.iter()) {
         if !cols.contains(col) {
             cols.push(col.clone());
         }

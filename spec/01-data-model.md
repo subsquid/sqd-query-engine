@@ -355,7 +355,8 @@ They are collected as [INV-D1](07-invariants.md#inv-d1) … [INV-D11](07-invaria
   present, is last.
 - Every variant: the variant column exists; every mapped column exists; a
   variant column and variants come together, since one without the other
-  does nothing.
+  does nothing. The block table declares none: a header's fields are written
+  flat, so a variant field there would be accepted and never rendered.
 - Every field mapping resolves to one column and one place: a `fieldKey` is
   either its own column's name or the name of no column at all; two mappings
   answering to one `fieldKey` read the same column; no two mappings in a group

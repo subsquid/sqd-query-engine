@@ -478,6 +478,15 @@ fn validate(desc: &DatasetDescription) -> Result<()> {
 
         check_variant_mappings(table_name, table)?;
 
+        // Nothing groups a header's fields by variant, so a variant field there
+        // is selected and never rendered.
+        anyhow::ensure!(
+            !(dispatches && table.is_block_table()),
+            "table '{}': the block table declares variants, which no header renders; \
+             a header's fields are written flat",
+            table_name
+        );
+
         // A relation naming a table that is not there does not fail: the scan
         // returns nothing for an unknown table and assembly skips the source, so
         // the relation comes back empty at 200. A mistyped key column is worse —
@@ -1458,6 +1467,50 @@ tables:
                 .expect_err("a surface left out must be refused")
         );
         assert!(err.contains("no request block"), "got: {err}");
+    }
+
+    /// A header is written flat. Nothing groups its fields by variant, so a
+    /// variant field declared on the block table is selected, accepted and left
+    /// out of every header, whichever group it is in.
+    ///
+    /// Covers CT-1 · INV-D1
+    #[test]
+    fn test_validate_rejects_variants_on_the_block_table() {
+        let catalog = |group: &str| {
+            format!(
+                r#"
+version: v2
+name: test
+tables:
+  blocks:
+    output:
+      name: block
+      fields: [number, kind, renamed]
+      variant_column: kind
+      variants:
+        x:
+          {group}: [ {{ column: payload, field_key: renamed, as: renamed }} ]
+    block_number_column: number
+    sort_key: [number]
+    columns:
+      number: {{ type: uint64 }}
+      kind: {{ type: string }}
+      payload: {{ type: uint64 }}
+"#
+            )
+        };
+
+        for group in ["_", "action"] {
+            let err = format!(
+                "{:#}",
+                parse_dataset_description(&catalog(group))
+                    .expect_err("variants on the block table must be refused")
+            );
+            assert!(
+                err.contains("block table declares variants"),
+                "{group}: {err}"
+            );
+        }
     }
 
     /// The three names in a field mapping — the column, the key that selects it
