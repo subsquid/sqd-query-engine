@@ -122,6 +122,14 @@ pub fn catalog_with_heavy_headers() -> DatasetDescription {
     parse_dataset_description(&CATALOG.replacen(blocks, heavy, 1)).unwrap()
 }
 
+/// The same catalog with `logs` charged for `key` in place of its item key.
+pub fn catalog_with_log_weight_key(key: &str) -> DatasetDescription {
+    let order = "    item_order_keys: [log_index]\n";
+    assert!(CATALOG.contains(order));
+    let declared = format!("{order}    weight_key: {key}\n");
+    parse_dataset_description(&CATALOG.replacen(order, &declared, 1)).unwrap()
+}
+
 /// A chunk with the given blocks and one item per `(block, weight)` entry in each
 /// item table. `logs`/`txs` map a block number to the item weight it claims.
 pub fn weighted_chunk(blocks: &[u64], logs: &[(u64, u64)], txs: &[(u64, u64)]) -> TempDir {

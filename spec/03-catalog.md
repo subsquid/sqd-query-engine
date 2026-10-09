@@ -121,6 +121,12 @@ not a mistake; both keys exist in the wire format.
 twelve Avalanche header fields, of which `blockExtraData` weighs
 `block_extra_data_size`.
 
+### Weight keys
+
+`logs`: `blockNumber, logIndex`, without the `transactionIndex` its item key
+holds. `traces`: its item key and `type`, the variant column. Every other table:
+its item key.
+
 ### Selectable fields
 
 `blocks`: `number, hash, parentHash, timestamp, transactionsRoot, receiptsRoot,
@@ -323,6 +329,12 @@ never emitted.
 `blocks.timestamp`: `timestampMillisecond`. `blocks.digest`, `extrinsics.signature`,
 `extrinsics.error`, `calls.args`, `calls.origin`, `calls.error`, `events.args`:
 `jsonVerbatim`. `extrinsics.fee`, `extrinsics.tip`: `decimalString`.
+`blocks.digest`, `extrinsics.signature`: weight 128.
+
+### Weight keys
+
+`events`: `blockNumber, index`, without the `callAddress` its item key holds.
+Every other table: its item key.
 
 ### Selectable fields
 

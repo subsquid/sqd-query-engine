@@ -26,7 +26,6 @@ Compared against the reference implementation, as of 2026-10-07.
 
 | # | Gap | Invariant | Sev |
 |---|---|---|---|
-| 44 | The weight model differs from the reference in four places | [INV-B5](07-invariants.md#inv-b5) | **S4** |
 | 31 | A block number above 2³¹ stored in `Int32` is read as negative by the range filter | [INV-D7](07-invariants.md#inv-d7) | **S4** |
 | 32 | The bloom's hash function is not pinned by the manifest, and the version it resolves to today ignores the seed above 240 bytes | [INV-P9](07-invariants.md#inv-p9) | **S4** |
 | 50 | Several malformed chunk shapes are answered rather than refused | [INV-E3](07-invariants.md#inv-e3), [INV-E7](07-invariants.md#inv-e7) | **S4** |
@@ -39,8 +38,8 @@ requests the reference answers and this engine refuses are the ones the
 divergence table below says are deliberate.
 
 Gaps 33 to 44 came from one review, done before the engine goes to a fleet of
-workers that nobody can patch quickly. The number 34 was never assigned, and 33,
-35 to 43 are closed, so one of those entries is left. The review ran the reference
+workers that nobody can patch quickly. The number 34 was never assigned, and the
+rest are closed. The review ran the reference
 and this engine side by side: every filter, relation, alias and field of all
 seven datasets diffed against the reference's request macros; about 330
 request probes and about 700 response runs on the real chunks and every
@@ -82,7 +81,7 @@ meets a column that is absent, it errors as [INV-E3](07-invariants.md#inv-e3)
 and [INV-X3](07-invariants.md#inv-x3) require; where it meets one stored at
 another type, it reads every integer width and every text type, and errors as
 [INV-E7](07-invariants.md#inv-e7) requires on a type it cannot compare or
-render. What is left of that family is gap 44's weight model.
+render.
 
 The reference moved while this was written. Twelve Avalanche block-header fields
 and Solana's `transactionConfig` landed there in the first days of September,
@@ -95,45 +94,6 @@ move fails a test rather than waiting for a review.
 ---
 
 ## S4 — Latent
-
-### 44. The weight model differs from the reference in four places
-
-Weight dedup now compares key values after hashing, so colliding hashes cannot
-merge distinct rows. The remaining differences concern the weight model.
-
-Four differences move the cut: boundary blocks weigh zero here and their header
-weight there; the key columns weighed when not selected differ; the header's
-`number` is weighed only when selected; Substrate `digest` weighs 32 here and 128
-there. The largest is the keys. The reference weighs every primary-key column at
-32 whether or not it is selected; this engine weighs only the columns that
-resolve as output fields, so an unselected `block_number` weighs nothing.
-
-The cut moves by more than a block. The second review measured all traces with
-subtraces on the real EVM chunk at 78 blocks there and 103 here (7.6 MB against
-10.2 MB), all logs with every relation at 39 against 46, and a Moonbeam
-everything query at 2 269 against 2 783; one fixture shape cut earlier here, 131
-against 142. Usually the reference's page is a prefix of this engine's. Paging
-each engine on its own gave the same items on all 50 walks, with nothing lost or
-repeated, so no client is wrong; but a page can be about a third larger than the
-reference's, and the parity suite cannot assert `lastBlock` equality until this
-closes.
-
-The keys cannot be weighed the reference's way today, because the catalog has no
-primary key: `compute_weight_params` in `src/output/weight.rs` knows only the
-selected fields. Declaring a table's primary key in the catalog, and weighing
-those columns whether or not they are selected, closes the largest difference.
-A release that predates the key skips it and keeps cutting where it does now,
-which is gap 55's case but harmless here: only the page boundary moves. The
-alternative is to keep this engine's model and record it as a deliberate
-divergence, in which case the parity suite compares page walks and never
-`lastBlock`.
-
-Range reads compute the final weight after collecting every table and relation
-for a complete block range. The narrow size pre-scan only suggests the first
-range; it does not decide the response boundary. There is no table-local budget
-estimate or recursive query restart.
-
-*First test:* pin the reference's per-block weights for the real chunk and diff.
 
 ### 31. A block number above 2³¹ stored in `Int32` reads as negative
 

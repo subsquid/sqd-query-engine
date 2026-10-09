@@ -52,7 +52,8 @@ each class needs and whether it exists.
 
 Static, no chunk, runs in milliseconds. Checks [INV-D1](07-invariants.md#inv-d1)
 – [INV-D3](07-invariants.md#inv-d3), [INV-D5](07-invariants.md#inv-d5),
-[INV-D6](07-invariants.md#inv-d6), [INV-D10](07-invariants.md#inv-d10).
+[INV-D6](07-invariants.md#inv-d6), [INV-D10](07-invariants.md#inv-d10),
+[INV-D11](07-invariants.md#inv-d11).
 
 For each bundled dataset assert every catalog reference resolves; every relation
 key begins with the block number column on both sides; every hierarchical
@@ -313,7 +314,7 @@ renamed out from under a comment inside it.
 
 | Invariant | Class | Status | Note |
 |---|---|---|---|
-| [INV-D1](07-invariants.md#inv-d1) | CT-1 | **C** | every reference the invariant lists has a negative case, and each asserts the message it must be refused *with*, so a case cannot pass on some later check the scaffolding trips: `test_validate_rejects_unresolvable_references` covers the address, sort-key, item-order, weight, roll, discriminator-length and variant ones, and with them the two shape rules §1.10 carries alongside — a roll's spread list is last, and a discriminator length is written the way the lookup asks for it; `test_validate_rejects_unknown_parent_columns` the parent columns; `test_validate_rejects_broken_alias_references`, `test_validate_rejects_unknown_filter_column`, `test_validate_rejects_a_special_filter_on_a_missing_column` and `test_validation_bad_block_number_column` the rest. The resolution rules a reference alone does not carry: `test_validate_requires_a_request_surface` (an item table declares one), `test_validate_rejects_variant_mapping_mistakes` (a field key is its own column or no column, one field key one column, one `as` per group, none over a column that identifies a row) and `test_validate_rejects_a_bloom_that_does_not_match_its_column` (fixed-size binary, at the declared width). `the_alias_example_in_the_format_doc_loads` holds `metadata/README.md` to the same validator, since its examples are what an author copies |
+| [INV-D1](07-invariants.md#inv-d1) | CT-1 | **C** | every reference the invariant lists has a negative case, and each asserts the message it must be refused *with*, so a case cannot pass on some later check the scaffolding trips: `test_validate_rejects_unresolvable_references` covers the address, sort-key, item-order, weight-key, weight, roll, discriminator-length and variant ones, and with them the two shape rules §1.10 carries alongside — a roll's spread list is last, and a discriminator length is written the way the lookup asks for it; `test_validate_rejects_unknown_parent_columns` the parent columns; `test_validate_rejects_broken_alias_references`, `test_validate_rejects_unknown_filter_column`, `test_validate_rejects_a_special_filter_on_a_missing_column` and `test_validation_bad_block_number_column` the rest. The resolution rules a reference alone does not carry: `test_validate_requires_a_request_surface` (an item table declares one), `test_validate_rejects_variant_mapping_mistakes` (a field key is its own column or no column, one field key one column, one `as` per group, none over a column that identifies a row) and `test_validate_rejects_a_bloom_that_does_not_match_its_column` (fixed-size binary, at the declared width). `the_alias_example_in_the_format_doc_loads` holds `metadata/README.md` to the same validator, since its examples are what an author copies |
 | [INV-D2](07-invariants.md#inv-d2) | CT-1 | **C** | `test_validate_rejects_broken_alias_references` |
 | [INV-D3](07-invariants.md#inv-d3) | CT-1 | **C** | `test_validate_requires_exactly_one_block_table` — none, two, and one that does not lead the catalog; identity is the item key, so a block table stored under another sort key is still one and an addressed table with no order keys is not |
 | [INV-D4](07-invariants.md#inv-d4) | CT-1 | **C** | `item_keys_are_unique_within_a_chunk` projects `[blockNumberColumn] ++ itemOrderKeys ++ [addressColumn]?` for every table of every fixture chunk and compares through Arrow's row format, so a list-valued address column is compared rather than skipped; `a_duplicated_item_key_is_caught` is the other direction, and it runs where the fixture tree does not |
@@ -323,6 +324,7 @@ renamed out from under a comment inside it.
 | [INV-D8](07-invariants.md#inv-d8) | CT-6 | **C** | `storage_layout_does_not_reach_the_answer` turns one knob per case, one per mechanism the invariant names — row groups of 1, 7 and more than the table holds; data pages of 1 and 5; uncompressed and snappy; no dictionary; no statistics; and the rows stored back to front and then in no order at all, which is a permutation no sort key produces. `a_fixture_chunk_answers_the_same_under_any_layout` repeats six of them on an archiver's chunk. Storage that is not parquet at all: `a_columnar_reader_answers_what_the_parquet_reader_does` reads the same chunks through the columnar reader, with no statistics and with windows from larger than the table down to one row, and `every_fixture_query_answers_the_same_through_the_columnar_reader` repeats every fixture query of every dataset that way. Statistics windows that do not cover the table — offsets that start past row 0, step back, overshoot, or end elsewhere — prune nothing: `window_offsets_that_do_not_cover_the_table_prune_nothing` |
 | [INV-D9](07-invariants.md#inv-d9) | CT-1 | **C** | `test_system_columns_excluded_from_weight`, `undeclared_columns_are_not_filterable`, `test_validate_rejects_fields_backed_by_system_columns` — direct, virtual-field and variant-field exposure |
 | [INV-D10](07-invariants.md#inv-d10) | CT-1 | **C** | `test_validate_rejects_duplicate_names` — two tables on one request name, two on one output name, an alias on a table's request name, and a table on the name another holds without declaring it |
+| [INV-D11](07-invariants.md#inv-d11) | CT-1 | **C** | `test_validate_rejects_a_weight_key_with_no_fixed_weight` — a declared key column weighed by its size or marked `system`, and each default key column weighed by its size: the item order key, the address column, the variant column, an item table's block number and the block table's number |
 | [INV-Q1](07-invariants.md#inv-q1) | CT-2 | **P** | reached through every fixture; no negative case for an unknown `type` |
 | [INV-Q2](07-invariants.md#inv-q2) | CT-2 | **C** | `test_parse_unknown_table_error`; `test_internal_table_names_are_not_request_keys` tries every table name and snake-cased alias of every bundled catalog that is not a request name |
 | [INV-Q3](07-invariants.md#inv-q3) | CT-2 | **C** | `test_parse_block_range_validation` |
@@ -368,12 +370,12 @@ renamed out from under a comment inside it.
 | [INV-B2](07-invariants.md#inv-b2) | CT-5 | **C** | `untrimmed_scan_includes_all_blocks` |
 | [INV-B3](07-invariants.md#inv-b3) | CT-5 | **C** | `boundary_blocks_emitted_without_items`, `budget_trim_excludes_range_end_boundary_block`, and `a_split_adds_only_boundary_headers`, which bounds at two the headers a split may add |
 | [INV-B4](07-invariants.md#inv-b4) | CT-5 | **C** | `paging_a_partitioned_chunk_loses_no_block` pages shared-boundary blocks whole; `an_oversized_first_block_does_not_restart_the_query` checks the oversized-first-block case and verifies that item tables are not read again. |
-| [INV-B5](07-invariants.md#inv-b5) | CT-5 | **P** | the weight unit tests cover the components, not the block sum |
+| [INV-B5](07-invariants.md#inv-b5) | CT-5, CT-7 | **C** | `a_header_weighs_its_key_when_no_header_field_is_selected` and `a_boundary_block_weighs_its_header` sum a block from its header and its items at budgets one unit apart. `every_page_ends_where_the_reference_ends` ends every page the reference ends — over 400 on every fixture chunk, more than 50 of them cut short — for shapes that select no field, where a row is charged its weight key alone, and every field the chunk stores |
 | [INV-B6](07-invariants.md#inv-b6) | CT-5 | **P** | `multi_table_trim_reports_true_last_block`; the keep-at-least-one rule is untested |
 | [INV-B7](07-invariants.md#inv-b7) | CT-5 | **C** | `paging_a_partitioned_chunk_loses_no_block` checks end-to-end paging. `range_reads_return_what_a_full_read_returns` compares generated queries with range reads enabled and disabled. `each_requested_table_can_stop_on_complete_blocks` verifies early termination for each requested table. `overlapping_groups_and_relations_use_the_same_complete_range` checks completeness across overlapping groups and relation pulls. |
 | [INV-B8](07-invariants.md#inv-b8) | CT-5 | **C** | `splitting_the_range_returns_the_same_items` splits at every block boundary of a sixteen-block chunk and concatenates the halves back, per table, in response order — for seven item-request shapes, since composability is a claim about how a filter and a relation meet a range boundary and a query carrying neither says nothing about either. `splitting_a_fixture_range_returns_the_same_items` does it over forty blocks an archiver wrote, and `splitting_a_hierarchical_range_returns_the_same_items` over a relation that matches an address *prefix* rather than an equal key, which is where locality is least obvious. A half the weight budget trimmed is a failure rather than a difference to explain away, so the comparison cannot be satisfied by two short responses |
 | [INV-B9](07-invariants.md#inv-b9) | CT-5, CT-8 | **P** | the arithmetic is checked — `a_negative_size_weighs_nothing`, `block_weight_saturates_rather_than_wrapping` — and `a_missing_weight_column_is_an_error` that a value cannot weigh nothing because its size column is absent, `a_weight_column_nothing_weighs_is_an_error` because it is stored as something no weight reads. That it is the *same* function twice over one chunk is not asserted |
-| [INV-B10](07-invariants.md#inv-b10) | CT-5 | **C** | four weight-projection cases |
+| [INV-B10](07-invariants.md#inv-b10) | CT-5 | **C** | the weight-projection cases; `a_declared_weight_key_replaces_the_item_key`; `a_size_column_is_charged_only_when_selected`, on item rows and headers; and `every_table_is_charged_what_the_reference_charges`, which reads each table's primary key and column weights out of the reference's sources and diffs them against the catalogs |
 | [INV-O1](07-invariants.md#inv-o1) | CT-6 | **C** | `empty_result_is_none`, `iteration_matches_json_lines`, `test_json_close` |
 | [INV-O2](07-invariants.md#inv-o2) | CT-6 | **P** | fixtures only |
 | [INV-O3](07-invariants.md#inv-o3) | CT-6 | **P** | fixtures only |
@@ -399,19 +401,19 @@ renamed out from under a comment inside it.
 | [INV-X2](07-invariants.md#inv-x2) | CT-8 | **C** | `an_ignored_nullable_column_does_not_change_output` |
 | [INV-X3](07-invariants.md#inv-x3) | CT-8 | **C** | `filtering_an_absent_column_is_an_error` on both scan entry points, `filtering_a_present_column_still_works` for the other direction, `one_unanswerable_item_rejects_the_whole_request` for a filter one item request of several carries, and `an_alias_filter_on_a_column_the_chunk_lacks_is_an_error` for one reached through an alias's extraction column |
 
-**Totals: 61 C, 24 P, 0 U** of 85. Property coverage is therefore 0.72
+**Totals: 63 C, 23 P, 0 U** of 86. Property coverage is therefore 0.73
 (`P-COV-PROPERTY` in [09-parameters.md](09-parameters.md)).
 
 The figure fell from 0.73 to 0.69 on 2026-09-12, and no test was removed to make it fall. [INV-D6](07-invariants.md#inv-d6), [INV-P13](07-invariants.md#inv-p13) and [INV-Q14](07-invariants.md#inv-q14) were read against the tests they name and did not hold at **C**; their rows now say what those tests actually do. A ratchet on a number three rows had inflated would have locked the inflation in, so the baseline moved down once, deliberately, and ratchets from there. INV-Q14 earned its **C** back the same day with a test that recomputes the transcription from the reference, and INV-P13 later with tests that send a mixed-length discriminator and an empty prefix and check the rows.
 
-Of the 85 rows at **C** or **P**, 71 are backed by a tagged test and 14 rest on
-prose alone. Those 14 are the rows whose note says "fixtures only" or describes a
+Of the 86 rows at **C** or **P**, 74 are backed by a tagged test and 12 rest on
+prose alone. Those 12 are the rows whose note says "fixtures only" or describes a
 group of cases without naming one, and they are the ones nothing recomputes: the
 status is what somebody believed on the day they typed it. Shrinking that number
 is what turns MG-1's ratchet from an intention into an arithmetic fact, so the
 checker recomputes all three numbers in this paragraph rather than trusting them.
 
-A tag is not the same as a gate. 4 of the 71 are backed only by tests marked
+A tag is not the same as a gate. 4 of the 74 are backed only by tests marked
 `#[ignore]`, which MG-3's portable job does not run: the test would fail if the
 invariant broke, but only on a machine that has the chunks. The checker reports
 those rows on every run too, because a status that no job can falsify is a status

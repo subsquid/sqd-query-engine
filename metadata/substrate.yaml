@@ -26,6 +26,7 @@ tables:
       digest:
         type: string
         encoding: json_verbatim
+        weight: 128
       spec_name:
         type: string
       spec_version:
@@ -171,6 +172,8 @@ tables:
       fields: [ index, extrinsic_index, name, phase, call_address, topics, args ]
     address_column: call_address
     item_order_keys: [ index ]
+    # An event carries its call's address but is weighed for its block and index.
+    weight_key: [ block_number, index ]
     sort_key: [ name, block_number, index ]
     columns:
       block_number:

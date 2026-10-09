@@ -2,7 +2,7 @@ use super::arrow_out::blocks_mask;
 use super::block_index::compute_block_range;
 use super::columns::resolve_relation_output_columns;
 use super::row_order::build_full_sort_columns;
-use super::weight::{weight_projection, weight_scan_columns, TableOutput};
+use super::weight::{weight_scan_columns, TableOutput};
 use crate::metadata::{DatasetDescription, TableDescription};
 use crate::query::{Plan, RelationKind};
 use crate::scan::predicate::RowPredicate;
@@ -86,10 +86,7 @@ impl<'a> SelectionReader<'a> {
             if !track_positions {
                 extend_unique(primary, row_key(desc));
             }
-            extend_unique(
-                primary,
-                weight_scan_columns(&weight_projection(&table.output_columns, Some(desc)), desc),
-            );
+            extend_unique(primary, weight_scan_columns(&table.output_columns, desc));
             for relation in &table.relations {
                 extend_unique(primary, relation.left_key.iter().cloned());
                 if relation.kind != RelationKind::Join {
@@ -106,13 +103,7 @@ impl<'a> SelectionReader<'a> {
                 if relation.kind != RelationKind::Join {
                     extend_unique(target, desc.address_column.iter().cloned());
                 }
-                extend_unique(
-                    target,
-                    weight_scan_columns(
-                        &weight_projection(&relation.output_columns, Some(desc)),
-                        desc,
-                    ),
-                );
+                extend_unique(target, weight_scan_columns(&relation.output_columns, desc));
             }
         }
         // A row without its complete identity cannot be fetched by key. Keep
