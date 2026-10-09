@@ -279,7 +279,6 @@ impl KeySet {
                 primary_batches,
                 &left_keys[..2],
                 left_keys[2],
-                false,
             ))
         } else if use_fixed16 {
             let mut pairs = Vec::new();
@@ -396,14 +395,8 @@ impl HierarchicalFilter {
         mode: HierarchicalMode,
         inclusive: bool,
     ) -> Self {
-        let parents = matches!(mode, HierarchicalMode::Parents);
-        AddressIndex::build(
-            primary_batches,
-            group_key_columns,
-            source_address_column,
-            parents,
-        )
-        .filter(target_address_column, mode, inclusive)
+        let index = AddressIndex::build(primary_batches, group_key_columns, source_address_column);
+        index.filter(target_address_column, mode, inclusive)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -419,19 +412,13 @@ pub struct AddressIndex {
 }
 
 impl AddressIndex {
-    /// With `parents`, it also indexes what finding a parent takes.
     pub fn build(
         primary_batches: &[RecordBatch],
         group_key_columns: &[&str],
         source_address_column: &str,
-        parents: bool,
     ) -> Self {
-        let sources = SourceAddresses::build(
-            primary_batches,
-            group_key_columns,
-            source_address_column,
-            parents,
-        );
+        let sources =
+            SourceAddresses::build(primary_batches, group_key_columns, source_address_column);
 
         AddressIndex {
             sources: Arc::new(sources),
@@ -550,7 +537,7 @@ struct SourceAddresses {
     /// every source path by hash.
     exact: Option<PathIndex>,
     /// Every strict prefix of a deep source path by hash, which only a parent
-    /// lookup needs: built beside `exact` for one, else the first time one asks.
+    /// lookup needs: built the first time one asks.
     prefixes: std::sync::OnceLock<PathIndex>,
 }
 
@@ -605,12 +592,7 @@ fn path_hash_step(hash: u64, element: &[u8; 8]) -> u64 {
 }
 
 impl SourceAddresses {
-    fn build(
-        batches: &[RecordBatch],
-        group_key_columns: &[&str],
-        address_column: &str,
-        parents: bool,
-    ) -> Self {
+    fn build(batches: &[RecordBatch], group_key_columns: &[&str], address_column: &str) -> Self {
         let pair = group_key_columns.len() == 2
             && batches.iter().filter(|b| b.num_rows() > 0).all(|batch| {
                 group_key_columns.iter().all(|name| {
@@ -707,56 +689,70 @@ impl SourceAddresses {
             prefixes: std::sync::OnceLock::new(),
         };
         if deep {
-            let (exact, prefixes) = addresses.index(parents);
-            addresses.exact = Some(exact);
-            if let Some(prefixes) = prefixes {
-                let _ = addresses.prefixes.set(prefixes);
-            }
+            addresses.exact = Some(addresses.exact_index());
         }
         addresses
     }
 
-    /// Every source path by its hash, and with `prefixes` every distinct
-    /// strict prefix of one. A prefix shared by several paths is the prefix of
-    /// each in a run of the sorted paths, so it is new only where it is longer
-    /// than what the path shares with the one before, or is that whole path.
-    fn index(&self, prefixes: bool) -> (PathIndex, Option<PathIndex>) {
-        let mut exact = Vec::with_capacity(self.paths.len());
-        let mut strict = Vec::new();
+    /// Every source path by its hash.
+    fn exact_index(&self) -> PathIndex {
+        let mut entries = Vec::with_capacity(self.paths.len());
+        self.walk(|group, (start, len), _, hashes| {
+            entries.push((hashes[len as usize], group, start, len));
+        });
+
+        PathIndex::new(entries)
+    }
+
+    /// Every distinct strict prefix of a source path by its hash.
+    fn prefix_index(&self) -> PathIndex {
+        let mut entries = Vec::new();
+        self.walk(|group, (start, len), new_from, hashes| {
+            let strict = hashes[..len as usize].iter().enumerate().skip(new_from);
+            entries.extend(strict.map(|(depth, &hash)| (hash, group, start, depth as u32)));
+        });
+
+        PathIndex::new(entries)
+    }
+
+    /// Calls `visit` with each source path's group, its place in `elements`,
+    /// the depth from which its strict prefixes are not a strict prefix of a
+    /// path before it, and the hash of each of its prefixes, itself included.
+    ///
+    /// The paths of a group are sorted, so a prefix shared by several is the
+    /// prefix of each in a run: it is new only where it is longer than what the
+    /// path shares with the one before, or is that whole path. The hashes of
+    /// the shared part are the ones before's.
+    fn walk(&self, mut visit: impl FnMut(u32, (u32, u32), usize, &[u64])) {
+        let mut hashes = Vec::new();
         for (group, range) in self.ranges.iter().enumerate() {
             let group = group as u32;
-            let mut previous: Option<&[[u8; 8]]> = None;
+            hashes.clear();
+            hashes.push(path_hash_start(group));
+
+            let mut previous: &[[u8; 8]] = &[];
             for &(start, len) in &self.paths[range.start as usize..range.end as usize] {
                 let (path, _) = self.path((start, len)).as_chunks::<8>();
-                let new_from = match previous.filter(|_| prefixes) {
-                    _ if !prefixes => path.len(),
-                    None => 0,
-                    Some(before) => {
-                        let shared = before.iter().zip(path).take_while(|(a, b)| a == b).count();
-                        if shared == before.len() {
-                            shared
-                        } else {
-                            shared + 1
-                        }
-                    }
+                let shared = previous
+                    .iter()
+                    .zip(path)
+                    .take_while(|(a, b)| a == b)
+                    .count();
+                let new_from = if shared == previous.len() {
+                    shared
+                } else {
+                    shared + 1
                 };
 
-                let mut hash = path_hash_start(group);
-                for (depth, element) in path.iter().enumerate() {
-                    if depth >= new_from {
-                        strict.push((hash, group, start, depth as u32));
-                    }
-                    hash = path_hash_step(hash, element);
+                hashes.truncate(shared + 1);
+                for element in &path[shared..] {
+                    let last = hashes[hashes.len() - 1];
+                    hashes.push(path_hash_step(last, element));
                 }
-                exact.push((hash, group, start, len));
-                previous = Some(path);
+                visit(group, (start, len), new_from, &hashes);
+                previous = path;
             }
         }
-
-        (
-            PathIndex::new(exact),
-            prefixes.then(|| PathIndex::new(strict)),
-        )
     }
 
     fn path(&self, (start, len): (u32, u32)) -> &[u8] {
@@ -807,9 +803,7 @@ impl SourceAddresses {
                 // A source the target is a strict prefix of, or equal to when
                 // inclusive.
                 HierarchicalMode::Parents => {
-                    let prefixes = self
-                        .prefixes
-                        .get_or_init(|| self.index(true).1.expect("prefixes were asked for"));
+                    let prefixes = self.prefixes.get_or_init(|| self.prefix_index());
                     let hash = steps.iter().fold(path_hash_start(group), path_hash_step);
                     prefixes.contains(hash, group, target, elements)
                         || (inclusive && exact.contains(hash, group, target, elements))
@@ -1375,60 +1369,36 @@ fn scan_batches(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<Scann
         return Ok(Vec::new());
     }
 
-    // 3. Read and filter across row groups
+    // 3. Read and filter each row group on its own, in parallel
     let output_schema = build_output_schema(table.schema(), &request.output_columns);
-
-    let in_memory =
-        request.row_indices.is_none() && request.predicates.iter().all(|p| p.matches_every_row());
-    if let Some(cache) = request.column_cache.filter(|_| in_memory) {
-        let results: Vec<Result<Vec<ScannedBatch>>> = row_groups_to_scan
-            .par_iter()
-            .map(|&group| {
-                let decoded = scan_decoded_row_group(
-                    table,
-                    group,
-                    &all_columns,
-                    request,
-                    &output_schema,
-                    cache,
-                )?;
-                match decoded {
-                    Some(batches) => Ok(batches),
-                    // The cache cannot take this row group: read it as any scan does.
-                    None => scan_row_groups(table, &[group], &all_columns, request, &output_schema),
-                }
-            })
-            .collect();
-        return Ok(results
-            .into_iter()
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .flatten()
-            .collect());
-    }
-
-    // Parallelize across row groups for all scans with >1 RG.
-    // Each RG gets its own RowFilter pipeline, evaluated independently.
-    let mut all_batches = Vec::new();
-    if row_groups_to_scan.len() <= 1 {
-        all_batches.extend(scan_row_groups(
-            table,
-            &row_groups_to_scan,
-            &all_columns,
-            request,
-            &output_schema,
-        )?);
-    } else {
-        let results: Vec<Result<Vec<ScannedBatch>>> = row_groups_to_scan
-            .par_iter()
-            .map(|&rg_idx| scan_row_groups(table, &[rg_idx], &all_columns, request, &output_schema))
-            .collect();
-        for result in results {
-            all_batches.extend(result?);
+    // A scan that evaluates no predicate keeps every row of the window, which
+    // the cache decodes once for all such scans of a pass.
+    let cache = request
+        .column_cache
+        .filter(|_| request.predicates.iter().all(|p| p.matches_every_row()));
+    let scan_group = |group: usize| {
+        if let Some(cache) = cache {
+            let decoded =
+                scan_decoded_row_group(table, group, &all_columns, request, &output_schema, cache)?;
+            if let Some(batches) = decoded {
+                return Ok(batches);
+            }
+            // The cache cannot take this row group: read it as any scan does.
         }
+        scan_row_groups(table, &[group], &all_columns, request, &output_schema)
+    };
+
+    let results: Vec<Result<Vec<ScannedBatch>>> = row_groups_to_scan
+        .par_iter()
+        .map(|&group| scan_group(group))
+        .collect();
+    // The first failure in row group order, whichever finished first.
+    let mut batches = Vec::new();
+    for result in results {
+        batches.extend(result?);
     }
 
-    Ok(all_batches)
+    Ok(batches)
 }
 
 /// Decode block bounds using the column's physical width. Wrapped signed
@@ -2175,24 +2145,29 @@ fn window_rows(
     .with_batch_size(WINDOW_BATCH)
     .build()?;
 
-    let mut offsets: Vec<u32> = Vec::new();
-    let mut start = 0u32;
+    let mut masks = Vec::new();
     for batch in reader {
         let blocks = batch?.column(0).clone();
         let inside = block_range_mask(&blocks, window.from.filter(|&b| b > 0), window.to)?;
-        let inside = match inside.nulls() {
+        masks.push(match inside.nulls() {
             Some(nulls) => inside.values() & nulls.inner(),
             None => inside.values().clone(),
-        };
-        offsets.extend(inside.set_indices().map(|row| start + row as u32));
-        start += blocks.len() as u32;
+        });
     }
 
-    Ok(if offsets.len() == rows {
-        super::columns::WindowRows::All(rows)
-    } else {
-        super::columns::WindowRows::Some(offsets.into())
-    })
+    // Counted first, so the offsets take no spare capacity.
+    let inside: usize = masks.iter().map(BooleanBuffer::count_set_bits).sum();
+    if inside == rows {
+        return Ok(super::columns::WindowRows::All(rows));
+    }
+    let mut offsets = Vec::with_capacity(inside);
+    let mut start = 0u32;
+    for mask in &masks {
+        offsets.extend(mask.set_indices().map(|row| start + row as u32));
+        start += mask.len() as u32;
+    }
+
+    Ok(super::columns::WindowRows::Some(offsets.into()))
 }
 
 /// Hierarchical scan with merged key+address RowFilter stage.
@@ -2908,6 +2883,81 @@ mod tests {
         assert_eq!(found.iter().map(RecordBatch::num_rows).sum::<usize>(), 64);
         let whole = rows as usize * 8;
         assert!(peak < whole / 4, "{peak} bytes to find 64 rows of {whole}");
+    }
+
+    /// The offsets of a window's rows stay inside the cache's budget however
+    /// they grew while the rows were found. A budget that cannot take them
+    /// leaves the row group to the reader.
+    #[test]
+    fn a_window_the_cache_holds_stays_inside_its_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let rows = 100_000u64;
+        let table = crate::testing::write_table(
+            dir.path(),
+            vec![arrow::datatypes::Field::new(
+                "block_number",
+                DataType::UInt64,
+                false,
+            )],
+            vec![Arc::new(UInt64Array::from_iter_values(0..rows))],
+            rows as usize,
+        );
+        let window = super::super::Window {
+            from: Some(1),
+            to: Some(rows - 2),
+        };
+
+        for budget in [rows * 4, 500_000, u64::MAX] {
+            let cache = super::super::ColumnCache::new(budget);
+            let mut request = ScanRequest::new(vec!["block_number"]);
+            request.block_number_column = Some("block_number");
+            (request.from_block, request.to_block) = (window.from, window.to);
+            request.window = Some(window);
+            request.column_cache = Some(&cache);
+            let found = scan(&table, &request).unwrap();
+
+            assert_eq!(
+                found.iter().map(RecordBatch::num_rows).sum::<usize>(),
+                rows as usize - 2
+            );
+            assert!(cache.used() <= budget, "{} bytes held", cache.used());
+            // The offsets fit in all but the smallest budget.
+            assert_eq!(cache.used() > 0, budget > rows * 4, "budget {budget}");
+        }
+    }
+
+    /// The offsets of a window's rows hold no more than the cache reserves
+    /// for them at their most, every row of the group but one.
+    #[test]
+    fn a_window_holds_no_more_than_the_cache_reserves() {
+        let dir = tempfile::tempdir().unwrap();
+        let rows = 1000u64;
+        let table = crate::testing::write_table(
+            dir.path(),
+            vec![arrow::datatypes::Field::new(
+                "block_number",
+                DataType::UInt64,
+                false,
+            )],
+            vec![Arc::new(UInt64Array::from_iter_values(0..rows))],
+            rows as usize,
+        );
+        let window = super::super::Window {
+            from: Some(1),
+            to: None,
+        };
+        let cache = super::super::ColumnCache::new(u64::MAX);
+
+        let held = cache
+            .window_rows(&table, 0, window, || {
+                window_rows(&table, 0, window, Some("block_number"))
+            })
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(held.value.len(), rows as usize - 1);
+        let reserved = super::super::columns::window_reservation(&table, 0);
+        assert!(cache.used() <= reserved, "{} of {reserved}", cache.used());
     }
 
     /// A table several scans share is decoded once and filtered in memory; each
