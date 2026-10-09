@@ -125,7 +125,7 @@ fn a_relation_follows_the_rows_its_own_items_matched() {
                     request.item_tags = tags.iter().map(Vec::as_slice).collect();
 
                     let scanned = reader.scan_rows("items", &request).unwrap();
-                    let batches = scanned.rows.batches();
+                    let batches = scanned.rows().batches();
                     let context = format!(
                         "items {chosen:?}, batches of {batch_size}, range {range:?}, \
                          positions {positions}"
@@ -164,7 +164,7 @@ fn a_relation_follows_the_rows_its_own_items_matched() {
                         tagged_rows += tagged.iter().map(RecordBatch::num_rows).sum::<usize>();
                     }
 
-                    let returned = scanned.rows.num_rows();
+                    let returned = scanned.rows().num_rows();
                     assert!(returned > 0, "nothing came back: {context}");
                 }
             }

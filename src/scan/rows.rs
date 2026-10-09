@@ -1,5 +1,5 @@
 use super::ScanRequest;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use arrow::array::{AsArray, BooleanArray, UInt64Array};
 use arrow::compute::{filter, filter_record_batch};
 use arrow::datatypes::UInt64Type;
@@ -25,18 +25,19 @@ impl Rows {
     }
 
     /// Rows with the position of each: `positions[i]` belongs to `batches[i]`.
-    pub fn with_positions(batches: Vec<RecordBatch>, positions: Vec<UInt64Array>) -> Self {
+    /// An error unless every row has exactly one.
+    pub fn with_positions(batches: Vec<RecordBatch>, positions: Vec<UInt64Array>) -> Result<Self> {
         let aligned = batches.len() == positions.len()
             && batches
                 .iter()
                 .zip(&positions)
                 .all(|(batch, positions)| batch.num_rows() == positions.len());
-        assert!(aligned, "every row has exactly one position");
+        anyhow::ensure!(aligned, "every row must have exactly one position");
 
-        Self {
+        Ok(Self {
             batches,
             positions: Some(positions),
-        }
+        })
     }
 
     pub fn batches(&self) -> &[RecordBatch] {
@@ -137,14 +138,54 @@ impl Rows {
 
 /// What a scan returns: its rows, and for each of the request's item tags,
 /// which of those rows one of the tag's items matched.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Scanned {
-    pub rows: Rows,
+    rows: Rows,
     /// Per tag, in request order: its items and one mask per batch of `rows`.
     tags: Vec<(Vec<usize>, Vec<BooleanArray>)>,
 }
 
 impl Scanned {
+    /// What a reader read for `request`: the rows, and for each of the
+    /// request's item tags in order, one mask per batch of `rows` marking the
+    /// rows one of the tag's items matched. An error when the masks do not
+    /// cover the rows one entry per row, or the rows lack the positions the
+    /// request asked for.
+    pub fn new(request: &ScanRequest, rows: Rows, tags: Vec<Vec<BooleanArray>>) -> Result<Self> {
+        anyhow::ensure!(
+            tags.len() == request.item_tags.len(),
+            "{} item tags reported where the request asked for {}",
+            tags.len(),
+            request.item_tags.len()
+        );
+        for masks in &tags {
+            let aligned = masks.len() == rows.batches.len()
+                && masks
+                    .iter()
+                    .zip(&rows.batches)
+                    .all(|(mask, batch)| mask.len() == batch.num_rows());
+            anyhow::ensure!(aligned, "an item tag must mark every row once");
+        }
+        anyhow::ensure!(
+            !request.positions || rows.positions.is_some(),
+            "the request asked for each row's position"
+        );
+
+        let items = request.item_tags.iter().map(|items| items.to_vec());
+        Ok(Self {
+            rows,
+            tags: items.zip(tags).collect(),
+        })
+    }
+
+    pub fn rows(&self) -> &Rows {
+        &self.rows
+    }
+
+    pub fn into_rows(self) -> Rows {
+        self.rows
+    }
+
     /// The rows one of `items` matched, when the request named them as a tag.
     pub fn matched_by(&self, items: &[usize]) -> Option<Vec<RecordBatch>> {
         let (_, masks) = self.tags.iter().find(|(tag, _)| tag == items)?;
@@ -160,38 +201,31 @@ impl Scanned {
         Some(matched)
     }
 
-    pub(super) fn collect(request: &ScanRequest, parts: Vec<ScannedBatch>) -> Self {
+    pub(super) fn collect(request: &ScanRequest, parts: Vec<ScannedBatch>) -> Result<Self> {
         let mut batches = Vec::with_capacity(parts.len());
         let mut positions = request.positions.then(Vec::new);
-        let mut tags: Vec<(Vec<usize>, Vec<BooleanArray>)> = request
-            .item_tags
-            .iter()
-            .map(|items| (items.to_vec(), Vec::new()))
-            .collect();
+        let mut tags = vec![Vec::new(); request.item_tags.len()];
 
         for part in parts {
-            let rows = part.batch.num_rows();
-            let tagged =
-                part.tags.len() == tags.len() && part.tags.iter().all(|mask| mask.len() == rows);
-            assert!(tagged, "every tag has one mask entry per row");
-
+            anyhow::ensure!(
+                part.tags.len() == tags.len(),
+                "a batch must carry every tag"
+            );
             if let Some(positions) = &mut positions {
-                positions.push(
-                    part.positions
-                        .expect("the scan recorded every row's position"),
-                );
+                let recorded = part.positions;
+                positions.push(recorded.context("the scan must record every row's position")?);
             }
-            for ((_, masks), mask) in tags.iter_mut().zip(part.tags) {
+            for (masks, mask) in tags.iter_mut().zip(part.tags) {
                 masks.push(mask);
             }
             batches.push(part.batch);
         }
 
         let rows = match positions {
-            Some(positions) => Rows::with_positions(batches, positions),
+            Some(positions) => Rows::with_positions(batches, positions)?,
             None => Rows::new(batches),
         };
-        Self { rows, tags }
+        Self::new(request, rows, tags)
     }
 }
 
@@ -204,6 +238,32 @@ pub(super) struct ScannedBatch {
 }
 
 impl ScannedBatch {
+    /// This batch in slices of at most `size` rows, as a reader returns them,
+    /// each with its rows' positions and tags.
+    pub(super) fn split(self, size: usize) -> Vec<Self> {
+        let size = size.max(1);
+        let rows = self.batch.num_rows();
+        if rows <= size {
+            return vec![self];
+        }
+
+        (0..rows)
+            .step_by(size)
+            .map(|start| {
+                let length = size.min(rows - start);
+                Self {
+                    batch: self.batch.slice(start, length),
+                    positions: self.positions.as_ref().map(|p| p.slice(start, length)),
+                    tags: self
+                        .tags
+                        .iter()
+                        .map(|tag| tag.slice(start, length))
+                        .collect(),
+                }
+            })
+            .collect()
+    }
+
     /// A batch no item ran on, so no tag holds for any of its rows.
     pub(super) fn untagged(
         request: &ScanRequest,
@@ -218,5 +278,66 @@ impl ScannedBatch {
             positions,
             tags,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::ArrayRef;
+    use std::sync::Arc;
+
+    fn batch(rows: u64) -> RecordBatch {
+        let values: ArrayRef = Arc::new(UInt64Array::from_iter_values(0..rows));
+        RecordBatch::try_from_iter([("n", values)]).unwrap()
+    }
+
+    fn marks(lengths: &[usize]) -> Vec<BooleanArray> {
+        let mark = |length| BooleanArray::from(vec![true; length]);
+        lengths.iter().map(|&length| mark(length)).collect()
+    }
+
+    /// A reader's rows and item marks make a scan result only when each tag
+    /// marks every row once, and every row has a position when the request
+    /// asked for them.
+    #[test]
+    fn a_scan_result_takes_marks_that_cover_its_rows() {
+        let items = [0];
+        let mut request = ScanRequest::new(vec!["n"]);
+        request.item_tags = vec![&items];
+        let rows = || Rows::new(vec![batch(2), batch(3)]);
+
+        let marked = vec![
+            BooleanArray::from(vec![true, false]),
+            BooleanArray::from(vec![false, false, true]),
+        ];
+        let scanned = Scanned::new(&request, rows(), vec![marked]).unwrap();
+        let matched = scanned.matched_by(&items).unwrap();
+        assert_eq!(matched.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
+        assert!(scanned.matched_by(&[1]).is_none());
+
+        let refused = [
+            ("a tag left out", vec![]),
+            ("a tag too many", vec![marks(&[2, 3]), marks(&[2, 3])]),
+            ("a batch without marks", vec![marks(&[2])]),
+            ("a mark past the rows", vec![marks(&[2, 4])]),
+            ("a row without a mark", vec![marks(&[2, 2])]),
+        ];
+        for (case, tags) in refused {
+            assert!(Scanned::new(&request, rows(), tags).is_err(), "{case}");
+        }
+
+        request.positions = true;
+        let unplaced = Scanned::new(&request, rows(), vec![marks(&[2, 3])]);
+        assert!(unplaced.is_err(), "rows without the positions asked for");
+        let positions = vec![
+            UInt64Array::from(vec![0, 1]),
+            UInt64Array::from(vec![2, 3, 4]),
+        ];
+        let placed = Rows::with_positions(vec![batch(2), batch(3)], positions).unwrap();
+        assert!(Scanned::new(&request, placed, vec![marks(&[2, 3])]).is_ok());
+
+        let short = Rows::with_positions(vec![batch(2)], vec![UInt64Array::from(vec![0])]);
+        assert!(short.is_err(), "a row without a position");
     }
 }

@@ -56,7 +56,7 @@ impl ChunkReader for ObservedReader {
             table: table.into(),
             from: request.from_block,
             to: request.to_block,
-            rows: scanned.rows.num_rows(),
+            rows: scanned.rows().num_rows(),
             physical_rows: request.row_indices.is_some(),
             filters: !request.predicates.is_empty()
                 || request.key_filter.is_some()

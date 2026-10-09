@@ -1,0 +1,12 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f78cceecc3f9c1b1322dea870c4fae4e7b078f56338e16ddc1f594f5966cab6b # shrinks to parts = [[(-2147483648, 0, "", [65535]), (-2147483648, 0, "", [0])]], columns = ["path"], order = ["signed", "path", "unsigned", "text"], width = 2, nulls = false, deep = true
+cc c8b17d383d49ba3dca657ef19b7d7d53cbe628a7da2a6f6a6aea619f08011ce8 # shrinks to parts = [([(-2147483648, 0, "acc", []), (-2147483648, 0, "acc", [0])], 0)], columns = ["path"], order = ["text", "path", "signed", "unsigned"], nulls = false
+cc 599a5dd909d07aacf740551a4ce4d75eb5c316f8d5b9951c4c356e88129d3030 # shrinks to parts = [([(-2147483648, 0, "", [0])], 1), ([(-2147483648, 0, "", [])], 0)], columns = ["path"], order = ["path", "unsigned", "signed", "text"], nulls = false
+cc e8981d92f4988482197fa2a5622db24710b7e8d0210b4bfe73478a85d715d804 # shrinks to parts = [([(1, 0, "", [])], 0)], columns = ["signed", "text"], order = ["path", "unsigned", "text", "signed"], nulls = true
+cc 2d3007163a8efbeafcf8e6be5a13e23280a9851b4c2fcbbec627e01b2f1630f6 # shrinks to parts = [([(-2147483648, 0, "", [0]), (-2147483648, 0, "", [65535])], 2)], columns = ["path"], order = ["text", "path", "unsigned", "signed"], nulls = false, deep = true
+cc 1a311255ed9913e9d1bd054251bd71cdf2871e37d71b3d718bedd251d269662d # shrinks to parts = [([(-2147483648, 0, "", []), (0, 0, "", [])], 0)], columns = ["signed", "path"], order = ["signed", "unsigned", "path", "text"], nulls = false, deep = true
