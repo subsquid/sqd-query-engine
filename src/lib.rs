@@ -1,3 +1,4 @@
+pub mod catalogs;
 pub mod error;
 pub mod integers;
 pub mod join;
