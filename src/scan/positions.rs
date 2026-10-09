@@ -52,12 +52,10 @@ impl TrackedRows {
             .collect()
     }
 
-    pub(super) fn finish(self, table: &ParquetTable, groups: &[usize]) -> UInt64Array {
-        let total = groups
-            .iter()
-            .map(|&group| table.row_group(group).num_rows() as usize)
-            .sum();
-        let mut selection = RowSelection::from(vec![RowSelector::select(total)]);
+    /// The file positions of the rows the stages kept in row group `group`.
+    pub(super) fn finish(self, table: &ParquetTable, group: usize) -> UInt64Array {
+        let rows = table.row_group(group).num_rows() as usize;
+        let mut selection = RowSelection::from(vec![RowSelector::select(rows)]);
         for stage in self.stages {
             if !selection.selects_any() {
                 break;
@@ -65,25 +63,15 @@ impl TrackedRows {
             let masks = stage.lock().expect("position recorder poisoned");
             selection = selection.and_then(&RowSelection::from_filters(&masks));
         }
-        let mut starts = Vec::with_capacity(table.num_row_groups());
-        let mut offset = 0u64;
-        for group in table.metadata().row_groups() {
-            starts.push(offset);
-            offset += group.num_rows() as u64;
-        }
-        let mut physical = groups.iter().flat_map(|&group| {
-            let start = starts[group];
-            start..start + table.row_group(group).num_rows() as u64
-        });
+
         let mut positions = Vec::with_capacity(selection.row_count());
+        let mut row = table.row_group_start(group);
         for selector in selection.iter() {
-            if selector.skip {
-                if selector.row_count > 0 {
-                    physical.nth(selector.row_count - 1);
-                }
-            } else {
-                positions.extend(physical.by_ref().take(selector.row_count));
+            let next = row + selector.row_count as u64;
+            if !selector.skip {
+                positions.extend(row..next);
             }
+            row = next;
         }
         UInt64Array::from(positions)
     }
