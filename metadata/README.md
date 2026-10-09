@@ -381,9 +381,10 @@ checks need no chunk:
   field, and a table that declares an output `name` declares `fields`;
 - a roll's spread list column, if any, is last; a discriminator length is
   written the way the lookup reads it (`"8"`, not `8`) and is at most 16;
-- `variant_column` and `variants` come together; `hex_number` is declared on an
-  unsigned integer; a `bloom` names a `fixed_binary_N` column and declares that
-  `N`;
+- `variant_column` and `variants` come together, and the block table declares
+  neither, since a header's fields are written flat; `hex_number` is declared
+  on an unsigned integer; a `bloom` names a `fixed_binary_N` column and declares
+  that `N`;
 - every field mapping resolves once: a `field_key` is its own column's name or
   no column's, two mappings answering to one field key read one column, no two
   mappings in a group share an `as`, and none claims a column that identifies a
