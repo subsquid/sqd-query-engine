@@ -7,6 +7,7 @@
 
 pub mod arrow;
 pub mod chunk;
+pub mod columnar;
 pub mod evm_like;
 pub mod fixtures;
 pub mod generator;

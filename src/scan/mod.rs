@@ -1,5 +1,6 @@
 mod addresses;
 mod chunk;
+mod columnar;
 mod columns;
 mod key_columns;
 mod keys;
@@ -11,6 +12,7 @@ mod scanner;
 
 pub use addresses::{AddressIndex, HierarchicalFilter, HierarchicalMode};
 pub use chunk::*;
+pub use columnar::{ColumnarChunk, ColumnarChunkReader, ColumnarTable, WindowStats};
 pub use columns::{ColumnCache, Window};
 pub use keys::{KeyFilter, KeySet};
 pub use rows::{Rows, Scanned};

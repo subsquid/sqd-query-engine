@@ -153,34 +153,9 @@ where
 /// Every row group is checked, not the ones this query selects, for the same
 /// reason: a narrow range must not answer where a wide one fails.
 fn ensure_block_numbers_readable(table: &ParquetTable, request: &ScanRequest) -> Result<()> {
-    let Some(bn_column) = request.block_number_column else {
+    let Some(bn_column) = nullable_block_numbers(table.name(), table.schema(), request)? else {
         return Ok(());
     };
-
-    let Some(index) = table.column_index(bn_column) else {
-        crate::engine_bail!(
-            crate::error::ErrorKind::ColumnNotFound,
-            "block-number column '{}' is not found in '{}'",
-            bn_column,
-            table.name()
-        );
-    };
-
-    let field = table.schema().field(index);
-    crate::engine_ensure!(
-        crate::integers::is_integer(field.data_type()),
-        crate::error::ErrorKind::MalformedChunkData,
-        "block-number column '{}' of '{}' is stored as {}, which is not an integer",
-        bn_column,
-        table.name(),
-        field.data_type()
-    );
-
-    // A column parquet marks REQUIRED cannot hold a null, whatever its
-    // statistics say or fail to say.
-    if !field.is_nullable() {
-        return Ok(());
-    }
 
     let mut unstated: Vec<usize> = Vec::new();
 
@@ -229,7 +204,48 @@ fn ensure_block_numbers_readable(table: &ParquetTable, request: &ScanRequest) ->
     Ok(())
 }
 
-fn ensure_columns_present(table: &ParquetTable, request: &ScanRequest) -> Result<()> {
+/// The schema half of [`ensure_block_numbers_readable`], which every reader
+/// shares: the block-number column must exist and be an integer. Returns the
+/// column when its schema lets it hold a null, which only the reader can rule
+/// out.
+pub(super) fn nullable_block_numbers<'r>(
+    table: &str,
+    schema: &Schema,
+    request: &ScanRequest<'r>,
+) -> Result<Option<&'r str>> {
+    let Some(bn_column) = request.block_number_column else {
+        return Ok(None);
+    };
+
+    let Ok(index) = schema.index_of(bn_column) else {
+        crate::engine_bail!(
+            crate::error::ErrorKind::ColumnNotFound,
+            "block-number column '{}' is not found in '{}'",
+            bn_column,
+            table
+        );
+    };
+
+    let field = schema.field(index);
+    crate::engine_ensure!(
+        crate::integers::is_integer(field.data_type()),
+        crate::error::ErrorKind::MalformedChunkData,
+        "block-number column '{}' of '{}' is stored as {}, which is not an integer",
+        bn_column,
+        table,
+        field.data_type()
+    );
+
+    // A column the schema marks non-nullable (parquet's REQUIRED) cannot hold a
+    // null, whatever its statistics say or fail to say.
+    Ok(field.is_nullable().then_some(bn_column))
+}
+
+pub(super) fn ensure_columns_present(
+    table: &str,
+    schema: &Schema,
+    request: &ScanRequest,
+) -> Result<()> {
     let mut required: Vec<&str> = request.required_columns.clone();
 
     for pred in &request.predicates {
@@ -247,12 +263,12 @@ fn ensure_columns_present(table: &ParquetTable, request: &ScanRequest) -> Result
     }
 
     for col in required {
-        if table.column_index(col).is_none() {
+        if schema.index_of(col).is_err() {
             crate::engine_bail!(
                 crate::error::ErrorKind::ColumnNotFound,
                 "column '{}' is not found in '{}'",
                 col,
-                table.name()
+                table
             );
         }
     }
@@ -267,13 +283,17 @@ fn ensure_columns_present(table: &ParquetTable, request: &ScanRequest) -> Result
 /// check is: a row filter's callback can only fail with an `ArrowError`, which
 /// carries no kind, and a chunk that answers or refuses depending on how many
 /// rows a predicate happened to reach is the same bug from the other side.
-fn ensure_predicates_comparable(table: &ParquetTable, request: &ScanRequest) -> Result<()> {
+pub(super) fn ensure_predicates_comparable(
+    table: &str,
+    schema: &Schema,
+    request: &ScanRequest,
+) -> Result<()> {
     for pred in &request.predicates {
         for col_pred in pred.column_predicates() {
-            let Some(index) = table.column_index(&col_pred.column) else {
+            let Ok(index) = schema.index_of(&col_pred.column) else {
                 continue;
             };
-            let stored = table.schema().field(index).data_type();
+            let stored = schema.field(index).data_type();
 
             if let Err(e) =
                 crate::scan::predicate::check_stored_type(col_pred.predicate.as_ref(), stored)
@@ -282,7 +302,7 @@ fn ensure_predicates_comparable(table: &ParquetTable, request: &ScanRequest) -> 
                     ErrorKind::UnsupportedKeyType,
                     "filter on column '{}' of '{}': {}",
                     col_pred.column,
-                    table.name(),
+                    table,
                     e
                 );
             }
@@ -305,8 +325,8 @@ pub fn scan_rows(table: &ParquetTable, request: &ScanRequest) -> Result<Scanned>
 }
 
 fn scan_batches(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<ScannedBatch>> {
-    ensure_columns_present(table, request)?;
-    ensure_predicates_comparable(table, request)?;
+    ensure_columns_present(table.name(), table.schema(), request)?;
+    ensure_predicates_comparable(table.name(), table.schema(), request)?;
     ensure_block_numbers_readable(table, request)?;
 
     if let Some(rows) = request.row_indices {
@@ -360,14 +380,14 @@ fn scan_batches(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<Scann
 
 /// What a scan filters rows by beside its items, decided once, so that the
 /// reader and the cache apply the same.
-struct RowFilters<'r> {
+pub(super) struct RowFilters<'r> {
     /// The `[from, to]` blocks a row must fall in, when a filter checks them.
-    blocks: Option<(Option<u64>, Option<u64>)>,
-    relation: Relation<'r>,
+    pub(super) blocks: Option<(Option<u64>, Option<u64>)>,
+    pub(super) relation: Relation<'r>,
 }
 
 /// How a relation scan picks its target's rows.
-enum Relation<'r> {
+pub(super) enum Relation<'r> {
     /// Not a relation scan.
     None,
     /// The rows whose key the source rows hold.
@@ -377,7 +397,7 @@ enum Relation<'r> {
 }
 
 impl<'r> RowFilters<'r> {
-    fn of(request: &ScanRequest<'r>) -> Self {
+    pub(super) fn of(request: &ScanRequest<'r>) -> Self {
         let relation = match (request.hierarchical_filter, request.key_filter) {
             (Some(addresses), _) => Relation::Addresses(addresses),
             (None, Some(keys)) => Relation::Keys(keys),
@@ -1177,7 +1197,7 @@ fn window_rows(
 /// width a writer may choose is read (INV-D7), and a bound the width cannot
 /// hold is not truncated into it: a `from` above the width's ceiling matches
 /// nothing, and a `to` above it constrains nothing (INV-P14).
-fn block_range_mask(
+pub(super) fn block_range_mask(
     column: &Arc<dyn Array>,
     from_block: Option<u64>,
     to_block: Option<u64>,
