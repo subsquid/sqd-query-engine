@@ -363,6 +363,8 @@ tables:
           kind: roll
           columns: [ topic0, topic1, topic2, topic3 ]
     item_order_keys: [ transaction_index, log_index ]
+    # A log is ordered by its transaction but weighed for its block and log index.
+    weight_key: [ block_number, log_index ]
     sort_key: [ topic0, address, block_number, log_index ]
     columns:
       block_number:

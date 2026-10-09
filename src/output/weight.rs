@@ -44,11 +44,15 @@ struct WeightContribution<'a> {
 /// Weight is computed per target table with row deduplication, matching legacy behavior:
 /// - Direct scan results and relation results targeting the same table are merged
 /// - Duplicate rows (same block_number + item_order_keys) are counted only once
+///
+/// Every block of `candidates` also carries its header, whether or not it holds
+/// items: a boundary block is on the page like any other (§5.5).
 pub(crate) fn compute_block_weights(
     table_outputs: &HashMap<String, TableOutput>,
     block_batches: &[RecordBatch],
     metadata: &DatasetDescription,
     plan: &Plan,
+    candidates: &[u64],
 ) -> Result<FxHashMap<u64, u64>> {
     let no_rows = Rows::default();
     // 1. Group all batch contributions by TARGET table name.
@@ -62,9 +66,7 @@ pub(crate) fn compute_block_weights(
             None => continue,
         };
         let table_desc = metadata.table(&table_plan.table);
-
-        let weight_cols = weight_projection(&table_plan.output_columns, table_desc);
-        let (fixed_weight, weight_col_names) = compute_weight_params(&weight_cols, table_desc);
+        let (fixed_weight, weight_col_names) = row_weight(&table_plan.output_columns, table_desc);
 
         target_contribs
             .entry(&table_plan.table)
@@ -77,8 +79,7 @@ pub(crate) fn compute_block_weights(
 
         for (rel_idx, rel) in table_plan.relations.iter().enumerate() {
             let rel_desc = metadata.table(&rel.target_table);
-            let columns = weight_projection(&rel.output_columns, rel_desc);
-            let (fixed_weight, weight_cols) = compute_weight_params(&columns, rel_desc);
+            let (fixed_weight, weight_cols) = row_weight(&rel.output_columns, rel_desc);
             target_contribs
                 .entry(&rel.target_table)
                 .or_default()
@@ -124,59 +125,47 @@ pub(crate) fn compute_block_weights(
 
     // 3. Add block header weight.
     let block_desc = metadata.table(&plan.block_table);
-    let (header_fixed, header_weight_cols) =
-        compute_weight_params(&plan.block_output_columns, block_desc);
+    let (header_fixed, header_weight_cols) = row_weight(&plan.block_output_columns, block_desc);
     let header_bn_col = block_desc
         .map(|d| d.block_number_column.as_str())
         .unwrap_or("number");
+    let candidates: FxHashSet<u64> = candidates.iter().copied().collect();
 
-    if plan.include_all_blocks {
-        accumulate_block_weights(
-            block_batches,
-            header_bn_col,
-            header_fixed,
-            &header_weight_cols,
-            &mut block_weights,
-        );
-    } else {
-        let blocks_with_items: HashSet<u64> = block_weights.keys().copied().collect();
-        for batch in block_batches {
-            let bn_col = match batch.column_by_name(header_bn_col) {
-                Some(c) => c,
-                None => continue,
-            };
-            // A header's weight is its fixed part plus whatever its
-            // data-dependent columns say, exactly as in the include-all-blocks
-            // branch above. Counting only the fixed part makes a header carrying
-            // withdrawals weigh the same as an empty one.
-            let weight_arrays: Vec<_> = header_weight_cols
-                .iter()
-                .filter_map(|c| batch.column_by_name(c))
-                .collect();
+    for batch in block_batches {
+        let bn_col = match batch.column_by_name(header_bn_col) {
+            Some(c) => c,
+            None => continue,
+        };
+        // A header's weight is its fixed part plus whatever its data-dependent
+        // columns say. Counting only the fixed part makes a header carrying
+        // withdrawals weigh the same as an empty one.
+        let weight_arrays: Vec<_> = header_weight_cols
+            .iter()
+            .filter_map(|c| batch.column_by_name(c))
+            .collect();
 
-            // The scan refuses a chunk whose block-number column cannot place a
-            // row, so a batch arriving here without a readable one did not come
-            // from one. Weighing nothing for it runs the response large rather
-            // than short, which is the direction INV-B9 tolerates.
-            let Ok(blocks) = BlockNumbers::resolve(bn_col.as_ref(), header_bn_col) else {
+        // The scan refuses a chunk whose block-number column cannot place a
+        // row, so a batch arriving here without a readable one did not come
+        // from one. Weighing nothing for it runs the response large rather
+        // than short, which is the direction INV-B9 tolerates.
+        let Ok(blocks) = BlockNumbers::resolve(bn_col.as_ref(), header_bn_col) else {
+            continue;
+        };
+
+        for i in 0..batch.num_rows() {
+            let block_num = blocks.at(i);
+
+            if !candidates.contains(&block_num) {
                 continue;
-            };
-
-            for i in 0..batch.num_rows() {
-                let block_num = blocks.at(i);
-
-                if !blocks_with_items.contains(&block_num) {
-                    continue;
-                }
-
-                let dynamic: u64 = weight_arrays
-                    .iter()
-                    .map(|col| get_weight_value(col.as_ref(), i))
-                    .fold(0u64, u64::saturating_add);
-
-                let entry = block_weights.entry(block_num).or_default();
-                *entry = entry.saturating_add(header_fixed.saturating_add(dynamic));
             }
+
+            let dynamic: u64 = weight_arrays
+                .iter()
+                .map(|col| get_weight_value(col.as_ref(), i))
+                .fold(0u64, u64::saturating_add);
+
+            let entry = block_weights.entry(block_num).or_default();
+            *entry = entry.saturating_add(header_fixed.saturating_add(dynamic));
         }
     }
 
@@ -232,7 +221,7 @@ pub(crate) fn weight_scan_columns(
     output_columns: &[String],
     table_desc: &TableDescription,
 ) -> Vec<String> {
-    let (_fixed, weight_cols) = compute_weight_params(output_columns, Some(table_desc));
+    let (_fixed, weight_cols) = row_weight(output_columns, Some(table_desc));
     let mut cols = Vec::with_capacity(weight_cols.len() + 1);
     cols.push(table_desc.block_number_column.clone());
     for c in weight_cols {
@@ -252,7 +241,7 @@ pub(crate) fn block_scan_columns(
     block_output_columns: &[String],
     block_desc: &TableDescription,
 ) -> Vec<String> {
-    let (_fixed, weight_cols) = compute_weight_params(block_output_columns, Some(block_desc));
+    let (_fixed, weight_cols) = row_weight(block_output_columns, Some(block_desc));
 
     let mut cols = Vec::with_capacity(block_output_columns.len() + weight_cols.len() + 1);
     cols.push(block_desc.block_number_column.clone());
@@ -272,7 +261,7 @@ pub(crate) fn weight_range_end(
     table_desc: &TableDescription,
     budget: u64,
 ) -> Option<u64> {
-    let (fixed, columns) = compute_weight_params(output_columns, Some(table_desc));
+    let (fixed, columns) = row_weight(output_columns, Some(table_desc));
     let mut weights = FxHashMap::default();
     accumulate_block_weights(
         narrow_batches,
@@ -291,6 +280,16 @@ pub(crate) fn weight_range_end(
         }
     }
     None
+}
+
+/// What a row weighs, its weight key included, when a client selects
+/// `output_columns`: its fixed part, and the size columns that add the rest.
+pub(crate) fn row_weight(
+    output_columns: &[String],
+    table_desc: Option<&TableDescription>,
+) -> (u64, Vec<String>) {
+    let columns = weight_projection(output_columns, table_desc);
+    compute_weight_params(&columns, table_desc)
 }
 
 /// Compute fixed weight per row and list of weight columns for weight limiting.
@@ -567,16 +566,15 @@ fn equal_key_value(a: &dyn Array, ai: usize, b: &dyn Array, bi: usize) -> bool {
     a.slice(ai, 1).to_data() == b.slice(bi, 1).to_data()
 }
 
-/// Compute the column set used for weight calculation.
-/// Matches legacy behavior: weight projection = primary_key + user_output_columns.
-///
-/// Primary key = block_number_column + item_order_keys (+ address_column if present).
+/// Compute the column set used for weight calculation: the table's weight key
+/// and the columns the selected fields read.
 ///
 /// Unlike `resolve_output_columns`, this does NOT include:
 /// - Join key columns (for relations)
 /// - Source predicate columns (e.g., is_committed)
-/// - Tag columns (for field groups)
-pub(crate) fn weight_projection(
+/// - Size columns: one is read to weigh the column it sizes, and charged for
+///   itself only when it is selected or in the weight key
+fn weight_projection(
     user_output_columns: &[String],
     table_desc: Option<&TableDescription>,
 ) -> Vec<String> {
@@ -587,13 +585,9 @@ pub(crate) fn weight_projection(
 
     let mut cols: HashSet<String> = HashSet::new();
 
-    // 1. Primary key: block_number_column + item_order_keys + address_column
-    cols.insert(desc.block_number_column.clone());
-    for key in &desc.item_order_keys {
-        cols.insert(key.clone());
-    }
-    if let Some(ac) = &desc.address_column {
-        cols.insert(ac.clone());
+    // 1. The weight key, selected or not.
+    for key in desc.weight_key() {
+        cols.insert(key.to_string());
     }
 
     // 2. User-requested output columns (with virtual field expansion)
@@ -608,15 +602,6 @@ pub(crate) fn weight_projection(
             }
         } else if let Some(phys) = desc.physical_output_column(col_name) {
             cols.insert(phys.to_string());
-        }
-    }
-
-    // 3. Weight/size columns for any projected column that uses dynamic weight
-    for (col_name, col_desc) in &desc.columns {
-        if cols.contains(col_name) {
-            if let Some(WeightSource::Column(wc)) = &col_desc.weight {
-                cols.insert(wc.clone());
-            }
         }
     }
 
@@ -822,20 +807,24 @@ mod tests {
         parse_dataset_description(&yaml).unwrap()
     }
 
+    fn substrate_meta() -> DatasetDescription {
+        let yaml = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("metadata/substrate.yaml"),
+        )
+        .unwrap();
+        parse_dataset_description(&yaml).unwrap()
+    }
+
     /// Helper: compute weight from a set of column names using compute_weight_params.
     fn weight_for(cols: &[&str], table_desc: Option<&TableDescription>) -> (u64, Vec<String>) {
         let col_strings: Vec<String> = cols.iter().map(|s| s.to_string()).collect();
         compute_weight_params(&col_strings, table_desc)
     }
 
-    /// Helper: compute weight using weight_projection (primary_key + user output).
-    fn legacy_weight_for(
-        user_output: &[&str],
-        table_desc: Option<&TableDescription>,
-    ) -> (u64, Vec<String>) {
-        let user_strings: Vec<String> = user_output.iter().map(|s| s.to_string()).collect();
-        let projected = weight_projection(&user_strings, table_desc);
-        compute_weight_params(&projected, table_desc)
+    /// Helper: what a row weighs with `selected` output columns.
+    fn weight_of(selected: &[&str], table_desc: Option<&TableDescription>) -> (u64, Vec<String>) {
+        let selected: Vec<String> = selected.iter().map(|s| s.to_string()).collect();
+        row_weight(&selected, table_desc)
     }
 
     // -----------------------------------------------------------------------
@@ -1047,7 +1036,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests: legacy-compatible weight columns (primary_key + user output)
+    // Tests: row weight (weight key + selected columns)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1055,9 +1044,9 @@ mod tests {
         let meta = solana_meta();
         let instr = meta.table("instructions").unwrap();
 
-        // weight_projection adds primary key: [block_number, transaction_index, instruction_address]
+        // Weight key: [block_number, transaction_index, instruction_address]
         // User output: [transaction_index, instruction_address, program_id, accounts, data]
-        let (fixed, dynamic) = legacy_weight_for(
+        let (fixed, dynamic) = weight_of(
             &[
                 "transaction_index",
                 "instruction_address",
@@ -1087,7 +1076,7 @@ mod tests {
 
         // Same as above but the user also requests d1, d8 and is_committed —
         // all three are selectable, so all three are weighed.
-        let (fixed, dynamic) = legacy_weight_for(
+        let (fixed, dynamic) = weight_of(
             &[
                 "transaction_index",
                 "instruction_address",
@@ -1112,9 +1101,9 @@ mod tests {
         let meta = evm_meta();
         let logs = meta.table("logs").unwrap();
 
-        // weight_projection adds primary key: [block_number, transaction_index, log_index]
+        // Weight key: [block_number, log_index]
         // User output: [log_index, transaction_index, address, data, topics]
-        let (fixed, dynamic) = legacy_weight_for(
+        let (fixed, dynamic) = weight_of(
             &[
                 "log_index",
                 "transaction_index",
@@ -1131,15 +1120,71 @@ mod tests {
         assert_eq!(dynamic, vec!["data_size"]);
     }
 
+    /// A row is charged for its weight key whether or not a client selects it,
+    /// and for nothing else it did not select. The keys are the reference's:
+    /// an EVM log is its block and log index although it is ordered by its
+    /// transaction too, a Substrate event its block and index although it
+    /// carries its call's address, and a trace is read as one of four shapes,
+    /// so its `type` is charged with its key.
+    #[test]
+    fn an_unselected_row_weighs_its_weight_key() {
+        let evm = evm_meta();
+        let substrate = substrate_meta();
+        let cases = [
+            (&evm, "blocks", 32),
+            (&evm, "transactions", 2 * 32),
+            (&evm, "logs", 2 * 32),
+            (&evm, "traces", 4 * 32),
+            (&evm, "statediffs", 4 * 32),
+            (&substrate, "blocks", 32),
+            (&substrate, "events", 2 * 32),
+            (&substrate, "calls", 3 * 32),
+        ];
+
+        for (meta, table, weight) in cases {
+            let (fixed, sized) = weight_of(&[], meta.table(table));
+            assert_eq!(
+                (fixed, sized),
+                (weight, Vec::<String>::new()),
+                "{}.{table}",
+                meta.name
+            );
+        }
+    }
+
+    /// Selecting a key column charges nothing more; selecting a column outside
+    /// the key charges it.
+    #[test]
+    fn a_selected_key_column_is_charged_once() {
+        let meta = evm_meta();
+        let logs = meta.table("logs");
+
+        assert_eq!(weight_of(&["log_index"], logs).0, 2 * 32);
+        assert_eq!(weight_of(&["transaction_index"], logs).0, 3 * 32);
+
+        let traces = meta.table("traces");
+        assert_eq!(weight_of(&["type"], traces).0, 4 * 32);
+    }
+
+    /// A Substrate digest is a list of logs, and the reference weighs it as four
+    /// words.
+    #[test]
+    fn a_substrate_digest_weighs_four_words() {
+        let meta = substrate_meta();
+        let blocks = meta.table("blocks");
+
+        assert_eq!(weight_of(&["digest"], blocks).0, 32 + 4 * 32);
+    }
+
     #[test]
     fn test_weight_projection_evm_transactions_with_input() {
         let meta = evm_meta();
         let txs = meta.table("transactions").unwrap();
 
-        // weight_projection adds primary key: [block_number, transaction_index]
+        // Weight key: [block_number, transaction_index]
         // User output: [hash, from, to, input, value, gas]
         let (fixed, dynamic) =
-            legacy_weight_for(&["hash", "from", "to", "input", "value", "gas"], Some(txs));
+            weight_of(&["hash", "from", "to", "input", "value", "gas"], Some(txs));
 
         // block_number(32) + transaction_index(32) + hash(32) + from(32) + to(32) +
         // value(32) + gas(32) + input(input_size)
@@ -1223,15 +1268,15 @@ mod tests {
         let meta = solana_meta();
         let instr = meta.table("instructions").unwrap();
 
-        // weight_projection does NOT include source predicate columns (e.g., is_committed)
+        // The row weight does NOT include source predicate columns (e.g., is_committed)
         // unless the user explicitly requests them in output fields.
 
         // Scenario: user requests [program_id, data] only.
         // Even if is_committed is used as a source predicate for a relation,
         // it should NOT inflate the weight.
-        let (fixed, dynamic) = legacy_weight_for(&["program_id", "data"], Some(instr));
+        let (fixed, dynamic) = weight_of(&["program_id", "data"], Some(instr));
 
-        // Primary key: block_number(32) + transaction_index(32) + instruction_address(32)
+        // Weight key: block_number(32) + transaction_index(32) + instruction_address(32)
         // User output: program_id(32) + data(data_size)
         // is_committed NOT included → no extra 32 bytes
         assert_eq!(fixed, 4 * 32, "4 fixed columns (no is_committed)");
@@ -1239,7 +1284,7 @@ mod tests {
 
         // Contrast: if user DID request is_committed in output, it would be counted
         let (fixed_with, dynamic_with) =
-            legacy_weight_for(&["program_id", "data", "is_committed"], Some(instr));
+            weight_of(&["program_id", "data", "is_committed"], Some(instr));
         assert_eq!(fixed_with, 5 * 32, "5 fixed columns (with is_committed)");
         assert_eq!(dynamic_with.len(), 1);
     }

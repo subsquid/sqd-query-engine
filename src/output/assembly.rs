@@ -1068,7 +1068,13 @@ fn execute_chunk_fmt(
         let exhausted = if sorted_blocks.is_empty() {
             false
         } else {
-            let weights = compute_block_weights(&range_outputs, &range_headers, metadata, plan)?;
+            let weights = compute_block_weights(
+                &range_outputs,
+                &range_headers,
+                metadata,
+                plan,
+                &sorted_blocks,
+            )?;
             selection.extend(&sorted_blocks, &weights)
         };
 
