@@ -11,7 +11,7 @@ use crate::scan::predicate::{
 use crate::{engine_bail, engine_ensure, engine_err};
 use anyhow::Result;
 use arrow::array::*;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
 /// `P-MAX-BLOOM-VALUES` (spec/09-parameters.md §9.1). Each value is a separate
@@ -63,6 +63,17 @@ pub struct RelationPlan {
     /// plan's `predicates`; only rows one of them matched feed it. `None` when
     /// every item did, so every row the scan returns qualifies.
     pub source_items: Option<Vec<usize>>,
+}
+
+impl RelationPlan {
+    /// Whether `other` reads the same rows into the same output.
+    fn same_join(&self, other: &RelationPlan) -> bool {
+        self.target_table == other.target_table
+            && self.kind == other.kind
+            && self.left_key == other.left_key
+            && self.right_key == other.right_key
+            && self.output_columns == other.output_columns
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,13 +149,10 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
         // Compile each item into predicates
         let mut all_predicates = Vec::new();
         let mut all_relations: Vec<RelationPlan> = Vec::new();
-        // Keyed by the alias the item came through as well as the relation's
-        // name: two aliases over one table declare their relations separately,
-        // and the same name can mean a different join on each.
-        let mut seen_relations: HashSet<(Option<String>, String)> = HashSet::new();
-        // The items requesting each relation, by relation name
-        let mut rel_source_items: std::collections::HashMap<String, Vec<usize>> =
-            std::collections::HashMap::new();
+        // The items asking for each planned relation, under whichever name. A
+        // name is not a join: two names can declare one, and one name can mean
+        // a different join through each alias over the table.
+        let mut relation_sources: Vec<BTreeSet<usize>> = Vec::new();
         // Unsatisfiable items are not counted: they contribute no rows, so a
         // relation every *remaining* item asks for still applies to every row
         // the scan produces.
@@ -159,19 +167,7 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
             let item_index = all_predicates.len();
             all_predicates.push(item_predicate);
 
-            // Collect relations (dedup across items)
             for rel_name in &item.relations {
-                rel_source_items
-                    .entry(rel_name.clone())
-                    .or_default()
-                    .push(item_index);
-
-                let rel_key = (item.alias.clone(), rel_name.clone());
-                if seen_relations.contains(&rel_key) {
-                    continue;
-                }
-                seen_relations.insert(rel_key);
-
                 let rel_def =
                     relation_def(metadata, table_desc, item, rel_name).ok_or_else(|| {
                         engine_err!(
@@ -204,52 +200,22 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
                     source_items: None, // filled in below
                 };
 
-                // Two aliases naming the same join is one scan, not two.
-                let already = all_relations.iter().any(|r| {
-                    r.target_table == plan.target_table
-                        && r.kind == plan.kind
-                        && r.left_key == plan.left_key
-                        && r.right_key == plan.right_key
-                        && r.output_columns == plan.output_columns
-                });
-                if !already {
+                // Two names declaring the same join is one scan, not two.
+                let planned = all_relations.iter().position(|r| r.same_join(&plan));
+                let at = planned.unwrap_or_else(|| {
                     all_relations.push(plan);
-                }
+                    relation_sources.push(BTreeSet::new());
+                    all_relations.len() - 1
+                });
+                relation_sources[at].insert(item_index);
             }
         }
 
-        // Set source_items on each relation.
-        // If ALL items request a relation, source_items = None (all primary rows qualify,
-        // since the union of all items' predicates IS the primary scan predicate).
-        for rel in &mut all_relations {
-            for (rel_name, source_items) in &rel_source_items {
-                // Resolve the way the relation was created: through the alias of
-                // any item that asked for it, and otherwise on the table.
-                let rel_def = items
-                    .iter()
-                    .filter(|item| item.relations.contains(rel_name))
-                    .find_map(|item| relation_def(metadata, table_desc, item, rel_name));
-                if let Some(rel_def) = rel_def {
-                    if rel_def.table == rel.target_table {
-                        let kind = match rel_def.kind {
-                            MetaRelationKind::Join => RelationKind::Join,
-                            MetaRelationKind::Children => RelationKind::Children,
-                            MetaRelationKind::Parents => RelationKind::Parents,
-                        };
-                        if kind == rel.kind
-                            && rel_def.effective_left_key() == rel.left_key.as_slice()
-                        {
-                            // If all items request this relation, no filtering needed
-                            rel.source_items = if source_items.len() >= total_items {
-                                None
-                            } else {
-                                Some(source_items.clone())
-                            };
-                            break;
-                        }
-                    }
-                }
-            }
+        // A relation every item asked for follows every row the scan returns:
+        // the union of the items' predicates is the scan's own.
+        for (rel, sources) in all_relations.iter_mut().zip(&relation_sources) {
+            let every_item = sources.len() == total_items;
+            rel.source_items = (!every_item).then(|| sources.iter().copied().collect());
         }
 
         // Every item matched nothing, so the table has nothing to contribute.

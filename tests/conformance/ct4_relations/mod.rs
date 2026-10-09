@@ -6,6 +6,7 @@
 //! one hop — over queries HC-4 composed, because each of those is a claim about
 //! a *pair* of queries and a hand-written case only ever asserts one pair of it.
 
+mod attribution;
 mod joins;
 mod laws;
 mod names;
