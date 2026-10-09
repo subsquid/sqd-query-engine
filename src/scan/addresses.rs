@@ -3,8 +3,8 @@
 //! lookup in its group rather than by comparing itself with every source of
 //! its transaction.
 
+use super::key_columns::{pair_keys, typed_key_columns, TypedKeyColumn};
 use super::pairs::pack16;
-use super::scanner::{pair_keys, typed_key_columns, TypedKeyColumn};
 use crate::integers::IntColumn;
 use arrow::array::{Array, BooleanArray, GenericListArray, RecordBatch};
 use arrow::buffer::BooleanBuffer;
@@ -588,7 +588,7 @@ pub(super) fn address_list<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scan::scanner::{composite_key_in_set_mask, CompositeKeySet, KeyFilter};
+    use crate::scan::keys::{CompositeKeySet, KeyFilter};
     use arrow::array::{ArrayRef, Int32Array, ListArray, StringArray, UInt32Array};
 
     /// The address index answers what comparing a target with every source of
@@ -731,11 +731,8 @@ mod tests {
                 "block",
                 "block",
             );
-            let key_columns: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
-            let matched =
-                composite_key_in_set_mask(&target_batch, &key_columns, &exact.key_set, None)
-                    .unwrap();
-            if let CompositeKeySet::PairPath(sources) = exact.key_set.as_ref() {
+            let matched = exact.mask(&target_batch, None).unwrap();
+            if let CompositeKeySet::PairPath(sources) = exact.key_set() {
                 assert!(
                     sources.prefixes.get().is_none(),
                     "a join built prefixes, case {case}"

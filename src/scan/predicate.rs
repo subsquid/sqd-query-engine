@@ -1260,12 +1260,6 @@ pub fn or_masks(masks: &[BooleanArray], items: &[usize], len: usize) -> BooleanA
 /// column is stored at, or `None` where the writer recorded none.
 pub type ColumnStats<'a> = dyn Fn(&str) -> Option<StatRange> + 'a;
 
-/// Check if ALL row predicates (ORed) say skip for a row group.
-pub fn can_skip_row_group_or(predicates: &[&RowPredicate], stats_fn: &ColumnStats) -> bool {
-    // OR: skip only if ALL predicates say skip
-    predicates.iter().all(|p| p.can_skip_row_group(stats_fn))
-}
-
 /// Whether a predicate can be evaluated against a column stored at
 /// `data_type`, learned by evaluating it against an empty column of that type.
 ///

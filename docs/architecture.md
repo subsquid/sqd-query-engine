@@ -116,7 +116,7 @@ Readers that do not advertise position support use the complete-key fallback.
 
 ### scan() Internals
 
-**Entry point:** `src/scan/scanner.rs:523`
+**Entry point:** `scan_rows` in `src/scan/scanner.rs`
 
 ```
 scan(table, request)
@@ -126,10 +126,11 @@ scan(table, request)
   |
   +-- 2. select_row_groups(): prune row groups via statistics
   |      - Block range: skip RG where block_number max < from_block or min > to_block
-  |      - Predicates: can_skip_row_group_or() using min/max stats
   |      - KeyFilter: binary search on sorted_blocks vs RG block range
+  |      - Predicates: an item whose min/max stats rule the RG out does not run on it;
+  |        an RG no item runs on is skipped
   |
-  +-- 3. scan_row_groups(): build RowFilter pipeline, read data
+  +-- 3. scan_row_group(): build RowFilter stages, read one row group
   |      - Parallelized via rayon (one task per row group)
   |
   +-- 4. project_batch(): drop non-output columns from result
@@ -481,11 +482,8 @@ Thread 3: query C scan(logs) -> scan(txs) -> weight -> json
 
 Multi-RG parallelism within a single scan:
 ```rust
-// scanner.rs:580-583
-let results: Vec<Result<Vec<RecordBatch>>> = row_groups_to_scan
-    .par_iter()
-    .map(|&rg_idx| scan_row_groups(table, &[rg_idx], ...))
-    .collect();
+// scanner.rs, scan_batches
+let results: Vec<Result<Vec<ScannedBatch>>> = row_groups.par_iter().map(scan_group).collect();
 ```
 
 This helps at low concurrency (CPU=1-2) but is neutral at high concurrency where each thread already has enough work.
