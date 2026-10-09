@@ -104,7 +104,7 @@ pub(crate) fn compute_block_weights(
         // collapse to a single counted row while all of them are emitted, and
         // the response overshoots the cap by the trace count (INV-B6/B10).
         let dedup_keys = table_desc
-            .map(crate::output::row_writer::build_full_sort_columns)
+            .map(crate::output::row_order::build_full_sort_columns)
             .unwrap_or_default();
         let dedup_keys: Vec<&str> = dedup_keys.iter().map(String::as_str).collect();
 
@@ -767,7 +767,7 @@ mod tests {
             let batch = RecordBatch::try_new(schema, columns).unwrap();
             match positions {
                 Some(positions) => {
-                    Rows::with_positions(vec![batch], vec![UInt64Array::from(positions)])
+                    Rows::with_positions(vec![batch], vec![UInt64Array::from(positions)]).unwrap()
                 }
                 None => Rows::new(vec![batch]),
             }

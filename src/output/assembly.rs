@@ -15,9 +15,10 @@ use crate::output::encoder::{encode_json_string, resolve_encoder, snake_to_camel
 use crate::output::materialize::{
     materialize_tables, read_rows, retain_blocks, retain_selected_keys, SelectionReader,
 };
+use crate::output::row_order::{build_full_sort_columns, orders_rows, RowOrder};
 use crate::output::row_writer::{
-    build_field_writers, build_full_sort_columns, build_grouped_writers, resolve_grouped_writers,
-    resolve_sort_columns, resolve_writers, row_sort_keys, IndexedBatches, TypedSortColumn,
+    build_field_writers, build_grouped_writers, resolve_grouped_writers, resolve_writers,
+    IndexedBatches,
 };
 use crate::output::weight::{
     block_scan_columns, compute_block_weights, weight_range_end, weight_scan_columns,
@@ -31,7 +32,7 @@ use crate::scan::{
     ParquetChunkReader, Rows, ScanRequest, Window,
 };
 use crate::text::StringColumn;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use arrow::record_batch::RecordBatch;
 use rayon::prelude::*;
 use rustc_hash::FxHashSet as HashSet;
@@ -271,9 +272,8 @@ fn ensure_columns_renderable(
 
         for key in build_full_sort_columns(desc) {
             if let Ok(field) = schema.field_with_name(&key) {
-                let probe = arrow::array::new_empty_array(field.data_type());
                 crate::engine_ensure!(
-                    TypedSortColumn::resolve(probe.as_ref()).is_some(),
+                    orders_rows(field.data_type()),
                     crate::error::ErrorKind::MalformedChunkData,
                     "sort key '{}' of '{}' is stored as {}, which cannot order rows",
                     key,
@@ -539,6 +539,21 @@ impl<K: PartialEq + Send, V: Send> BuiltOnce<K, V> {
         Self(built)
     }
 
+    /// [`Self::build`] where a value may fail to build: the first failure in
+    /// key order.
+    fn try_build(
+        keys: impl IntoIterator<Item = K>,
+        build: impl Fn(&K) -> Result<V> + Sync + Send,
+    ) -> Result<Self> {
+        let built = BuiltOnce::build(keys, build).0;
+        let values = built
+            .into_iter()
+            .map(|(key, value)| Ok((key, value?)))
+            .collect::<Result<_>>()?;
+
+        Ok(Self(values))
+    }
+
     /// The value built for `key`, which must be one of the keys built.
     fn get(&self, key: &K) -> &V {
         let (_, value) = self
@@ -645,7 +660,9 @@ fn scan_relation(
     request.hierarchical_filter = input.hierarchical_filter.as_ref();
 
     let started = profile.then(std::time::Instant::now);
-    let target = chunk.scan_rows(&relation.target_table, &request)?.rows;
+    let target = chunk
+        .scan_rows(&relation.target_table, &request)?
+        .into_rows();
     if let Some(started) = started {
         eprintln!(
             "    {} scan: {:.2?} ({} rows)",
@@ -776,12 +793,12 @@ fn scan_tables(
 
         let t_primary = timer!();
         let scanned = chunk.scan_rows(&table_plan.table, &request)?;
-        let primary = scanned.rows.batches();
+        let primary = scanned.rows().batches();
         elapsed!(
             t_primary,
             "primary scan",
             "{} rows",
-            scanned.rows.num_rows()
+            scanned.rows().num_rows()
         );
 
         // Compute actual block range from primary scan for cross-table pruning
@@ -792,18 +809,23 @@ fn scan_tables(
         let has_primary_rows = primary.iter().any(|b| b.num_rows() > 0);
         if has_primary_rows && !table_plan.relations.is_empty() {
             let t_kf = timer!();
-            let sources = BuiltOnce::build(
+            let sources = BuiltOnce::try_build(
                 table_plan
                     .relations
                     .iter()
                     .map(|relation| relation.source_items.as_deref()),
-                |items| match items {
-                    None => primary.to_vec(),
-                    Some(items) => scanned
-                        .matched_by(items)
-                        .expect("the scan reports the rows of every relation's items"),
+                |items| {
+                    match items {
+                    None => Ok(primary.to_vec()),
+                    Some(items) => scanned.matched_by(items).with_context(|| {
+                        format!(
+                            "the chunk reader did not report which rows of '{}' items {items:?} matched",
+                            table_plan.table
+                        )
+                    }),
+                }
                 },
-            );
+            )?;
             let inputs = relation_inputs(table_plan, table_desc, metadata, &sources);
             elapsed!(t_kf, "key filter build");
 
@@ -841,7 +863,7 @@ fn scan_tables(
         }
 
         let output = TableOutput {
-            rows: scanned.rows,
+            rows: scanned.into_rows(),
             relations,
         };
         Ok((table_plan.table.clone(), output))
@@ -924,7 +946,9 @@ fn execute_chunk_fmt(
         request.block_number_column = Some(bn_col);
         request.required_columns = block_req_refs;
 
-        scan_reader.scan_rows(&plan.block_table, &request)?.rows
+        scan_reader
+            .scan_rows(&plan.block_table, &request)?
+            .into_rows()
     } else {
         Rows::default()
     };
@@ -1301,19 +1325,14 @@ fn execute_chunk_fmt(
             let has_rows = |batches: &[RecordBatch]| batches.iter().any(|b| b.num_rows() > 0);
 
             let grouped = build_grouped_writers(&table_plan.output_columns, table_desc);
-            let sort_columns = build_full_sort_columns(table_desc);
-            let sort_col_resolved = resolve_sort_columns(&batches, &sort_columns);
-            let sort_rows = row_sort_keys(&batches, &sort_columns, &sort_col_resolved);
             if has_rows(&batches) {
                 all_indexes.push(IndexedBatches {
                     index: build_block_index(&batches, bn_col)?,
+                    order: RowOrder::new(&batches, table_desc),
                     batches,
                     writers: build_field_writers(&table_plan.output_columns, Some(table_desc)),
                     grouped,
                     table_name: query_name.to_string(),
-                    sort_columns,
-                    sort_col_resolved,
-                    sort_rows,
                 });
             }
 
@@ -1325,20 +1344,13 @@ fn execute_chunk_fmt(
                         let rel_qn = rd.request_name(&rel.target_table);
 
                         let rel_grouped = build_grouped_writers(&rel.output_columns, rd);
-                        let rel_sort_columns = build_full_sort_columns(rd);
-                        let rel_sort_resolved =
-                            resolve_sort_columns(&rel_batches, &rel_sort_columns);
-                        let rel_sort_rows =
-                            row_sort_keys(&rel_batches, &rel_sort_columns, &rel_sort_resolved);
                         all_indexes.push(IndexedBatches {
                             index: build_block_index(&rel_batches, rel_bn)?,
+                            order: RowOrder::new(&rel_batches, rd),
                             batches: rel_batches,
                             writers: build_field_writers(&rel.output_columns, Some(rd)),
                             grouped: rel_grouped,
                             table_name: rel_qn.to_string(),
-                            sort_columns: rel_sort_columns,
-                            sort_col_resolved: rel_sort_resolved,
-                            sort_rows: rel_sort_rows,
                         });
                     }
                 }

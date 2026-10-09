@@ -1,7 +1,7 @@
 use super::arrow_out::{blocks_mask, project_columns};
 use super::block_index::compute_block_range;
 use super::columns::resolve_relation_output_columns;
-use super::row_writer::build_full_sort_columns;
+use super::row_order::build_full_sort_columns;
 use super::weight::{weight_projection, weight_scan_columns, TableOutput};
 use crate::metadata::{DatasetDescription, TableDescription};
 use crate::query::{Plan, RelationKind};

@@ -31,6 +31,7 @@ macro_rules! for_each_int_type {
         }
     };
 }
+pub(crate) use for_each_int_type;
 
 /// An integer column, resolved once so a read costs a match rather than a
 /// downcast chain.
@@ -43,6 +44,64 @@ pub(crate) enum IntColumn<'a> {
     Int16(&'a Int16Array),
     Int32(&'a Int32Array),
     Int64(&'a Int64Array),
+}
+
+/// The Arrow type of an unsigned native, to read a column's bits unsigned.
+trait Unsigned {
+    type Arrow: ArrowPrimitiveType<Native = Self>;
+}
+
+impl Unsigned for u8 {
+    type Arrow = arrow::datatypes::UInt8Type;
+}
+
+impl Unsigned for u16 {
+    type Arrow = arrow::datatypes::UInt16Type;
+}
+
+impl Unsigned for u32 {
+    type Arrow = arrow::datatypes::UInt32Type;
+}
+
+impl Unsigned for u64 {
+    type Arrow = arrow::datatypes::UInt64Type;
+}
+
+/// Rows of `values` at least `from` and at most `to`. A bound the width
+/// cannot hold is not truncated into it: a `from` above it matches nothing,
+/// and a `to` above it constrains nothing.
+fn within<T>(
+    values: &PrimitiveArray<T>,
+    from: Option<u64>,
+    to: Option<u64>,
+) -> Result<BooleanArray, arrow::error::ArrowError>
+where
+    T: ArrowPrimitiveType,
+    T::Native: TryFrom<u64>,
+{
+    use arrow::compute::kernels::{boolean::and, cmp};
+
+    let low = match from.filter(|&from| from > 0).map(T::Native::try_from) {
+        Some(Err(_)) => {
+            let none = arrow::buffer::BooleanBuffer::new_unset(values.len());
+            return Ok(BooleanArray::new(none, None));
+        }
+        Some(Ok(low)) => Some(cmp::gt_eq(values, &PrimitiveArray::<T>::new_scalar(low))?),
+        None => None,
+    };
+    let high = match to.map(T::Native::try_from) {
+        Some(Ok(high)) => Some(cmp::lt_eq(values, &PrimitiveArray::<T>::new_scalar(high))?),
+        Some(Err(_)) | None => None,
+    };
+
+    Ok(match (low, high) {
+        (Some(low), Some(high)) => and(&low, &high)?,
+        (Some(bound), None) | (None, Some(bound)) => bound,
+        (None, None) => {
+            let all = arrow::buffer::BooleanBuffer::new_set(values.len());
+            BooleanArray::new(all, values.nulls().cloned())
+        }
+    })
 }
 
 /// Whether a declared integer column may be stored at this physical type.
@@ -104,6 +163,30 @@ macro_rules! int_column {
             pub(crate) fn block_number(&self, row: usize) -> u64 {
                 match self {
                     $(Self::$variant(a) => (a.value(row) as $unsigned) as u64,)+
+                }
+            }
+
+            /// Whether each row's [`Self::block_number`] is at least `from` and
+            /// at most `to`; a null row's answer is null.
+            pub(crate) fn block_numbers_within(
+                &self,
+                from: Option<u64>,
+                to: Option<u64>,
+            ) -> Result<BooleanArray, arrow::error::ArrowError> {
+                match self {
+                    // The column's bits read unsigned, without a copy.
+                    $(Self::$variant(a) => {
+                        let bits = arrow::buffer::ScalarBuffer::<$unsigned>::new(
+                            a.values().inner().clone(),
+                            0,
+                            a.len(),
+                        );
+                        let unsigned = PrimitiveArray::<<$unsigned as Unsigned>::Arrow>::new(
+                            bits,
+                            a.nulls().cloned(),
+                        );
+                        within(&unsigned, from, to)
+                    })+
                 }
             }
 

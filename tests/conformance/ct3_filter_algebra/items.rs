@@ -168,7 +168,7 @@ fn a_row_group_an_items_statistics_rule_out_holds_none_of_its_rows() {
 
             let mut everything = ScanRequest::new(vec!["name", "code", "flag", BN]);
             everything.positions = true;
-            let all = reader.scan_rows("items", &everything).unwrap().rows;
+            let all = reader.scan_rows("items", &everything).unwrap().into_rows();
             let all_positions = all.positions().unwrap();
 
             for _ in 0..40 {
@@ -217,7 +217,8 @@ fn a_row_group_an_items_statistics_rule_out_holds_none_of_its_rows() {
                     request.positions = true;
                     request.batch_size = batch_size;
 
-                    let returned = positions(&reader.scan_rows("items", &request).unwrap().rows);
+                    let returned =
+                        positions(&reader.scan_rows("items", &request).unwrap().into_rows());
                     assert_eq!(
                         returned, expected,
                         "chunk {chunk}, range {range:?}, batches of {batch_size}: {items:?}"

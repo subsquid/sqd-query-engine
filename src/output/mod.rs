@@ -5,6 +5,7 @@ pub(crate) mod columns;
 mod encoder;
 mod fork;
 mod materialize;
+mod row_order;
 mod row_writer;
 mod weight;
 mod writer;

@@ -1,3 +1,4 @@
+mod addresses;
 mod chunk;
 mod columns;
 mod pairs;
@@ -6,6 +7,7 @@ pub mod predicate;
 mod rows;
 mod scanner;
 
+pub use addresses::{AddressIndex, HierarchicalFilter, HierarchicalMode};
 pub use chunk::*;
 pub use columns::{ColumnCache, Window};
 pub use rows::{Rows, Scanned};
@@ -27,7 +29,7 @@ pub trait ChunkReader: Sync {
 
     /// The rows of [`ChunkReader::scan_rows`] alone.
     fn scan(&self, table: &str, request: &ScanRequest) -> Result<Vec<RecordBatch>> {
-        Ok(self.scan_rows(table, request)?.rows.into_batches())
+        Ok(self.scan_rows(table, request)?.into_rows().into_batches())
     }
 
     /// Whether scans can record physical row positions and read those

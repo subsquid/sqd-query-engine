@@ -19,6 +19,10 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use crate::harness::chunk::write_parquet;
+use crate::harness::evm_like;
+use arrow::datatypes::SchemaRef;
+use sqd_query_engine::output::execute_chunk;
+use sqd_query_engine::scan::{ChunkReader, ParquetChunkReader, ScanRequest, Scanned};
 
 fn evm() -> &'static DatasetDescription {
     static META: OnceLock<DatasetDescription> = OnceLock::new();
@@ -449,4 +453,63 @@ fn refuses_every_path(stated: &str, props: Option<parquet::file::properties::Wri
              on a chunk written {stated}: {err:#}"
         );
     }
+}
+
+/// A chunk reader that answers every scan without the item matches it was
+/// asked to report.
+struct Untagged(ParquetChunkReader);
+
+impl ChunkReader for Untagged {
+    fn scan_rows(&self, table: &str, request: &ScanRequest) -> anyhow::Result<Scanned> {
+        let mut blind = request.clone();
+        blind.item_tags.clear();
+        self.0.scan_rows(table, &blind)
+    }
+
+    fn supports_row_positions(&self) -> bool {
+        self.0.supports_row_positions()
+    }
+
+    fn has_table(&self, table: &str) -> bool {
+        self.0.has_table(table)
+    }
+
+    fn table_schema(&self, table: &str) -> Option<SchemaRef> {
+        self.0.table_schema(table)
+    }
+}
+
+/// A relation some of a table's items ask for follows the rows those items
+/// matched, which the reader reports. A reader that leaves them out fails the
+/// query, rather than taking the engine down or following other rows.
+///
+/// Covers CT-9 · INV-E1
+#[test]
+fn a_reader_that_leaves_out_item_matches_fails_the_query() {
+    let metadata = evm_like::catalog();
+    let chunk = evm_like::chunk();
+    let query = serde_json::json!({
+        "type": "test",
+        "fromBlock": 100,
+        "toBlock": 115,
+        "logs": [
+            {"address": [evm_like::address(0)], "transaction": true},
+            {"address": [evm_like::address(1)]}
+        ],
+        "fields": {"log": {"data": true}, "transaction": {"gasUsed": true}}
+    })
+    .to_string();
+    let plan = compile(
+        &parse_query(query.as_bytes(), &metadata).unwrap(),
+        &metadata,
+    )
+    .unwrap();
+    let reader = Untagged(ParquetChunkReader::open(chunk.path()).unwrap());
+
+    let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        execute_chunk(&plan, &metadata, &reader, false).map(|_| ())
+    }));
+
+    let answer = answer.expect("a reader's answer must not panic the engine");
+    assert!(answer.is_err(), "rows without their item matches answered");
 }

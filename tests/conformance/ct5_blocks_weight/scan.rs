@@ -82,14 +82,14 @@ fn physical_positions_survive_pruning_cascaded_filters_and_batches() {
         request.predicates = vec![&predicate];
         request.batch_size = batch_size;
         request.positions = true;
-        let selected = reader.scan_rows("items", &request).unwrap().rows;
+        let selected = reader.scan_rows("items", &request).unwrap().into_rows();
         assert_eq!(positions(&selected), [7, 11, 13]);
 
         let mut fetch = ScanRequest::new(vec!["payload"]);
         fetch.row_indices = Some(&[7, 13]);
         fetch.positions = true;
         fetch.batch_size = batch_size;
-        let fetched = reader.scan_rows("items", &fetch).unwrap().rows;
+        let fetched = reader.scan_rows("items", &fetch).unwrap().into_rows();
         let payloads: Vec<_> = fetched
             .batches()
             .iter()
@@ -312,7 +312,7 @@ fn hierarchical_positions_name_their_rows_after_the_block_range() {
         request.hierarchical_filter = Some(&children);
         request.positions = true;
         request.batch_size = batch_size;
-        let rows = reader.scan_rows("calls", &request).unwrap().rows;
+        let rows = reader.scan_rows("calls", &request).unwrap().into_rows();
 
         let blocks: Vec<u64> = rows
             .batches()
