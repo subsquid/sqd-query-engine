@@ -31,6 +31,11 @@ Compared against the reference implementation, as of 2026-10-07.
 | 50 | Several malformed chunk shapes are answered rather than refused | [INV-E3](07-invariants.md#inv-e3), [INV-E7](07-invariants.md#inv-e7) | **S4** |
 | 53 | A damaged chunk can panic the decoder, and the error kinds around it are coarse | [INV-E7](07-invariants.md#inv-e7) | **S4** |
 | 55 | A catalog key that changes the output is skipped by a release that predates it | [INV-X1](07-invariants.md#inv-x1) | **S4** |
+| 57 | A relation whose followed rows all have a null key reads its target's whole block span | — | **S4** |
+| 58 | Several listed items rebuild their union of values for every row group | — | **S4** |
+| 59 | The reader decodes filter columns a second time for the rows it returns | — | **S4** |
+| 60 | Output encoding and weighing repeat per row what could be done once per batch | — | **S4** |
+| 61 | Behaviours only a hand-made catalog reaches | [INV-O6](07-invariants.md#inv-o6) | **S4** |
 
 Every dataset [chapter 3](03-catalog.md) names is served except `fuel`, which is
 out of scope ([ADR-10](decisions/ADR-10-fuel-is-out-of-scope.md)). The only
@@ -305,6 +310,88 @@ answering differently.
 
 *First test:* parse a catalog carrying a must-understand key with a reader that
 does not know it, and assert the refusal.
+
+### 57. A relation whose followed rows all have a null key reads its target's whole block span
+
+When no followed row has a complete key, the key set is empty, and
+`relation_inputs` drops an empty key filter rather than pass it on. The target
+is then read with every output column over the block span of the source rows,
+and the fallback join keeps none of them. The bundled Substrate catalog reaches
+this: `events: [{"name": [...], "extrinsic": true}]` on events of the
+initialization or finalization phase, whose `extrinsic_index` is null. On a
+synthetic chunk of 100 blocks, `Session.NewSession` with `extrinsic: true`
+read 300 extrinsics without a key filter to answer none.
+
+An empty key set can also mean the key columns were not readable, and then the
+fallback join raises the error. So the fix has to tell "every key is null" from
+"no key could be read" before it skips the scan.
+
+*First test:* a chunk whose followed rows have only null keys, asserting the
+relation reads nothing from its target.
+
+### 58. Several listed items rebuild their union of values for every row group
+
+With two or more items, `every_item_stages` builds one list per column of
+every value an item lists there, so that the items run only on the rows it
+admits. It builds that list for each row group: `listed_union` concatenates
+the items' lists and `InListPredicate::new` copies them into a new hash set.
+The work does not depend on the rows. Two log items with 20 000 addresses each,
+over 10 surviving row groups, spent about 9 ms of a 22 ms query on it. No bench
+query has more than one item, so no bench sees it.
+
+*First test:* count the unions a scan builds, asserting one per distinct set of
+active items.
+
+### 59. The reader decodes filter columns a second time for the rows it returns
+
+The Parquet path projects the output columns together with the predicate, key,
+hierarchy and block-number columns. The row filter stages have already decoded
+the filter columns, so the reader decodes them again for every row it keeps,
+and `project_batch` then drops them. Under a `SelectionReader` the output is
+only the narrow key and weight set, so in a selection pass every filter column
+falls in this group. Projecting only the output and block-number columns gave
+the same responses and about 4% less time on log queries; traces and Solana
+did not move. The cached path does need every column, so the two paths need
+different projections.
+
+*First test:* the read snapshot of a selective log query, asserting the reader
+projection holds only output and block-number columns.
+
+### 60. Output encoding and weighing repeat per row what could be done once per batch
+
+- A trace row looks its variant up in a `HashMap<String, _>`, a SipHash of the
+  tag on every row. A linear scan of the few variants takes a quarter of the
+  time per lookup; the end-to-end share was not measured.
+- A struct value converts each member name to camel case on every value, an
+  allocation each, and resolves each member's encoder per value. Every bundled
+  struct column without `members:` takes this path, and no bench query selects
+  one.
+- `GenericListArray::value(row)` allocates an array per call. It runs per row in
+  the roll splice (Solana instruction `accounts` once `a15` is set) and in the
+  list encoder.
+- `get_weight_value` resolves its column's integer type on every row, in each
+  weighing loop.
+- `RowOrder` copies every fixed integer sort key to `i128`, 16 bytes per key
+  per row, and the response holds it until the last block is written.
+
+*First test:* Gungraun counts of `evm/all_traces` and a query selecting a
+struct column, before and after.
+
+### 61. Behaviours only a hand-made catalog reaches
+
+- Variant groups are written in alphabetical order, because the loader keeps
+  them in a `BTreeMap`. The test `variant_groups_keep_their_catalog_order` and
+  its comment claim declaration order; it passes only because `action` sorts
+  before `result`. A catalog that declares `result` first, or a `_` group, gets
+  another order than declared.
+- `HierarchicalSpec::of` picks inclusive matching when the source and target
+  address columns have different names, so two tables that both name it
+  `address` match strictly.
+- The fork check reads the parent hash only from a `StringArray`; a `LargeUtf8`
+  or `Utf8View` column is refused as `MalformedChunkData`.
+
+*First test:* a catalog declaring `result` before `action`, asserting the
+declared order or a refusal.
 
 ---
 
