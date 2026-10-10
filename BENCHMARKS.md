@@ -10,9 +10,9 @@ Solana: 48 blocks, ~27 MB. Jemalloc allocator, pre-cached ParquetTable. Chunk
 paths override via `$EVM_CHUNK` (small), `$EVM_CHUNK_BIG` (big), `$SOL_CHUNK`.
 
 The legacy engine (`sqd-query`) runs the **identical** query JSON on the
-**identical** chunk via `--features legacy-query`; the RPC outputs are verified
-byte-identical between engines (`cargo bench --bench profile --features
-legacy-query -- rpc/getLogs --compare`).
+**identical** chunk via `--features legacy-query`. Whether the two engines
+return the same response is checked by the fixture tests and the CT-7
+differential suite, not by the benches.
 
 ## Query catalog
 
@@ -381,7 +381,9 @@ cargo bench --bench latency --features legacy-query
 cargo bench --bench latency --features legacy-query -- evm_fullscan
 
 # Throughput (default CPU=8, --all for full sweep). With the feature, prints
-# New / Legacy / ratio columns.
+# New / Legacy / ratio columns. --format json|stream|arrow picks how the
+# response is consumed, --secs N the time per case. Legacy answers only JSON,
+# so its columns appear with --format json alone.
 cargo bench --bench throughput -- --all
 cargo bench --bench throughput --features legacy-query -- --all
 
@@ -391,10 +393,8 @@ cargo bench --bench profile -- "rpc/getLogs" 1 --profile
 # Profile the same query through the legacy engine
 cargo bench --bench profile --features legacy-query -- "rpc/getBlockReceipts" 1000 --legacy
 
-# Verify the new engine matches legacy byte-for-byte on a query
-cargo bench --bench profile --features legacy-query -- "rpc/getBlockByNumber" --compare
-
 # Memory: alloc/query + peak heap under concurrency (add --features legacy-query
-# for the legacy columns; --cpu N sets the concurrency, --filter <substr> scopes)
+# for the legacy columns; --cpu N sets the concurrency, --filter <substr> scopes,
+# --format as above)
 cargo bench --bench memory --features legacy-query -- --cpu 8
 ```

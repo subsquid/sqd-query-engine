@@ -13,18 +13,20 @@
 //!   - The mmap'd parquet data (new engine) is NOT counted (it's not heap); the
 //!     chunk is loaded during warmup so any one-time heap is excluded from the
 //!     per-run peak delta. So this measures per-query *working* memory.
-//!   - Build with `--features legacy-query` to get the legacy columns.
+//!   - Build with `--features legacy-query` to get the legacy columns; they
+//!     appear only with `--format json`, the one format legacy answers in.
 
 #[path = "../queries.rs"]
 mod queries;
+#[path = "../run.rs"]
+mod run;
 #[cfg(feature = "legacy-query")]
 #[path = "../legacy.rs"]
 mod legacy;
 
 use queries::*;
+use run::{compare_with_legacy, run_query, Format};
 use sqd_query_engine::metadata::load_dataset_description;
-use sqd_query_engine::output::execute_chunk;
-use sqd_query_engine::query::{compile, parse_query};
 use sqd_query_engine::scan::ParquetChunkReader;
 use std::alloc::{GlobalAlloc, Layout};
 use std::path::Path;
@@ -97,20 +99,6 @@ static SOLANA_META: LazyLock<sqd_query_engine::metadata::DatasetDescription> =
 static EVM_META: LazyLock<sqd_query_engine::metadata::DatasetDescription> =
     LazyLock::new(|| load_dataset_description(Path::new("metadata/evm.yaml")).unwrap());
 
-fn to_json_lines(blocks: Option<sqd_query_engine::output::QueryOutput>) -> Vec<u8> {
-    blocks.map(|b| b.into_json_lines()).unwrap_or_default()
-}
-
-fn run_new(
-    json: &[u8],
-    meta: &sqd_query_engine::metadata::DatasetDescription,
-    chunk: &ParquetChunkReader,
-) -> Vec<u8> {
-    let parsed = parse_query(json, meta).unwrap();
-    let plan = compile(&parsed, meta).unwrap();
-    to_json_lines(execute_chunk(&plan, meta, chunk, false).unwrap())
-}
-
 /// Bytes allocated per query (single-threaded). Allocation is deterministic per
 /// query, so a small iteration count gives a stable figure.
 fn alloc_per_query<F: Fn()>(run: F, iters: usize) -> u64 {
@@ -155,7 +143,8 @@ fn fmt_bytes(b: i64) -> String {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let legacy_enabled = cfg!(feature = "legacy-query");
+    let format = Format::from_args(&args);
+    let legacy_enabled = compare_with_legacy(format);
     let cpu: usize = args
         .iter()
         .position(|a| a == "--cpu")
@@ -192,7 +181,10 @@ fn main() {
     }
 
     println!();
-    println!("=== Memory: alloc/query (single-thread) + peak heap @ CPU={cpu} ===");
+    println!(
+        "=== Memory: alloc/query (single-thread) + peak heap @ CPU={cpu}, format {} ===",
+        format.name()
+    );
     println!("(requested heap bytes; mmap'd parquet not counted)");
     println!();
     if legacy_enabled {
@@ -220,7 +212,7 @@ fn main() {
         // New engine
         let new_chunk = ParquetChunkReader::open(Path::new(dir)).unwrap();
         let new_run = || {
-            std::hint::black_box(run_new(json, meta, &new_chunk));
+            std::hint::black_box(run_query(json, meta, &new_chunk, format));
         };
         new_run(); // warm (load chunk / caches)
         let new_aq = alloc_per_query(&new_run, iters);

@@ -51,7 +51,6 @@ fn main() {
     let profile_mode = args.iter().any(|a| a == "--profile");
     let size_mode = args.iter().any(|a| a == "--size");
     let use_legacy = args.iter().any(|a| a == "--legacy");
-    let compare_mode = args.iter().any(|a| a == "--compare");
 
     let all_queries: Vec<(&str, &[u8], &sqd_query_engine::metadata::DatasetDescription, &str)> = vec![
         ("evm/all_relations", EVM_ALL_RELATIONS, &EVM_META, EVM_CHUNK.as_str()),
@@ -92,11 +91,6 @@ fn main() {
     if !chunk_path.exists() {
         eprintln!("Chunk not found: {}", chunk_dir);
         std::process::exit(1);
-    }
-
-    if compare_mode {
-        compare_engines(name, query_json, meta, chunk_dir);
-        return;
     }
 
     if use_legacy {
@@ -172,74 +166,6 @@ fn run_legacy(name: &str, query_json: &[u8], chunk_dir: &str, iterations: usize,
 #[cfg(not(feature = "legacy-query"))]
 fn run_legacy(_name: &str, _query_json: &[u8], _chunk_dir: &str, _iterations: usize, _size_mode: bool) {
     eprintln!("--legacy requires building with --features legacy-query");
-    std::process::exit(1);
-}
-
-/// Run the query through both engines on the same chunk and assert that the
-/// decoded JSON is semantically identical (the legacy engine is the reference).
-/// Mirrors `generate_fixtures`: legacy emits JSON-lines, new emits a JSON array.
-#[cfg(feature = "legacy-query")]
-fn compare_engines(
-    name: &str,
-    query_json: &[u8],
-    meta: &sqd_query_engine::metadata::DatasetDescription,
-    chunk_dir: &str,
-) {
-    let new_chunk = ParquetChunkReader::open(Path::new(chunk_dir)).unwrap();
-    let new_bytes = run_query(query_json, meta, &new_chunk, false);
-    let new_blocks: Vec<serde_json::Value> = String::from_utf8(new_bytes)
-        .unwrap()
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|l| serde_json::from_str(l).unwrap())
-        .collect();
-    let new_val = serde_json::Value::Array(new_blocks);
-
-    let leg_chunk = legacy::open_chunk(Path::new(chunk_dir));
-    let leg_bytes = legacy::run_query(query_json, &leg_chunk);
-    let leg_blocks: Vec<serde_json::Value> = String::from_utf8(leg_bytes)
-        .unwrap()
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|l| serde_json::from_str(l).unwrap())
-        .collect();
-    let leg_val = serde_json::Value::Array(leg_blocks);
-
-    let new_blocks = new_val.as_array().map(|a| a.len()).unwrap_or(0);
-    let leg_n = leg_val.as_array().map(|a| a.len()).unwrap_or(0);
-    eprintln!("=== Compare {name}: new={new_blocks} blocks, legacy={leg_n} blocks ===");
-
-    if new_val == leg_val {
-        eprintln!("MATCH ✓  (new engine output is identical to legacy)");
-        return;
-    }
-
-    // Locate the first differing block to make the mismatch actionable.
-    if let (Some(a), Some(b)) = (new_val.as_array(), leg_val.as_array()) {
-        for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
-            if x != y {
-                let num = x.get("header").and_then(|h| h.get("number"));
-                eprintln!("MISMATCH ✗  first differing block at index {i} (number={num:?})");
-                let xs = serde_json::to_string(x).unwrap();
-                let ys = serde_json::to_string(y).unwrap();
-                eprintln!("  new   : {}", &xs[..xs.len().min(400)]);
-                eprintln!("  legacy: {}", &ys[..ys.len().min(400)]);
-                std::process::exit(1);
-            }
-        }
-    }
-    eprintln!("MISMATCH ✗  block counts differ (new={new_blocks}, legacy={leg_n})");
-    std::process::exit(1);
-}
-
-#[cfg(not(feature = "legacy-query"))]
-fn compare_engines(
-    _name: &str,
-    _query_json: &[u8],
-    _meta: &sqd_query_engine::metadata::DatasetDescription,
-    _chunk_dir: &str,
-) {
-    eprintln!("--compare requires building with --features legacy-query");
     std::process::exit(1);
 }
 
