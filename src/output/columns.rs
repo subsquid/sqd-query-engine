@@ -1,4 +1,4 @@
-use crate::metadata::{TableDescription, VirtualField, WeightSource};
+use crate::metadata::{TableDescription, WeightSource};
 use crate::query::TablePlan;
 use std::collections::HashSet;
 
@@ -19,14 +19,8 @@ pub(crate) fn physical_output_columns(
         }
     };
     for col in out_cols {
-        if let Some(VirtualField::Roll { columns }) =
-            table_desc.output.virtual_fields.get(col.as_str())
-        {
-            for c in columns {
-                push(c.clone(), &mut cols);
-            }
-        } else if let Some(phys) = table_desc.physical_output_column(col) {
-            push(phys.to_string(), &mut cols);
+        for c in table_desc.field_columns(col) {
+            push(c.to_string(), &mut cols);
         }
     }
     cols
@@ -57,20 +51,7 @@ pub(crate) fn resolve_output_columns(
 
     // Requested output columns
     for col in &table_plan.output_columns {
-        // Check if this is a virtual field
-        if let Some(vf) = table_desc.output.virtual_fields.get(col.as_str()) {
-            match vf {
-                VirtualField::Roll { columns } => {
-                    for c in columns {
-                        cols.insert(c.clone());
-                    }
-                }
-            }
-        } else if let Some(phys) = table_desc.physical_output_column(col) {
-            // A column, or a variant field that maps to a differently-named
-            // physical column (e.g. trace `call_call_type` → `call_type`).
-            cols.insert(phys.to_string());
-        }
+        cols.extend(table_desc.field_columns(col).map(str::to_string));
     }
 
     // Join key columns (needed for relations)
@@ -116,22 +97,11 @@ pub(crate) fn resolve_relation_output_columns(
     }
 
     for col in output_columns {
-        if let Some(desc) = table_desc {
-            if let Some(vf) = desc.output.virtual_fields.get(col.as_str()) {
-                match vf {
-                    VirtualField::Roll { columns } => {
-                        for c in columns {
-                            cols.insert(c.clone());
-                        }
-                    }
-                }
-            } else if let Some(phys) = desc.physical_output_column(col) {
-                cols.insert(phys.to_string());
-            } else {
+        match table_desc.and_then(|desc| desc.field_source(col)) {
+            Some(source) => cols.extend(source.columns().map(str::to_string)),
+            None => {
                 cols.insert(col.clone());
             }
-        } else {
-            cols.insert(col.clone());
         }
     }
 
@@ -185,17 +155,8 @@ pub(crate) fn required_output_columns(
     };
 
     for col in output_columns {
-        if let Some(VirtualField::Roll { columns }) =
-            table_desc.output.virtual_fields.get(col.as_str())
-        {
-            for source in columns {
-                require(source, &mut cols);
-            }
-            continue;
-        }
-        // Resolve variant fields (e.g. `call_call_type` → `call_type`).
-        if let Some(phys) = table_desc.physical_output_column(col) {
-            require(phys, &mut cols);
+        for source in table_desc.field_columns(col) {
+            require(source, &mut cols);
         }
     }
     cols

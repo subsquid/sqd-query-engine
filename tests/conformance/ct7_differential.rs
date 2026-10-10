@@ -13,7 +13,7 @@
 //! ```
 
 use sqd_query_engine::metadata::{
-    load_dataset_description, DatasetDescription, TableDescription, VirtualField, WeightSource,
+    load_dataset_description, DatasetDescription, TableDescription, WeightSource,
 };
 use sqd_query_engine::output::{execute_chunk_with, execute_plan, ExecOptions};
 use sqd_query_engine::query::{compile, parse_query};
@@ -459,7 +459,7 @@ fn stored_fields(table: &TableDescription, name: &str, chunk: &Path) -> Vec<Stri
         .map(|field| field.name().to_string())
         .collect();
 
-    let is_stored = |column: &String| {
+    let is_stored = |column: &str| {
         let size = match table.column(column).and_then(|c| c.weight.as_ref()) {
             Some(WeightSource::Column(size)) => Some(size),
             _ => None,
@@ -472,14 +472,8 @@ fn stored_fields(table: &TableDescription, name: &str, chunk: &Path) -> Vec<Stri
         .fields
         .iter()
         .filter(|field| {
-            let columns = match table.output.virtual_fields.get(field.as_str()) {
-                Some(VirtualField::Roll { columns }) => columns.clone(),
-                None => table
-                    .physical_output_column(field)
-                    .map(|column| vec![column.to_string()])
-                    .unwrap_or_default(),
-            };
-            !columns.is_empty() && columns.iter().all(is_stored)
+            let mut columns = table.field_columns(field).peekable();
+            columns.peek().is_some() && columns.all(is_stored)
         })
         .cloned()
         .collect()
