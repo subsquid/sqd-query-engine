@@ -1,0 +1,46 @@
+---
+source: tests/reads.rs
+expression: snapshot.trim_end()
+---
+## json
+response 22562400..22562475 n=76 read_through=22562479
+read blocks blocks=-..- cols=[number] block_column=number at=76:9b43e66a72eef3b8 -> rows=76
+read blocks blocks=0..- cols=[number] block_column=number required=[number] positions -> rows=1592
+read logs blocks=-..- cols=[address,block_number,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] block_column=block_number at=33946:2e267ba81e3590aa -> rows=33946
+read logs blocks=0..22562415 cols=[block_number,data_size,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3] items=[] positions window=0..22562415 -> rows=6902
+read logs blocks=22562416..22562431 cols=[block_number,data_size,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3] items=[] positions window=22562416..22562431 -> rows=8048
+read logs blocks=22562432..22562447 cols=[block_number,data_size,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3] items=[] positions window=22562432..22562447 -> rows=6668
+read logs blocks=22562448..22562463 cols=[block_number,data_size,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3] items=[] positions window=22562448..22562463 -> rows=7318
+read logs blocks=22562464..22562479 cols=[block_number,data_size,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3] items=[] positions window=22562464..22562479 -> rows=6978
+read transactions blocks=-..- cols=[block_number,hash,input,input_size,transaction_index] block_column=block_number at=8100:e5db3426bd7ab41f -> rows=8100
+read transactions blocks=22562400..22562415 cols=[block_number,input_size,transaction_index] block_column=block_number required=[hash,input,input_size,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=0..22562415 -> rows=1719
+read transactions blocks=22562416..22562431 cols=[block_number,input_size,transaction_index] block_column=block_number required=[hash,input,input_size,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=22562416..22562431 -> rows=1800
+read transactions blocks=22562432..22562447 cols=[block_number,input_size,transaction_index] block_column=block_number required=[hash,input,input_size,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=22562432..22562447 -> rows=1704
+read transactions blocks=22562448..22562463 cols=[block_number,input_size,transaction_index] block_column=block_number required=[hash,input,input_size,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=22562448..22562463 -> rows=1748
+read transactions blocks=22562464..22562479 cols=[block_number,input_size,transaction_index] block_column=block_number required=[hash,input,input_size,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=22562464..22562479 -> rows=1614
+
+## json, page 256 KiB
+response 22562400..22562400 n=1 read_through=22562415
+read blocks blocks=-..- cols=[number] block_column=number at=1:c77b3abb6f87acd9 -> rows=1
+read blocks blocks=0..- cols=[number] block_column=number required=[number] positions -> rows=1592
+read logs blocks=-..- cols=[address,block_number,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] block_column=block_number at=177:e453ddb86b6f0a36 -> rows=177
+read logs blocks=0..22562415 cols=[block_number,data_size,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3] items=[] positions window=0..22562415 -> rows=6902
+read transactions blocks=-..- cols=[block_number,hash,input,input_size,transaction_index] block_column=block_number at=49:12de3219cc0b422d -> rows=49
+read transactions blocks=22562400..22562415 cols=[block_number,input_size,transaction_index] block_column=block_number required=[hash,input,input_size,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=0..22562415 -> rows=1719
+
+## arrow
+response 22562400..22562475 n=76
+read blocks blocks=-..- cols=[number] block_column=number at=76:9b43e66a72eef3b8 -> rows=76
+read blocks blocks=0..- cols=[number] block_column=number required=[number] positions -> rows=1592
+read logs blocks=-..- cols=[address,block_number,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] block_column=block_number at=33946:2e267ba81e3590aa -> rows=33946
+read logs blocks=0..22562415 cols=[block_number,data_size,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3] items=[] positions window=0..22562415 -> rows=6902
+read logs blocks=22562416..22562431 cols=[block_number,data_size,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3] items=[] positions window=22562416..22562431 -> rows=8048
+read logs blocks=22562432..22562447 cols=[block_number,data_size,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3] items=[] positions window=22562432..22562447 -> rows=6668
+read logs blocks=22562448..22562463 cols=[block_number,data_size,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3] items=[] positions window=22562448..22562463 -> rows=7318
+read logs blocks=22562464..22562479 cols=[block_number,data_size,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3] items=[] positions window=22562464..22562479 -> rows=6978
+read transactions blocks=-..- cols=[block_number,hash,input,input_size,transaction_index] block_column=block_number at=8100:e5db3426bd7ab41f -> rows=8100
+read transactions blocks=22562400..22562415 cols=[block_number,input_size,transaction_index] block_column=block_number required=[hash,input,input_size,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=0..22562415 -> rows=1719
+read transactions blocks=22562416..22562431 cols=[block_number,input_size,transaction_index] block_column=block_number required=[hash,input,input_size,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=22562416..22562431 -> rows=1800
+read transactions blocks=22562432..22562447 cols=[block_number,input_size,transaction_index] block_column=block_number required=[hash,input,input_size,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=22562432..22562447 -> rows=1704
+read transactions blocks=22562448..22562463 cols=[block_number,input_size,transaction_index] block_column=block_number required=[hash,input,input_size,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=22562448..22562463 -> rows=1748
+read transactions blocks=22562464..22562479 cols=[block_number,input_size,transaction_index] block_column=block_number required=[hash,input,input_size,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=22562464..22562479 -> rows=1614

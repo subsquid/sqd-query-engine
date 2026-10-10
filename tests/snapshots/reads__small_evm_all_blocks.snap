@@ -1,0 +1,18 @@
+---
+source: tests/reads.rs
+expression: snapshot.trim_end()
+---
+## json
+response 24550597..24550820 n=224 read_through=-
+read blocks blocks=-..- cols=[gas_limit,gas_used,hash,miner,number,parent_hash,timestamp] block_column=number at=224:bb0ef37fd8c89387 -> rows=224
+read blocks blocks=0..- cols=[number] block_column=number required=[gas_limit,gas_used,hash,miner,number,parent_hash,timestamp] positions -> rows=224
+
+## json, page 256 KiB
+response 24550597..24550820 n=224 read_through=-
+read blocks blocks=-..- cols=[gas_limit,gas_used,hash,miner,number,parent_hash,timestamp] block_column=number at=224:bb0ef37fd8c89387 -> rows=224
+read blocks blocks=0..- cols=[number] block_column=number required=[gas_limit,gas_used,hash,miner,number,parent_hash,timestamp] positions -> rows=224
+
+## arrow
+response 24550597..24550820 n=224
+read blocks blocks=-..- cols=[gas_limit,gas_used,hash,miner,number,parent_hash,timestamp] block_column=number at=224:bb0ef37fd8c89387 -> rows=224
+read blocks blocks=0..- cols=[number] block_column=number required=[gas_limit,gas_used,hash,miner,number,parent_hash,timestamp] positions -> rows=224

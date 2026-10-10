@@ -1,0 +1,36 @@
+---
+source: tests/reads.rs
+expression: snapshot.trim_end()
+---
+## json
+response 406021645..406021692 n=48 read_through=-
+read blocks blocks=-..- cols=[hash,number,timestamp] block_column=number at=48:3c494ad057935bf5 -> rows=48
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,number,timestamp] positions -> rows=48
+read instructions blocks=-..- cols=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,block_number,data,data_size,instruction_address,program_id,rest_accounts,transaction_index] block_column=block_number at=8037:a294f4980cc692e1 -> rows=8037
+read instructions blocks=0..- cols=[accounts_size,block_number,data_size,instruction_address,transaction_index] block_column=block_number required=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,data,data_size,instruction_address,program_id,rest_accounts] items=[program_id in(Utf8: "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4")] positions window=0..- -> rows=8037
+read logs blocks=-..- cols=[block_number,instruction_address,kind,log_index,message,message_size,transaction_index] block_column=block_number at=4690:0193dd94766918e2 -> rows=4690
+read logs blocks=406021645..406021692 cols=[block_number,instruction_address,message_size,transaction_index] block_column=block_number required=[instruction_address,kind,log_index,message,message_size,transaction_index] keys=[block_number,transaction_index,instruction_address] block=block_number as pair paths positions window=0..- -> rows=4690
+read transactions blocks=-..- cols=[block_number,err,signatures,signatures_size,transaction_index] block_column=block_number at=2062:7123b2ac4c61f42e -> rows=2062
+read transactions blocks=406021645..406021692 cols=[block_number,signatures_size,transaction_index] block_column=block_number required=[err,signatures,signatures_size,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=0..- -> rows=2062
+
+## json, page 256 KiB
+response 406021645..406021649 n=5 read_through=-
+read blocks blocks=-..- cols=[hash,number,timestamp] block_column=number at=5:4393f8e7c137d5fb -> rows=5
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,number,timestamp] positions -> rows=48
+read instructions blocks=-..- cols=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,block_number,data,data_size,instruction_address,program_id,rest_accounts,transaction_index] block_column=block_number at=244:b382ca0de7c6a1a0 -> rows=244
+read instructions blocks=0..- cols=[accounts_size,block_number,data_size,instruction_address,transaction_index] block_column=block_number required=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,data,data_size,instruction_address,program_id,rest_accounts] items=[program_id in(Utf8: "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4")] positions window=0..- -> rows=8037
+read logs blocks=-..- cols=[block_number,instruction_address,kind,log_index,message,message_size,transaction_index] block_column=block_number at=180:d6dad6b6386d8f09 -> rows=180
+read logs blocks=406021645..406021692 cols=[block_number,instruction_address,message_size,transaction_index] block_column=block_number required=[instruction_address,kind,log_index,message,message_size,transaction_index] keys=[block_number,transaction_index,instruction_address] block=block_number as pair paths positions window=0..- -> rows=4690
+read transactions blocks=-..- cols=[block_number,err,signatures,signatures_size,transaction_index] block_column=block_number at=58:b471f218f691b223 -> rows=58
+read transactions blocks=406021645..406021692 cols=[block_number,signatures_size,transaction_index] block_column=block_number required=[err,signatures,signatures_size,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=0..- -> rows=2062
+
+## arrow
+response 406021645..406021692 n=48
+read blocks blocks=-..- cols=[hash,number,timestamp] block_column=number at=48:3c494ad057935bf5 -> rows=48
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,number,timestamp] positions -> rows=48
+read instructions blocks=-..- cols=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,block_number,data,data_size,instruction_address,program_id,rest_accounts,transaction_index] block_column=block_number at=8037:a294f4980cc692e1 -> rows=8037
+read instructions blocks=0..- cols=[accounts_size,block_number,data_size,instruction_address,transaction_index] block_column=block_number required=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,data,data_size,instruction_address,program_id,rest_accounts] items=[program_id in(Utf8: "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4")] positions window=0..- -> rows=8037
+read logs blocks=-..- cols=[block_number,instruction_address,kind,log_index,message,message_size,transaction_index] block_column=block_number at=4690:0193dd94766918e2 -> rows=4690
+read logs blocks=406021645..406021692 cols=[block_number,instruction_address,message_size,transaction_index] block_column=block_number required=[instruction_address,kind,log_index,message,message_size,transaction_index] keys=[block_number,transaction_index,instruction_address] block=block_number as pair paths positions window=0..- -> rows=4690
+read transactions blocks=-..- cols=[block_number,err,signatures,signatures_size,transaction_index] block_column=block_number at=2062:7123b2ac4c61f42e -> rows=2062
+read transactions blocks=406021645..406021692 cols=[block_number,signatures_size,transaction_index] block_column=block_number required=[err,signatures,signatures_size,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=0..- -> rows=2062

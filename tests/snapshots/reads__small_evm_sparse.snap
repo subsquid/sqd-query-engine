@@ -1,0 +1,21 @@
+---
+source: tests/reads.rs
+expression: snapshot.trim_end()
+---
+## json
+response 24550597..24550820 n=2 read_through=-
+read blocks blocks=-..- cols=[hash,number,timestamp] block_column=number at=2:1183ac3496a3487c -> rows=2
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,number,timestamp] positions -> rows=224
+read logs blocks=0..- cols=[block_number,data_size] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(Utf8: "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")] positions window=0..- -> rows=0
+
+## json, page 256 KiB
+response 24550597..24550820 n=2 read_through=-
+read blocks blocks=-..- cols=[hash,number,timestamp] block_column=number at=2:1183ac3496a3487c -> rows=2
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,number,timestamp] positions -> rows=224
+read logs blocks=0..- cols=[block_number,data_size] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(Utf8: "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")] positions window=0..- -> rows=0
+
+## arrow
+response 24550597..24550820 n=2
+read blocks blocks=-..- cols=[hash,number,timestamp] block_column=number at=2:1183ac3496a3487c -> rows=2
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,number,timestamp] positions -> rows=224
+read logs blocks=0..- cols=[block_number,data_size] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(Utf8: "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")] positions window=0..- -> rows=0

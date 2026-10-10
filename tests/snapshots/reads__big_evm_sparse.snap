@@ -1,0 +1,24 @@
+---
+source: tests/reads.rs
+expression: snapshot.trim_end()
+---
+## json
+response 22562400..22563991 n=2 read_through=-
+read blocks blocks=-..- cols=[hash,number,timestamp] block_column=number at=2:4809e1b4f577a101 -> rows=2
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,number,timestamp] positions -> rows=1592
+read logs blocks=0..22563423 cols=[block_number,data_size] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(Utf8: "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")] positions window=0..22563423 -> rows=0
+read logs blocks=22563424..- cols=[block_number,data_size] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(Utf8: "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")] positions window=22563424..- -> rows=0
+
+## json, page 256 KiB
+response 22562400..22563991 n=2 read_through=-
+read blocks blocks=-..- cols=[hash,number,timestamp] block_column=number at=2:4809e1b4f577a101 -> rows=2
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,number,timestamp] positions -> rows=1592
+read logs blocks=0..22563423 cols=[block_number,data_size] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(Utf8: "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")] positions window=0..22563423 -> rows=0
+read logs blocks=22563424..- cols=[block_number,data_size] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(Utf8: "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")] positions window=22563424..- -> rows=0
+
+## arrow
+response 22562400..22563991 n=2
+read blocks blocks=-..- cols=[hash,number,timestamp] block_column=number at=2:4809e1b4f577a101 -> rows=2
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,number,timestamp] positions -> rows=1592
+read logs blocks=0..22563423 cols=[block_number,data_size] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(Utf8: "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")] positions window=0..22563423 -> rows=0
+read logs blocks=22563424..- cols=[block_number,data_size] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(Utf8: "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")] positions window=22563424..- -> rows=0

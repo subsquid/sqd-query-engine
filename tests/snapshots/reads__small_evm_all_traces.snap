@@ -1,0 +1,21 @@
+---
+source: tests/reads.rs
+expression: snapshot.trim_end()
+---
+## json
+response 24550597..24550612 n=16 read_through=24550613
+read blocks blocks=0..- cols=[number] block_column=number required=[number] -> rows=224
+read traces blocks=0..- cols=[block_number,call_input_size] block_column=block_number items=[] -> rows=471830
+read traces blocks=0..24550613 cols=[block_number,call_from,call_input,call_input_size,call_to,call_value,trace_address,transaction_index,type] block_column=block_number required=[call_from,call_input,call_input_size,call_to,call_value,trace_address,transaction_index,type] items=[] window=0..24550613 -> rows=37014
+
+## json, page 256 KiB
+response 24550597..24550597 n=1 read_through=24550597
+read blocks blocks=0..- cols=[number] block_column=number required=[number] -> rows=224
+read traces blocks=0..- cols=[block_number,call_input_size] block_column=block_number items=[] -> rows=471830
+read traces blocks=0..24550597 cols=[block_number,call_from,call_input,call_input_size,call_to,call_value,trace_address,transaction_index,type] block_column=block_number required=[call_from,call_input,call_input_size,call_to,call_value,trace_address,transaction_index,type] items=[] window=0..24550597 -> rows=2277
+
+## arrow
+response 24550597..24550612 n=16
+read blocks blocks=0..- cols=[number] block_column=number required=[number] -> rows=224
+read traces blocks=0..- cols=[block_number,call_input_size] block_column=block_number items=[] -> rows=471830
+read traces blocks=0..24550613 cols=[block_number,call_from,call_input,call_input_size,call_to,call_value,trace_address,transaction_index,type] block_column=block_number required=[call_from,call_input,call_input_size,call_to,call_value,trace_address,transaction_index,type] items=[] window=0..24550613 -> rows=37014

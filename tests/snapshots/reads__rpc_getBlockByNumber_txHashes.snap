@@ -1,0 +1,18 @@
+---
+source: tests/reads.rs
+expression: snapshot.trim_end()
+---
+## json
+response 24550620..24550620 n=1 read_through=-
+read blocks blocks=24550620..24550620 cols=[base_fee_per_gas,difficulty,extra_data,extra_data_size,gas_limit,gas_used,hash,logs_bloom,miner,mix_hash,nonce,number,parent_hash,receipts_root,sha3_uncles,size,state_root,timestamp,total_difficulty,transactions_root] block_column=number required=[base_fee_per_gas,difficulty,extra_data,extra_data_size,gas_limit,gas_used,hash,logs_bloom,miner,mix_hash,nonce,number,parent_hash,receipts_root,sha3_uncles,size,state_root,timestamp,total_difficulty,transactions_root] -> rows=1
+read transactions blocks=24550620..24550620 cols=[block_number,hash,transaction_index] block_column=block_number required=[hash,transaction_index] items=[] window=24550620..24550620 -> rows=307
+
+## json, page 256 KiB
+response 24550620..24550620 n=1 read_through=-
+read blocks blocks=24550620..24550620 cols=[base_fee_per_gas,difficulty,extra_data,extra_data_size,gas_limit,gas_used,hash,logs_bloom,miner,mix_hash,nonce,number,parent_hash,receipts_root,sha3_uncles,size,state_root,timestamp,total_difficulty,transactions_root] block_column=number required=[base_fee_per_gas,difficulty,extra_data,extra_data_size,gas_limit,gas_used,hash,logs_bloom,miner,mix_hash,nonce,number,parent_hash,receipts_root,sha3_uncles,size,state_root,timestamp,total_difficulty,transactions_root] -> rows=1
+read transactions blocks=24550620..24550620 cols=[block_number,hash,transaction_index] block_column=block_number required=[hash,transaction_index] items=[] window=24550620..24550620 -> rows=307
+
+## arrow
+response 24550620..24550620 n=1
+read blocks blocks=24550620..24550620 cols=[base_fee_per_gas,difficulty,extra_data,extra_data_size,gas_limit,gas_used,hash,logs_bloom,miner,mix_hash,nonce,number,parent_hash,receipts_root,sha3_uncles,size,state_root,timestamp,total_difficulty,transactions_root] block_column=number required=[base_fee_per_gas,difficulty,extra_data,extra_data_size,gas_limit,gas_used,hash,logs_bloom,miner,mix_hash,nonce,number,parent_hash,receipts_root,sha3_uncles,size,state_root,timestamp,total_difficulty,transactions_root] -> rows=1
+read transactions blocks=24550620..24550620 cols=[block_number,hash,transaction_index] block_column=block_number required=[hash,transaction_index] items=[] window=24550620..24550620 -> rows=307

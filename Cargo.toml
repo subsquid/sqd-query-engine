@@ -62,6 +62,7 @@ rayon = "1"
 tempfile = "3"
 proptest = "1"
 zstd = "0.13"
+insta = "1"
 
 [[bench]]
 name = "latency"

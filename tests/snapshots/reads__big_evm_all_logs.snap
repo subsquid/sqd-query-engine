@@ -1,0 +1,21 @@
+---
+source: tests/reads.rs
+expression: snapshot.trim_end()
+---
+## json
+response 22562400..22562512 n=113 read_through=22562513
+read blocks blocks=0..- cols=[number] block_column=number required=[number] -> rows=1592
+read logs blocks=0..- cols=[block_number,data_size] block_column=block_number items=[] -> rows=769829
+read logs blocks=0..22562513 cols=[address,block_number,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[] window=0..22562513 -> rows=51264
+
+## json, page 256 KiB
+response 22562400..22562401 n=2 read_through=22562402
+read blocks blocks=0..- cols=[number] block_column=number required=[number] -> rows=1592
+read logs blocks=0..- cols=[block_number,data_size] block_column=block_number items=[] -> rows=769829
+read logs blocks=0..22562402 cols=[address,block_number,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[] window=0..22562402 -> rows=1039
+
+## arrow
+response 22562400..22562512 n=113
+read blocks blocks=0..- cols=[number] block_column=number required=[number] -> rows=1592
+read logs blocks=0..- cols=[block_number,data_size] block_column=block_number items=[] -> rows=769829
+read logs blocks=0..22562513 cols=[address,block_number,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[] window=0..22562513 -> rows=51264

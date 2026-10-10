@@ -147,6 +147,28 @@ impl KeyFilter {
         self.key_set.is_empty()
     }
 
+    /// The key columns, the block column, how the keys are held and whether the
+    /// block check runs first, as text that is the same in every run, for
+    /// diagnostics. The keys themselves are the rows of the scan they came from.
+    pub fn describe(&self) -> String {
+        let held = match self.key_set.as_ref() {
+            CompositeKeySet::Fixed16(_) => "pairs",
+            CompositeKeySet::PairPath(_) => "pair paths",
+            CompositeKeySet::Wide(_) => "bytes",
+            CompositeKeySet::Rows { .. } => "rows",
+        };
+        let order = if self.materialization {
+            ", block first"
+        } else {
+            ""
+        };
+        format!(
+            "[{}] block={} as {held}{order}",
+            self.columns.join(","),
+            self.block_number_column
+        )
+    }
+
     /// The target table's block-number column.
     pub(super) fn block_column(&self) -> &str {
         &self.block_number_column
@@ -464,5 +486,45 @@ mod tests {
                 assert_eq!(filter.has_block_within(min, max), expected, "{min}..={max}");
             }
         }
+    }
+
+    /// Diagnostics tell apart key filters that differ in their block column, in
+    /// how they hold the keys or in whether the block check runs first.
+    #[test]
+    fn describe_names_the_columns_the_block_column_and_the_key_form() {
+        let batch = RecordBatch::try_from_iter([
+            (
+                "number",
+                Arc::new(UInt64Array::from(vec![7, 8])) as ArrayRef,
+            ),
+            ("index", Arc::new(UInt32Array::from(vec![0, 1])) as ArrayRef),
+            (
+                "name",
+                Arc::new(arrow::array::StringArray::from(vec!["a", "b"])) as ArrayRef,
+            ),
+        ])
+        .unwrap();
+        let pair = ["number", "index"];
+        let named = ["number", "name"];
+        let build = |keys: &[&str], block: &str| {
+            KeyFilter::build(std::slice::from_ref(&batch), keys, keys, "number", block).describe()
+        };
+
+        assert_eq!(
+            build(&pair, "number"),
+            "[number,index] block=number as pairs"
+        );
+        assert_eq!(build(&pair, "block"), "[number,index] block=block as pairs");
+        assert_eq!(
+            build(&named, "number"),
+            "[number,name] block=number as bytes"
+        );
+
+        let columns: Vec<String> = pair.iter().map(|c| c.to_string()).collect();
+        let rows = KeyFilter::for_rows(std::slice::from_ref(&batch), &columns, "number").unwrap();
+        assert_eq!(
+            rows.describe(),
+            "[number,index] block=number as pairs, block first"
+        );
     }
 }
