@@ -1,0 +1,9 @@
+---
+source: tests/cases.rs
+---
+blocks: 8 (24550597 to 24550604)
+logs: 4491
+stateDiffs: 14485
+traces: 16746
+transactions: 2179
+digest: 66c1b05c4906475899868a8ac4e94865

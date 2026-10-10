@@ -1,0 +1,51 @@
+{
+  "type": "evm",
+  "fromBlock": 24550620,
+  "toBlock": 24550620,
+  "includeAllBlocks": true,
+  "fields": {
+    "block": {
+      "number": true,
+      "hash": true,
+      "parentHash": true,
+      "timestamp": true,
+      "gasUsed": true,
+      "gasLimit": true,
+      "baseFeePerGas": true,
+      "miner": true,
+      "size": true,
+      "stateRoot": true,
+      "transactionsRoot": true,
+      "receiptsRoot": true,
+      "logsBloom": true,
+      "difficulty": true,
+      "totalDifficulty": true,
+      "extraData": true,
+      "mixHash": true,
+      "nonce": true,
+      "sha3Uncles": true
+    },
+    "transaction": {
+      "transactionIndex": true,
+      "hash": true,
+      "nonce": true,
+      "from": true,
+      "to": true,
+      "value": true,
+      "gas": true,
+      "gasPrice": true,
+      "maxFeePerGas": true,
+      "maxPriorityFeePerGas": true,
+      "input": true,
+      "type": true,
+      "v": true,
+      "r": true,
+      "s": true,
+      "yParity": true,
+      "chainId": true
+    }
+  },
+  "transactions": [
+    {}
+  ]
+}

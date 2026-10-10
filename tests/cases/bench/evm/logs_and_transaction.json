@@ -1,0 +1,25 @@
+{
+  "type": "evm",
+  "fromBlock": 0,
+  "fields": {
+    "block": {
+      "number": true
+    },
+    "log": {
+      "logIndex": true,
+      "address": true,
+      "topics": true,
+      "data": true
+    },
+    "transaction": {
+      "transactionIndex": true,
+      "hash": true,
+      "input": true
+    }
+  },
+  "logs": [
+    {
+      "transaction": true
+    }
+  ]
+}

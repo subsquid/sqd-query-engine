@@ -8,6 +8,8 @@
 pub mod arrow;
 pub mod chunk;
 pub mod columnar;
+#[cfg(feature = "legacy-query")]
+pub mod engines;
 pub mod evm_like;
 pub mod fixtures;
 pub mod generator;
