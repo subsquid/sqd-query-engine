@@ -175,8 +175,10 @@ main!(
                 .format([EventKind::Ir])
                 .soft_limits([(EventKind::Ir, 3.0)])
         )
+        // Only allocations whose stack reaches the bench function are counted,
+        // and Valgrind keeps 12 frames by default: a deeper one would drop out.
         .tool(
-            Dhat::default()
+            Dhat::with_args(["--num-callers=500"])
                 .format([
                     DhatMetric::TotalBytes,
                     DhatMetric::TotalBlocks,
