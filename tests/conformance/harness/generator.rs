@@ -27,7 +27,9 @@ use arrow::array::{
 use arrow::compute::cast;
 use arrow::datatypes::DataType;
 use serde_json::{Map, Value};
-use sqd_query_engine::metadata::{DatasetDescription, SpecialFilter, TableDescription};
+use sqd_query_engine::metadata::{
+    DatasetDescription, FieldSource, SpecialFilter, TableDescription,
+};
 use sqd_query_engine::output::snake_to_camel;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -456,15 +458,15 @@ fn block_range(catalog: &DatasetDescription, chunk: &Path) -> (u64, u64) {
 /// A catalog names every field the dataset can have; a chunk carries the ones its
 /// archiver version wrote, and selecting one it does not is an error (INV-E3). So
 /// the projection is the intersection — which is also what keeps it the same on
-/// both sides of a law.
+/// both sides of a law. Only fields that read one column are generated.
 fn projection(table: &TableDescription, columns: &[String]) -> Map<String, Value> {
     table
         .output
         .fields
         .iter()
-        .filter(|field| {
-            let backing = table.physical_output_column(field).unwrap_or(field);
-            columns.iter().any(|c| c == backing)
+        .filter(|field| match table.field_source(field) {
+            Some(FieldSource::Column(column)) => columns.iter().any(|c| c == column),
+            Some(FieldSource::Roll(_)) | None => false,
         })
         .map(|field| (snake_to_camel(field), Value::Bool(true)))
         .collect()

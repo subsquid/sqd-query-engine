@@ -1,5 +1,5 @@
 use crate::integers::{BlockNumbers, IntColumn};
-use crate::metadata::{DatasetDescription, TableDescription, VirtualField, WeightSource};
+use crate::metadata::{DatasetDescription, TableDescription, WeightSource};
 use crate::query::Plan;
 use crate::scan::Rows;
 use crate::text::StringColumn;
@@ -292,9 +292,11 @@ pub(crate) fn row_weight(
     compute_weight_params(&columns, table_desc)
 }
 
-/// Compute fixed weight per row and list of weight columns for weight limiting.
+/// Fixed weight per row and the size columns that add the rest, for a set of
+/// physical columns. The names are columns, never fields: reading one as a field
+/// again charges a key column as whatever field shares its name.
 fn compute_weight_params(
-    output_columns: &[String],
+    columns: &[String],
     table_desc: Option<&TableDescription>,
 ) -> (u64, Vec<String>) {
     let desc = match table_desc {
@@ -302,24 +304,7 @@ fn compute_weight_params(
         None => return (DEFAULT_ROW_WEIGHT, Vec::new()),
     };
 
-    let mut projected: HashSet<&str> = HashSet::new();
-    for col_name in output_columns {
-        if let Some(vf) = desc.output.virtual_fields.get(col_name.as_str()) {
-            match vf {
-                VirtualField::Roll { columns } => {
-                    for c in columns {
-                        projected.insert(c.as_str());
-                    }
-                }
-            }
-        } else if let Some(phys) = desc.physical_output_column(col_name) {
-            // A variant field names its column indirectly
-            // (`call_call_type` → `call_type`). Missing that resolution here
-            // while `required_output_columns` makes it gives the row a weight of
-            // zero, so it is emitted and never counted (INV-B10).
-            projected.insert(phys);
-        }
-    }
+    let projected: HashSet<&str> = columns.iter().map(String::as_str).collect();
 
     let mut fixed_weight: u64 = 0;
     let mut weight_cols = Vec::new();
@@ -590,19 +575,9 @@ fn weight_projection(
         cols.insert(key.to_string());
     }
 
-    // 2. User-requested output columns (with virtual field expansion)
-    for col_name in user_output_columns {
-        if let Some(vf) = desc.output.virtual_fields.get(col_name.as_str()) {
-            match vf {
-                VirtualField::Roll { columns } => {
-                    for c in columns {
-                        cols.insert(c.clone());
-                    }
-                }
-            }
-        } else if let Some(phys) = desc.physical_output_column(col_name) {
-            cols.insert(phys.to_string());
-        }
+    // 2. The columns behind every selected field.
+    for field in user_output_columns {
+        cols.extend(desc.field_columns(field).map(str::to_string));
     }
 
     cols.into_iter().collect()
@@ -637,7 +612,7 @@ fn hash_array_value(col: &dyn arrow::array::Array, row: usize, hasher: &mut impl
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metadata::parse_dataset_description;
+    use crate::metadata::{parse_dataset_description, VirtualField};
     use crate::output::columns::resolve_output_columns;
 
     /// Two rows the key hash cannot tell apart are still two rows.
@@ -815,10 +790,15 @@ mod tests {
         parse_dataset_description(&yaml).unwrap()
     }
 
-    /// Helper: compute weight from a set of column names using compute_weight_params.
-    fn weight_for(cols: &[&str], table_desc: Option<&TableDescription>) -> (u64, Vec<String>) {
-        let col_strings: Vec<String> = cols.iter().map(|s| s.to_string()).collect();
-        compute_weight_params(&col_strings, table_desc)
+    /// Helper: what `fields` weigh without the weight key.
+    fn weight_for(fields: &[&str], table_desc: Option<&TableDescription>) -> (u64, Vec<String>) {
+        let desc = table_desc.unwrap();
+        let columns: Vec<String> = fields
+            .iter()
+            .flat_map(|field| desc.field_columns(field))
+            .map(str::to_string)
+            .collect();
+        compute_weight_params(&columns, table_desc)
     }
 
     /// Helper: what a row weighs with `selected` output columns.
@@ -1150,6 +1130,28 @@ mod tests {
                 meta.name
             );
         }
+    }
+
+    /// The weight model reads a field name once. Reading its columns as field
+    /// names again charged the key column `log_index` as a virtual field of the
+    /// same name, here a roll of `data`, weighed only by a size column. The
+    /// loader refuses such a catalog (INV-D10); the weight model must not need
+    /// it to.
+    #[test]
+    fn a_weight_key_column_is_charged_as_a_column() {
+        let mut meta = evm_meta();
+        let logs = meta.tables.get_mut("logs").unwrap();
+        logs.output.virtual_fields.insert(
+            "log_index".to_string(),
+            VirtualField::Roll {
+                columns: vec!["data".to_string()],
+            },
+        );
+
+        assert_eq!(
+            weight_of(&[], meta.table("logs")),
+            (2 * 32, Vec::<String>::new())
+        );
     }
 
     /// Selecting a key column charges nothing more; selecting a column outside

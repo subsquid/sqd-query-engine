@@ -1,6 +1,4 @@
-use crate::metadata::{
-    ColumnType, JsonEncoding, MemberDescription, TableDescription, VirtualField,
-};
+use crate::metadata::{ColumnType, FieldSource, JsonEncoding, MemberDescription, TableDescription};
 use crate::output::encoder::{
     encode_json_string, encode_roll, resolve_encoder, snake_to_camel, Encoder, ResolvedRollEncoder,
     RollSource, Unrenderable,
@@ -187,46 +185,49 @@ pub(crate) fn build_field_writers(
     output_columns
         .iter()
         .map(|col_name| {
-            // Check virtual fields first
-            if let Some(desc) = table_desc {
-                if let Some(vf) = desc.output.virtual_fields.get(col_name) {
-                    match vf {
-                        VirtualField::Roll { columns } => {
-                            let mut prefix = Vec::with_capacity(col_name.len() + 4);
-                            encode_json_string(&snake_to_camel(col_name), &mut prefix);
-                            prefix.push(b':');
-                            let sources = columns
-                                .iter()
-                                .map(|name| {
-                                    let declared = desc.columns.get(name);
-                                    RollSourceColumn {
-                                        name: name.clone(),
-                                        encoding: declared.and_then(|c| c.encoding.clone()),
-                                        declared_type: declared.map(|c| c.data_type.clone()),
-                                    }
-                                })
-                                .collect();
-                            return FieldWriter::Roll {
-                                json_key_prefix: prefix,
-                                sources,
-                            };
-                        }
-                    }
-                }
-            }
-
             let mut prefix = Vec::with_capacity(col_name.len() + 4);
             encode_json_string(&snake_to_camel(col_name), &mut prefix);
             prefix.push(b':');
 
-            let declared = table_desc.and_then(|d| d.columns.get(col_name));
+            let source = table_desc.and_then(|desc| Some((desc, desc.field_source(col_name)?)));
 
-            FieldWriter::Regular {
-                json_key_prefix: prefix,
-                column_name: col_name.clone(),
-                encoding: declared.and_then(|c| c.encoding.clone()),
-                declared_type: declared.map(|c| c.data_type.clone()),
-                members: declared.and_then(|c| c.members.clone()),
+            match source {
+                Some((desc, FieldSource::Roll(columns))) => {
+                    let sources = columns
+                        .iter()
+                        .map(|name| {
+                            let declared = desc.columns.get(name);
+                            RollSourceColumn {
+                                name: name.clone(),
+                                encoding: declared.and_then(|c| c.encoding.clone()),
+                                declared_type: declared.map(|c| c.data_type.clone()),
+                            }
+                        })
+                        .collect();
+
+                    FieldWriter::Roll {
+                        json_key_prefix: prefix,
+                        sources,
+                    }
+                }
+                Some((desc, FieldSource::Column(column))) => {
+                    let declared = desc.columns.get(column);
+
+                    FieldWriter::Regular {
+                        json_key_prefix: prefix,
+                        column_name: column.to_string(),
+                        encoding: declared.and_then(|c| c.encoding.clone()),
+                        declared_type: declared.map(|c| c.data_type.clone()),
+                        members: declared.and_then(|c| c.members.clone()),
+                    }
+                }
+                None => FieldWriter::Regular {
+                    json_key_prefix: prefix,
+                    column_name: col_name.clone(),
+                    encoding: None,
+                    declared_type: None,
+                    members: None,
+                },
             }
         })
         .collect()

@@ -771,34 +771,17 @@ fn check_field_surface(table_name: &str, table: &crate::TableDescription) -> Res
     );
 
     for field in &output.fields {
-        if let Some(column) = table.columns.get(field) {
-            anyhow::ensure!(
-                !column.system,
-                "table '{}': field '{}' names a system column, which is not part of the \
-                 public surface",
+        let Some(source) = table.field_source(field) else {
+            anyhow::bail!(
+                "table '{}': field '{}' names no column, virtual field or variant field",
                 table_name,
                 field
             );
-            continue;
-        }
+        };
 
-        if let Some(crate::VirtualField::Roll { columns }) = output.virtual_fields.get(field) {
-            for physical in columns {
-                check_public_field_source(table_name, field, physical, table)?;
-            }
-            continue;
-        }
-
-        if let Some(physical) = table.variant_source(field) {
+        for physical in source.columns() {
             check_public_field_source(table_name, field, physical, table)?;
-            continue;
         }
-
-        anyhow::bail!(
-            "table '{}': field '{}' names no column, virtual field or variant field",
-            table_name,
-            field
-        );
     }
 
     Ok(())
@@ -850,10 +833,10 @@ fn check_variant_mappings(table_name: &str, table: &crate::TableDescription) -> 
                 );
 
                 // A field key that renames its column must not be a column of
-                // its own. `physical_output_column` answers from the column list
-                // before it consults the mappings, and the row writer resolves
-                // the mappings first: a key that is both projects one column and
-                // writes another, and the field ships empty.
+                // its own. `field_source` answers from the column list before it
+                // consults the mappings, and the row writer resolves the mappings
+                // first: a key that is both projects one column and writes
+                // another, and the field ships empty.
                 anyhow::ensure!(
                     field == mapping.column || !table.columns.contains_key(field),
                     "table '{}': variant '{}.{}' selects column '{}' under the name of \
@@ -2771,6 +2754,65 @@ tables:
                 "{what}: refused for another reason: {error:#}"
             );
         }
+    }
+
+    /// A field reads its own column, a roll's columns in order, or the column a
+    /// variant mapping renames; a name that is not a field reads nothing.
+    #[test]
+    fn test_field_source_resolves_each_kind_of_field() {
+        const CATALOG: &str = r#"
+version: v2
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    sort_key: [number]
+    columns:
+      number: { type: uint64 }
+  logs:
+    request:
+      name: logs
+      filters: []
+    output:
+      name: log
+      fields: [log_index, topics, call_payload]
+      virtual_fields:
+        topics: { kind: roll, columns: [ t1, t0 ] }
+      variant_column: kind
+      variants:
+        call:
+          action: [ { column: payload, field_key: call_payload, as: payload } ]
+    item_order_keys: [log_index]
+    sort_key: [block_number, log_index]
+    columns:
+      block_number: { type: uint64 }
+      log_index: { type: uint32 }
+      t0: { type: string }
+      t1: { type: string }
+      kind: { type: string }
+      payload: { type: string }
+"#;
+        let dataset = parse_dataset_description(CATALOG).unwrap();
+        let logs = dataset.table("logs").unwrap();
+        let rolled = ["t1".to_string(), "t0".to_string()];
+
+        assert_eq!(
+            logs.field_source("log_index"),
+            Some(crate::FieldSource::Column("log_index"))
+        );
+        assert_eq!(
+            logs.field_source("topics"),
+            Some(crate::FieldSource::Roll(&rolled))
+        );
+        assert_eq!(
+            logs.field_source("call_payload"),
+            Some(crate::FieldSource::Column("payload"))
+        );
+        assert_eq!(logs.field_source("nope"), None);
+
+        let columns: Vec<&str> = logs.field_columns("topics").collect();
+        assert_eq!(columns, ["t1", "t0"]);
+        assert_eq!(logs.field_columns("nope").count(), 0);
     }
 
     /// Every catalog shipped with the engine must load, strictly: a misspelled

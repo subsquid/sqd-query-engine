@@ -232,25 +232,33 @@ impl TableDescription {
         self.request().name.as_deref().unwrap_or(key)
     }
 
-    /// The physical parquet column an output key reads, when the catalog
-    /// declares one: an ordinary column, or a variant mapping's `field_key` that
-    /// renames it (`call_call_type` → `call_type`).
+    /// What an output field reads: a virtual field's rolled columns, a column of
+    /// that name, or the column a variant mapping's `field_key` renames
+    /// (`call_call_type` → `call_type`).
     ///
-    /// A virtual field resolves to nothing — it rolls several columns, and the
-    /// caller expands it. Everything that projects, weighs or requires an output
-    /// column goes through here, so the three cannot disagree on what a key
-    /// means.
-    ///
-    /// The column list is consulted first and the mappings second, which is the
-    /// opposite of the order the row writer resolves them in. The loader keeps
-    /// the two from ever disagreeing: a `field_key` that differs from its own
-    /// column may not name a column at all.
-    pub fn physical_output_column(&self, key: &str) -> Option<&str> {
-        if let Some((name, _)) = self.columns.get_key_value(key) {
-            return Some(name.as_str());
+    /// Everything that projects, weighs, requires or writes a field asks here,
+    /// so no two of them can read one name two ways. The order of the three
+    /// lookups is moot: the loader refuses a virtual field named like a column
+    /// or a variant field (INV-D10), and a `field_key` that renames its column
+    /// may not name a column.
+    pub fn field_source(&self, field: &str) -> Option<FieldSource<'_>> {
+        if let Some(VirtualField::Roll { columns }) = self.output.virtual_fields.get(field) {
+            return Some(FieldSource::Roll(columns));
         }
 
-        self.variant_source(key)
+        if let Some((name, _)) = self.columns.get_key_value(field) {
+            return Some(FieldSource::Column(name));
+        }
+
+        self.variant_source(field).map(FieldSource::Column)
+    }
+
+    /// The columns [`Self::field_source`] finds for `field`; none for a name
+    /// that is not a field.
+    pub fn field_columns(&self, field: &str) -> impl Iterator<Item = &str> {
+        self.field_source(field)
+            .into_iter()
+            .flat_map(FieldSource::columns)
     }
 
     /// The physical column a variant mapping reads for `field`, if any mapping
@@ -259,7 +267,7 @@ impl TableDescription {
     /// Takes the first of several mappings that answer to the name; the loader
     /// requires them all to read the same column, so which one it is does not
     /// matter.
-    pub fn variant_source(&self, field: &str) -> Option<&str> {
+    pub(crate) fn variant_source(&self, field: &str) -> Option<&str> {
         self.output
             .variants
             .values()
@@ -591,6 +599,28 @@ impl FieldMapping {
     /// The `output.fields` key that selects this mapping (defaults to `column`).
     pub fn field(&self) -> &str {
         self.field_key.as_deref().unwrap_or(&self.column)
+    }
+}
+
+/// The physical columns behind one output field
+/// ([`TableDescription::field_source`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldSource<'a> {
+    /// One column, under the field's name or renamed by a variant mapping.
+    Column(&'a str),
+    /// Several columns rolled into one array, in roll order.
+    Roll(&'a [String]),
+}
+
+impl<'a> FieldSource<'a> {
+    /// The columns, in the order the field reads them.
+    pub fn columns(self) -> impl Iterator<Item = &'a str> {
+        let (single, rolled) = match self {
+            FieldSource::Column(column) => (Some(column), &[][..]),
+            FieldSource::Roll(columns) => (None, columns),
+        };
+
+        single.into_iter().chain(rolled.iter().map(String::as_str))
     }
 }
 
