@@ -52,6 +52,8 @@ tests/
   conformance/
     main.rs     # CT-1 through CT-9 modules (some classes have subdirectories)
     harness/    # Fixture loaders, runners, synthetic chunk writers
+  cases.rs
+  cases/        # Queries plus a reference to the chunk they run on; see its README
   e2e_fixtures.rs
   fixtures/     # Query/result JSON pairs per dataset; a link into the legacy repo
   reads.rs      # What each bench query reads, as snapshots
@@ -184,6 +186,7 @@ Pick the place for a test by what it checks and what data it needs.
 | A rule of the spec | `tests/conformance/ctN_*`, in its class | A small chunk the harness writes |
 | Generated queries answer as the legacy engine does | `tests/conformance/ct7_differential.rs` | The fixture tree and `--features legacy-query` |
 | A recorded query keeps its recorded answer | `tests/e2e_fixtures.rs` | The fixture tree |
+| A query on a referenced chunk matches the legacy engine and a snapshot | `tests/cases/` | Cached chunks; see [the case guide](tests/cases/README.md) |
 | What each bench query reads | `tests/reads.rs` | The chunks in `data/` |
 | CPU and heap cost of each bench query | `benches/instructions` | Linux and `valgrind`; see [BENCHMARKS.md](BENCHMARKS.md) |
 | How `throughput` turns finished queries into a rate | `tests/throughput.rs` | Nothing |
@@ -225,9 +228,9 @@ Don't rename `actual.temp.json` to `result.json`. The test writes that file
 from this engine's output, so a fixture made from it compares the engine with
 itself.
 
-CT-7 builds its queries from the catalog, and there's no list there for a
-hand-written query. A specific query compared live with the legacy engine has
-no place yet.
+CT-7 builds its queries from the catalog. For a specific query compared live
+with the legacy engine, add a case under `tests/cases/`: a `case.yaml` naming
+the chunk and query files beside it. See [the case guide](tests/cases/README.md).
 
 ### Running them
 
@@ -236,7 +239,9 @@ them are `#[ignore]`d. CI runs the rest.
 
 ```bash
 make test           # what CI runs; tests that need data show as ignored
-make test-data      # only the tests that need data/ or tests/fixtures, CT-7 aside
+make test-data      # tests that need external data, CT-7 aside
+make fetch-cases    # download the chunks referenced by tests/cases/
+make test-cases     # run those cases against both engines
 make test-nightly   # CT-7 to CT-9, with the legacy engine
 make spec-check     # the spec, the conformance matrix and the test tags agree
 
@@ -248,3 +253,5 @@ SQD_REQUIRE_CHUNKS=1 SQD_REQUIRE_FIXTURES=1 \
 `SQD_REQUIRE_CHUNKS=1` and `SQD_REQUIRE_FIXTURES=1` turn a missing chunk into a
 failure. Without them, a test whose data is missing returns early and passes,
 which is fine on a laptop and useless as evidence.
+
+Selected real-chunk cases always fail when their cached chunks are missing.

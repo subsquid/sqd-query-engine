@@ -1,0 +1,16 @@
+{
+  "type": "evm",
+  "fromBlock": 0,
+  "includeAllBlocks": true,
+  "fields": {
+    "block": {
+      "number": true,
+      "hash": true,
+      "parentHash": true,
+      "timestamp": true,
+      "miner": true,
+      "gasUsed": true,
+      "gasLimit": true
+    }
+  }
+}

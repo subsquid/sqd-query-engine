@@ -1,4 +1,5 @@
-.PHONY: spec-check spec-check-strict spec-test test test-pr test-nightly test-data fmt lint
+.PHONY: spec-check spec-check-strict spec-test test test-pr test-nightly test-data \
+        fetch-cases test-cases fmt lint
 
 # MG-6 — the specification's own integrity gate. Runs in well under a second.
 # CI runs exactly this; see .github/workflows/spec.yml.
@@ -43,6 +44,28 @@ test-nightly:
 # `--ignored` selects the tests omitted from the portable gate.
 test-data:
 	SQD_REQUIRE_CHUNKS=1 SQD_REQUIRE_FIXTURES=1 cargo test --workspace -- --ignored
+
+# Real-chunk cases, see tests/cases/README.md. The chunks live in a cache outside
+# the repo, and the test reads the same variable.
+export SQD_CHUNK_CACHE ?= $(HOME)/.cache/sqd-chunks
+
+# Downloads each chunk a case names and the cache lacks. The copy lands in a
+# `.part` directory first, so an interrupted one never looks complete. The AWS
+# CLI must be configured for the chunk store.
+fetch-cases:
+	@refs=$$(cargo test --quiet --test cases -- --list-chunks) || exit 1; \
+	for ref in $$refs; do \
+	  dest="$(SQD_CHUNK_CACHE)/$$ref"; \
+	  test -d "$$dest" && continue; \
+	  echo "fetching s3://$$ref"; \
+	  aws s3 cp --recursive --only-show-errors "s3://$$ref/" "$$dest.part/" || exit 1; \
+	  test -d "$$dest.part" || { echo "s3://$$ref holds no files"; exit 1; }; \
+	  mv "$$dest.part" "$$dest" || exit 1; \
+	done
+
+# `legacy-query` adds the live comparison with the reference engine.
+test-cases:
+	cargo test --features legacy-query --test cases -- --ignored
 
 # MG-8, over the engine, its crates and its tests. `benches/` and `examples/` are outside
 # both static gates: they are not the engine, and bringing them under the

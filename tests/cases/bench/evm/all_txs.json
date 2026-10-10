@@ -1,0 +1,23 @@
+{
+  "type": "evm",
+  "fromBlock": 0,
+  "fields": {
+    "block": {
+      "number": true
+    },
+    "transaction": {
+      "hash": true,
+      "from": true,
+      "to": true,
+      "value": true,
+      "input": true,
+      "nonce": true,
+      "gas": true,
+      "gasPrice": true,
+      "transactionIndex": true
+    }
+  },
+  "transactions": [
+    {}
+  ]
+}
