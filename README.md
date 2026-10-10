@@ -47,29 +47,19 @@ src/
 metadata/       # Dataset YAML catalogs and catalog format documentation
 spec/           # Behavioral contract, invariants, conformance matrix, decisions
 docs/           # Architecture reading guide, weight model, design history
-benches/        # Latency, throughput, memory, and profiling benchmarks
+benches/        # Latency, throughput, memory, profiling and instruction-count benchmarks
 tests/
   conformance/
     main.rs     # CT-1 through CT-9 modules (some classes have subdirectories)
     harness/    # Fixture loaders, runners, synthetic chunk writers
   e2e_fixtures.rs
-  fixtures/     # Query/result JSON pairs per dataset
+  fixtures/     # Query/result JSON pairs per dataset; a link into the legacy repo
+  reads.rs      # What each bench query reads, as snapshots
+  snapshots/    # Those snapshots
+  throughput.rs # How the throughput bench counts its rate
 ```
 
-Tests are laid out by conformance class, and each one that pins an invariant
-carries a tag naming it:
-
-```rust
-/// Covers CT-2 · INV-Q10
-#[test]
-fn a_bloom_filter_takes_at_most_ten_values() { ... }
-```
-
-`make spec-check` reads those tags back against the traceability matrix in
-`spec/08-conformance.md`, so a test filed under the wrong class, a tag naming an
-invariant that does not exist, a matrix row claiming a test that carries no tag,
-and a row naming a test that no longer exists are all build failures rather than
-review comments.
+[Tests](#tests) says which kind of test goes where.
 
 ## Usage
 
@@ -186,16 +176,75 @@ cargo bench --bench throughput --features legacy-query -- --all
 
 ## Tests
 
-```bash
-# Unit tests, including the metadata crate
-cargo test --workspace --lib
+Pick the place for a test by what it checks and what data it needs.
 
-# E2E fixture tests (external fixtures required)
-SQD_REQUIRE_FIXTURES=1 cargo test --test e2e_fixtures -- --ignored
+| What the test checks | Where it goes | What it needs |
+|---|---|---|
+| One function or module | `#[cfg(test)] mod tests` in `src/` | Nothing, or the chunks in `data/` |
+| A rule of the spec | `tests/conformance/ctN_*`, in its class | A small chunk the harness writes |
+| Generated queries answer as the legacy engine does | `tests/conformance/ct7_differential.rs` | The fixture tree and `--features legacy-query` |
+| A recorded query keeps its recorded answer | `tests/e2e_fixtures.rs` | The fixture tree |
+| What each bench query reads | `tests/reads.rs` | The chunks in `data/` |
+| CPU and heap cost of each bench query | `benches/instructions` | Linux and `valgrind`; see [BENCHMARKS.md](BENCHMARKS.md) |
+| How `throughput` turns finished queries into a rate | `tests/throughput.rs` | Nothing |
 
-# Portable workspace suite; external-data tests are explicitly ignored
-cargo test --workspace
+### Where a new end-to-end test goes
 
-# Specification and test-tag consistency
-make spec-check
+Usually into the conformance suite. The class is the section of
+`spec/08-conformance.md` that owns the rule you check: CT-3 for filters, CT-4
+for relations, CT-5 for blocks and pages, CT-6 for output, and so on. A
+conformance test writes its own small chunk with the harness (`synthetic`,
+`evm_like`, `sol_like`), so it runs in every PR on any machine. And it names the
+rule it pins:
+
+```rust
+/// Covers CT-6 · INV-O7
+#[test]
+fn a_selected_null_renders_as_null_at_every_integer_width() { ... }
 ```
+
+`make spec-check` reads those tags back against the matrix in
+`spec/08-conformance.md`. A test under the wrong class, a tag for an invariant
+that doesn't exist, and a matrix row naming a test that's gone all fail the
+build.
+
+A fixture test is weaker. It says an answer didn't change, but when it fails it
+doesn't say which rule broke. Write one when you need a real chunk and an answer
+recorded from the legacy engine. The files don't go into this repo:
+`tests/fixtures` is a link to `crates/query/fixtures` in the legacy repo, so a
+new fixture is a commit there.
+
+1. Put `query.json` in `tests/fixtures/<dataset>/queries/<name>/`.
+2. Get `result.json` from the legacy engine with
+   `cargo run --bin generate_fixtures --features legacy-query`. It fills only
+   `ethereum` and `solana` directories named `prod_pattern_*` that have no
+   `result.json` yet; for another name or dataset, extend it first.
+3. Add a line such as `evm_fixture!(<name>);` to `tests/e2e_fixtures.rs`.
+
+Don't rename `actual.temp.json` to `result.json`. The test writes that file
+from this engine's output, so a fixture made from it compares the engine with
+itself.
+
+CT-7 builds its queries from the catalog, and there's no list there for a
+hand-written query. A specific query compared live with the legacy engine has
+no place yet.
+
+### Running them
+
+The chunks in `data/` and the fixture tree are not in git, so tests that need
+them are `#[ignore]`d. CI runs the rest.
+
+```bash
+make test           # what CI runs; tests that need data show as ignored
+make test-data      # only the tests that need data/ or tests/fixtures, CT-7 aside
+make test-nightly   # CT-7 to CT-9, with the legacy engine
+make spec-check     # the spec, the conformance matrix and the test tags agree
+
+# Everything at once
+SQD_REQUIRE_CHUNKS=1 SQD_REQUIRE_FIXTURES=1 \
+  cargo test --workspace --features legacy-query -- --include-ignored
+```
+
+`SQD_REQUIRE_CHUNKS=1` and `SQD_REQUIRE_FIXTURES=1` turn a missing chunk into a
+failure. Without them, a test whose data is missing returns early and passes,
+which is fine on a laptop and useless as evidence.
