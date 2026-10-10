@@ -591,6 +591,27 @@ mod tests {
         assert_eq!(log_items[0].filters.len(), 2);
     }
 
+    /// An item's filters keep the request's key order in every build, whatever
+    /// other crates ask of `serde_json`: the scanner gives the first one a
+    /// stage of its own.
+    #[test]
+    fn filters_keep_the_order_of_the_request() {
+        let meta = evm_metadata();
+        let json = br#"{
+            "type": "evm", "fromBlock": 0,
+            "logs": [{ "topic2": ["0x01"], "address": ["0x02"], "topic0": ["0x03"] }]
+        }"#;
+
+        let query = parse_query(json, &meta).unwrap();
+        let filters: Vec<&str> = query.items["logs"][0]
+            .filters
+            .iter()
+            .map(|(column, _)| column.as_str())
+            .collect();
+
+        assert_eq!(filters, ["topic2", "address", "topic0"]);
+    }
+
     #[test]
     fn test_parse_solana_instructions_query() {
         let meta = solana_metadata();
