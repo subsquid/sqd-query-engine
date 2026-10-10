@@ -172,7 +172,6 @@ cargo bench --bench throughput -- --all    # throughput (all CPU levels)
 # A/B vs the legacy engine on the same chunk (requires sibling ../data repo):
 cargo bench --bench latency    --features legacy-query
 cargo bench --bench throughput --features legacy-query -- --all
-cargo bench --bench profile    --features legacy-query -- rpc/getLogs --compare
 ```
 
 ## Supported Datasets

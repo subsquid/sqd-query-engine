@@ -1,18 +1,20 @@
 #[path = "../queries.rs"]
 mod queries;
+#[path = "../run.rs"]
+mod run;
+mod measure;
 #[cfg(feature = "legacy-query")]
 #[path = "../legacy.rs"]
 mod legacy;
 
+use measure::measure;
 use queries::*;
+use run::{compare_with_legacy, run_query, Format};
 use sqd_query_engine::metadata::load_dataset_description;
-use sqd_query_engine::output::execute_chunk;
-use sqd_query_engine::query::{compile, parse_query};
 use sqd_query_engine::scan::ParquetChunkReader;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
@@ -24,23 +26,6 @@ static SOLANA_META: LazyLock<sqd_query_engine::metadata::DatasetDescription> =
 static EVM_META: LazyLock<sqd_query_engine::metadata::DatasetDescription> =
     LazyLock::new(|| load_dataset_description(Path::new("metadata/evm.yaml")).unwrap());
 
-fn to_json_lines(blocks: Option<sqd_query_engine::output::QueryOutput>) -> Vec<u8> {
-    blocks.map(|b| b.into_json_lines()).unwrap_or_default()
-}
-
-/// Full pipeline: parse → compile → execute (new engine). Each call allocates
-/// a fresh output buffer, mirroring one RPC request → one response buffer (and
-/// keeping it symmetric with the legacy engine, which always allocates).
-fn run_query(
-    query_json: &[u8],
-    meta: &sqd_query_engine::metadata::DatasetDescription,
-    chunk: &ParquetChunkReader,
-) -> Vec<u8> {
-    let parsed = parse_query(query_json, meta).unwrap();
-    let plan = compile(&parsed, meta).unwrap();
-    to_json_lines(execute_chunk(&plan, meta, chunk, false).unwrap())
-}
-
 struct BenchCase {
     name: String,
     query_json: &'static [u8],
@@ -51,33 +36,10 @@ struct BenchCase {
     chunk_dir: String,
 }
 
-/// Drive `run_once` from `concurrency` threads for `duration`, return req/sec.
-fn measure<F: Fn() + Sync>(run_once: F, concurrency: usize, duration: Duration) -> f64 {
-    let stop = AtomicBool::new(false);
-    let total = AtomicUsize::new(0);
-
-    let start = Instant::now();
-    std::thread::scope(|s| {
-        for _ in 0..concurrency {
-            s.spawn(|| {
-                while !stop.load(Ordering::Relaxed) {
-                    run_once();
-                    total.fetch_add(1, Ordering::Relaxed);
-                }
-            });
-        }
-        std::thread::sleep(duration);
-        stop.store(true, Ordering::Relaxed);
-    });
-
-    let elapsed = start.elapsed().as_secs_f64();
-    total.load(Ordering::Relaxed) as f64 / elapsed
-}
-
-fn measure_new(case: &BenchCase, concurrency: usize, duration: Duration) -> f64 {
+fn measure_new(case: &BenchCase, format: Format, concurrency: usize, duration: Duration) -> f64 {
     measure(
         || {
-            std::hint::black_box(run_query(case.query_json, case.meta, &case.chunk));
+            std::hint::black_box(run_query(case.query_json, case.meta, &*case.chunk, format));
         },
         concurrency,
         duration,
@@ -138,7 +100,14 @@ fn main() {
 
     // Default: only test at CPU=8. Pass "--all" for full sweep (1,2,4,8,...,max).
     let all_levels = args.iter().any(|a| a == "--all");
-    let legacy_enabled = cfg!(feature = "legacy-query");
+    let format = Format::from_args(&args);
+    let legacy_enabled = compare_with_legacy(format);
+    let secs = args
+        .iter()
+        .position(|a| a == "--secs")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(5);
     // Optional substring filter: `--filter trace_block` runs only matching cases.
     let filter = args
         .iter()
@@ -159,6 +128,9 @@ fn main() {
     if cases.is_empty() {
         eprintln!("No chunk data found. Expected data/{{evm,solana}}/chunk/");
         return;
+    }
+    if let Some(f) = &filter {
+        cases.retain(|case| case.name.contains(f.as_str()));
     }
 
     let concurrency_levels: Vec<usize> = if all_levels {
@@ -184,42 +156,37 @@ fn main() {
         vec![8]
     };
 
-    let duration = Duration::from_secs(5);
+    let duration = Duration::from_secs(secs);
 
     // Warmup (new engine; legacy warms its own cache inside measure_legacy)
     eprintln!("Warming up...");
     for case in &cases {
-        std::hint::black_box(run_query(case.query_json, case.meta, &case.chunk));
+        std::hint::black_box(run_query(case.query_json, case.meta, &*case.chunk, format));
     }
 
     println!();
-    println!("=== Throughput (rps, 5s per level) ===");
+    println!("=== Throughput (rps, {secs}s per level, format {}) ===", format.name());
     if legacy_enabled {
-        println!("{:<40}{:>6}{:>11}{:>11}{:>9}", "Benchmark", "CPU", "New", "Legacy", "New/Leg");
-        println!("{}", "-".repeat(77));
+        println!("{:<40}{:>6}{:>13}{:>13}{:>9}", "Benchmark", "CPU", "New", "Legacy", "New/Leg");
+        println!("{}", "-".repeat(81));
     } else {
-        println!("{:<40}{:>6}{:>11}", "Benchmark", "CPU", "New");
-        println!("{}", "-".repeat(57));
+        println!("{:<40}{:>6}{:>13}", "Benchmark", "CPU", "New");
+        println!("{}", "-".repeat(59));
     }
 
     for case in &cases {
-        if let Some(f) = &filter {
-            if !case.name.contains(f.as_str()) {
-                continue;
-            }
-        }
         for &cpu in &concurrency_levels {
             eprint!("\r  {:<40} CPU={cpu:<4}", case.name);
-            let new_rps = measure_new(case, cpu, duration);
+            let new_rps = measure_new(case, format, cpu, duration);
             if legacy_enabled {
                 let leg = measure_legacy(case, cpu, duration).unwrap_or(0.0);
                 let ratio = if leg > 0.0 { new_rps / leg } else { f64::NAN };
                 println!(
-                    "{:<40}{:>6}{:>11.1}{:>11.1}{:>8.2}x",
+                    "{:<40}{:>6}{:>13.3}{:>13.3}{:>8.2}x",
                     case.name, cpu, new_rps, leg, ratio
                 );
             } else {
-                println!("{:<40}{:>6}{:>11.1}", case.name, cpu, new_rps);
+                println!("{:<40}{:>6}{:>13.3}", case.name, cpu, new_rps);
             }
         }
         eprint!("\r{:<40}\r", "");
