@@ -1646,36 +1646,68 @@ mod tests {
             return;
         }
 
-        // `transactions` is pulled by BOTH the traces and stateDiffs relations.
-        // JSON merges+dedups into one array; flat Arrow must do the same.
+        // Only a table asked directly and pulled by another table's relation has
+        // two sources, which Arrow merges on its own path. The relation leaves out
+        // the rows the scan matched, so the merge finds nothing to dedup; the
+        // counts catch a source it drops. The other shapes come out as one source.
+        let usdc = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
+        let shapes = [
+            (
+                "a table and its own relation",
+                format!(r#""logs": [{{ "address": ["{usdc}"], "transactionLogs": true }}]"#),
+            ),
+            (
+                "a table asked directly and pulled by another",
+                format!(
+                    r#""transactions": [{{ "to": ["{usdc}"], "logs": true }}],
+                       "logs": [{{ "address": ["{usdc}"] }}]"#
+                ),
+            ),
+            (
+                "two relations into one table",
+                format!(
+                    r#""traces": [{{ "type": ["call"], "callTo": ["{usdc}"], "transaction": true }}],
+                       "stateDiffs": [{{ "address": ["{usdc}"], "transaction": true }}]"#
+                ),
+            ),
+        ];
+
         let meta = evm_metadata();
-        let q = br#"{
-            "type": "evm", "fromBlock": 0,
-            "fields": {
-                "block": { "number": true },
-                "transaction": { "from": true, "to": true, "hash": true, "transactionIndex": true },
-                "trace": { "type": true, "transactionIndex": true },
-                "stateDiff": { "kind": true, "transactionIndex": true, "address": true }
-            },
-            "traces": [{ "type": ["call"], "callTo": ["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"], "transaction": true }],
-            "stateDiffs": [{ "address": ["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"], "transaction": true }]
-        }"#;
-        let plan = compile(&parse_query(q, &meta).unwrap(), &meta).unwrap();
         let chunk = evm_chunk();
+        let mut wrong = Vec::new();
 
-        let json = to_blocks(execute_chunk(&plan, &meta, &chunk, false).unwrap());
-        let arrow = execute_chunk_arrow(&plan, &meta, &chunk, false, false)
-            .unwrap()
-            .unwrap()
-            .into_data();
+        for (what, items) in shapes {
+            let query = format!(
+                r#"{{"type": "evm", "fromBlock": 0, {items},
+                    "fields": {{
+                        "block": {{ "number": true }},
+                        "transaction": {{ "transactionIndex": true, "hash": true }},
+                        "log": {{ "logIndex": true, "transactionIndex": true }},
+                        "trace": {{ "transactionIndex": true, "traceAddress": true }},
+                        "stateDiff": {{ "transactionIndex": true, "address": true, "key": true }}
+                    }}}}"#
+            );
+            let plan = compile(&parse_query(query.as_bytes(), &meta).unwrap(), &meta).unwrap();
 
-        let jcounts = json_item_counts(&json);
-        let frames = read_arrow_frames(&arrow);
+            let json = to_blocks(execute_chunk(&plan, &meta, &chunk, false).unwrap());
+            let arrow = execute_chunk_arrow(&plan, &meta, &chunk, false, false)
+                .unwrap()
+                .unwrap()
+                .into_data();
 
-        assert_eq!(
-            frames["transactions"].1, jcounts["transactions"],
-            "multi-source transactions must be deduped to match json"
-        );
+            let json_rows = json_item_counts(&json);
+            let arrow_rows: HashMap<String, usize> = read_arrow_frames(&arrow)
+                .into_iter()
+                .filter(|(name, _)| name != "blocks")
+                .map(|(name, (_, rows))| (name, rows))
+                .collect();
+
+            if arrow_rows != json_rows {
+                wrong.push(format!("{what}: arrow {arrow_rows:?}, json {json_rows:?}"));
+            }
+        }
+
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
     #[test]

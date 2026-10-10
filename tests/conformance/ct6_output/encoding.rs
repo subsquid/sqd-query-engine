@@ -6,6 +6,7 @@
 //! answer without changing it is the other half of the class, in `determinism`.
 
 use sqd_query_engine::error::{error_kind, ErrorKind};
+use sqd_query_engine::metadata::parse_dataset_description;
 use sqd_query_engine::output::{execute_chunk_arrow, execute_plan};
 use sqd_query_engine::query::{compile, parse_query};
 use sqd_query_engine::scan::ParquetChunkReader;
@@ -13,9 +14,10 @@ use sqd_query_engine::scan::ParquetChunkReader;
 use crate::harness::arrow::read_frames;
 use crate::harness::chunk::{chunk_with_column_filled, column_names, write_table};
 use crate::harness::fixtures::{
-    fixture_chunk, fixture_tree_has, fixture_tree_is_present, meta, run, FIXTURE_DATASETS,
+    fixture_chunk, fixture_tree_has, fixture_tree_is_present, meta, run, run_against,
+    FIXTURE_DATASETS,
 };
-use crate::harness::json::parse_response;
+use crate::harness::json::{items_in, parse_response};
 use crate::harness::synthetic::{
     catalog, logs_query, run as run_synthetic, uniform, weighted_chunk, BLOCKS,
 };
@@ -172,6 +174,116 @@ fn iteration_matches_json_lines() {
     let mut partial = run_synthetic(&meta, &chunk, logs_query()).unwrap();
     partial.write_next_block(&mut Vec::new());
     assert_eq!(partial.into_json_lines(), iterated);
+}
+
+// ---------------------------------------------------------------------------
+// INV-O7 — a selected null renders as `null`
+// ---------------------------------------------------------------------------
+
+/// A null renders as `null` at every integer width a chunk can store. Each width
+/// has an encoder of its own, and the fixtures hold nulls at only some of them.
+///
+/// Covers CT-6 · INV-O7
+#[test]
+fn a_selected_null_renders_as_null_at_every_integer_width() {
+    use arrow::array::{ArrayRef, UInt64Array};
+    use arrow::compute::cast;
+    use arrow::datatypes::{DataType, Field};
+    use std::sync::Arc;
+
+    // Stored width and the catalog type declared for it.
+    let widths = [
+        ("u8", "uint8", DataType::UInt8),
+        ("i8", "int16", DataType::Int8),
+        ("u16", "uint16", DataType::UInt16),
+        ("i16", "int16", DataType::Int16),
+        ("u32", "uint32", DataType::UInt32),
+        ("i32", "int32", DataType::Int32),
+        ("u64", "uint64", DataType::UInt64),
+        ("i64", "int64", DataType::Int64),
+    ];
+    let names: Vec<&str> = widths.iter().map(|(name, _, _)| *name).collect();
+
+    let columns: String = widths
+        .iter()
+        .map(|(name, declared, _)| format!("      {name}: {{ type: {declared} }}\n"))
+        .collect();
+    let catalog = parse_dataset_description(&format!(
+        r#"
+version: v2
+name: test
+tables:
+  blocks:
+    output:
+      name: block
+      fields: [number]
+    block_number_column: number
+    sort_key: [number]
+    columns:
+      number: {{ type: uint64 }}
+  items:
+    request:
+      name: items
+      filters: []
+    output:
+      name: item
+      fields: [seq, {fields}]
+    item_order_keys: [seq]
+    sort_key: [block_number, seq]
+    columns:
+      block_number: {{ type: uint64 }}
+      seq: {{ type: uint64 }}
+{columns}"#,
+        fields = names.join(", ")
+    ))
+    .unwrap();
+
+    let dir = tempfile::TempDir::new().unwrap();
+    write_table(
+        dir.path(),
+        "blocks",
+        vec![Field::new("number", DataType::UInt64, false)],
+        vec![Arc::new(UInt64Array::from(vec![1u64])) as ArrayRef],
+    );
+    let mut fields = vec![
+        Field::new("block_number", DataType::UInt64, false),
+        Field::new("seq", DataType::UInt64, false),
+    ];
+    let mut arrays: Vec<ArrayRef> = vec![
+        Arc::new(UInt64Array::from(vec![1u64, 1])),
+        Arc::new(UInt64Array::from(vec![0u64, 1])),
+    ];
+    let one_then_null = UInt64Array::from(vec![Some(1), None]);
+    for (name, _, stored) in &widths {
+        fields.push(Field::new(*name, stored.clone(), true));
+        arrays.push(cast(&one_then_null, stored).unwrap());
+    }
+    write_table(dir.path(), "items", fields, arrays);
+
+    let selection: Vec<String> = names
+        .iter()
+        .map(|name| format!(r#""{name}":true"#))
+        .collect();
+    let query = format!(
+        r#"{{"type":"test","fromBlock":1,"toBlock":1,"items":[{{}}],
+             "fields":{{"item":{{"seq":true,{}}}}}}}"#,
+        selection.join(",")
+    );
+    let body = run_against(&catalog, dir.path(), &query).unwrap();
+    let items = items_in(&parse_response(&body)[0], "items");
+    assert_eq!(items.len(), 2, "both rows must come back: {items:?}");
+
+    let wrong: Vec<String> = names
+        .iter()
+        .filter(|name| {
+            let one = items[0].get(**name).is_some_and(|v| !v.is_null());
+            let null = items[1].get(**name).is_some_and(|v| v.is_null());
+            !(one && null)
+        })
+        .map(|name| format!("{name}: {} then {}", items[0][*name], items[1][*name]))
+        .collect();
+
+    assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
 // ---------------------------------------------------------------------------
