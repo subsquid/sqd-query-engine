@@ -1,0 +1,7 @@
+---
+source: tests/cases.rs
+---
+blocks: 30 (406021645 to 406021692)
+balances: 175
+instructions: 58
+digest: 24ef122e9eb227b34787627558eadea0

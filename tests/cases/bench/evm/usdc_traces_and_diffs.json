@@ -1,0 +1,52 @@
+{
+  "type": "evm",
+  "fromBlock": 0,
+  "fields": {
+    "block": {
+      "number": true,
+      "hash": true,
+      "timestamp": true
+    },
+    "transaction": {
+      "from": true,
+      "to": true,
+      "hash": true,
+      "transactionIndex": true
+    },
+    "trace": {
+      "type": true,
+      "callFrom": true,
+      "callTo": true,
+      "callSighash": true,
+      "transactionIndex": true,
+      "traceAddress": true
+    },
+    "stateDiff": {
+      "kind": true,
+      "next": true,
+      "prev": true,
+      "transactionIndex": true,
+      "address": true,
+      "key": true
+    }
+  },
+  "traces": [
+    {
+      "type": [
+        "call"
+      ],
+      "callTo": [
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+      ],
+      "transaction": true
+    }
+  ],
+  "stateDiffs": [
+    {
+      "address": [
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+      ],
+      "transaction": true
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+---
+source: tests/cases.rs
+---
+blocks: 35 (406021645 to 406021692)
+instructions: 365
+tokenBalances: 658
+transactions: 85
+digest: cba43835aadadbab88ba18f7de378ece

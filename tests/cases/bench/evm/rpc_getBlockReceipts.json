@@ -1,0 +1,36 @@
+{
+  "type": "evm",
+  "fromBlock": 24550620,
+  "toBlock": 24550620,
+  "fields": {
+    "block": {
+      "number": true,
+      "hash": true
+    },
+    "transaction": {
+      "transactionIndex": true,
+      "hash": true,
+      "from": true,
+      "to": true,
+      "type": true,
+      "status": true,
+      "gasUsed": true,
+      "cumulativeGasUsed": true,
+      "effectiveGasPrice": true,
+      "contractAddress": true
+    },
+    "log": {
+      "address": true,
+      "topics": true,
+      "data": true,
+      "logIndex": true,
+      "transactionIndex": true,
+      "transactionHash": true
+    }
+  },
+  "transactions": [
+    {
+      "logs": true
+    }
+  ]
+}

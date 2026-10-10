@@ -1,0 +1,44 @@
+{
+  "type": "evm",
+  "fromBlock": 24550620,
+  "toBlock": 24550620,
+  "fields": {
+    "block": {
+      "number": true,
+      "hash": true
+    },
+    "trace": {
+      "type": true,
+      "error": true,
+      "revertReason": true,
+      "transactionIndex": true,
+      "traceAddress": true,
+      "subtraces": true,
+      "callFrom": true,
+      "callTo": true,
+      "callValue": true,
+      "callGas": true,
+      "callInput": true,
+      "callSighash": true,
+      "callType": true,
+      "callResultGasUsed": true,
+      "callResultOutput": true,
+      "createFrom": true,
+      "createValue": true,
+      "createGas": true,
+      "createInit": true,
+      "createResultGasUsed": true,
+      "createResultCode": true,
+      "createResultAddress": true,
+      "suicideAddress": true,
+      "suicideRefundAddress": true,
+      "suicideBalance": true,
+      "rewardAuthor": true,
+      "rewardValue": true,
+      "rewardType": true
+    }
+  },
+  "traces": [
+    {}
+  ]
+}

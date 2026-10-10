@@ -1,0 +1,19 @@
+{
+  "type": "evm",
+  "fromBlock": 0,
+  "fields": {
+    "block": {
+      "number": true
+    },
+    "log": {
+      "address": true,
+      "topics": true,
+      "data": true,
+      "logIndex": true,
+      "transactionIndex": true
+    }
+  },
+  "logs": [
+    {}
+  ]
+}

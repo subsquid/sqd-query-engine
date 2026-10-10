@@ -63,6 +63,8 @@ tempfile = "3"
 proptest = "1"
 zstd = "0.13"
 insta = "1"
+# One test per query file in tests/cases.rs.
+libtest-mimic = "0.8"
 # Instruction and heap counts under Valgrind; the runner binary must match this version.
 gungraun = "=0.20.0"
 
@@ -84,4 +86,8 @@ harness = false
 
 [[bench]]
 name = "instructions"
+harness = false
+
+[[test]]
+name = "cases"
 harness = false

@@ -1,0 +1,33 @@
+{
+  "type": "evm",
+  "fromBlock": 0,
+  "fields": {
+    "block": {
+      "number": true,
+      "hash": true,
+      "timestamp": true
+    },
+    "transaction": {
+      "from": true,
+      "to": true,
+      "hash": true,
+      "sighash": true,
+      "transactionIndex": true
+    },
+    "log": {
+      "address": true,
+      "topics": true,
+      "data": true,
+      "logIndex": true,
+      "transactionIndex": true
+    }
+  },
+  "transactions": [
+    {
+      "to": [
+        "0xdac17f958d2ee523a2206206994597c13d831ec7"
+      ],
+      "logs": true
+    }
+  ]
+}
