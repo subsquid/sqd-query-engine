@@ -2,6 +2,7 @@
 /data
 .idea/
 tests/fixtures
+tests/cases/local/
 ISSUES.md
 .claude/settings.local.json
 CLAUDE.local.md

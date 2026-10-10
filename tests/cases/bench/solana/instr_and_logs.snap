@@ -1,0 +1,8 @@
+---
+source: tests/cases.rs
+---
+blocks: 48 (406021645 to 406021692)
+instructions: 8037
+logs: 4690
+transactions: 2062
+digest: cd990b81b73108b7a8c4ea5e2b22d3bf

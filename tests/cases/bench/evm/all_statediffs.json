@@ -1,0 +1,20 @@
+{
+  "type": "evm",
+  "fromBlock": 0,
+  "fields": {
+    "block": {
+      "number": true
+    },
+    "stateDiff": {
+      "kind": true,
+      "next": true,
+      "prev": true,
+      "transactionIndex": true,
+      "address": true,
+      "key": true
+    }
+  },
+  "stateDiffs": [
+    {}
+  ]
+}

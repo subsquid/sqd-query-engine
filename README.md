@@ -52,6 +52,8 @@ tests/
   conformance/
     main.rs     # CT-1 through CT-9 modules (some classes have subdirectories)
     harness/    # Fixture loaders, runners, synthetic chunk writers
+  cases.rs
+  cases/        # Queries plus a reference to the chunk they run on; see its README
   e2e_fixtures.rs
   fixtures/     # Query/result JSON pairs per dataset
 ```
@@ -196,6 +198,9 @@ SQD_REQUIRE_FIXTURES=1 cargo test --test e2e_fixtures -- --ignored
 
 # Portable workspace suite; external-data tests are explicitly ignored
 cargo test --workspace
+
+# Real-chunk cases against the legacy engine (chunk store access required)
+make fetch-cases && make test-cases
 
 # Specification and test-tag consistency
 make spec-check

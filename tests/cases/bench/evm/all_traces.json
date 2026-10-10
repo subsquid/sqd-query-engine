@@ -1,0 +1,21 @@
+{
+  "type": "evm",
+  "fromBlock": 0,
+  "fields": {
+    "block": {
+      "number": true
+    },
+    "trace": {
+      "type": true,
+      "transactionIndex": true,
+      "traceAddress": true,
+      "callFrom": true,
+      "callTo": true,
+      "callInput": true,
+      "callValue": true
+    }
+  },
+  "traces": [
+    {}
+  ]
+}

@@ -1,0 +1,6 @@
+---
+source: tests/cases.rs
+---
+blocks: 42 (24550597 to 24550638)
+stateDiffs: 90321
+digest: cfb6edb49ad246633ee2d0616d877284

@@ -15,12 +15,13 @@
 use sqd_query_engine::metadata::{
     load_dataset_description, DatasetDescription, TableDescription, WeightSource,
 };
-use sqd_query_engine::output::{execute_chunk_with, execute_plan, ExecOptions};
+use sqd_query_engine::output::{execute_chunk_with, ExecOptions};
 use sqd_query_engine::query::{compile, parse_query};
 use sqd_query_engine::scan::ParquetChunkReader;
 use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 
+use crate::harness::engines::{as_blocks, run_legacy, run_new};
 use crate::harness::fixtures::fixture_chunk;
 
 /// (catalog, fixture directory). Only datasets both engines serve.
@@ -55,38 +56,6 @@ fn snake_to_camel(s: &str) -> String {
         }
     }
     out
-}
-
-fn run_new(query: &[u8], metadata: &DatasetDescription, chunk: &Path) -> Result<Vec<u8>, String> {
-    let parsed = parse_query(query, metadata).map_err(|e| format!("{e:#}"))?;
-    let plan = compile(&parsed, metadata).map_err(|e| format!("{e:#}"))?;
-    Ok(execute_plan(&plan, metadata, chunk)
-        .map_err(|e| format!("{e:#}"))?
-        .map(|out| out.into_json_lines())
-        .unwrap_or_default())
-}
-
-fn run_legacy(query: &[u8], chunk: &Path) -> Result<Vec<u8>, String> {
-    let chunk = sqd_query::ParquetChunk::new(chunk.to_string_lossy().into_owned());
-    let query = sqd_query::Query::from_json_bytes(query).map_err(|e| format!("{e:#}"))?;
-    let mut writer = sqd_query::JsonLinesWriter::new(Vec::new());
-    match query.compile().execute(&chunk) {
-        Ok(Some(mut blocks)) => writer
-            .write_blocks(&mut blocks)
-            .map_err(|e| format!("{e:#}"))?,
-        Ok(None) => {}
-        Err(e) => return Err(format!("{e:#}")),
-    }
-    writer.finish().map_err(|e| format!("{e:#}"))
-}
-
-/// NDJSON to a comparable value. The two engines order object keys differently
-/// and escape differently, so the comparison is over parsed values, never bytes.
-fn as_blocks(body: &[u8]) -> Vec<serde_json::Value> {
-    body.split(|b| *b == b'\n')
-        .filter(|line| !line.is_empty())
-        .map(|line| serde_json::from_slice(line).unwrap())
-        .collect()
 }
 
 /// The first block the chunk holds, so generated ranges land on real data.

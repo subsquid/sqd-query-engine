@@ -1,0 +1,71 @@
+{
+  "type": "evm",
+  "fromBlock": 0,
+  "includeAllBlocks": true,
+  "fields": {
+    "block": {
+      "number": true,
+      "hash": true,
+      "timestamp": true
+    },
+    "transaction": {
+      "transactionIndex": true,
+      "hash": true,
+      "from": true,
+      "to": true,
+      "input": true,
+      "value": true
+    },
+    "log": {
+      "logIndex": true,
+      "transactionIndex": true,
+      "address": true,
+      "topics": true,
+      "data": true
+    },
+    "trace": {
+      "transactionIndex": true,
+      "traceAddress": true,
+      "type": true,
+      "callFrom": true,
+      "callTo": true,
+      "callInput": true,
+      "callValue": true
+    },
+    "stateDiff": {
+      "transactionIndex": true,
+      "address": true,
+      "key": true,
+      "kind": true,
+      "prev": true,
+      "next": true
+    }
+  },
+  "transactions": [
+    {
+      "logs": true,
+      "traces": true,
+      "stateDiffs": true
+    }
+  ],
+  "logs": [
+    {
+      "transaction": true,
+      "transactionLogs": true,
+      "transactionTraces": true,
+      "transactionStateDiffs": true
+    }
+  ],
+  "traces": [
+    {
+      "transaction": true,
+      "transactionLogs": true,
+      "transactionTraces": true
+    }
+  ],
+  "stateDiffs": [
+    {
+      "transaction": true
+    }
+  ]
+}
