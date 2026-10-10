@@ -5,13 +5,20 @@ are added via YAML metadata, not code.
 
 ## Architecture
 
+```text
+JSON bytes + DatasetDescription -> parse_query -> Query -> compile -> Plan
+Plan + ChunkReader -> validate + choose read strategy
+                   -> scan complete block ranges + expand relations
+                   -> select whole blocks by weight
+                   -> read selected payloads when deferred
+                   -> QueryOutput -> encode one JSON block on demand
+                   -> ArrowOutput (alternative, buffered IPC)
 ```
-JSON query -> parse (metadata-driven) -> compile -> Plan
-Plan -> parallel parquet scan (mmap, RowFilter pushdown)
-     -> KeyFilter + HierarchicalFilter relation scans
-     -> join (semi_join / lookup_join / find_children / find_parents)
-     -> block grouping + sequential JSON output
-```
+
+Start with the [architecture reading guide](docs/architecture.md) for the inputs,
+results, and source files of each stage. It also identifies where the executor
+chooses between reading payloads immediately and deferring them until page
+selection. The [specification](spec/README.md) defines the observable behavior.
 
 ### Key Design Decisions
 
@@ -26,23 +33,27 @@ Plan -> parallel parquet scan (mmap, RowFilter pushdown)
 
 ## Project Structure
 
-```
+```text
+crates/metadata/ # sqd-metadata: catalog types, YAML loader, validation
 src/
-  metadata/     # YAML metadata loader, dataset description types
-  query/        # JSON query parser, plan compiler
-  scan/         # Parquet scanner, predicates, chunk reader
-  join/         # Semi-join, lookup-join, hierarchical join
-  output/       # JSON encoders, block grouping, streaming writer
-metadata/
-  evm.yaml      # Ethereum dataset description
-  solana.yaml   # Solana dataset description
-benches/        # divan benchmarks
+  lib.rs        # Public modules; re-exports sqd_metadata as metadata
+  query/        # JSON parser and plan compiler
+  scan/         # ChunkReader, Parquet and columnar readers, predicates, row identities
+  join/         # Equality and hierarchical joins, including scan fallbacks
+  output/       # Execution, projection, weight selection, materialization, JSON/Arrow
+  error.rs      # Error kinds and classification
+  integers.rs   # Integer-width-independent column access
+  text.rs       # Shared text handling
+metadata/       # Dataset YAML catalogs and catalog format documentation
+spec/           # Behavioral contract, invariants, conformance matrix, decisions
+docs/           # Architecture reading guide, weight model, design history
+benches/        # Latency, throughput, memory, and profiling benchmarks
 tests/
-  conformance/     # The CT classes of spec/08-conformance.md, one module each
-    harness/       # Shared fixture loader, runners, synthetic chunk writers
-    ct1_catalog.rs ... ct9_fuzz.rs
-  e2e_fixtures.rs  # Fixture comparison against the reference engine
-  fixtures/        # Query/result JSON pairs per dataset
+  conformance/
+    main.rs     # CT-1 through CT-9 modules (some classes have subdirectories)
+    harness/    # Fixture loaders, runners, synthetic chunk writers
+  e2e_fixtures.rs
+  fixtures/     # Query/result JSON pairs per dataset
 ```
 
 Tests are laid out by conformance class, and each one that pins an invariant
@@ -63,16 +74,33 @@ review comments.
 ## Usage
 
 ```rust
-use sqd_query_engine::metadata::loader::load_dataset_description;
-use sqd_query_engine::query::{parse::parse_query, plan::compile};
-use sqd_query_engine::output::assembly::execute_plan;
+use std::path::Path;
 
-let meta = load_dataset_description(Path::new("metadata/evm.yaml"))?;
-let parsed = parse_query(query_json, &meta)?;
-let plan = compile(&parsed, &meta)?;
-let output = execute_plan(&plan, &meta, chunk_dir)?; // None = no blocks in range
-let json_lines = output.map(|blocks| blocks.into_json_lines()).unwrap_or_default();
+use anyhow::Result;
+use sqd_query_engine::metadata::load_dataset_description;
+use sqd_query_engine::output::execute_plan;
+use sqd_query_engine::query::{compile, parse_query};
+
+pub fn query_json_lines(query_json: &[u8], chunk_dir: &Path) -> Result<Vec<u8>> {
+    let metadata = load_dataset_description(Path::new("metadata/evm.yaml"))?;
+    let query = parse_query(query_json, &metadata)?;
+    let plan = compile(&query, &metadata)?;
+    let output = execute_plan(&plan, &metadata, chunk_dir)?;
+    Ok(output.map(|blocks| blocks.into_json_lines()).unwrap_or_default())
+}
 ```
+
+`None` means the requested range does not intersect the chunk. A query with no
+matching items still returns the covered range's boundary blocks as headers.
+`into_json_lines` buffers the complete answer. For incremental encoding, consume
+`QueryOutput` with `has_next_block` and `write_next_block`, reusing a buffer and
+adding a newline after each block. The selected page's Arrow batches are already
+in memory when execution returns.
+
+To reuse an open reader, call `output::execute_chunk` or
+`output::execute_chunk_with` with a `scan::ChunkReader`. `metadata`, `query`, and
+`output` expose the imports above through public re-exports; their implementation
+modules such as `loader`, `parse`, and `assembly` are private.
 
 ## Query Format
 
@@ -112,8 +140,10 @@ Queries are JSON objects specifying block ranges, table filters, relations, and 
 
 ## Benchmarks
 
-Throughput improvement vs legacy engine (median across query types). See [BENCHMARKS.md](BENCHMARKS.md) for full
-results.
+Historical throughput measurements vs the legacy engine (median across query types).
+See [BENCHMARKS.md](BENCHMARKS.md) for recorded results and the
+[historical comparison](docs/history/engine-comparison.md) for context; these are
+not a baseline for the current revision.
 
 ### x86_64: Intel Xeon E-2136 (6C/12T @ 3.3GHz), 64GB DDR4, Linux — prior run (pre-RPC query set)
 
@@ -158,16 +188,15 @@ cargo bench --bench profile    --features legacy-query -- rpc/getLogs --compare
 ## Tests
 
 ```bash
-# Unit tests (82 tests)
-cargo test --lib
+# Unit tests, including the metadata crate
+cargo test --workspace --lib
 
-# E2E fixture tests (46 tests, compare output against legacy engine)
-cargo test --test e2e_fixtures
+# E2E fixture tests (external fixtures required)
+SQD_REQUIRE_FIXTURES=1 cargo test --test e2e_fixtures -- --ignored
 
-# All tests
-cargo test
+# Portable workspace suite; external-data tests are explicitly ignored
+cargo test --workspace
+
+# Specification and test-tag consistency
+make spec-check
 ```
-
-## Changelog
-
-See [CHANGELOG.md](CHANGELOG.md).
