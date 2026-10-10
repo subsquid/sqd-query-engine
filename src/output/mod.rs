@@ -7,6 +7,7 @@ mod fork;
 mod materialize;
 mod row_order;
 mod row_writer;
+mod sources;
 mod weight;
 mod writer;
 
