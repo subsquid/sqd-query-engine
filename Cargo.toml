@@ -18,7 +18,9 @@ arrow = { version = "54", features = ["ffi", "ipc_compression"] }
 parquet = { version = "54", features = ["arrow"] }
 rayon = "1"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# An item's filters, and so the scan's stages, follow the request's key order;
+# without this, the order would depend on which other crate shares the build.
+serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
 indexmap = { version = "2", features = ["serde"] }
 anyhow = "1"
