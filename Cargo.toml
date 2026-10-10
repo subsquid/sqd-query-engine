@@ -63,6 +63,8 @@ tempfile = "3"
 proptest = "1"
 zstd = "0.13"
 insta = "1"
+# Instruction and heap counts under Valgrind; the runner binary must match this version.
+gungraun = "=0.20.0"
 
 [[bench]]
 name = "latency"
@@ -78,4 +80,8 @@ harness = false
 
 [[bench]]
 name = "memory"
+harness = false
+
+[[bench]]
+name = "instructions"
 harness = false

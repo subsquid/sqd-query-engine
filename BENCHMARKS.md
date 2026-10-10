@@ -398,3 +398,37 @@ cargo bench --bench profile --features legacy-query -- "rpc/getBlockReceipts" 10
 # --format as above)
 cargo bench --bench memory --features legacy-query -- --cpu 8
 ```
+
+### Checking that a change keeps reads and costs
+
+Two checks need one run of each build and no noise estimate: the read snapshot
+and the heap counts repeat exactly, and instruction counts move by about 2% at
+most between runs of one binary, under the 3% limit.
+
+What each bench query asks the chunk reader for is a snapshot test, one
+snapshot per query under `tests/snapshots/`. A change that reads other tables,
+columns, filters or block ranges changes a snapshot, and the diff shows in
+review. Row groups the reader skips inside a scan are not recorded.
+
+```bash
+SQD_REQUIRE_CHUNKS=1 cargo test --test reads -- --ignored
+cargo insta review    # accept an intended change
+```
+
+Instructions, bytes allocated and peak heap of each query are counted under
+Valgrind by [Gungraun](https://github.com/gungraun/gungraun), one query on one
+thread. It runs on Linux and needs `valgrind` and the runner of the same version
+as the `gungraun` dev-dependency. A run against a baseline fails with exit code 3
+when instructions grow by more than 3%, bytes allocated by more than 1% or peak
+heap by more than 5%.
+
+```bash
+cargo install gungraun-runner --version 0.20.0
+git switch master  && cargo bench --bench instructions -- --save-baseline=base --parallel
+git switch my-work && cargo bench --bench instructions -- --baseline=base --parallel
+```
+
+Instruction counts leave out wall time, cache misses, page faults and lock
+contention. A change to threading, I/O or buffer lifetimes also needs
+`throughput` and `memory` on both builds, alternated on the same machine with
+the same settings, and a run of one build against itself to measure the noise.
