@@ -1,0 +1,21 @@
+---
+source: tests/reads.rs
+expression: snapshot.trim_end()
+---
+## json
+response 22562400..22562465 n=66 read_through=22562466
+read blocks blocks=0..- cols=[number] block_column=number required=[number] -> rows=1592
+read statediffs blocks=0..- cols=[block_number,next_size,prev_size] block_column=block_number items=[] -> rows=2055913
+read statediffs blocks=0..22562466 cols=[address,block_number,key,kind,next,next_size,prev,prev_size,transaction_index] block_column=block_number required=[address,key,kind,next,next_size,prev,prev_size,transaction_index] items=[] window=0..22562466 -> rows=88730
+
+## json, page 256 KiB
+response 22562400..22562400 n=1 read_through=22562401
+read blocks blocks=0..- cols=[number] block_column=number required=[number] -> rows=1592
+read statediffs blocks=0..- cols=[block_number,next_size,prev_size] block_column=block_number items=[] -> rows=2055913
+read statediffs blocks=0..22562401 cols=[address,block_number,key,kind,next,next_size,prev,prev_size,transaction_index] block_column=block_number required=[address,key,kind,next,next_size,prev,prev_size,transaction_index] items=[] window=0..22562401 -> rows=1927
+
+## arrow
+response 22562400..22562465 n=66
+read blocks blocks=0..- cols=[number] block_column=number required=[number] -> rows=1592
+read statediffs blocks=0..- cols=[block_number,next_size,prev_size] block_column=block_number items=[] -> rows=2055913
+read statediffs blocks=0..22562466 cols=[address,block_number,key,kind,next,next_size,prev,prev_size,transaction_index] block_column=block_number required=[address,key,kind,next,next_size,prev,prev_size,transaction_index] items=[] window=0..22562466 -> rows=88730

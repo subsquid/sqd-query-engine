@@ -1,0 +1,24 @@
+---
+source: tests/reads.rs
+expression: snapshot.trim_end()
+---
+## json
+response 24550597..24550820 n=224 read_through=-
+read blocks blocks=-..- cols=[hash,number,timestamp] block_column=number at=224:bb0ef37fd8c89387 -> rows=224
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,number,timestamp] positions -> rows=224
+read logs blocks=-..- cols=[address,block_number,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] block_column=block_number at=16836:25d7e0cd296010e4 -> rows=16836
+read logs blocks=0..- cols=[block_number,data_size] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(Utf8: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48") topic0 in(Utf8: "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")] positions window=0..- -> rows=16836
+
+## json, page 256 KiB
+response 24550597..24550607 n=11 read_through=-
+read blocks blocks=-..- cols=[hash,number,timestamp] block_column=number at=11:1951357ebf5dff9f -> rows=11
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,number,timestamp] positions -> rows=224
+read logs blocks=-..- cols=[address,block_number,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] block_column=block_number at=760:c7a6b897ea46b00b -> rows=760
+read logs blocks=0..- cols=[block_number,data_size] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(Utf8: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48") topic0 in(Utf8: "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")] positions window=0..- -> rows=16836
+
+## arrow
+response 24550597..24550820 n=224
+read blocks blocks=-..- cols=[hash,number,timestamp] block_column=number at=224:bb0ef37fd8c89387 -> rows=224
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,number,timestamp] positions -> rows=224
+read logs blocks=-..- cols=[address,block_number,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] block_column=block_number at=16836:25d7e0cd296010e4 -> rows=16836
+read logs blocks=0..- cols=[block_number,data_size] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(Utf8: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48") topic0 in(Utf8: "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")] positions window=0..- -> rows=16836

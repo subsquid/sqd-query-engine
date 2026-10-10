@@ -1,0 +1,21 @@
+---
+source: tests/reads.rs
+expression: snapshot.trim_end()
+---
+## json
+response 24550620..24550620 n=1 read_through=-
+read blocks blocks=24550620..24550620 cols=[hash,number] block_column=number required=[hash,number] -> rows=1
+read traces blocks=24550620..24550620 cols=[block_number,call_from,call_gas,call_input,call_input_size,call_result_gas_used,call_result_output,call_result_output_size,call_sighash,call_to,call_type,call_value,create_from,create_gas,create_init,create_init_size,create_result_address,create_result_code,create_result_code_size,create_result_gas_used,create_value,error,revert_reason,reward_author,reward_type,reward_value,subtraces,suicide_address,suicide_balance,suicide_refund_address,trace_address,transaction_index,type] block_column=block_number required=[call_from,call_gas,call_input,call_input_size,call_result_gas_used,call_result_output,call_result_output_size,call_sighash,call_to,call_type,call_value,create_from,create_gas,create_init,create_init_size,create_result_address,create_result_code,create_result_code_size,create_result_gas_used,create_value,error,revert_reason,reward_author,reward_type,reward_value,subtraces,suicide_address,suicide_balance,suicide_refund_address,trace_address,transaction_index,type] items=[] window=24550620..24550620 -> rows=1584
+read traces blocks=24550620..24550620 cols=[block_number,call_input_size,call_result_output_size,create_init_size,create_result_code_size] block_column=block_number items=[] -> rows=1584
+
+## json, page 256 KiB
+response 24550620..24550620 n=1 read_through=-
+read blocks blocks=24550620..24550620 cols=[hash,number] block_column=number required=[hash,number] -> rows=1
+read traces blocks=24550620..24550620 cols=[block_number,call_from,call_gas,call_input,call_input_size,call_result_gas_used,call_result_output,call_result_output_size,call_sighash,call_to,call_type,call_value,create_from,create_gas,create_init,create_init_size,create_result_address,create_result_code,create_result_code_size,create_result_gas_used,create_value,error,revert_reason,reward_author,reward_type,reward_value,subtraces,suicide_address,suicide_balance,suicide_refund_address,trace_address,transaction_index,type] block_column=block_number required=[call_from,call_gas,call_input,call_input_size,call_result_gas_used,call_result_output,call_result_output_size,call_sighash,call_to,call_type,call_value,create_from,create_gas,create_init,create_init_size,create_result_address,create_result_code,create_result_code_size,create_result_gas_used,create_value,error,revert_reason,reward_author,reward_type,reward_value,subtraces,suicide_address,suicide_balance,suicide_refund_address,trace_address,transaction_index,type] items=[] window=24550620..24550620 -> rows=1584
+read traces blocks=24550620..24550620 cols=[block_number,call_input_size,call_result_output_size,create_init_size,create_result_code_size] block_column=block_number items=[] -> rows=1584
+
+## arrow
+response 24550620..24550620 n=1
+read blocks blocks=24550620..24550620 cols=[hash,number] block_column=number required=[hash,number] -> rows=1
+read traces blocks=24550620..24550620 cols=[block_number,call_from,call_gas,call_input,call_input_size,call_result_gas_used,call_result_output,call_result_output_size,call_sighash,call_to,call_type,call_value,create_from,create_gas,create_init,create_init_size,create_result_address,create_result_code,create_result_code_size,create_result_gas_used,create_value,error,revert_reason,reward_author,reward_type,reward_value,subtraces,suicide_address,suicide_balance,suicide_refund_address,trace_address,transaction_index,type] block_column=block_number required=[call_from,call_gas,call_input,call_input_size,call_result_gas_used,call_result_output,call_result_output_size,call_sighash,call_to,call_type,call_value,create_from,create_gas,create_init,create_init_size,create_result_address,create_result_code,create_result_code_size,create_result_gas_used,create_value,error,revert_reason,reward_author,reward_type,reward_value,subtraces,suicide_address,suicide_balance,suicide_refund_address,trace_address,transaction_index,type] items=[] window=24550620..24550620 -> rows=1584
+read traces blocks=24550620..24550620 cols=[block_number,call_input_size,call_result_output_size,create_init_size,create_result_code_size] block_column=block_number items=[] -> rows=1584

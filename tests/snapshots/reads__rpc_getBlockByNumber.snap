@@ -1,0 +1,18 @@
+---
+source: tests/reads.rs
+expression: snapshot.trim_end()
+---
+## json
+response 24550620..24550620 n=1 read_through=-
+read blocks blocks=24550620..24550620 cols=[base_fee_per_gas,difficulty,extra_data,extra_data_size,gas_limit,gas_used,hash,logs_bloom,miner,mix_hash,nonce,number,parent_hash,receipts_root,sha3_uncles,size,state_root,timestamp,total_difficulty,transactions_root] block_column=number required=[base_fee_per_gas,difficulty,extra_data,extra_data_size,gas_limit,gas_used,hash,logs_bloom,miner,mix_hash,nonce,number,parent_hash,receipts_root,sha3_uncles,size,state_root,timestamp,total_difficulty,transactions_root] -> rows=1
+read transactions blocks=24550620..24550620 cols=[block_number,chain_id,from,gas,gas_price,hash,input,input_size,max_fee_per_gas,max_priority_fee_per_gas,nonce,r,s,to,transaction_index,type,v,value,y_parity] block_column=block_number required=[chain_id,from,gas,gas_price,hash,input,input_size,max_fee_per_gas,max_priority_fee_per_gas,nonce,r,s,to,transaction_index,type,v,value,y_parity] items=[] window=24550620..24550620 -> rows=307
+
+## json, page 256 KiB
+response 24550620..24550620 n=1 read_through=-
+read blocks blocks=24550620..24550620 cols=[base_fee_per_gas,difficulty,extra_data,extra_data_size,gas_limit,gas_used,hash,logs_bloom,miner,mix_hash,nonce,number,parent_hash,receipts_root,sha3_uncles,size,state_root,timestamp,total_difficulty,transactions_root] block_column=number required=[base_fee_per_gas,difficulty,extra_data,extra_data_size,gas_limit,gas_used,hash,logs_bloom,miner,mix_hash,nonce,number,parent_hash,receipts_root,sha3_uncles,size,state_root,timestamp,total_difficulty,transactions_root] -> rows=1
+read transactions blocks=24550620..24550620 cols=[block_number,chain_id,from,gas,gas_price,hash,input,input_size,max_fee_per_gas,max_priority_fee_per_gas,nonce,r,s,to,transaction_index,type,v,value,y_parity] block_column=block_number required=[chain_id,from,gas,gas_price,hash,input,input_size,max_fee_per_gas,max_priority_fee_per_gas,nonce,r,s,to,transaction_index,type,v,value,y_parity] items=[] window=24550620..24550620 -> rows=307
+
+## arrow
+response 24550620..24550620 n=1
+read blocks blocks=24550620..24550620 cols=[base_fee_per_gas,difficulty,extra_data,extra_data_size,gas_limit,gas_used,hash,logs_bloom,miner,mix_hash,nonce,number,parent_hash,receipts_root,sha3_uncles,size,state_root,timestamp,total_difficulty,transactions_root] block_column=number required=[base_fee_per_gas,difficulty,extra_data,extra_data_size,gas_limit,gas_used,hash,logs_bloom,miner,mix_hash,nonce,number,parent_hash,receipts_root,sha3_uncles,size,state_root,timestamp,total_difficulty,transactions_root] -> rows=1
+read transactions blocks=24550620..24550620 cols=[block_number,chain_id,from,gas,gas_price,hash,input,input_size,max_fee_per_gas,max_priority_fee_per_gas,nonce,r,s,to,transaction_index,type,v,value,y_parity] block_column=block_number required=[chain_id,from,gas,gas_price,hash,input,input_size,max_fee_per_gas,max_priority_fee_per_gas,nonce,r,s,to,transaction_index,type,v,value,y_parity] items=[] window=24550620..24550620 -> rows=307

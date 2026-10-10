@@ -227,6 +227,16 @@ pub trait ArrayPredicate: Send + Sync {
     fn listed_values(&self) -> Option<&Arc<dyn Array>> {
         None
     }
+
+    /// The operation and every operand, as text that is the same for the same
+    /// predicate in every run, so that diagnostics can compare predicates across
+    /// builds. Unordered operands are sorted.
+    ///
+    /// Without an override only the type is named, so two predicates of one
+    /// type that differ in operands read the same.
+    fn describe(&self) -> String {
+        std::any::type_name::<Self>().to_owned()
+    }
 }
 
 /// Evaluate a predicate on a dictionary-encoded column of any key width: once
@@ -309,7 +319,6 @@ pub struct InListPredicate {
 /// Bloom filter predicate: check if any of the given values might be in the bloom filter.
 pub struct BloomFilterPredicate {
     needles: Vec<Vec<u8>>,
-    #[allow(dead_code)]
     num_bytes: usize,
     num_hashes: usize,
 }
@@ -635,6 +644,10 @@ impl ArrayPredicate for EqPredicate {
             _ => false,
         }
     }
+
+    fn describe(&self) -> String {
+        format!("eq({:?})", self.value)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -740,6 +753,19 @@ impl ArrayPredicate for InListPredicate {
 
     fn listed_values(&self) -> Option<&Arc<dyn Array>> {
         Some(&self.values)
+    }
+
+    fn describe(&self) -> String {
+        let formatter = arrow::util::display::ArrayFormatter::try_new(
+            self.values.as_ref(),
+            &arrow::util::display::FormatOptions::default(),
+        )
+        .expect("a filter list holds text, integers or bytes, which all format");
+        // Quoted, so that a value holding the separator stays one value.
+        let values: Vec<String> = (0..self.values.len())
+            .map(|i| format!("{:?}", formatter.value(i).to_string()))
+            .collect();
+        format!("in({}: {})", self.values.data_type(), values.join(", "))
     }
 }
 
@@ -878,6 +904,20 @@ impl ArrayPredicate for BloomFilterPredicate {
         // Cannot use row group stats to skip bloom filter columns
         false
     }
+
+    fn describe(&self) -> String {
+        let needles: Vec<String> = self
+            .needles
+            .iter()
+            .map(|n| faster_hex::hex_string(n))
+            .collect();
+        format!(
+            "bloom(bytes={}, hashes={}: {})",
+            self.num_bytes,
+            self.num_hashes,
+            needles.join(", ")
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -919,6 +959,10 @@ impl ArrayPredicate for RangeGtePredicate {
     fn can_skip(&self, stats: &StatRange) -> bool {
         range_outside(&self.value, stats, true)
     }
+
+    fn describe(&self) -> String {
+        format!("gte({:?})", self.value)
+    }
 }
 
 impl RangeLtePredicate {
@@ -937,6 +981,10 @@ impl ArrayPredicate for RangeLtePredicate {
 
     fn can_skip(&self, stats: &StatRange) -> bool {
         range_outside(&self.value, stats, false)
+    }
+
+    fn describe(&self) -> String {
+        format!("lte({:?})", self.value)
     }
 }
 
@@ -1031,6 +1079,23 @@ impl ArrayPredicate for ListContainsAnyPredicate {
         // No row group pruning for list-contains predicates
         false
     }
+
+    fn describe(&self) -> String {
+        let mut operands = Vec::new();
+        if let Some(set) = &self.u32_set {
+            let mut values: Vec<u32> = set.iter().copied().collect();
+            values.sort_unstable();
+            let values: Vec<String> = values.iter().map(u32::to_string).collect();
+            operands.push(format!("UInt32: {}", values.join(", ")));
+        }
+        if let Some(set) = &self.string_set {
+            let mut values: Vec<&String> = set.iter().collect();
+            values.sort_unstable();
+            let values: Vec<String> = values.iter().map(|v| format!("{v:?}")).collect();
+            operands.push(format!("Utf8: {}", values.join(", ")));
+        }
+        format!("contains_any({})", operands.join("; "))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1055,6 +1120,10 @@ impl ArrayPredicate for NeverPredicate {
 
     fn can_skip(&self, _stats: &StatRange) -> bool {
         true
+    }
+
+    fn describe(&self) -> String {
+        "never".to_owned()
     }
 }
 
@@ -2638,5 +2707,105 @@ mod tests {
         .is_ok());
         assert!(check_stored_type(&pred, &DataType::Utf8).is_err());
         assert!(check_stored_type(&pred, &DataType::Boolean).is_err());
+    }
+
+    /// Diagnostics tell predicates apart by operation and by every operand, a
+    /// threshold that matches the same rows included, and a set built in any
+    /// order reads the same.
+    #[test]
+    fn describe_names_the_operation_and_every_operand() {
+        let described = [
+            (
+                EqPredicate::new(ScalarValue::UInt64(1)).describe(),
+                "eq(UInt64(1))",
+            ),
+            (
+                EqPredicate::new(ScalarValue::Int64(1)).describe(),
+                "eq(Int64(1))",
+            ),
+            (
+                EqPredicate::new(ScalarValue::Utf8("a".into())).describe(),
+                r#"eq(Utf8("a"))"#,
+            ),
+            (
+                RangeGtePredicate::new(ScalarValue::UInt64(1)).describe(),
+                "gte(UInt64(1))",
+            ),
+            (
+                RangeGtePredicate::new(ScalarValue::UInt64(2)).describe(),
+                "gte(UInt64(2))",
+            ),
+            (
+                RangeLtePredicate::new(ScalarValue::UInt64(1)).describe(),
+                "lte(UInt64(1))",
+            ),
+            (
+                InListPredicate::new(Arc::new(UInt64Array::from(vec![2, 1]))).describe(),
+                r#"in(UInt64: "2", "1")"#,
+            ),
+            (
+                InListPredicate::new(Arc::new(Int64Array::from(vec![2, 1]))).describe(),
+                r#"in(Int64: "2", "1")"#,
+            ),
+            (
+                InListPredicate::new(Arc::new(StringArray::from(vec!["a", "b"]))).describe(),
+                r#"in(Utf8: "a", "b")"#,
+            ),
+            (
+                InListPredicate::new(Arc::new(StringArray::from(vec!["a\", \"b"]))).describe(),
+                r#"in(Utf8: "a\", \"b")"#,
+            ),
+            (
+                BloomFilterPredicate::new(vec![vec![0xab], vec![1]], 64, 7).describe(),
+                "bloom(bytes=64, hashes=7: ab, 01)",
+            ),
+            (
+                BloomFilterPredicate::new(vec![vec![0xab], vec![1]], 64, 6).describe(),
+                "bloom(bytes=64, hashes=6: ab, 01)",
+            ),
+            (
+                BloomFilterPredicate::new(vec![vec![0xab], vec![1]], 32, 7).describe(),
+                "bloom(bytes=32, hashes=7: ab, 01)",
+            ),
+            (
+                ListContainsAnyPredicate::new_u32(vec![3, 1, 2]).describe(),
+                "contains_any(UInt32: 1, 2, 3)",
+            ),
+            (
+                ListContainsAnyPredicate::new_string(vec!["b".into(), "a".into()]).describe(),
+                r#"contains_any(Utf8: "a", "b")"#,
+            ),
+            (NeverPredicate.describe(), "never"),
+        ];
+        for (text, expected) in &described {
+            assert_eq!(text, expected);
+        }
+
+        let distinct: HashSet<&String> = described.iter().map(|(text, _)| text).collect();
+        assert_eq!(distinct.len(), described.len());
+
+        assert_eq!(
+            ListContainsAnyPredicate::new_u32(vec![2, 3, 1]).describe(),
+            ListContainsAnyPredicate::new_u32(vec![3, 1, 2]).describe()
+        );
+    }
+
+    /// A predicate written before `describe` existed still implements the
+    /// trait, and diagnostics name its type.
+    #[test]
+    fn a_predicate_that_does_not_describe_itself_is_named_by_its_type() {
+        struct Opaque;
+
+        impl ArrayPredicate for Opaque {
+            fn evaluate(&self, array: &dyn Array) -> Mask {
+                Ok(BooleanArray::from(vec![true; array.len()]))
+            }
+
+            fn can_skip(&self, _stats: &StatRange) -> bool {
+                false
+            }
+        }
+
+        assert_eq!(Opaque.describe(), std::any::type_name::<Opaque>());
     }
 }

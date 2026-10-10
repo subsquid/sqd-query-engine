@@ -1,0 +1,21 @@
+---
+source: tests/reads.rs
+expression: snapshot.trim_end()
+---
+## json
+response 22562400..22562526 n=127 read_through=22562527
+read blocks blocks=0..- cols=[number] block_column=number required=[number] -> rows=1592
+read transactions blocks=0..- cols=[block_number,input_size] block_column=block_number items=[] -> rows=264841
+read transactions blocks=0..22562527 cols=[block_number,from,gas,gas_price,hash,input,input_size,nonce,to,transaction_index,value] block_column=block_number required=[from,gas,gas_price,hash,input,input_size,nonce,to,transaction_index,value] items=[] window=0..22562527 -> rows=23601
+
+## json, page 256 KiB
+response 22562400..22562401 n=2 read_through=22562402
+read blocks blocks=0..- cols=[number] block_column=number required=[number] -> rows=1592
+read transactions blocks=0..- cols=[block_number,input_size] block_column=block_number items=[] -> rows=264841
+read transactions blocks=0..22562402 cols=[block_number,from,gas,gas_price,hash,input,input_size,nonce,to,transaction_index,value] block_column=block_number required=[from,gas,gas_price,hash,input,input_size,nonce,to,transaction_index,value] items=[] window=0..22562402 -> rows=488
+
+## arrow
+response 22562400..22562526 n=127
+read blocks blocks=0..- cols=[number] block_column=number required=[number] -> rows=1592
+read transactions blocks=0..- cols=[block_number,input_size] block_column=block_number items=[] -> rows=264841
+read transactions blocks=0..22562527 cols=[block_number,from,gas,gas_price,hash,input,input_size,nonce,to,transaction_index,value] block_column=block_number required=[from,gas,gas_price,hash,input,input_size,nonce,to,transaction_index,value] items=[] window=0..22562527 -> rows=23601

@@ -60,6 +60,22 @@ impl HierarchicalFilter {
         self.sources.is_empty()
     }
 
+    /// The relation, its columns and whether same-depth addresses match, as
+    /// text that is the same in every run, for diagnostics. The source
+    /// addresses are the rows of the scan they came from.
+    pub fn describe(&self) -> String {
+        let relation = match self.mode {
+            HierarchicalMode::Children => "children",
+            HierarchicalMode::Parents => "parents",
+        };
+        let depth = if self.inclusive { ", inclusive" } else { "" };
+        format!(
+            "{relation}[{}]/{}{depth}",
+            self.group_key_columns.join(","),
+            self.address_column
+        )
+    }
+
     /// Which rows of `batch` hold an address related to a source address of
     /// their group. Only `candidates` are asked.
     pub(super) fn mask(
@@ -776,6 +792,45 @@ mod tests {
             seen_hashed,
             [true, true],
             "one way of finding paths went untested"
+        );
+    }
+
+    /// Diagnostics tell apart hierarchy filters that differ in their relation or
+    /// in whether same-depth addresses match.
+    #[test]
+    fn describe_names_the_relation_the_columns_and_the_depth_rule() {
+        use arrow::datatypes::UInt32Type;
+
+        let address = ListArray::from_iter_primitive::<UInt32Type, _, _>(vec![Some(vec![Some(0)])]);
+        let batch = RecordBatch::try_from_iter([
+            ("block", Arc::new(UInt32Array::from(vec![1])) as ArrayRef),
+            ("tx", Arc::new(UInt32Array::from(vec![0])) as ArrayRef),
+            ("address", Arc::new(address) as ArrayRef),
+        ])
+        .unwrap();
+        let describe = |mode, inclusive| {
+            HierarchicalFilter::build(
+                std::slice::from_ref(&batch),
+                &["block", "tx"],
+                "address",
+                "path",
+                mode,
+                inclusive,
+            )
+            .describe()
+        };
+
+        assert_eq!(
+            describe(HierarchicalMode::Children, false),
+            "children[block,tx]/path"
+        );
+        assert_eq!(
+            describe(HierarchicalMode::Parents, false),
+            "parents[block,tx]/path"
+        );
+        assert_eq!(
+            describe(HierarchicalMode::Children, true),
+            "children[block,tx]/path, inclusive"
         );
     }
 }

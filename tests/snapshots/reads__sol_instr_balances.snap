@@ -1,0 +1,30 @@
+---
+source: tests/reads.rs
+expression: snapshot.trim_end()
+---
+## json
+response 406021645..406021692 n=30 read_through=-
+read balances blocks=-..- cols=[account,block_number,post,pre,transaction_index] block_column=block_number at=175:7c9ed54947588294 -> rows=175
+read balances blocks=406021645..406021692 cols=[block_number,transaction_index] block_column=block_number required=[account,post,pre,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=0..- -> rows=175
+read blocks blocks=-..- cols=[hash,number] block_column=number at=30:93506a4edf3520f0 -> rows=30
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,number] positions -> rows=48
+read instructions blocks=-..- cols=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,block_number,data,data_size,instruction_address,program_id,rest_accounts,transaction_index] block_column=block_number at=58:0b23cf7979956e11 -> rows=58
+read instructions blocks=0..- cols=[accounts_size,block_number,data_size,transaction_index] block_column=block_number required=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,data,data_size,program_id,rest_accounts] items=[program_id in(Utf8: "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc") d8 in(UInt64: "17926189716184860616") is_committed eq(Boolean(true))] positions window=0..- -> rows=58
+
+## json, page 256 KiB
+response 406021645..406021692 n=30 read_through=-
+read balances blocks=-..- cols=[account,block_number,post,pre,transaction_index] block_column=block_number at=175:7c9ed54947588294 -> rows=175
+read balances blocks=406021645..406021692 cols=[block_number,transaction_index] block_column=block_number required=[account,post,pre,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=0..- -> rows=175
+read blocks blocks=-..- cols=[hash,number] block_column=number at=30:93506a4edf3520f0 -> rows=30
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,number] positions -> rows=48
+read instructions blocks=-..- cols=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,block_number,data,data_size,instruction_address,program_id,rest_accounts,transaction_index] block_column=block_number at=58:0b23cf7979956e11 -> rows=58
+read instructions blocks=0..- cols=[accounts_size,block_number,data_size,transaction_index] block_column=block_number required=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,data,data_size,program_id,rest_accounts] items=[program_id in(Utf8: "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc") d8 in(UInt64: "17926189716184860616") is_committed eq(Boolean(true))] positions window=0..- -> rows=58
+
+## arrow
+response 406021645..406021692 n=30
+read balances blocks=-..- cols=[account,block_number,post,pre,transaction_index] block_column=block_number at=175:7c9ed54947588294 -> rows=175
+read balances blocks=406021645..406021692 cols=[block_number,transaction_index] block_column=block_number required=[account,post,pre,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=0..- -> rows=175
+read blocks blocks=-..- cols=[hash,number] block_column=number at=30:93506a4edf3520f0 -> rows=30
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,number] positions -> rows=48
+read instructions blocks=-..- cols=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,block_number,data,data_size,instruction_address,program_id,rest_accounts,transaction_index] block_column=block_number at=58:0b23cf7979956e11 -> rows=58
+read instructions blocks=0..- cols=[accounts_size,block_number,data_size,transaction_index] block_column=block_number required=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,data,data_size,program_id,rest_accounts] items=[program_id in(Utf8: "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc") d8 in(UInt64: "17926189716184860616") is_committed eq(Boolean(true))] positions window=0..- -> rows=58

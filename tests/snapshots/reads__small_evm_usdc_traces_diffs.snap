@@ -1,0 +1,39 @@
+---
+source: tests/reads.rs
+expression: snapshot.trim_end()
+---
+## json
+response 24550597..24550820 n=224 read_through=-
+read blocks blocks=-..- cols=[hash,number,timestamp] block_column=number at=224:bb0ef37fd8c89387 -> rows=224
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,number,timestamp] positions -> rows=224
+read statediffs blocks=-..- cols=[address,block_number,key,kind,next,next_size,prev,prev_size,transaction_index] block_column=block_number at=25260:c0cb364220120c1d -> rows=25260
+read statediffs blocks=0..- cols=[block_number,next_size,prev_size,transaction_index] block_column=block_number required=[address,key,kind,next,next_size,prev,prev_size,transaction_index] items=[address in(Utf8: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")] positions window=0..- -> rows=25260
+read traces blocks=-..- cols=[block_number,call_from,call_sighash,call_to,trace_address,transaction_index,type] block_column=block_number at=26633:f1b9fb330dc89ea1 -> rows=26633
+read traces blocks=0..- cols=[block_number,transaction_index] block_column=block_number required=[call_from,call_sighash,call_to,trace_address,transaction_index,type] items=[type in(Utf8: "call") call_to in(Utf8: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")] positions window=0..- -> rows=26633
+read transactions blocks=-..- cols=[block_number,from,hash,to,transaction_index] block_column=block_number at=10548:c212cb1bec83bb1b -> rows=10548
+read transactions blocks=24550597..24550820 cols=[block_number,transaction_index] block_column=block_number required=[from,hash,to,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=0..- -> rows=10191
+read transactions blocks=24550597..24550820 cols=[block_number,transaction_index] block_column=block_number required=[from,hash,to,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=0..- -> rows=10548
+
+## json, page 256 KiB
+response 24550597..24550600 n=4 read_through=-
+read blocks blocks=-..- cols=[hash,number,timestamp] block_column=number at=4:2e81a9d8a2d098ea -> rows=4
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,number,timestamp] positions -> rows=224
+read statediffs blocks=-..- cols=[address,block_number,key,kind,next,next_size,prev,prev_size,transaction_index] block_column=block_number at=378:04716b7049c30c92 -> rows=378
+read statediffs blocks=0..- cols=[block_number,next_size,prev_size,transaction_index] block_column=block_number required=[address,key,kind,next,next_size,prev,prev_size,transaction_index] items=[address in(Utf8: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")] positions window=0..- -> rows=25260
+read traces blocks=-..- cols=[block_number,call_from,call_sighash,call_to,trace_address,transaction_index,type] block_column=block_number at=413:2b326f932c6f27f2 -> rows=413
+read traces blocks=0..- cols=[block_number,transaction_index] block_column=block_number required=[call_from,call_sighash,call_to,trace_address,transaction_index,type] items=[type in(Utf8: "call") call_to in(Utf8: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")] positions window=0..- -> rows=26633
+read transactions blocks=-..- cols=[block_number,from,hash,to,transaction_index] block_column=block_number at=161:283021d255404f45 -> rows=161
+read transactions blocks=24550597..24550820 cols=[block_number,transaction_index] block_column=block_number required=[from,hash,to,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=0..- -> rows=10191
+read transactions blocks=24550597..24550820 cols=[block_number,transaction_index] block_column=block_number required=[from,hash,to,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=0..- -> rows=10548
+
+## arrow
+response 24550597..24550820 n=224
+read blocks blocks=-..- cols=[hash,number,timestamp] block_column=number at=224:bb0ef37fd8c89387 -> rows=224
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,number,timestamp] positions -> rows=224
+read statediffs blocks=-..- cols=[address,block_number,key,kind,next,next_size,prev,prev_size,transaction_index] block_column=block_number at=25260:c0cb364220120c1d -> rows=25260
+read statediffs blocks=0..- cols=[block_number,next_size,prev_size,transaction_index] block_column=block_number required=[address,key,kind,next,next_size,prev,prev_size,transaction_index] items=[address in(Utf8: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")] positions window=0..- -> rows=25260
+read traces blocks=-..- cols=[block_number,call_from,call_sighash,call_to,trace_address,transaction_index,type] block_column=block_number at=26633:f1b9fb330dc89ea1 -> rows=26633
+read traces blocks=0..- cols=[block_number,transaction_index] block_column=block_number required=[call_from,call_sighash,call_to,trace_address,transaction_index,type] items=[type in(Utf8: "call") call_to in(Utf8: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")] positions window=0..- -> rows=26633
+read transactions blocks=-..- cols=[block_number,from,hash,to,transaction_index] block_column=block_number at=10548:c212cb1bec83bb1b -> rows=10548
+read transactions blocks=24550597..24550820 cols=[block_number,transaction_index] block_column=block_number required=[from,hash,to,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=0..- -> rows=10191
+read transactions blocks=24550597..24550820 cols=[block_number,transaction_index] block_column=block_number required=[from,hash,to,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=0..- -> rows=10548
