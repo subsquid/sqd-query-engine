@@ -5,21 +5,19 @@ use crate::output::arrow_out::{
     OutputFormat,
 };
 use crate::output::block_index::{
-    build_block_index, collect_block_numbers, collect_boundary_blocks, compute_block_range,
+    collect_block_numbers, collect_boundary_blocks, compute_block_range,
 };
 use crate::output::columns::{
     find_address_column, group_keys_for_relation, physical_output_columns, required_output_columns,
     resolve_output_columns, resolve_relation_output_columns,
 };
-use crate::output::encoder::{encode_json_string, resolve_encoder, snake_to_camel};
+use crate::output::encoder::resolve_encoder;
 use crate::output::materialize::{
     materialize_tables, read_rows, retain_blocks, retain_selected_keys, SelectionReader,
 };
-use crate::output::row_order::{build_full_sort_columns, orders_rows, RowOrder};
-use crate::output::row_writer::{
-    build_field_writers, build_grouped_writers, resolve_grouped_writers, resolve_writers,
-    IndexedBatches,
-};
+use crate::output::row_order::{build_full_sort_columns, orders_rows};
+use crate::output::row_writer::{PreparedHeader, PreparedTable};
+use crate::output::sources::output_tables;
 use crate::output::weight::{
     block_scan_columns, compute_block_weights, weight_range_end, weight_scan_columns,
     BlockSelection, TableOutput,
@@ -38,17 +36,6 @@ use rayon::prelude::*;
 use rustc_hash::FxHashSet as HashSet;
 use std::collections::HashMap;
 use std::path::Path;
-
-/// Request name → the position its table holds in the catalog, which is the
-/// order item arrays appear in a response block.
-fn request_name_positions(metadata: &DatasetDescription) -> HashMap<&str, usize> {
-    metadata
-        .tables
-        .iter()
-        .enumerate()
-        .map(|(pos, (name, desc))| (desc.request_name(name), pos))
-        .collect()
-}
 
 /// Execution controls. Disabling range reads provides a full-read reference.
 #[derive(Debug, Clone, Copy)]
@@ -1152,52 +1139,7 @@ fn execute_chunk_fmt(
         let selected: HashSet<u64> = selected_blocks.iter().copied().collect();
         let keep = |b: u64| selected.contains(&b);
 
-        // Collect every output source (primary scans + relation pulls).
-        struct Src<'a> {
-            qn: String,
-            td: &'a crate::metadata::TableDescription,
-            out_cols: &'a [String],
-            batches: &'a [RecordBatch],
-        }
-        let mut srcs: Vec<Src> = Vec::new();
-        for table_plan in &plan.table_plans {
-            if let Some(output) = table_outputs.get(&table_plan.table) {
-                let td = metadata.table(&table_plan.table).unwrap();
-                srcs.push(Src {
-                    qn: td.request_name(&table_plan.table).to_string(),
-                    td,
-                    out_cols: &table_plan.output_columns,
-                    batches: output.rows.batches(),
-                });
-                for (rel_idx, rel) in table_plan.relations.iter().enumerate() {
-                    if let Some(rb) = output.relations.get(&rel_idx).map(Rows::batches) {
-                        if let Some(rd) = metadata.table(&rel.target_table) {
-                            srcs.push(Src {
-                                qn: rd.request_name(&rel.target_table).to_string(),
-                                td: rd,
-                                out_cols: &rel.output_columns,
-                                batches: rb,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-
-        // Group sources by output table name, ordered by metadata table order.
-        let qn_pos = request_name_positions(metadata);
-        let mut order: Vec<String> = Vec::new();
-        let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
-        for (i, s) in srcs.iter().enumerate() {
-            by_name
-                .entry(s.qn.clone())
-                .or_insert_with(|| {
-                    order.push(s.qn.clone());
-                    Vec::new()
-                })
-                .push(i);
-        }
-        order.sort_by_key(|qn| qn_pos.get(qn.as_str()).copied().unwrap_or(usize::MAX));
+        let tables = output_tables(plan, metadata, table_outputs);
 
         let mut groups: Vec<(String, Vec<RecordBatch>)> = Vec::new();
 
@@ -1235,17 +1177,16 @@ fn execute_chunk_fmt(
         }
 
         // Item tables.
-        for qn in &order {
-            let idxs = &by_name[qn];
-            let td = srcs[idxs[0]].td;
+        for table in &tables {
+            let td = table.desc;
             let bn = td.block_number_column.clone();
             let mut emit_cols = vec![bn.clone()];
-            for c in physical_output_columns(srcs[idxs[0]].out_cols, td) {
+            for c in physical_output_columns(table.sources[0].fields, td) {
                 if !emit_cols.contains(&c) {
                     emit_cols.push(c);
                 }
             }
-            let multi = idxs.len() > 1;
+            let multi = table.sources.len() > 1;
             // For a multi-source table, carry the dedup key columns through the
             // projection so they exist at dedup time, then drop them on emit.
             let sort_cols = build_full_sort_columns(td);
@@ -1259,8 +1200,8 @@ fn execute_chunk_fmt(
             }
 
             let mut projected: Vec<RecordBatch> = Vec::new();
-            for &si in idxs {
-                for b in srcs[si].batches {
+            for source in &table.sources {
+                for b in source.rows.batches() {
                     let f = filter_to_blocks(&project_columns(b, &proc_cols)?, &bn, keep)?;
                     if f.num_rows() > 0 {
                         projected.push(f);
@@ -1286,7 +1227,7 @@ fn execute_chunk_fmt(
             };
 
             groups.push((
-                qn.clone(),
+                table.name.to_string(),
                 if binary {
                     hexify_group(batches, td)?
                 } else {
@@ -1303,140 +1244,10 @@ fn execute_chunk_fmt(
         ))));
     }
 
-    // 6. Pre-build block→rows indexes for each batch set
-    let block_index = build_block_index(
-        &block_batches,
-        block_table_desc
-            .map(|d| d.block_number_column.as_str())
-            .unwrap_or("number"),
-    )?;
-
-    // Collect all indexed batch sources (both primary and relation), keyed by output table name.
-    // Multiple sources for the same table get merged into a single output array.
-    let mut all_indexes: Vec<IndexedBatches> = Vec::new();
-
-    for table_plan in &plan.table_plans {
-        if let Some(output) = table_outputs.remove(&table_plan.table) {
-            let TableOutput {
-                rows,
-                relations: mut relation_rows,
-            } = output;
-            let batches = rows.into_batches();
-            let table_desc = metadata.table(&table_plan.table).unwrap();
-            let bn_col = table_desc.block_number_column.as_str();
-            let query_name = table_desc.request_name(&table_plan.table);
-
-            // A source whose rows were read under another adds nothing to any
-            // block, and as a second source it would only slow the merge.
-            let has_rows = |batches: &[RecordBatch]| batches.iter().any(|b| b.num_rows() > 0);
-
-            let grouped = build_grouped_writers(&table_plan.output_columns, table_desc);
-            if has_rows(&batches) {
-                all_indexes.push(IndexedBatches {
-                    index: build_block_index(&batches, bn_col)?,
-                    order: RowOrder::new(&batches, table_desc),
-                    batches,
-                    writers: build_field_writers(&table_plan.output_columns, Some(table_desc)),
-                    grouped,
-                    table_name: query_name.to_string(),
-                });
-            }
-
-            for (rel_idx, rel) in table_plan.relations.iter().enumerate() {
-                let rel_batches = relation_rows.remove(&rel_idx).map(Rows::into_batches);
-                if let Some(rel_batches) = rel_batches.filter(|b| has_rows(b)) {
-                    if let Some(rd) = metadata.table(&rel.target_table) {
-                        let rel_bn = rd.block_number_column.as_str();
-                        let rel_qn = rd.request_name(&rel.target_table);
-
-                        let rel_grouped = build_grouped_writers(&rel.output_columns, rd);
-                        all_indexes.push(IndexedBatches {
-                            index: build_block_index(&rel_batches, rel_bn)?,
-                            order: RowOrder::new(&rel_batches, rd),
-                            batches: rel_batches,
-                            writers: build_field_writers(&rel.output_columns, Some(rd)),
-                            grouped: rel_grouped,
-                            table_name: rel_qn.to_string(),
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    // Group indexes by output table name, ordered by metadata table definition order.
-    let mut table_group_order: Vec<String> = Vec::new();
-    let mut table_groups: HashMap<String, Vec<usize>> = HashMap::new();
-    for (i, idx) in all_indexes.iter().enumerate() {
-        let entry = table_groups
-            .entry(idx.table_name.clone())
-            .or_insert_with(|| {
-                table_group_order.push(idx.table_name.clone());
-                Vec::new()
-            });
-        entry.push(i);
-    }
-
-    // Sort table_group_order by metadata table definition order (YAML key order).
-    let query_name_order = request_name_positions(metadata);
-    table_group_order.sort_by_key(|name| {
-        query_name_order
-            .get(name.as_str())
-            .copied()
-            .unwrap_or(usize::MAX)
-    });
-
-    // Build JSON array prefixes per output table
-    let table_json_prefixes: HashMap<String, Vec<u8>> = table_group_order
-        .iter()
-        .map(|name| {
-            let mut prefix = Vec::new();
-            encode_json_string(name, &mut prefix);
-            prefix.extend_from_slice(b":[");
-            (name.clone(), prefix)
-        })
-        .collect();
-
-    // Pre-compute block header writers
-    let header_writers = build_field_writers(&plan.block_output_columns, block_table_desc);
-    let bn_col = block_table_desc
-        .map(|d| d.block_number_column.as_str())
-        .unwrap_or("number");
-    let mut bn_key_prefix = Vec::new();
-    encode_json_string(&snake_to_camel(bn_col), &mut bn_key_prefix);
-    bn_key_prefix.push(b':');
-
-    // Pre-resolve column indices for header writers (once per batch schema)
-    let header_resolved = block_batches
-        .iter()
-        .map(|b| resolve_writers(&header_writers, b))
-        .collect::<Result<Vec<_>>>()?;
-
-    // Pre-resolve column indices for each source (once per batch schema)
-    let all_resolved = all_indexes
-        .iter()
-        .map(|idx| {
-            idx.batches
-                .iter()
-                .map(|b| resolve_writers(&idx.writers, b))
-                .collect::<Result<Vec<_>>>()
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    // Pre-resolve grouped writers
-    let all_grouped_resolved = all_indexes
-        .iter()
-        .map(|idx| {
-            idx.grouped
-                .as_ref()
-                .map(|gw| {
-                    idx.batches
-                        .iter()
-                        .map(|b| resolve_grouped_writers(gw, b))
-                        .collect::<Result<Vec<_>>>()
-                })
-                .transpose()
-        })
+    let header = PreparedHeader::new(block_batches, block_table_desc, &plan.block_output_columns)?;
+    let tables = output_tables(plan, metadata, table_outputs)
+        .into_iter()
+        .filter_map(|table| PreparedTable::new(table).transpose())
         .collect::<Result<Vec<_>>>()?;
 
     elapsed!(
@@ -1450,23 +1261,12 @@ fn execute_chunk_fmt(
 
     // Blocks are encoded lazily, one per QueryOutput::write_next_block call.
     // See decisions/002: sequential encoding wins at production concurrency.
-    Ok(FmtOutput::Json(Some(Box::new(QueryOutput {
+    Ok(FmtOutput::Json(Some(Box::new(QueryOutput::new(
         selected_blocks,
-        next: 0,
-        block_batches,
-        block_index,
-        header_resolved,
-        bn_key_prefix,
-        all_indexes,
-        all_resolved,
-        all_grouped_resolved,
-        table_group_order,
-        table_groups,
-        table_json_prefixes,
-        sort_scratch: Vec::new(),
-        merge_scratch: Vec::new(),
+        header,
+        tables,
         read_through,
-    }))))
+    )))))
 }
 
 #[cfg(test)]
@@ -1474,6 +1274,7 @@ mod tests {
     use super::*;
     use crate::metadata::load_dataset_description;
     use crate::output::row_writer::json_close;
+    use crate::output::snake_to_camel;
     use crate::query::compile;
     use crate::query::parse_query;
 
@@ -1650,7 +1451,10 @@ mod tests {
         // two sources, which Arrow merges on its own path. The relation leaves out
         // the rows the scan matched, so the merge finds nothing to dedup; the
         // counts catch a source it drops. The other shapes come out as one source.
+        // A source without rows still sends Arrow down the merge path, while JSON
+        // drops it before merging.
         let usdc = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
+        let no_topic = format!("0x{}", "00".repeat(32));
         let shapes = [
             (
                 "a table and its own relation",
@@ -1661,6 +1465,13 @@ mod tests {
                 format!(
                     r#""transactions": [{{ "to": ["{usdc}"], "logs": true }}],
                        "logs": [{{ "address": ["{usdc}"] }}]"#
+                ),
+            ),
+            (
+                "a table asked directly that matches nothing, pulled by another",
+                format!(
+                    r#""transactions": [{{ "to": ["{usdc}"], "logs": true }}],
+                       "logs": [{{ "topic0": ["{no_topic}"] }}]"#
                 ),
             ),
             (
