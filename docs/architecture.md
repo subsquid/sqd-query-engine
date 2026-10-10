@@ -20,9 +20,10 @@ Most implementation modules are private.
 | Scan a range | Table plans + inclusive block bounds → `TableOutput`s containing primary and related `Rows` | [`scan_tables`, `scan_relation`](../src/output/assembly.rs) |
 | Select a page | Range outputs + headers → per-block weights and an ordered prefix of whole blocks | [`compute_block_weights`, `BlockSelection::extend`](../src/output/weight.rs) |
 | Materialize when deferred | Selected row identities + physical projections → payload batches for tables and headers | [`retain_selected_keys`, `materialize_tables`, `read_rows`](../src/output/materialize.rs) |
-| Prepare JSON | Selected blocks + payload batches → indexes, resolved writers, `QueryOutput` | [`execute_chunk_fmt`](../src/output/assembly.rs), [`build_block_index`](../src/output/block_index.rs), [`resolve_writers`](../src/output/row_writer.rs) |
+| List response tables | Payload rows of every table plan and relation → `OutputTable`s in catalog order, each with its sources | [`output_tables`](../src/output/sources.rs) |
+| Prepare JSON | `OutputTable`s + header batches → `PreparedTable`s, `PreparedHeader`, `QueryOutput` | [`PreparedTable::new`, `PreparedHeader::new`](../src/output/row_writer.rs) |
 | Consume JSON | `QueryOutput` + caller's byte buffer → one encoded block per call | [`QueryOutput::write_next_block`](../src/output/writer.rs) |
-| Produce Arrow | Selected blocks + payload batches → buffered `ArrowOutput` | Arrow branch of [`execute_chunk_fmt`](../src/output/assembly.rs), [`write_arrow_frames`](../src/output/arrow_out.rs) |
+| Produce Arrow | Selected blocks + `OutputTable`s + header batches → buffered `ArrowOutput` | Arrow branch of [`execute_chunk_fmt`](../src/output/assembly.rs), [`write_arrow_frames`](../src/output/arrow_out.rs) |
 
 Scanning and selection repeat for complete block ranges until the page is full
 or the request is exhausted. Materialization runs after selection when payloads
@@ -200,10 +201,13 @@ Reader equivalence is exercised in
 
 ## JSON and Arrow output
 
-For JSON, execution builds block indexes and `IndexedBatches` sources, groups
-sources by output table, and resolves field writers against each batch schema.
-`QueryOutput` owns the selected block numbers, batches, indexes, and writers.
-No reader is retained for fetching payloads during encoding.
+Both formats take their tables from [`output_tables`](../src/output/sources.rs):
+one entry per response table, in catalog order, holding each table plan's own
+rows and every relation into that table as separate sources. JSON drops the
+sources without rows and prepares each table once: a block index, the row order
+and the field writers resolved against each batch schema. `QueryOutput` owns
+the selected block numbers, the prepared header and the prepared tables. No
+reader is retained for fetching payloads during encoding.
 
 [`write_next_block`](../src/output/writer.rs) appends one JSON object to the caller's
 buffer. It writes the header and merges, sorts, and deduplicates the table's rows
@@ -220,7 +224,7 @@ not simply no filter matches.
 
 The Arrow branch runs before JSON writer preparation. It trims batches to selected
 blocks, projects physical field sources plus the block-number key, and merges
-and deduplicates tables with multiple sources. `write_arrow_frames` creates
+and deduplicates tables with multiple sources, counting a source without rows. `write_arrow_frames` creates
 per-table IPC streams in a single buffered `ArrowOutput`, with optional Zstd
 compression and hex-to-binary conversion. This is flat physical-column output,
 not nested JSON fields. See

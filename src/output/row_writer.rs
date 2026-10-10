@@ -1,30 +1,262 @@
 use crate::metadata::{ColumnType, FieldSource, JsonEncoding, MemberDescription, TableDescription};
+use crate::output::block_index::{build_block_index, BlockIndex};
 use crate::output::encoder::{
     encode_json_string, encode_roll, resolve_encoder, snake_to_camel, Encoder, ResolvedRollEncoder,
     RollSource, Unrenderable,
 };
 use crate::output::row_order::RowOrder;
+use crate::output::sources::OutputTable;
 use crate::text::StringColumn;
 use anyhow::Result;
 use arrow::array::*;
 use arrow::record_batch::RecordBatch;
-use rustc_hash::FxHashMap;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 
-/// Pre-indexed batch data for a single table source (primary or relation).
-pub(crate) struct IndexedBatches {
-    pub(crate) batches: Vec<RecordBatch>,
-    pub(crate) index: FxHashMap<u64, Vec<(usize, usize)>>,
-    pub(crate) writers: Vec<FieldWriter>,
-    pub(crate) grouped: Option<GroupedWriters>,
-    /// Actual table name (for merging same-table sources)
-    pub(crate) table_name: String,
-    pub(crate) order: RowOrder,
+/// The block header table, ready to encode block by block.
+pub(crate) struct PreparedHeader {
+    batches: Vec<RecordBatch>,
+    index: BlockIndex,
+    resolved: Vec<Vec<ResolvedFieldWriter>>,
+    /// The block number's key, for a block the table has no row for.
+    number_prefix: Vec<u8>,
+}
+
+impl PreparedHeader {
+    pub(crate) fn new(
+        batches: Vec<RecordBatch>,
+        desc: Option<&TableDescription>,
+        fields: &[String],
+    ) -> Result<Self> {
+        let number_column = desc.map_or("number", |d| d.block_number_column.as_str());
+        let index = build_block_index(&batches, number_column)?;
+
+        let writers = build_field_writers(fields, desc);
+        let resolved = batches
+            .iter()
+            .map(|batch| resolve_writers(&writers, batch))
+            .collect::<Result<_>>()?;
+
+        let mut number_prefix = Vec::new();
+        encode_json_string(&snake_to_camel(number_column), &mut number_prefix);
+        number_prefix.push(b':');
+
+        Ok(Self {
+            batches,
+            index,
+            resolved,
+            number_prefix,
+        })
+    }
+
+    /// Write the `"header"` entry of block `block_num`.
+    pub(crate) fn write(&self, buf: &mut Vec<u8>, block_num: u64) {
+        buf.extend_from_slice(b"\"header\":{");
+
+        let first = self.index.get(&block_num).and_then(|rows| rows.first());
+        match first {
+            Some(&(batch, row)) => {
+                write_row_fields_resolved(buf, &self.batches[batch], row, &self.resolved[batch])
+            }
+            None => {
+                buf.extend_from_slice(&self.number_prefix);
+                let mut tmp = itoa::Buffer::new();
+                buf.extend_from_slice(tmp.format(block_num).as_bytes());
+            }
+        }
+
+        json_close(b'}', buf);
+        buf.push(b',');
+    }
+}
+
+/// A response table, ready to encode block by block.
+pub(crate) struct PreparedTable {
+    /// `"name":[`, which opens the table's items in a block.
+    prefix: Vec<u8>,
+    /// Never empty: a table without rows is not prepared.
+    sources: Vec<PreparedSource>,
+}
+
+/// One source of a response table: its rows indexed by block, their order, and
+/// its writers resolved against each batch.
+struct PreparedSource {
+    batches: Vec<RecordBatch>,
+    index: BlockIndex,
+    order: RowOrder,
+    writers: SourceWriters,
+}
+
+/// A source's writers, resolved once per batch.
+enum SourceWriters {
+    Flat(Vec<Vec<ResolvedFieldWriter>>),
+    Grouped(Vec<ResolvedGroupedWriters>),
+}
+
+/// Row references reused from block to block.
+#[derive(Default)]
+pub(crate) struct RowScratch {
+    /// `(batch, row)` of one source.
+    sort: Vec<(usize, usize)>,
+    /// `(source, batch, row)` of several sources of one table.
+    merge: Vec<(usize, usize, usize)>,
+}
+
+impl PreparedTable {
+    /// Sources without rows are left out, and `None` is a table with none left:
+    /// a source whose rows were read under another adds nothing to any block,
+    /// and as a second source it would only slow the merge.
+    pub(crate) fn new(table: OutputTable) -> Result<Option<Self>> {
+        let sources = table
+            .sources
+            .into_iter()
+            .filter(|source| source.rows.num_rows() > 0)
+            .map(|source| {
+                PreparedSource::new(source.rows.into_batches(), table.desc, source.fields)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if sources.is_empty() {
+            return Ok(None);
+        }
+
+        let mut prefix = Vec::new();
+        encode_json_string(table.name, &mut prefix);
+        prefix.extend_from_slice(b":[");
+
+        Ok(Some(Self { prefix, sources }))
+    }
+
+    /// Write the table's items of block `block_num`, if it has any.
+    pub(crate) fn write_items(&self, buf: &mut Vec<u8>, block_num: u64, scratch: &mut RowScratch) {
+        match self.sources.as_slice() {
+            [source] => source.write_items(buf, block_num, &self.prefix, &mut scratch.sort),
+            _ => self.write_merged_items(buf, block_num, &mut scratch.merge),
+        }
+    }
+
+    /// Items of several sources merged into one array, ordered and deduplicated
+    /// by the table's keys.
+    fn write_merged_items(
+        &self,
+        buf: &mut Vec<u8>,
+        block_num: u64,
+        rows: &mut Vec<(usize, usize, usize)>,
+    ) {
+        rows.clear();
+        for (si, source) in self.sources.iter().enumerate() {
+            if let Some(refs) = source.index.get(&block_num) {
+                rows.extend(refs.iter().map(|&(bi, ri)| (si, bi, ri)));
+            }
+        }
+
+        if rows.is_empty() {
+            return;
+        }
+
+        let sources = &self.sources;
+        if sources[0].order.is_keyed() {
+            let order = |a: &(usize, usize, usize), b: &(usize, usize, usize)| {
+                let (a_order, b_order) = (&sources[a.0].order, &sources[b.0].order);
+                a_order.compare((a.1, a.2), b_order, (b.1, b.2))
+            };
+            rows.sort_unstable_by(|a, b| order(a, b).then((a.0, a.1, a.2).cmp(&(b.0, b.1, b.2))));
+            rows.dedup_by(|b, a| a.0 != b.0 && order(a, b).is_eq());
+        }
+
+        buf.extend_from_slice(&self.prefix);
+
+        for (i, &(si, batch, row)) in rows.iter().enumerate() {
+            if i > 0 {
+                buf.push(b',');
+            }
+            buf.push(b'{');
+            sources[si].write_row(buf, batch, row);
+            json_close(b'}', buf);
+        }
+
+        buf.push(b']');
+        buf.push(b',');
+    }
+}
+
+impl PreparedSource {
+    fn new(batches: Vec<RecordBatch>, desc: &TableDescription, fields: &[String]) -> Result<Self> {
+        let index = build_block_index(&batches, &desc.block_number_column)?;
+        let order = RowOrder::new(&batches, desc);
+
+        let writers = match build_grouped_writers(fields, desc) {
+            Some(grouped) => SourceWriters::Grouped(
+                batches
+                    .iter()
+                    .map(|batch| resolve_grouped_writers(&grouped, batch))
+                    .collect::<Result<_>>()?,
+            ),
+            None => {
+                let writers = build_field_writers(fields, Some(desc));
+                SourceWriters::Flat(
+                    batches
+                        .iter()
+                        .map(|batch| resolve_writers(&writers, batch))
+                        .collect::<Result<_>>()?,
+                )
+            }
+        };
+
+        Ok(Self {
+            batches,
+            index,
+            order,
+            writers,
+        })
+    }
+
+    /// Write this source's items of block `block_num` as the table's array.
+    fn write_items(
+        &self,
+        buf: &mut Vec<u8>,
+        block_num: u64,
+        prefix: &[u8],
+        rows: &mut Vec<(usize, usize)>,
+    ) {
+        let row_refs = match self.index.get(&block_num) {
+            Some(refs) if !refs.is_empty() => refs,
+            _ => return,
+        };
+
+        rows.clear();
+        rows.extend_from_slice(row_refs);
+        self.order.sort(rows);
+
+        buf.extend_from_slice(prefix);
+
+        for (i, &(batch, row)) in rows.iter().enumerate() {
+            if i > 0 {
+                buf.push(b',');
+            }
+            buf.push(b'{');
+            self.write_row(buf, batch, row);
+            json_close(b'}', buf);
+        }
+
+        buf.push(b']');
+        buf.push(b',');
+    }
+
+    #[inline]
+    fn write_row(&self, buf: &mut Vec<u8>, batch: usize, row: usize) {
+        match &self.writers {
+            SourceWriters::Flat(resolved) => {
+                write_row_fields_resolved(buf, &self.batches[batch], row, &resolved[batch])
+            }
+            SourceWriters::Grouped(resolved) => {
+                write_row_grouped(buf, &self.batches[batch], row, &resolved[batch])
+            }
+        }
+    }
 }
 
 /// Pre-computed information for writing a single output column.
-pub(crate) enum FieldWriter {
+enum FieldWriter {
     /// Virtual field: roll columns together.
     Roll {
         json_key_prefix: Vec<u8>,
@@ -44,14 +276,14 @@ pub(crate) enum FieldWriter {
 }
 
 /// One column of a roll, with what the catalog declares for it.
-pub(crate) struct RollSourceColumn {
+struct RollSourceColumn {
     name: String,
     encoding: Option<JsonEncoding>,
     declared_type: Option<ColumnType>,
 }
 
 /// FieldWriter with column indices resolved for a specific batch schema.
-pub(crate) struct ResolvedFieldWriter {
+struct ResolvedFieldWriter {
     json_key_prefix: Vec<u8>,
     /// Resolved column index for Regular, or resolved indices for Roll.
     indices: ResolvedIndices,
@@ -59,7 +291,7 @@ pub(crate) struct ResolvedFieldWriter {
     roll_encoder: Option<ResolvedRollEncoder>,
 }
 
-pub(crate) enum ResolvedIndices {
+enum ResolvedIndices {
     /// A Regular field's column index and its encoder, resolved together: the
     /// encoder is chosen from the array at that index, so neither exists without
     /// the other.
@@ -73,7 +305,7 @@ pub(crate) enum ResolvedIndices {
 /// the flat group, which is written without a wrapping object.
 type VariantGroups<W> = HashMap<String, Vec<(Vec<u8>, Vec<W>)>>;
 
-pub(crate) struct GroupedWriters {
+struct GroupedWriters {
     /// Writers for the fields no variant claims, written flat on every row.
     base_writers: Vec<FieldWriter>,
     /// The column whose value picks the variant.
@@ -83,7 +315,7 @@ pub(crate) struct GroupedWriters {
 }
 
 /// Resolved grouped writers for a specific batch schema.
-pub(crate) struct ResolvedGroupedWriters {
+struct ResolvedGroupedWriters {
     base_resolved: Vec<ResolvedFieldWriter>,
     variant_col_idx: Option<usize>,
     variant_resolved: VariantGroups<ResolvedFieldWriter>,
@@ -96,7 +328,7 @@ pub(crate) struct ResolvedGroupedWriters {
 /// of which rows a query reaches, and this is what makes it impossible to
 /// render `null` in a value's place if a batch ever carries a type the schema
 /// did not announce.
-pub(crate) fn resolve_writers(
+fn resolve_writers(
     writers: &[FieldWriter],
     batch: &RecordBatch,
 ) -> Result<Vec<ResolvedFieldWriter>> {
@@ -178,7 +410,7 @@ fn unrenderable(column: String, cause: Unrenderable) -> anyhow::Error {
 }
 
 /// Pre-compute the JSON key prefixes and column resolution for a table's output columns.
-pub(crate) fn build_field_writers(
+fn build_field_writers(
     output_columns: &[String],
     table_desc: Option<&TableDescription>,
 ) -> Vec<FieldWriter> {
@@ -239,7 +471,7 @@ pub(crate) fn build_field_writers(
 ///
 /// `None` when the table dispatches on nothing, which is the same table for
 /// which the mappings are empty — the loader ties the two together.
-pub(crate) fn build_grouped_writers(
+fn build_grouped_writers(
     output_columns: &[String],
     table_desc: &TableDescription,
 ) -> Option<GroupedWriters> {
@@ -328,7 +560,7 @@ pub(crate) fn build_grouped_writers(
     })
 }
 
-pub(crate) fn resolve_grouped_writers(
+fn resolve_grouped_writers(
     gw: &GroupedWriters,
     batch: &RecordBatch,
 ) -> Result<ResolvedGroupedWriters> {
@@ -432,176 +664,6 @@ fn write_row_grouped(
             }
         }
     }
-}
-
-/// Write a block header JSON.
-pub(crate) fn write_header(
-    buf: &mut Vec<u8>,
-    block_num: u64,
-    block_batches: &[RecordBatch],
-    block_index: &FxHashMap<u64, Vec<(usize, usize)>>,
-    bn_key_prefix: &[u8],
-    resolved_by_batch: &[Vec<ResolvedFieldWriter>],
-) {
-    buf.extend_from_slice(b"\"header\":{");
-
-    let mut found = false;
-    if let Some(rows) = block_index.get(&block_num) {
-        if let Some(&(batch_idx, row)) = rows.first() {
-            write_row_fields_resolved(
-                buf,
-                &block_batches[batch_idx],
-                row,
-                &resolved_by_batch[batch_idx],
-            );
-            found = true;
-        }
-    }
-
-    if !found {
-        buf.extend_from_slice(bn_key_prefix);
-        let mut tmp = itoa::Buffer::new();
-        buf.extend_from_slice(tmp.format(block_num).as_bytes());
-    }
-
-    json_close(b'}', buf);
-    buf.push(b',');
-}
-
-/// Write items from a table for a specific block, using pre-built index.
-#[allow(clippy::too_many_arguments)]
-fn write_table_items_indexed(
-    buf: &mut Vec<u8>,
-    block_num: u64,
-    batches: &[RecordBatch],
-    block_index: &FxHashMap<u64, Vec<(usize, usize)>>,
-    order: &RowOrder,
-    json_array_prefix: &[u8],
-    resolved_by_batch: &[Vec<ResolvedFieldWriter>],
-    grouped_resolved: Option<&[ResolvedGroupedWriters]>,
-    scratch: &mut Vec<(usize, usize)>,
-) {
-    let row_refs = match block_index.get(&block_num) {
-        Some(refs) if !refs.is_empty() => refs,
-        _ => return,
-    };
-
-    // Build sortable rows (with batch_idx for resolved writer lookup). Reuse the
-    // caller-owned scratch buffer to avoid a fresh per-block allocation.
-    let rows = scratch;
-    rows.clear();
-    rows.extend_from_slice(row_refs);
-
-    order.sort(rows);
-
-    // Write array
-    buf.extend_from_slice(json_array_prefix);
-
-    for (i, &(batch_idx, row)) in rows.iter().enumerate() {
-        if i > 0 {
-            buf.push(b',');
-        }
-        buf.push(b'{');
-        if let Some(gr) = grouped_resolved {
-            write_row_grouped(buf, &batches[batch_idx], row, &gr[batch_idx]);
-        } else {
-            write_row_fields_resolved(buf, &batches[batch_idx], row, &resolved_by_batch[batch_idx]);
-        }
-        json_close(b'}', buf);
-    }
-
-    buf.push(b']');
-    buf.push(b',');
-}
-
-/// Write items from multiple sources for the same output table, merging into a single JSON array.
-/// Rows are collected from all sources, deduplicated by (item_order_keys), sorted, and written.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn write_merged_table_items(
-    buf: &mut Vec<u8>,
-    block_num: u64,
-    all_indexes: &[IndexedBatches],
-    source_indices: &[usize],
-    all_resolved: &[Vec<Vec<ResolvedFieldWriter>>],
-    all_grouped_resolved: &[Option<Vec<ResolvedGroupedWriters>>],
-    json_array_prefix: &[u8],
-    sort_scratch: &mut Vec<(usize, usize)>,
-    merge_scratch: &mut Vec<(usize, usize, usize)>,
-) {
-    // If single source, use optimized path
-    if source_indices.len() == 1 {
-        let si = source_indices[0];
-        let idx = &all_indexes[si];
-        write_table_items_indexed(
-            buf,
-            block_num,
-            &idx.batches,
-            &idx.index,
-            &idx.order,
-            json_array_prefix,
-            &all_resolved[si],
-            all_grouped_resolved[si].as_deref(),
-            sort_scratch,
-        );
-        return;
-    }
-
-    // Collect rows from all sources: (source_idx, batch_idx, row_idx). Reuse the
-    // caller-owned scratch buffer to avoid a fresh per-block allocation.
-    let rows = merge_scratch;
-    rows.clear();
-    for &si in source_indices {
-        let idx = &all_indexes[si];
-        if let Some(refs) = idx.index.get(&block_num) {
-            for &(bi, ri) in refs {
-                rows.push((si, bi, ri));
-            }
-        }
-    }
-
-    if rows.is_empty() {
-        return;
-    }
-
-    // Sources of one table order and deduplicate by its keys.
-    let first = &all_indexes[source_indices[0]].order;
-    if first.is_keyed() {
-        let order = |a: &(usize, usize, usize), b: &(usize, usize, usize)| {
-            let (a_order, b_order) = (&all_indexes[a.0].order, &all_indexes[b.0].order);
-            a_order.compare((a.1, a.2), b_order, (b.1, b.2))
-        };
-        rows.sort_unstable_by(|a, b| order(a, b).then((a.0, a.1, a.2).cmp(&(b.0, b.1, b.2))));
-        rows.dedup_by(|b, a| a.0 != b.0 && order(a, b).is_eq());
-    }
-
-    // Write array
-    buf.extend_from_slice(json_array_prefix);
-
-    for (i, &(si, batch_idx, row)) in rows.iter().enumerate() {
-        if i > 0 {
-            buf.push(b',');
-        }
-        buf.push(b'{');
-        if let Some(Some(gr)) = all_grouped_resolved.get(si) {
-            write_row_grouped(
-                buf,
-                &all_indexes[si].batches[batch_idx],
-                row,
-                &gr[batch_idx],
-            );
-        } else {
-            write_row_fields_resolved(
-                buf,
-                &all_indexes[si].batches[batch_idx],
-                row,
-                &all_resolved[si][batch_idx],
-            );
-        }
-        json_close(b'}', buf);
-    }
-
-    buf.push(b']');
-    buf.push(b',');
 }
 
 /// Replace trailing comma with closing bracket, or just add closing bracket.

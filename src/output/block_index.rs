@@ -58,12 +58,12 @@ pub(crate) fn compute_block_range(
     Ok((min_block, max_block))
 }
 
+/// Block number → the `(batch, row)` of each of its rows, in file order.
+pub(crate) type BlockIndex = FxHashMap<u64, Vec<(usize, usize)>>;
+
 /// Build an index mapping block_number -> list of (batch_index, row_index).
-pub(crate) fn build_block_index(
-    batches: &[RecordBatch],
-    bn_column: &str,
-) -> Result<FxHashMap<u64, Vec<(usize, usize)>>> {
-    let mut index: FxHashMap<u64, Vec<(usize, usize)>> = FxHashMap::default();
+pub(crate) fn build_block_index(batches: &[RecordBatch], bn_column: &str) -> Result<BlockIndex> {
+    let mut index = BlockIndex::default();
 
     for_each_block_number(batches, bn_column, |batch_idx, row, bn| {
         index.entry(bn).or_default().push((batch_idx, row));

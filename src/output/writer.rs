@@ -1,10 +1,4 @@
-use crate::output::row_writer::{
-    json_close, write_header, write_merged_table_items, IndexedBatches, ResolvedFieldWriter,
-    ResolvedGroupedWriters,
-};
-use arrow::record_batch::RecordBatch;
-use rustc_hash::FxHashMap;
-use std::collections::HashMap;
+use crate::output::row_writer::{json_close, PreparedHeader, PreparedTable, RowScratch};
 
 /// Initial buffer capacity, tuned for typical response sizes.
 const INITIAL_CAPACITY: usize = 256 * 1024;
@@ -20,25 +14,33 @@ const INITIAL_CAPACITY: usize = 256 * 1024;
 /// [`into_json_lines`](Self::into_json_lines).
 ///
 pub struct QueryOutput {
-    pub(crate) selected_blocks: Vec<u64>,
-    pub(crate) next: usize,
-    pub(crate) block_batches: Vec<RecordBatch>,
-    pub(crate) block_index: FxHashMap<u64, Vec<(usize, usize)>>,
-    pub(crate) header_resolved: Vec<Vec<ResolvedFieldWriter>>,
-    pub(crate) bn_key_prefix: Vec<u8>,
-    pub(crate) all_indexes: Vec<IndexedBatches>,
-    pub(crate) all_resolved: Vec<Vec<Vec<ResolvedFieldWriter>>>,
-    pub(crate) all_grouped_resolved: Vec<Option<Vec<ResolvedGroupedWriters>>>,
-    pub(crate) table_group_order: Vec<String>,
-    pub(crate) table_groups: HashMap<String, Vec<usize>>,
-    pub(crate) table_json_prefixes: HashMap<String, Vec<u8>>,
-    // Reusable per-block row-ref scratch buffers (sort + multi-source merge).
-    pub(crate) sort_scratch: Vec<(usize, usize)>,
-    pub(crate) merge_scratch: Vec<(usize, usize, usize)>,
-    pub(crate) read_through: Option<u64>,
+    selected_blocks: Vec<u64>,
+    next: usize,
+    header: PreparedHeader,
+    /// In the order their items take in a block.
+    tables: Vec<PreparedTable>,
+    scratch: RowScratch,
+    read_through: Option<u64>,
 }
 
 impl QueryOutput {
+    /// `selected_blocks` is sorted and not empty.
+    pub(crate) fn new(
+        selected_blocks: Vec<u64>,
+        header: PreparedHeader,
+        tables: Vec<PreparedTable>,
+        read_through: Option<u64>,
+    ) -> Self {
+        Self {
+            selected_blocks,
+            next: 0,
+            header,
+            tables,
+            scratch: RowScratch::default(),
+            read_through,
+        }
+    }
+
     pub fn num_blocks(&self) -> usize {
         self.selected_blocks.len()
     }
@@ -66,28 +68,9 @@ impl QueryOutput {
         let block_num = self.selected_blocks[self.next];
         out.push(b'{');
 
-        write_header(
-            out,
-            block_num,
-            &self.block_batches,
-            &self.block_index,
-            &self.bn_key_prefix,
-            &self.header_resolved,
-        );
-
-        // Table items, merging multiple sources for the same output table
-        for table_name in &self.table_group_order {
-            write_merged_table_items(
-                out,
-                block_num,
-                &self.all_indexes,
-                &self.table_groups[table_name],
-                &self.all_resolved,
-                &self.all_grouped_resolved,
-                &self.table_json_prefixes[table_name],
-                &mut self.sort_scratch,
-                &mut self.merge_scratch,
-            );
+        self.header.write(out, block_num);
+        for table in &self.tables {
+            table.write_items(out, block_num, &mut self.scratch);
         }
 
         json_close(b'}', out);
