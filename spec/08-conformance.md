@@ -361,8 +361,8 @@ renamed out from under a comment inside it.
 | [INV-R4](07-invariants.md#inv-r4) | CT-4 | **C** | `adding_a_relation_flag_never_removes_a_row` runs a generated query against the same query with one flag taken out of one item request, and compares *every* table — the invariant's `for every table U`, not the relation's target. Every table is requested directly as well, so the target is reachable two ways at once: that is where a relation removes rows, not by pulling too few but by a merge of two sources that keeps one. A run where no flag added a row is a failure |
 | [INV-R5](07-invariants.md#inv-r5) | CT-4 | **C** | `test_semi_join_null_key_no_false_match`, `test_semi_join_null_null_no_match`, and six more |
 | [INV-R6](07-invariants.md#inv-r6) | CT-4 | **C** | `test_find_children_basic` and three siblings |
-| [INV-R7](07-invariants.md#inv-r7) | CT-4 | **P** | `test_find_parents_basic` only; the full ancestor chain is not asserted |
-| [INV-R8](07-invariants.md#inv-r8) | CT-4 | **P** | reached through the Kusama and Moonbeam fixtures; no synthetic tree |
+| [INV-R7](07-invariants.md#inv-r7) | CT-4 | **C** | `a_hierarchy_within_a_table_excludes_the_equal_address` asserts a two-level ancestor chain and leaves out the row at the source's address; `test_find_parents_basic` |
+| [INV-R8](07-invariants.md#inv-r8) | CT-4 | **C** | `a_hierarchy_across_tables_includes_the_equal_address`: a synthetic tree in both directions, with the address columns named alike and apart; also the Kusama and Moonbeam fixtures |
 | [INV-R9](07-invariants.md#inv-r9) | CT-4 | **P** | fixtures only |
 | [INV-R10](07-invariants.md#inv-r10) | CT-4 | **P** | `test_execute_with_relations` plus the budget suite |
 | [INV-R11](07-invariants.md#inv-r11) | CT-4 | **C** | `a_relation_asked_from_two_item_requests_is_asked_once_of_their_union` — the same relation asked from two item requests over disjoint halves of a filter's values, against one request carrying both halves. The halves come from splitting one filter, which is what makes "the union of their matches" an item request that can be written at all |
@@ -401,19 +401,19 @@ renamed out from under a comment inside it.
 | [INV-X2](07-invariants.md#inv-x2) | CT-8 | **C** | `an_ignored_nullable_column_does_not_change_output` |
 | [INV-X3](07-invariants.md#inv-x3) | CT-8 | **C** | `filtering_an_absent_column_is_an_error` on both scan entry points, `filtering_a_present_column_still_works` for the other direction, `one_unanswerable_item_rejects_the_whole_request` for a filter one item request of several carries, and `an_alias_filter_on_a_column_the_chunk_lacks_is_an_error` for one reached through an alias's extraction column |
 
-**Totals: 63 C, 23 P, 0 U** of 86. Property coverage is therefore 0.73
+**Totals: 65 C, 21 P, 0 U** of 86. Property coverage is therefore 0.76
 (`P-COV-PROPERTY` in [09-parameters.md](09-parameters.md)).
 
 The figure fell from 0.73 to 0.69 on 2026-09-12, and no test was removed to make it fall. [INV-D6](07-invariants.md#inv-d6), [INV-P13](07-invariants.md#inv-p13) and [INV-Q14](07-invariants.md#inv-q14) were read against the tests they name and did not hold at **C**; their rows now say what those tests actually do. A ratchet on a number three rows had inflated would have locked the inflation in, so the baseline moved down once, deliberately, and ratchets from there. INV-Q14 earned its **C** back the same day with a test that recomputes the transcription from the reference, and INV-P13 later with tests that send a mixed-length discriminator and an empty prefix and check the rows.
 
-Of the 86 rows at **C** or **P**, 74 are backed by a tagged test and 12 rest on
-prose alone. Those 12 are the rows whose note says "fixtures only" or describes a
+Of the 86 rows at **C** or **P**, 75 are backed by a tagged test and 11 rest on
+prose alone. Those 11 are the rows whose note says "fixtures only" or describes a
 group of cases without naming one, and they are the ones nothing recomputes: the
 status is what somebody believed on the day they typed it. Shrinking that number
 is what turns MG-1's ratchet from an intention into an arithmetic fact, so the
 checker recomputes all three numbers in this paragraph rather than trusting them.
 
-A tag is not the same as a gate. 3 of the 74 are backed only by tests marked
+A tag is not the same as a gate. 3 of the 75 are backed only by tests marked
 `#[ignore]`, which MG-3's portable job does not run: the test would fail if the
 invariant broke, but only on a machine that has the chunks. The checker reports
 those rows on every run too, because a status that no job can falsify is a status

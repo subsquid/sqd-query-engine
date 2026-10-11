@@ -452,7 +452,7 @@ impl<'a> HierarchicalSpec<'a> {
     /// `None` for a join, and for a target without an address column.
     fn of(
         relation: &'a RelationPlan,
-        source: &'a TableDescription,
+        (source_table, source): (&str, &'a TableDescription),
         metadata: &'a DatasetDescription,
     ) -> Option<Self> {
         let mode = match relation.kind {
@@ -462,10 +462,9 @@ impl<'a> HierarchicalSpec<'a> {
         };
         let target_address = find_address_column(metadata.table(&relation.target_table)?)?;
         let source_address = find_address_column(source).unwrap_or(target_address);
-        // Cross-table relations use inclusive prefix matching because the
-        // source and target address columns are different (e.g., calls.address
-        // vs events.call_address). Same-table uses strict matching.
-        let inclusive = source_address != target_address;
+        // Another table's row at the source's address belongs to it (INV-R8),
+        // whatever the two address columns are called.
+        let inclusive = relation.target_table != source_table;
 
         Some(Self {
             group_keys: group_keys_for_relation(&relation.left_key, Some(target_address)),
@@ -555,6 +554,9 @@ impl<K: PartialEq + Send, V: Send> BuiltOnce<K, V> {
 /// What one relation's target scan needs from its table's rows.
 struct RelationInput<'a> {
     relation: &'a RelationPlan,
+    /// How a `children` or `parents` relation walks the address; `None` for a
+    /// join.
+    hierarchy: Option<HierarchicalSpec<'a>>,
     /// The primary rows it follows: all of them, or those its own items matched.
     source: &'a [RecordBatch],
     key_filter: Option<KeyFilter>,
@@ -581,10 +583,11 @@ fn relation_inputs<'a>(
 ) -> Vec<RelationInput<'a>> {
     let primary_bn = table_desc.block_number_column.as_str();
     let followed = |relation: &'a RelationPlan| relation.source_items.as_deref();
-    let address_spec = |relation: &'a RelationPlan| {
-        HierarchicalSpec::of(relation, table_desc, metadata)
-            .filter(|spec| !spec.group_keys.is_empty())
+    let hierarchy = |relation: &'a RelationPlan| {
+        HierarchicalSpec::of(relation, (&table_plan.table, table_desc), metadata)
     };
+    let address_spec =
+        |relation: &'a RelationPlan| hierarchy(relation).filter(|spec| !spec.group_keys.is_empty());
 
     let key_sets = BuiltOnce::build(
         table_plan.relations.iter().filter_map(|relation| {
@@ -612,10 +615,15 @@ fn relation_inputs<'a>(
 
             let keys = pushdown_keys(relation, metadata)
                 .map(|(left, right)| (key_sets.get(&(items, left)), right));
-            let addresses = address_spec(relation).map(|spec| {
-                let index = address_indexes.get(&(items, spec.group_keys, spec.source_address));
-                (index, spec.target_address, spec.mode, spec.inclusive)
-            });
+            let hierarchy = hierarchy(relation);
+            let addresses = hierarchy
+                .as_ref()
+                .filter(|spec| !spec.group_keys.is_empty())
+                .map(|spec| {
+                    let group_keys = spec.group_keys.clone();
+                    let index = address_indexes.get(&(items, group_keys, spec.source_address));
+                    (index, spec.target_address, spec.mode, spec.inclusive)
+                });
             let keyless = keys.as_ref().is_some_and(|(set, _)| set.matches_nothing())
                 || addresses
                     .as_ref()
@@ -630,6 +638,7 @@ fn relation_inputs<'a>(
 
             RelationInput {
                 relation,
+                hierarchy,
                 source: sources.get(&items),
                 key_filter,
                 hierarchical_filter,
@@ -642,7 +651,6 @@ fn relation_inputs<'a>(
 /// Read the target rows one relation relates to its source rows.
 fn scan_relation(
     input: &RelationInput,
-    table_desc: &TableDescription,
     metadata: &DatasetDescription,
     chunk: &dyn ChunkReader,
     window: Window,
@@ -696,7 +704,7 @@ fn scan_relation(
             &right,
         )?)
     } else {
-        let Some(spec) = HierarchicalSpec::of(relation, table_desc, metadata) else {
+        let Some(spec) = &input.hierarchy else {
             return Ok(Rows::default());
         };
         let relatives = match spec.mode {
@@ -843,15 +851,7 @@ fn scan_tables(
                     if input.follows_nothing() {
                         return None;
                     }
-                    let rows = scan_relation(
-                        input,
-                        table_desc,
-                        metadata,
-                        chunk,
-                        window,
-                        block_range,
-                        profile,
-                    );
+                    let rows = scan_relation(input, metadata, chunk, window, block_range, profile);
                     Some((index, rows))
                 })
                 .collect();
