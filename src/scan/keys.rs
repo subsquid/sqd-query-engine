@@ -409,9 +409,13 @@ fn composite_key_in_set_mask(
             let Some((first, second, nulls)) = pair_keys(batch, key_columns) else {
                 return Ok(BooleanArray::new(BooleanBuffer::new_unset(len), None));
             };
-            let found = BooleanBuffer::collect_bool(len, |row| {
-                candidate(row) && set.contains(first[row], second[row])
-            });
+            // Left to LLVM, whether this stays a call per row depends on how
+            // rustc splits the crate into codegen units.
+            let found = BooleanBuffer::collect_bool(
+                len,
+                #[inline(always)]
+                |row| candidate(row) && set.contains(first[row], second[row]),
+            );
             let found = match nulls {
                 Some(nulls) => &found & nulls.inner(),
                 None => found,
