@@ -16,14 +16,15 @@ Most implementation modules are private.
 | Load catalog | YAML → validated `DatasetDescription` | [`load_dataset_description`, `parse_dataset_description`](../crates/metadata/src/loader.rs) |
 | Parse | JSON bytes + catalog → `Query` with `QueryItem`s | [`parse_query`](../src/query/parse.rs) |
 | Compile | `Query` + catalog → `Plan`, `TablePlan`, `RelationPlan` | [`compile`](../src/query/plan.rs) |
-| Prepare execution | Plan + catalog + `ChunkReader` + `ExecOptions` → validation, fork check, optional `SelectionReader`, header rows | [`execute_chunk_fmt`](../src/output/assembly.rs), [`check_parent_block`](../src/output/fork.rs) |
-| Scan a range | Table plans + inclusive block bounds → `TableOutput`s containing primary and related `Rows` | [`scan_tables`, `scan_relation`](../src/output/assembly.rs) |
-| Select a page | Range outputs + headers → per-block weights and an ordered prefix of whole blocks | [`compute_block_weights`, `BlockSelection::extend`](../src/output/weight.rs) |
-| Materialize when deferred | Selected row identities + physical projections → payload batches for tables and headers | [`retain_selected_keys`, `materialize_tables`, `read_rows`](../src/output/materialize.rs) |
+| Execute | Plan + catalog + `ChunkReader` + `ExecOptions` → the steps below, in order | [`execute`](../src/execution/mod.rs) |
+| Prepare execution | Plan + catalog + `ChunkReader` + `ExecOptions` → `Execution`: catalog entry of every planned table, chunk checks, fork check, optional `SelectionReader` | [`Execution::prepare`](../src/execution/prepare.rs), [`check_parent_block`](../src/output/fork.rs) |
+| Select a page | `Execution` → `Page`: header rows, ranges scanned and weighed until the budget is spent, an ordered prefix of whole blocks | [`select_page`](../src/execution/page.rs), [`compute_block_weights`, `BlockSelection::extend`](../src/output/weight.rs) |
+| Scan a range | Table plans + inclusive block bounds → `TableOutput`s containing primary and related `Rows` | [`scan_tables`, `scan_relation`](../src/execution/tables.rs) |
+| Materialize when deferred | `Page` of row identities + physical projections → `Page` of payload batches for tables and headers | [`materialize_page`, `materialize_tables`, `read_rows`](../src/execution/materialize.rs) |
 | List response tables | Payload rows of every table plan and relation → `OutputTable`s in catalog order, each with its sources | [`output_tables`](../src/output/sources.rs) |
-| Prepare JSON | `OutputTable`s + header batches → `PreparedTable`s, `PreparedHeader`, `QueryOutput` | [`PreparedTable::new`, `PreparedHeader::new`](../src/output/row_writer.rs) |
+| Prepare JSON | `OutputTable`s + `OutputHeader` → `PreparedTable`s, `PreparedHeader`, `QueryOutput` | [`QueryOutput::prepare`](../src/output/writer.rs), [`PreparedTable::new`, `PreparedHeader::new`](../src/output/row_writer.rs) |
 | Consume JSON | `QueryOutput` + caller's byte buffer → one encoded block per call | [`QueryOutput::write_next_block`](../src/output/writer.rs) |
-| Produce Arrow | Selected blocks + `OutputTable`s + header batches → buffered `ArrowOutput` | Arrow branch of [`execute_chunk_fmt`](../src/output/assembly.rs), [`write_arrow_frames`](../src/output/arrow_out.rs) |
+| Produce Arrow | Selected blocks + `OutputTable`s + `OutputHeader` → buffered `ArrowOutput` | [`arrow_output`, `write_arrow_frames`](../src/output/arrow_out.rs) |
 
 Scanning and selection repeat for complete block ranges until the page is full
 or the request is exhausted. Materialization runs after selection when payloads
@@ -89,16 +90,20 @@ calls `execute_chunk`. Callers with an existing reader use `execute_chunk` or
 `execute_chunk_with`; the latter takes explicit `ExecOptions`. Arrow entry points
 are `execute_plan_arrow` and `execute_chunk_arrow`.
 
-All reach [`execute_chunk_fmt`](../src/output/assembly.rs). Before scanning for
-output, it checks required tables and renderable columns and performs the
-optional `parentBlockHash` check. Relation targets are required only when there
+All reach [`execute`](../src/execution/mod.rs), which runs
+`prepare → select_page → materialize_page` and hands the page to the format's
+output step. Encoding stays in `output/`. Before scanning for output,
+`Execution::prepare` resolves the catalog entry of every planned table, checks
+required tables and renderable columns, and performs the optional
+`parentBlockHash` check. Relation targets are required only when there
 are source rows to follow; an empty source does not open its target.
 
 ### Where payload deferral is chosen
 
-Read `defers_payloads`, `prescanned_table`, and `initial_range_end` in
-[`assembly.rs`](../src/output/assembly.rs), then `SelectionReader::new` in
-[`materialize.rs`](../src/output/materialize.rs).
+Read `defers_payloads` and `prescanned_table` in
+[`prepare.rs`](../src/execution/prepare.rs), `initial_range_end` in
+[`page.rs`](../src/execution/page.rs), then `SelectionReader::new` in
+[`materialize.rs`](../src/execution/materialize.rs).
 
 With `ExecOptions::range_reads` enabled:
 
@@ -233,7 +238,7 @@ Laziness applies to **JSON encoding**, not to loading the page's payloads.
 exceed the last emitted block. `None` from execution means no covered blocks,
 not simply no filter matches.
 
-The Arrow branch runs before JSON writer preparation. It trims batches to selected
+`arrow_output` takes the place of JSON writer preparation. It trims batches to selected
 blocks, projects physical field sources plus the block-number key, and merges
 and deduplicates tables with multiple sources, counting a source without rows. `write_arrow_frames` creates
 per-table IPC streams in a single buffered `ArrowOutput`, with optional Zstd

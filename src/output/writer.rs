@@ -1,4 +1,6 @@
 use crate::output::row_writer::{json_close, PreparedHeader, PreparedTable, RowScratch};
+use crate::output::sources::{OutputHeader, OutputTable};
+use anyhow::Result;
 
 /// Initial buffer capacity, tuned for typical response sizes.
 const INITIAL_CAPACITY: usize = 256 * 1024;
@@ -24,21 +26,28 @@ pub struct QueryOutput {
 }
 
 impl QueryOutput {
-    /// `selected_blocks` is sorted and not empty.
-    pub(crate) fn new(
+    /// Prepare the headers and every table to encode. `selected_blocks` is
+    /// sorted and not empty.
+    pub(crate) fn prepare(
         selected_blocks: Vec<u64>,
-        header: PreparedHeader,
-        tables: Vec<PreparedTable>,
+        header: OutputHeader,
+        tables: Vec<OutputTable>,
         read_through: Option<u64>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let header = PreparedHeader::new(header)?;
+        let tables = tables
+            .into_iter()
+            .filter_map(|table| PreparedTable::new(table).transpose())
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(Self {
             selected_blocks,
             next: 0,
             header,
             tables,
             scratch: RowScratch::default(),
             read_through,
-        }
+        })
     }
 
     pub fn num_blocks(&self) -> usize {

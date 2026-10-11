@@ -1,5 +1,5 @@
 //! The tables a response carries and the rows that fill each one: the table's
-//! own scan, and every relation into it.
+//! own scan, and every relation into it; and the block headers beside them.
 //!
 //! Both output formats take their tables from here, so they agree on which
 //! sources a table has and on the order the tables come in.
@@ -8,7 +8,19 @@ use crate::metadata::{DatasetDescription, TableDescription};
 use crate::output::weight::TableOutput;
 use crate::query::Plan;
 use crate::scan::Rows;
+use arrow::record_batch::RecordBatch;
 use std::collections::HashMap;
+
+/// The block headers of a response.
+pub(crate) struct OutputHeader<'a> {
+    /// The block table's catalog name.
+    pub(crate) table: &'a str,
+    pub(crate) desc: &'a TableDescription,
+    /// The header fields the request selects.
+    pub(crate) fields: &'a [String],
+    /// Header rows of the page's blocks, possibly beside other blocks' rows.
+    pub(crate) batches: Vec<RecordBatch>,
+}
 
 /// One source of a response table's rows.
 pub(crate) struct OutputSource<'a> {

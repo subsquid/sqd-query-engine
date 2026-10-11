@@ -92,7 +92,7 @@ in memory when execution returns.
 To reuse an open reader, call `output::execute_chunk` or
 `output::execute_chunk_with` with a `scan::ChunkReader`. `metadata`, `query`, and
 `output` expose the imports above through public re-exports; their implementation
-modules such as `loader`, `parse`, and `assembly` are private.
+modules such as `loader`, `parse`, and `execution` are private.
 
 ## Query Format
 
