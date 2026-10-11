@@ -3,7 +3,7 @@
 //! lookup in its group rather than by comparing itself with every source of
 //! its transaction.
 
-use super::key_columns::{pair_keys, typed_key_columns, TypedKeyColumn};
+use super::key_columns::{keys_readable, pair_keys, typed_key_columns, TypedKeyColumn};
 use super::pairs::pack16;
 use crate::integers::IntColumn;
 use arrow::array::{Array, BooleanArray, GenericListArray, RecordBatch};
@@ -99,6 +99,9 @@ impl HierarchicalFilter {
 pub struct AddressIndex {
     sources: Arc<SourceAddresses>,
     group_key_columns: Vec<String>,
+    /// Whether every group key and address column was read, so that a row
+    /// left out had a null in it.
+    readable: bool,
 }
 
 impl AddressIndex {
@@ -109,11 +112,23 @@ impl AddressIndex {
     ) -> Self {
         let sources =
             SourceAddresses::build(primary_batches, group_key_columns, source_address_column);
+        let addresses_readable = primary_batches
+            .iter()
+            .filter(|batch| batch.num_rows() > 0)
+            .all(|batch| address_list(batch, source_address_column).is_some());
 
         AddressIndex {
             sources: Arc::new(sources),
             group_key_columns: group_key_columns.iter().map(|s| s.to_string()).collect(),
+            readable: addresses_readable && keys_readable(primary_batches, group_key_columns),
         }
+    }
+
+    /// Whether no target row can relate to a source: every source row has a
+    /// null group key or address. Not so when a column could not be read,
+    /// which the join that reads it instead reports.
+    pub fn matches_nothing(&self) -> bool {
+        self.readable && self.sources.is_empty()
     }
 
     /// Target rows whose `target_address_column` relates to a source address
@@ -606,6 +621,45 @@ mod tests {
     use super::*;
     use crate::scan::keys::{CompositeKeySet, KeyFilter};
     use arrow::array::{ArrayRef, Int32Array, ListArray, StringArray, UInt32Array};
+
+    /// Sources whose group key or address is null in every row relate to
+    /// nothing; a column the index cannot read is not one of nulls.
+    #[test]
+    fn only_null_sources_relate_to_nothing() {
+        use arrow::datatypes::{Float64Type, UInt32Type};
+        let path = |present: [bool; 2]| -> ArrayRef {
+            Arc::new(ListArray::from_iter_primitive::<UInt32Type, _, _>(
+                present.map(|present| present.then(|| vec![Some(0)])),
+            ))
+        };
+        let ints = |present: [bool; 2]| -> ArrayRef {
+            Arc::new(UInt32Array::from_iter(present.map(|p| p.then_some(1))))
+        };
+        let batch = |tx: ArrayRef, address: ArrayRef| {
+            let block: ArrayRef = Arc::new(UInt32Array::from(vec![5, 6]));
+            RecordBatch::try_from_iter([("block", block), ("tx", tx), ("address", address)])
+                .unwrap()
+        };
+        let index = |batch: RecordBatch| AddressIndex::build(&[batch], &["block", "tx"], "address");
+        let both = [true, true];
+        let none = [false, false];
+        let one = [false, true];
+
+        assert!(index(batch(ints(both), path(none))).matches_nothing());
+        assert!(index(batch(ints(none), path(both))).matches_nothing());
+        assert!(index(batch(ints([true, false]), path(one))).matches_nothing());
+        assert!(!index(batch(ints(both), path(one))).matches_nothing());
+
+        let floats: ArrayRef = Arc::new(ListArray::from_iter_primitive::<Float64Type, _, _>(vec![
+            None::<Vec<Option<f64>>>,
+            None,
+        ]));
+        assert!(!index(batch(ints(both), floats)).matches_nothing());
+        let text: ArrayRef = Arc::new(StringArray::from(vec![None::<&str>, None]));
+        assert!(!index(batch(ints(both), text)).matches_nothing());
+        let missing = batch(ints(both), path(none)).project(&[0, 1]).unwrap();
+        assert!(!index(missing).matches_nothing());
+    }
 
     /// The address index answers what comparing a target with every source of
     /// its group answers, in both modes, inclusive or not, over random groups,

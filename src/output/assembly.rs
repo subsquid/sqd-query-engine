@@ -559,6 +559,16 @@ struct RelationInput<'a> {
     source: &'a [RecordBatch],
     key_filter: Option<KeyFilter>,
     hierarchical_filter: Option<HierarchicalFilter>,
+    /// Every row it follows has a null in its key or address (INV-R5).
+    keyless: bool,
+}
+
+impl RelationInput<'_> {
+    /// Whether no target row can relate to the rows it follows, so that the
+    /// target is never opened.
+    fn follows_nothing(&self) -> bool {
+        self.keyless || self.source.iter().all(|batch| batch.num_rows() == 0)
+    }
 }
 
 /// Each relation's input. Relations that follow the same rows share the key
@@ -600,14 +610,22 @@ fn relation_inputs<'a>(
                 .table(&relation.target_table)
                 .map_or("block_number", |desc| desc.block_number_column.as_str());
 
-            let key_filter = pushdown_keys(relation, metadata)
-                .map(|(left, right)| key_sets.get(&(items, left)).filter(&right, target_bn))
+            let keys = pushdown_keys(relation, metadata)
+                .map(|(left, right)| (key_sets.get(&(items, left)), right));
+            let addresses = address_spec(relation).map(|spec| {
+                let index = address_indexes.get(&(items, spec.group_keys, spec.source_address));
+                (index, spec.target_address, spec.mode, spec.inclusive)
+            });
+            let keyless = keys.as_ref().is_some_and(|(set, _)| set.matches_nothing())
+                || addresses
+                    .as_ref()
+                    .is_some_and(|(index, ..)| index.matches_nothing());
+
+            let key_filter = keys
+                .map(|(set, right)| set.filter(&right, target_bn))
                 .filter(|filter| !filter.is_empty());
-            let hierarchical_filter = address_spec(relation)
-                .map(|spec| {
-                    let index = address_indexes.get(&(items, spec.group_keys, spec.source_address));
-                    index.filter(spec.target_address, spec.mode, spec.inclusive)
-                })
+            let hierarchical_filter = addresses
+                .map(|(index, target, mode, inclusive)| index.filter(target, mode, inclusive))
                 .filter(|filter| !filter.is_empty());
 
             RelationInput {
@@ -615,6 +633,7 @@ fn relation_inputs<'a>(
                 source: sources.get(&items),
                 key_filter,
                 hierarchical_filter,
+                keyless,
             }
         })
         .collect()
@@ -821,8 +840,7 @@ fn scan_tables(
                 .par_iter()
                 .enumerate()
                 .filter_map(|(index, input)| {
-                    // A relation with no rows to follow never opens its target.
-                    if input.source.iter().all(|b| b.num_rows() == 0) {
+                    if input.follows_nothing() {
                         return None;
                     }
                     let rows = scan_relation(

@@ -139,7 +139,9 @@ only their own source items without evaluating those predicates again.
 `scan_relation` passes a `KeyFilter` or `HierarchicalFilter` to the target scan
 when possible. Otherwise it applies the equality or hierarchical masks from
 [`join/`](../src/join/mod.rs) after scanning. A pushed-down relation needs no
-second join over its result.
+second join over its result. A relation whose followed rows all have a null in
+the key or address relates to nothing and never opens its target; when a key
+column cannot be read at all, the join after the scan is what reports it.
 
 [`compute_block_weights`](../src/output/weight.rs) accounts for selected fields
 and deduplicates contributions from overlapping sources. `BlockSelection`
