@@ -96,6 +96,33 @@ pub(super) fn typed_key_columns<'a>(
         .collect()
 }
 
+/// Whether every batch with rows holds every key column at a type a key is
+/// read from, so that a row without a key is a row with a null in it.
+pub(super) fn keys_readable(batches: &[RecordBatch], names: &[&str]) -> bool {
+    let readable = |batch: &RecordBatch, name: &&str| {
+        let column = batch.column_by_name(name);
+        match column.and_then(|column| TypedKeyColumn::resolve(column.as_ref())) {
+            Some(TypedKeyColumn::List(_, elements)) => elements.is_some(),
+            Some(_) => true,
+            None => false,
+        }
+    };
+
+    batches
+        .iter()
+        .filter(|batch| batch.num_rows() > 0)
+        .all(|batch| names.iter().all(|name| readable(batch, name)))
+}
+
+/// The rows of `batch` whose key columns all hold a value; `None` when every
+/// row does.
+pub(super) fn complete_keys(batch: &RecordBatch, names: &[&str]) -> Option<NullBuffer> {
+    names
+        .iter()
+        .filter_map(|name| batch.column_by_name(name)?.logical_nulls())
+        .reduce(|all, nulls| NullBuffer::union(Some(&all), Some(&nulls)).expect("both present"))
+}
+
 /// The join keys of a batch's two integer key columns, and the rows where
 /// either is null; `None` when they are not two integer columns.
 pub(super) fn pair_keys<S: AsRef<str>>(
