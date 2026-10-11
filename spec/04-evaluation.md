@@ -184,9 +184,10 @@ numbers are stored as 32-bit integers selects nothing and is not an error.
 
 ### 4.2.10 Pushdown is invisible
 
-Engines prune: they skip row groups whose statistics exclude a filter, use
-dictionaries, evaluate cheap filters before expensive ones, and stop reading
-early once the weight budget is spent.
+Engines prune: they skip row groups whose statistics exclude a filter, leave
+out a filter the statistics prove for every row, use dictionaries, evaluate
+cheap filters before expensive ones, and stop reading early once the weight
+budget is spent.
 
 None of this may change the answer ([INV-P16](07-invariants.md#inv-p16)). In
 particular, statistics are a *hint*. A column may lack statistics, have stale

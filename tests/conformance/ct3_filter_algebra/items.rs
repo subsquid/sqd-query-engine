@@ -6,12 +6,17 @@
 //! alternative judged as if it were required, or an item dropped from a row
 //! group another item kept it in. Each loses rows silently, so the answer is
 //! compared with every row evaluated by hand.
+//!
+//! Statistics also prove filters: a row group that holds one value, which a
+//! filter lists, needs no evaluation of that filter. A proof read at the wrong
+//! width, or on a column that holds nulls, keeps rows the filter drops.
 
 use crate::harness::chunk::write_table_with;
 use arrow::array::{
-    Array, ArrayRef, BooleanArray, Int32Array, StringArray, UInt32Array, UInt64Array,
+    Array, ArrayRef, AsArray, BooleanArray, Int32Array, RecordBatch, StringArray, UInt32Array,
+    UInt64Array,
 };
-use arrow::datatypes::{DataType, Field};
+use arrow::datatypes::{DataType, Field, UInt32Type};
 use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use parquet::schema::types::ColumnPath;
 use sqd_query_engine::scan::predicate::{
@@ -39,6 +44,9 @@ impl Rng {
 /// Rows sorted the way an archive sorts them: by the filtered columns first,
 /// then by block. `code` crosses 2³¹, where its statistics turn negative, and
 /// `name` shares a long prefix so a truncated bound is a prefix of a value.
+/// `group` and `label` hold one value per `kind`, so many row groups hold one
+/// value of each; `group` crosses 2³¹ between kinds, and `label` is null in
+/// runs of rows, so some of those row groups hold nulls beside the value.
 fn columns(rng: &mut Rng, wrapped_blocks: bool) -> Vec<(Field, ArrayRef)> {
     let mut rows: Vec<(u32, u32, u64)> = (0..ROWS)
         .map(|_| {
@@ -53,9 +61,14 @@ fn columns(rng: &mut Rng, wrapped_blocks: bool) -> Vec<(Field, ArrayRef)> {
         .collect();
     rows.sort_unstable();
 
+    let ids = 0..rows.len() as u32;
     let names = rows
         .iter()
         .map(|&(kind, _, _)| format!("a-shared-prefix-for-every-name-{kind}"));
+    let groups = rows.iter().map(|&(kind, _, _)| group_of(kind as u64));
+    let labels = rows
+        .iter()
+        .map(|&(kind, code, _)| (code % 5 != 0).then(|| format!("label-{kind}")));
     let flags = rows
         .iter()
         .map(|&(_, code, block)| (block % 7 != 0).then_some(code % 2 == 0));
@@ -82,8 +95,26 @@ fn columns(rng: &mut Rng, wrapped_blocks: bool) -> Vec<(Field, ArrayRef)> {
             Field::new("flag", DataType::Boolean, true),
             Arc::new(BooleanArray::from_iter(flags)),
         ),
+        (
+            Field::new("group", DataType::UInt32, false),
+            Arc::new(UInt32Array::from_iter_values(groups)),
+        ),
+        (
+            Field::new("label", DataType::Utf8, true),
+            Arc::new(StringArray::from_iter(labels)),
+        ),
         (Field::new(BN, blocks.data_type().clone(), false), blocks),
+        // The row's position, so that tagged rows can be told apart.
+        (
+            Field::new("id", DataType::UInt32, false),
+            Arc::new(UInt32Array::from_iter_values(ids)),
+        ),
     ]
+}
+
+/// Kinds 0 and 1 below 2³¹, 2 and 3 above it.
+fn group_of(kind: u64) -> u32 {
+    (1u32 << 31) - 2 + kind as u32
 }
 
 fn writers(rng: &mut Rng) -> Vec<WriterProperties> {
@@ -107,7 +138,7 @@ fn filter(rng: &mut Rng) -> ColumnPredicate {
         1 => u32::MAX - rng.below(10) as u32,
         _ => (1 << 31) + rng.below(10) as u32,
     };
-    match rng.below(5) {
+    match rng.below(9) {
         0 => col_in_list(
             "name",
             Arc::new(StringArray::from_iter_values((0..1 + rng.below(2)).map(
@@ -125,9 +156,32 @@ fn filter(rng: &mut Rng) -> ColumnPredicate {
             column: "code".into(),
             predicate: Arc::new(RangeGtePredicate::new(ScalarValue::UInt32(code(rng)))),
         },
-        _ => ColumnPredicate {
+        4 => ColumnPredicate {
             column: "code".into(),
             predicate: Arc::new(RangeLtePredicate::new(ScalarValue::UInt32(code(rng)))),
+        },
+        5 => col_in_list(
+            "group",
+            Arc::new(UInt32Array::from_iter_values(
+                (0..1 + rng.below(2)).map(|_| group_of(rng.below(5))),
+            )),
+        ),
+        6 => col_eq("group", ScalarValue::UInt32(group_of(rng.below(5)))),
+        7 => col_in_list(
+            "label",
+            Arc::new(StringArray::from_iter_values(
+                (0..1 + rng.below(2)).map(|_| format!("label-{}", rng.below(5))),
+            )),
+        ),
+        _ => match rng.below(2) {
+            0 => col_eq(
+                "label",
+                ScalarValue::Utf8(format!("label-{}", rng.below(5))),
+            ),
+            _ => col_eq(
+                "name",
+                ScalarValue::Utf8(format!("a-shared-prefix-for-every-name-{}", rng.below(5))),
+            ),
         },
     }
 }
@@ -135,11 +189,33 @@ fn filter(rng: &mut Rng) -> ColumnPredicate {
 fn item(rng: &mut Rng) -> RowPredicate {
     let columns = (0..1 + rng.below(2)).map(|_| filter(rng)).collect();
     if rng.below(3) == 0 {
-        let alternatives = (0..2).map(|_| vec![filter(rng)]).collect();
+        // Two filters in one alternative let a proof cover part of it.
+        let alternatives = (0..2)
+            .map(|_| (0..1 + rng.below(2)).map(|_| filter(rng)).collect())
+            .collect();
         RowPredicate::with_alternatives(columns, alternatives)
     } else {
         RowPredicate::new(columns)
     }
+}
+
+/// Whether `mask` selects `row`: a row it says neither yes nor no about is not
+/// selected.
+fn matches(mask: &BooleanArray, row: usize) -> bool {
+    mask.is_valid(row) && mask.value(row)
+}
+
+fn ids(batches: &[RecordBatch]) -> Vec<u64> {
+    batches
+        .iter()
+        .flat_map(|batch| {
+            let ids = batch
+                .column_by_name("id")
+                .unwrap()
+                .as_primitive::<UInt32Type>();
+            ids.values().iter().map(|&id| id as u64).collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 fn positions(rows: &Rows) -> Vec<u64> {
@@ -166,7 +242,8 @@ fn a_row_group_an_items_statistics_rule_out_holds_none_of_its_rows() {
             write_table_with(dir.path(), "items", fields, arrays, props);
             let reader = ParquetChunkReader::open(dir.path()).unwrap();
 
-            let mut everything = ScanRequest::new(vec!["name", "code", "flag", BN]);
+            let mut everything =
+                ScanRequest::new(vec!["name", "code", "flag", "group", "label", BN]);
             everything.positions = true;
             let all = reader.scan_rows("items", &everything).unwrap().into_rows();
             let all_positions = all.positions().unwrap();
@@ -188,8 +265,13 @@ fn a_row_group_an_items_statistics_rule_out_holds_none_of_its_rows() {
                 });
 
                 let mut expected = Vec::new();
+                let mut expected_tags = vec![Vec::new(); items.len()];
                 for (batch, rows) in all.batches().iter().zip(all_positions) {
                     let any = or_row_predicates(&refs, batch).unwrap();
+                    let each: Vec<BooleanArray> = refs
+                        .iter()
+                        .map(|item| item.evaluate(batch).unwrap())
+                        .collect();
                     let blocks = batch.column_by_name(BN).unwrap();
                     let block = |row: usize| match blocks.as_any().downcast_ref::<UInt64Array>() {
                         Some(blocks) => blocks.value(row),
@@ -202,27 +284,45 @@ fn a_row_group_an_items_statistics_rule_out_holds_none_of_its_rows() {
                     for row in 0..batch.num_rows() {
                         let in_range =
                             range.is_none_or(|(from, to)| (from..=to).contains(&block(row)));
-                        if in_range && any.is_valid(row) && any.value(row) {
-                            expected.push(rows.value(row));
+                        if !in_range || !matches(&any, row) {
+                            continue;
+                        }
+                        expected.push(rows.value(row));
+                        for (tag, mask) in expected_tags.iter_mut().zip(&each) {
+                            if matches(mask, row) {
+                                tag.push(rows.value(row));
+                            }
                         }
                     }
                 }
 
-                for batch_size in [3, usize::MAX] {
-                    let mut request = ScanRequest::new(vec![BN]);
+                // Tags take the path that evaluates every item, even a lone one.
+                let tags: Vec<Vec<usize>> = (0..items.len()).map(|item| vec![item]).collect();
+                for (batch_size, tagged) in [(3, false), (usize::MAX, false), (3, true)] {
+                    let mut request = ScanRequest::new(vec![BN, "id"]);
                     request.predicates = refs.clone();
                     request.block_number_column = Some(BN);
                     (request.from_block, request.to_block) =
                         range.map_or((None, None), |(from, to)| (Some(from), Some(to)));
                     request.positions = true;
                     request.batch_size = batch_size;
+                    if tagged {
+                        request.item_tags = tags.iter().map(Vec::as_slice).collect();
+                    }
 
-                    let returned =
-                        positions(&reader.scan_rows("items", &request).unwrap().into_rows());
-                    assert_eq!(
-                        returned, expected,
-                        "chunk {chunk}, range {range:?}, batches of {batch_size}: {items:?}"
+                    let scanned = reader.scan_rows("items", &request).unwrap();
+                    let context = format!(
+                        "chunk {chunk}, range {range:?}, batches of {batch_size}, \
+                         tagged {tagged}: {items:?}"
                     );
+                    if tagged {
+                        for (tag, expected) in tags.iter().zip(&expected_tags) {
+                            let ids = ids(&scanned.matched_by(tag).unwrap());
+                            assert_eq!(&ids, expected, "tag {tag:?}, {context}");
+                        }
+                    }
+                    let returned = positions(&scanned.into_rows());
+                    assert_eq!(returned, expected, "{context}");
                 }
                 matched += usize::from(!expected.is_empty());
                 empty += usize::from(expected.is_empty());
