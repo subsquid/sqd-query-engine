@@ -99,20 +99,22 @@ impl PackedKeys {
     }
 }
 
+/// The key columns' own buffers, held rather than copied: a response keeps
+/// them until its last block is written.
 struct TypedKeys {
-    fixed: Vec<Vec<i128>>,
-    path: Option<(OffsetBuffer<i32>, PathValues)>,
+    fixed: Vec<StoredInts>,
+    path: Option<(OffsetBuffer<i32>, StoredInts)>,
 }
 
-/// A path's elements at their stored type, one variant per width of the
-/// shared integer list, so that two paths of one type compare as two slices.
-macro_rules! path_values {
+/// Integers at their stored type, one variant per width, so that two values
+/// or two paths of one type compare as they are stored.
+macro_rules! stored_ints {
     ($($variant:ident($array:ty, $native:ty, $unsigned:ty, $bits:literal, $signed:literal)),+ $(,)?) => {
-        enum PathValues {
+        enum StoredInts {
             $($variant(arrow::buffer::ScalarBuffer<$native>),)+
         }
 
-        impl PathValues {
+        impl StoredInts {
             fn resolve(values: &dyn Array) -> Option<Self> {
                 $(if let Some(a) = values.as_any().downcast_ref::<$array>() {
                     return Some(Self::$variant(a.values().clone()));
@@ -148,6 +150,21 @@ macro_rules! path_values {
                 }
             }
 
+            fn len(&self) -> usize {
+                match self {
+                    $(Self::$variant(values) => values.len(),)+
+                }
+            }
+
+            /// Value `a` against `other`'s value `b`.
+            #[inline]
+            fn compare_one(&self, a: usize, other: &Self, b: usize) -> Ordering {
+                match (self, other) {
+                    $((Self::$variant(x), Self::$variant(y)) => x[a].cmp(&y[b]),)+
+                    _ => self.value(a).cmp(&other.value(b)),
+                }
+            }
+
             /// Two paths compared element by element, then by length.
             fn compare(&self, a: Range<usize>, other: &Self, b: Range<usize>) -> Ordering {
                 match (self, other) {
@@ -165,7 +182,7 @@ macro_rules! path_values {
     };
 }
 
-crate::integers::for_each_int_type!(path_values);
+crate::integers::for_each_int_type!(stored_ints);
 
 impl SortKeys {
     #[inline]
@@ -174,7 +191,7 @@ impl SortKeys {
             Self::Typed(keys) => {
                 let (a, b) = (&keys[ba], &keys[bb]);
                 for (x, y) in a.fixed.iter().zip(&b.fixed) {
-                    let order = x[ra].cmp(&y[rb]);
+                    let order = x.compare_one(ra, y, rb);
                     if order.is_ne() {
                         return order;
                     }
@@ -197,7 +214,7 @@ enum TypedSortColumn {
     /// A list's offsets and, when they are integers, its elements. Elements
     /// that are not integers order as equal, which leaves the file-order
     /// tiebreaker to decide; there is no order to invent for them.
-    List(OffsetBuffer<i32>, Option<PathValues>),
+    List(OffsetBuffer<i32>, Option<StoredInts>),
 }
 
 impl TypedSortColumn {
@@ -209,7 +226,7 @@ impl TypedSortColumn {
             return Some(Self::Text(text));
         }
         if let Some(list) = col.as_any().downcast_ref::<GenericListArray<i32>>() {
-            let elements = PathValues::resolve(list.values().as_ref());
+            let elements = StoredInts::resolve(list.values().as_ref());
             return Some(Self::List(list.offsets().clone(), elements));
         }
 
@@ -347,10 +364,10 @@ fn packed_keys(keys: &TypedKeys) -> PackedKeys {
                 .as_ref()
                 .map_or(0, |(offsets, _)| offsets.len() - 1)
         },
-        Vec::len,
+        StoredInts::len,
     );
-    // Fixed columns are compared at i128, sign included.
-    let fixed_bytes = keys.fixed.len() * 16;
+    // Every batch stores a column at one type, so its values pack at one width.
+    let fixed_bytes: usize = keys.fixed.iter().map(StoredInts::width).sum();
     let mut ends = Vec::with_capacity(rows);
     let mut total = 0;
     for row in 0..rows {
@@ -366,9 +383,9 @@ fn packed_keys(keys: &TypedKeys) -> PackedKeys {
     for row in 0..rows {
         let mut at = start;
         for column in &keys.fixed {
-            let ordered = (column[row] as u128) ^ (1 << 127);
-            bytes[at..at + 16].copy_from_slice(&ordered.to_be_bytes());
-            at += 16;
+            let width = column.width();
+            column.pack(row..row + 1, &mut bytes[at..at + width]);
+            at += width;
         }
         if let Some((offsets, values)) = &keys.path {
             let path = offsets[row] as usize..offsets[row + 1] as usize;
@@ -389,15 +406,12 @@ fn typed_keys(columns: &[arrow::array::ArrayRef]) -> Option<TypedKeys> {
 
     let fixed = fixed
         .iter()
-        .map(|column| {
-            let values = OwnedIntColumn::resolve(column.as_ref())?;
-            Some((0..column.len()).map(|row| values.value(row)).collect())
-        })
+        .map(|column| StoredInts::resolve(column.as_ref()))
         .collect::<Option<_>>()?;
     let path = match list {
         Some(list) => Some((
             list.offsets().clone(),
-            PathValues::resolve(list.values().as_ref())?,
+            StoredInts::resolve(list.values().as_ref())?,
         )),
         None => None,
     };
