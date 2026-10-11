@@ -5,7 +5,7 @@ use crate::engine_err;
 use crate::error::ErrorKind;
 use crate::integers::IntColumn;
 use crate::scan::chunk::ParquetTable;
-use crate::scan::predicate::RowPredicate;
+use crate::scan::predicate::{ColumnPredicate, RowPredicate, StatRange};
 use crate::scan::rows::{Scanned, ScannedBatch};
 use anyhow::{Context, Result};
 use arrow::array::*;
@@ -649,6 +649,24 @@ struct PreparedRowGroup {
     /// Indices into the request's predicates, ascending; empty when the scan
     /// has none.
     active_items: Vec<usize>,
+    /// Each active item some of whose filters the statistics prove, with the
+    /// filters left to check; ascending, as `active_items` is.
+    narrowed: Vec<(usize, RowPredicate)>,
+}
+
+impl PreparedRowGroup {
+    /// The active items as this row group checks them.
+    fn items<'r>(&'r self, request: &ScanRequest<'r>) -> Vec<&'r RowPredicate> {
+        let mut narrowed = self.narrowed.iter().peekable();
+
+        self.active_items
+            .iter()
+            .map(|&item| match narrowed.next_if(|(n, _)| *n == item) {
+                Some((_, left)) => left,
+                None => request.predicates[item],
+            })
+            .collect()
+    }
 }
 
 fn select_row_groups(table: &ParquetTable, request: &ScanRequest) -> Vec<PreparedRowGroup> {
@@ -687,53 +705,92 @@ fn prepare_row_group(
     }
 
     // An item whose statistics rule this row group out does not run on it.
-    let stats = row_group_stats(table, index, &request.predicates);
+    let stats = GroupStats::read(table, index, &request.predicates);
+    let range = |column: &str| stats.range(column).cloned();
     let active_items: Vec<usize> = (0..request.predicates.len())
-        .filter(|&item| !request.predicates[item].can_skip_row_group(&stats))
+        .filter(|&item| !request.predicates[item].can_skip_row_group(&range))
         .collect();
     if !request.predicates.is_empty() && active_items.is_empty() {
         return None;
     }
 
+    // A filter the statistics prove for every row is not evaluated on it.
+    let narrowed = active_items
+        .iter()
+        .filter_map(|&item| {
+            let left = request.predicates[item].without_proven(|p| stats.proves(p))?;
+            Some((item, left))
+        })
+        .collect();
+
     Some(PreparedRowGroup {
         index,
         active_items,
+        narrowed,
     })
 }
 
-/// One row group's statistics for the columns `predicates` filter on, each read
-/// once, at the type the column is stored at. A hundred items name the same few
-/// columns, and reading a statistic allocates.
-fn row_group_stats<'p>(
-    table: &ParquetTable,
-    group: usize,
-    predicates: &[&'p RowPredicate],
-) -> impl Fn(&str) -> Option<crate::scan::predicate::StatRange> + 'p {
-    let mut columns: Vec<(&str, Option<crate::scan::predicate::StatRange>)> = Vec::new();
-    for predicate in predicates.iter().flat_map(|p| p.column_predicates()) {
-        let column = predicate.column.as_str();
-        if columns.iter().all(|(read, _)| *read != column) {
-            columns.push((column, column_stats(table, group, column)));
-        }
-    }
+/// One row group's statistics for the columns a scan's items filter on, each
+/// read once, at the type the column is stored at. A hundred items name the
+/// same few columns, and reading a statistic allocates.
+struct GroupStats<'p>(Vec<ColumnSummary<'p>>);
 
-    move |column| columns.iter().find(|(read, _)| *read == column)?.1.clone()
+struct ColumnSummary<'p> {
+    column: &'p str,
+    range: Option<StatRange>,
+    /// The writer counted the column's nulls in the group, and found none.
+    null_free: bool,
 }
 
-fn column_stats(
-    table: &ParquetTable,
-    group: usize,
-    column: &str,
-) -> Option<crate::scan::predicate::StatRange> {
-    // Parquet stats come at the physical type; the stored type says how to read them.
-    let stored = table.schema().field_with_name(column).ok()?.data_type();
-    let stats = table.column_stats(group, column)?;
-    let (min, max) = (stats.min?, stats.max?);
-    crate::scan::predicate::StatRange::new(
-        stored,
-        stat_value_to_array(&min).as_ref(),
-        stat_value_to_array(&max).as_ref(),
-    )
+impl<'p> GroupStats<'p> {
+    fn read(table: &ParquetTable, group: usize, predicates: &[&'p RowPredicate]) -> Self {
+        let mut columns: Vec<ColumnSummary<'p>> = Vec::new();
+        for predicate in predicates.iter().flat_map(|p| p.column_predicates()) {
+            let column = predicate.column.as_str();
+            if columns.iter().all(|read| read.column != column) {
+                columns.push(column_summary(table, group, column));
+            }
+        }
+
+        Self(columns)
+    }
+
+    fn range(&self, column: &str) -> Option<&StatRange> {
+        self.0.iter().find(|c| c.column == column)?.range.as_ref()
+    }
+
+    /// Whether every row of the group holds a value `predicate` matches. A
+    /// null satisfies no filter (INV-P7), so a column that may hold one
+    /// proves nothing.
+    fn proves(&self, predicate: &ColumnPredicate) -> bool {
+        let Some(summary) = self.0.iter().find(|c| c.column == predicate.column) else {
+            return false;
+        };
+        let range = summary.range.as_ref().filter(|_| summary.null_free);
+
+        range.is_some_and(|range| predicate.predicate.matches_every_value(range))
+    }
+}
+
+fn column_summary<'p>(table: &ParquetTable, group: usize, column: &'p str) -> ColumnSummary<'p> {
+    let stats = table.column_stats(group, column);
+    let null_free = stats.as_ref().is_some_and(|s| s.null_count == Some(0));
+    let range = stats.and_then(|stats| {
+        // Parquet stats come at the physical type; the stored type says how to read them.
+        let stored = table.schema().field_with_name(column).ok()?.data_type();
+        let (min, max) = (stats.min?, stats.max?);
+        StatRange::new(
+            stored,
+            stat_value_to_array(&min).as_ref(),
+            stat_value_to_array(&max).as_ref(),
+        )
+    });
+
+    ColumnSummary {
+        column,
+        range,
+        null_free,
+    }
 }
 
 /// For each set of items that runs on some row group, the list of every value
@@ -787,7 +844,7 @@ fn scan_row_group(
     output_schema: &SchemaRef,
     union: Option<Arc<RowPredicate>>,
 ) -> Result<Vec<ScannedBatch>> {
-    let filter = reader_filter(table, request, &group.active_items, union);
+    let filter = reader_filter(table, request, group, union);
 
     read_row_group(table, group.index, request, output_schema, filter)
 }
@@ -803,12 +860,12 @@ struct ReaderFilter {
     tags: Option<Arc<ItemTags>>,
 }
 
-/// The reader filter that applies `request` to a row group on which the
-/// `active` items run, admitting rows by their `union` when they have one.
+/// The reader filter that applies `request` to row group `group`, admitting
+/// rows by the `union` of its active items when they have one.
 fn reader_filter(
     table: &ParquetTable,
     request: &ScanRequest,
-    active: &[usize],
+    group: &PreparedRowGroup,
     union: Option<Arc<RowPredicate>>,
 ) -> ReaderFilter {
     let filters = RowFilters::of(request);
@@ -836,12 +893,9 @@ fn reader_filter(
         stages.push(key_stage(table, keys));
     }
 
-    let items: Vec<&RowPredicate> = active
-        .iter()
-        .map(|&item| request.predicates[item])
-        .collect();
+    let items = group.items(request);
     let tags = (!items.is_empty())
-        .then(|| ItemTags::new(request, active))
+        .then(|| ItemTags::new(request, &group.active_items))
         .flatten();
     stages.extend(item_stages(table, &items, tags.clone(), union));
 
@@ -925,8 +979,10 @@ fn item_stages(
     }
 }
 
-/// A lone item's first column gets a stage of its own, since it leads the sort
-/// key and is the most selective; its other columns share one.
+/// A lone item's first column gets a stage of its own, and its other columns
+/// share a second, which decodes only the rows the first kept. The first is the
+/// client's first filter, which need not be the most selective; a filter the
+/// row group's statistics prove is already left out.
 fn lone_item_stages(table: &ParquetTable, item: &RowPredicate) -> Vec<Box<dyn ArrowPredicate>> {
     let mut stages: Vec<Box<dyn ArrowPredicate>> = Vec::new();
     let (first, rest) = match item.columns.split_first() {
@@ -976,7 +1032,14 @@ fn every_item_stages(
 ) -> Vec<Box<dyn ArrowPredicate>> {
     let mut stages: Vec<Box<dyn ArrowPredicate>> = Vec::new();
 
-    if let Some(union) = union {
+    // An item that matches every row admits every row, to the union as well.
+    // Only tags still need each item's answer.
+    let every_row = items.iter().any(|item| item.matches_every_row());
+    if every_row && tags.is_none() {
+        return stages;
+    }
+
+    if let Some(union) = union.filter(|_| !every_row) {
         stages.push(Box::new(ArrowPredicateFn::new(
             roots(table, union.required_columns()),
             move |batch: RecordBatch| {
@@ -1532,8 +1595,12 @@ mod tests {
             ("addresses, bounded", &related, &["address", "block_number"]),
             ("addresses", &unbounded, &["address"]),
         ] {
-            let active: Vec<usize> = (0..request.predicates.len()).collect();
-            let filter = reader_filter(&table, request, &active, None);
+            let group = PreparedRowGroup {
+                index: 0,
+                active_items: (0..request.predicates.len()).collect(),
+                narrowed: Vec::new(),
+            };
+            let filter = reader_filter(&table, request, &group, None);
             let columns: Vec<&str> = reader_columns(request, &filter).collect();
             assert_eq!(columns, expected, "{what}");
         }
@@ -1646,6 +1713,51 @@ mod tests {
                 .collect();
             assert_eq!(blocks, expected, "items {picked:?}");
         }
+    }
+
+    /// A filter a row group's statistics prove for every row runs no stage
+    /// there, and an item left with nothing to check admits every row without
+    /// one. Tags still need each item's answer, so one stage stays for them;
+    /// the union in front of it goes, since it would admit every row.
+    #[test]
+    fn a_filter_the_statistics_prove_runs_no_stage() {
+        let dir = tempfile::tempdir().unwrap();
+        let (table, items) = items_over_row_groups(dir.path());
+        let b_or_c = RowPredicate::new(vec![crate::scan::predicate::col_in_list(
+            "address",
+            Arc::new(StringArray::from(vec!["b", "c"])),
+        )]);
+        let stages = |request: &ScanRequest| -> Vec<(usize, usize)> {
+            let row_groups = select_row_groups(&table, request);
+            let unions = ItemUnions::build(request, &row_groups);
+            row_groups
+                .iter()
+                .map(|group| {
+                    let union = unions.get(&group.active_items);
+                    let filter = reader_filter(&table, request, group, union);
+                    (group.index, filter.stages.len())
+                })
+                .collect()
+        };
+
+        // Row groups: [a, b] [a, c] [b, c] [a, b] [c, c] [b, b].
+        let mut request = ScanRequest::new(vec!["address"]);
+        request.predicates = vec![&items[2]];
+        assert_eq!(stages(&request), [(1, 1), (2, 1), (4, 0)], "c");
+
+        request.predicates = vec![&items[2], &b_or_c];
+        assert_eq!(
+            stages(&request),
+            [(0, 1), (1, 2), (2, 2), (3, 1), (4, 0), (5, 0)],
+            "c, and b or c"
+        );
+
+        request.item_tags = vec![&[0][..], &[1][..]];
+        assert_eq!(
+            stages(&request),
+            [(0, 1), (1, 2), (2, 2), (3, 1), (4, 1), (5, 1)],
+            "the same, tagged"
+        );
     }
 
     /// A relation key keeps the same rows whether the scan reads them or the
