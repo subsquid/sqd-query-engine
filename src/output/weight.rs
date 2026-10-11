@@ -140,10 +140,7 @@ pub(crate) fn compute_block_weights(
         // A header's weight is its fixed part plus whatever its data-dependent
         // columns say. Counting only the fixed part makes a header carrying
         // withdrawals weigh the same as an empty one.
-        let weight_arrays: Vec<_> = header_weight_cols
-            .iter()
-            .filter_map(|c| batch.column_by_name(c))
-            .collect();
+        let weight_columns = weight_columns(batch, &header_weight_cols);
 
         // The scan refuses a chunk whose block-number column cannot place a
         // row, so a batch arriving here without a readable one did not come
@@ -160,9 +157,9 @@ pub(crate) fn compute_block_weights(
                 continue;
             }
 
-            let dynamic: u64 = weight_arrays
+            let dynamic: u64 = weight_columns
                 .iter()
-                .map(|col| get_weight_value(col.as_ref(), i))
+                .map(|column| weight_at(column, i))
                 .fold(0u64, u64::saturating_add);
 
             let entry = block_weights.entry(block_num).or_default();
@@ -337,24 +334,32 @@ fn compute_weight_params(
     (fixed_weight, weight_cols)
 }
 
-/// Get uint64 value from a weight column at row index.
+/// The weight columns of `batch`, resolved once for all its rows.
+///
+/// A width this cannot read weighs nothing, and that is the one to watch:
+/// `*_size` companions are narrowed like any other integer, and a weight model
+/// blind to `UInt16` charges a whole chunk's rows their fixed part alone.
+fn weight_columns<'b>(batch: &'b RecordBatch, names: &[String]) -> Vec<IntColumn<'b>> {
+    names
+        .iter()
+        .filter_map(|name| IntColumn::resolve(batch.column_by_name(name)?.as_ref()))
+        .collect()
+}
+
+/// A weight column's value at `row`.
 ///
 /// A size is unsigned by the catalog, so a negative one is a corrupt chunk. Read
 /// as a `u64` it becomes ~`u64::MAX`, which drops the block from every response
 /// it appears in — or wraps the accumulator and drops the budget instead. It
 /// weighs nothing here: a model that under-counts one row emits a slightly large
 /// response, and a model that over-counts it by 2⁶⁴ emits nothing (INV-B9).
-///
-/// A width this cannot read weighs nothing for the same reason, and that is the
-/// one to watch: `*_size` companions are narrowed like any other integer, and a
-/// weight model blind to `UInt16` charges a whole chunk's rows their fixed part
-/// alone.
-pub(crate) fn get_weight_value(col: &dyn arrow::array::Array, i: usize) -> u64 {
-    match IntColumn::resolve(col) {
-        Some(column) if column.is_null(i) => 0,
-        Some(column) => column.value(i).try_into().unwrap_or(0),
-        None => 0,
+#[inline]
+fn weight_at(column: &IntColumn, row: usize) -> u64 {
+    if column.is_null(row) {
+        return 0;
     }
+
+    column.value(row).try_into().unwrap_or(0)
 }
 
 /// Accumulate per-block weights in a single pass (no dedup, fast path).
@@ -371,10 +376,7 @@ pub(crate) fn accumulate_block_weights(
             None => continue,
         };
 
-        let wc_arrays: Vec<Option<&dyn arrow::array::Array>> = weight_columns
-            .iter()
-            .map(|name| batch.column_by_name(name).map(|c| c.as_ref()))
-            .collect();
+        let resolved = self::weight_columns(batch, weight_columns);
 
         // The scan refuses a chunk whose block-number column cannot place a row,
         // so a batch arriving here without a readable one did not come from one.
@@ -388,8 +390,8 @@ pub(crate) fn accumulate_block_weights(
             let block_num = blocks.at(i);
 
             let mut row_weight = fixed_weight_per_row;
-            for arr in wc_arrays.iter().flatten() {
-                row_weight = row_weight.saturating_add(get_weight_value(*arr, i));
+            for column in &resolved {
+                row_weight = row_weight.saturating_add(weight_at(column, i));
             }
 
             let entry = weights.entry(block_num).or_default();
@@ -478,11 +480,7 @@ fn accumulate_rows(
     let Ok(blocks) = BlockNumbers::resolve(numbers.as_ref(), bn_column) else {
         return;
     };
-    let weight_columns: Vec<_> = source
-        .weight_cols
-        .iter()
-        .filter_map(|name| batch.column_by_name(name))
-        .collect();
+    let weight_columns = weight_columns(batch, &source.weight_cols);
 
     for row in 0..batch.num_rows() {
         let block = blocks.at(row);
@@ -493,7 +491,7 @@ fn accumulate_rows(
         let weight = weight_columns
             .iter()
             .fold(source.fixed_weight, |sum, column| {
-                sum.saturating_add(get_weight_value(column.as_ref(), row))
+                sum.saturating_add(weight_at(column, row))
             });
         let total = weights.entry(block).or_default();
         *total = total.saturating_add(weight);
@@ -817,7 +815,7 @@ mod tests {
 
     /// `withdrawals` and `extra_data` declare a `*_size` companion. The header
     /// scan used to project the block number and the requested columns only, so
-    /// the companion was absent from the batch, `get_weight_value` found nothing,
+    /// the companion was absent from the batch, the weight found nothing,
     /// and a block carrying two kilobytes of withdrawals weighed the 32 bytes of
     /// an empty one.
     #[test]
@@ -1297,7 +1295,8 @@ mod tests {
 
     /// A size column is unsigned by the catalog, so a negative one is a corrupt
     /// chunk. Read as a `u64` it was ~`u64::MAX`: the block outweighs the whole
-    /// budget and is dropped from every response it appears in.
+    /// budget and is dropped from every response it appears in. A null one
+    /// weighs nothing either.
     ///
     /// Covers CT-5 · INV-B9
     #[test]
@@ -1307,9 +1306,10 @@ mod tests {
             std::sync::Arc::new(Int32Array::from(vec![-4096i32])),
         ];
 
+        let weight = |col: &dyn Array| weight_at(&IntColumn::resolve(col).unwrap(), 0);
         for col in negative {
             assert_eq!(
-                get_weight_value(col.as_ref(), 0),
+                weight(col.as_ref()),
                 0,
                 "a negative {:?} size",
                 col.data_type()
@@ -1322,8 +1322,12 @@ mod tests {
         ];
 
         for col in sizes {
-            assert_eq!(get_weight_value(col.as_ref(), 0), 4096);
+            assert_eq!(weight(col.as_ref()), 4096);
         }
+
+        // A null size weighs nothing, whatever its slot holds.
+        let null = Int64Array::new(vec![4096i64].into(), Some(vec![false].into()));
+        assert_eq!(weight(&null), 0);
     }
 
     /// Weight is a model, and a model that wraps stops bounding anything: the

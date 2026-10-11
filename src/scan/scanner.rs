@@ -333,7 +333,8 @@ fn scan_batches(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<Scann
         return super::positions::read_rows(table, request, rows);
     }
 
-    // 1. Determine all columns we need to read (output + predicate + block range)
+    // 1. Determine all columns we need to read (output + predicate + block range).
+    // A cached row group is filtered in memory, so the cache needs all of them.
     let all_columns = collect_read_columns(table, request);
 
     // 2. Determine which row groups to scan (skip via statistics)
@@ -350,6 +351,7 @@ fn scan_batches(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<Scann
     let cache = request
         .column_cache
         .filter(|_| request.predicates.iter().all(|p| p.matches_every_row()));
+    let unions = ItemUnions::build(request, &row_groups);
     let scan_group = |group: &PreparedRowGroup| {
         if let Some(cache) = cache {
             let decoded = scan_decoded_row_group(
@@ -365,7 +367,8 @@ fn scan_batches(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<Scann
             }
             // The cache cannot take this row group: read it as any scan does.
         }
-        scan_row_group(table, group, &all_columns, request, &output_schema)
+        let union = unions.get(&group.active_items);
+        scan_row_group(table, group, request, &output_schema, union)
     };
 
     let results: Vec<Result<Vec<ScannedBatch>>> = row_groups.par_iter().map(scan_group).collect();
@@ -733,25 +736,60 @@ fn column_stats(
     )
 }
 
+/// For each set of items that runs on some row group, the list of every value
+/// they list, which admits the rows they could match to the stage that runs
+/// them. Built before the row groups are read: it depends on the items alone,
+/// and a list of twenty thousand addresses is costly to copy.
+struct ItemUnions(rustc_hash::FxHashMap<Vec<usize>, Option<Arc<RowPredicate>>>);
+
+impl ItemUnions {
+    fn build(request: &ScanRequest, row_groups: &[PreparedRowGroup]) -> Self {
+        let mut sets: HashSet<&[usize]> = HashSet::default();
+        for group in row_groups
+            .iter()
+            .filter(|group| group.active_items.len() > 1)
+        {
+            sets.insert(&group.active_items);
+        }
+
+        if sets.is_empty() {
+            return Self(Default::default());
+        }
+
+        let sets: Vec<&[usize]> = sets.into_iter().collect();
+        let unions = sets
+            .into_par_iter()
+            .map(|active| {
+                let items: Vec<&RowPredicate> = active
+                    .iter()
+                    .map(|&item| request.predicates[item])
+                    .collect();
+                let union = crate::scan::predicate::listed_union(&items).map(Arc::new);
+                (active.to_vec(), union)
+            })
+            .collect();
+
+        Self(unions)
+    }
+
+    /// The union for the `active` items, when they are several and list values.
+    fn get(&self, active: &[usize]) -> Option<Arc<RowPredicate>> {
+        self.0.get(active).cloned().flatten()
+    }
+}
+
 /// Read one row group through a parquet reader whose row filter applies the
 /// scan's filters, and project what it returns to the output columns.
 fn scan_row_group(
     table: &ParquetTable,
     group: &PreparedRowGroup,
-    read_columns: &[&str],
     request: &ScanRequest,
     output_schema: &SchemaRef,
+    union: Option<Arc<RowPredicate>>,
 ) -> Result<Vec<ScannedBatch>> {
-    let filter = reader_filter(table, request, &group.active_items);
+    let filter = reader_filter(table, request, &group.active_items, union);
 
-    read_row_group(
-        table,
-        group.index,
-        read_columns,
-        request,
-        output_schema,
-        filter,
-    )
+    read_row_group(table, group.index, request, output_schema, filter)
 }
 
 /// How a reader picks a row group's rows.
@@ -766,8 +804,13 @@ struct ReaderFilter {
 }
 
 /// The reader filter that applies `request` to a row group on which the
-/// `active` items run.
-fn reader_filter(table: &ParquetTable, request: &ScanRequest, active: &[usize]) -> ReaderFilter {
+/// `active` items run, admitting rows by their `union` when they have one.
+fn reader_filter(
+    table: &ParquetTable,
+    request: &ScanRequest,
+    active: &[usize],
+    union: Option<Arc<RowPredicate>>,
+) -> ReaderFilter {
     let filters = RowFilters::of(request);
 
     if let Relation::Addresses(addresses) = filters.relation {
@@ -800,7 +843,7 @@ fn reader_filter(table: &ParquetTable, request: &ScanRequest, active: &[usize]) 
     let tags = (!items.is_empty())
         .then(|| ItemTags::new(request, active))
         .flatten();
-    stages.extend(item_stages(table, &items, tags.clone()));
+    stages.extend(item_stages(table, &items, tags.clone(), union));
 
     ReaderFilter {
         stages,
@@ -873,11 +916,12 @@ fn item_stages(
     table: &ParquetTable,
     items: &[&RowPredicate],
     tags: Option<Arc<ItemTags>>,
+    union: Option<Arc<RowPredicate>>,
 ) -> Vec<Box<dyn ArrowPredicate>> {
     match items {
         [] => Vec::new(),
         [item] if tags.is_none() => lone_item_stages(table, item),
-        _ => every_item_stages(table, items, tags),
+        _ => every_item_stages(table, items, tags, union),
     }
 }
 
@@ -922,19 +966,16 @@ fn lone_item_stages(table: &ParquetTable, item: &RowPredicate) -> Vec<Box<dyn Ar
 }
 
 /// Several items, or items whose tags are asked for: one stage evaluates them
-/// all, after a stage that admits only the rows one of them could match.
+/// all, after a stage that admits only the rows `union` admits, every row one
+/// of them could match.
 fn every_item_stages(
     table: &ParquetTable,
     items: &[&RowPredicate],
     tags: Option<Arc<ItemTags>>,
+    union: Option<Arc<RowPredicate>>,
 ) -> Vec<Box<dyn ArrowPredicate>> {
     let mut stages: Vec<Box<dyn ArrowPredicate>> = Vec::new();
 
-    // One list per column admits every row an item could match, so
-    // the items themselves run only on the rows it admits.
-    let union = (items.len() > 1)
-        .then(|| crate::scan::predicate::listed_union(items))
-        .flatten();
     if let Some(union) = union {
         stages.push(Box::new(ArrowPredicateFn::new(
             roots(table, union.required_columns()),
@@ -971,16 +1012,31 @@ fn every_item_stages(
     stages
 }
 
+/// The columns a reader decodes for the rows its row filter keeps: the output,
+/// and the block number when `filter` checks block bounds on those rows. The
+/// stages decode their own columns, and one decoded again for the rows kept
+/// would only be dropped from the output.
+fn reader_columns<'a, 'r>(
+    request: &'a ScanRequest<'r>,
+    filter: &ReaderFilter,
+) -> impl Iterator<Item = &'r str> + 'a {
+    let block = request
+        .block_number_column
+        .filter(|_| filter.blocks_after.is_some());
+
+    request.output_columns.iter().copied().chain(block)
+}
+
 /// Read row group `group` through `filter`. Each row comes with its position
 /// and tags when the request asks for them.
 fn read_row_group(
     table: &ParquetTable,
     group: usize,
-    read_columns: &[&str],
     request: &ScanRequest,
     output_schema: &SchemaRef,
     filter: ReaderFilter,
 ) -> Result<Vec<ScannedBatch>> {
+    let projection = roots(table, reader_columns(request, &filter));
     let mut tracked = request.positions.then(TrackedRows::default);
     let stages = match &mut tracked {
         Some(tracked) => tracked.wrap(filter.stages),
@@ -991,7 +1047,7 @@ fn read_row_group(
         table.data(),
         table.arrow_metadata().clone(),
     )
-    .with_projection(roots(table, read_columns.iter().copied()))
+    .with_projection(projection)
     .with_batch_size(request.batch_size)
     .with_row_groups(vec![group]);
     if !stages.is_empty() {
@@ -1375,6 +1431,220 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// Calls in blocks 1 to 6, one transaction each, a root call and its child.
+    fn calls_table(dir: &Path) -> (ParquetTable, RecordBatch) {
+        use arrow::datatypes::UInt32Type;
+        let blocks: Vec<u64> = (1..=6).flat_map(|b| [b, b]).collect();
+        let addresses = || {
+            ListArray::from_iter_primitive::<UInt32Type, _, _>(
+                (1..=6).flat_map(|_| [Some(vec![Some(0)]), Some(vec![Some(0), Some(0)])]),
+            )
+        };
+        let table = crate::testing::write_table(
+            dir,
+            vec![
+                arrow::datatypes::Field::new("block_number", DataType::UInt64, false),
+                arrow::datatypes::Field::new("transaction_index", DataType::UInt32, false),
+                arrow::datatypes::Field::new("address", addresses().data_type().clone(), true),
+            ],
+            vec![
+                Arc::new(UInt64Array::from(blocks.clone())),
+                Arc::new(UInt32Array::from(vec![0; blocks.len()])),
+                Arc::new(addresses()),
+            ],
+            4,
+        );
+        let roots = RecordBatch::try_from_iter([
+            (
+                "block_number",
+                Arc::new(UInt64Array::from_iter_values(1..=6)) as ArrayRef,
+            ),
+            (
+                "transaction_index",
+                Arc::new(UInt32Array::from(vec![0; 6])) as ArrayRef,
+            ),
+            (
+                "address",
+                Arc::new(ListArray::from_iter_primitive::<UInt32Type, _, _>(
+                    (1..=6).map(|_| Some(vec![Some(0)])),
+                )) as ArrayRef,
+            ),
+        ])
+        .unwrap();
+
+        (table, roots)
+    }
+
+    /// The reader decodes the output for the rows its filter keeps, and the
+    /// block number only where it checks block bounds on those rows: the
+    /// filter's stages decode the columns they filter on themselves.
+    #[test]
+    fn the_reader_decodes_only_what_it_returns() {
+        let dir = tempfile::tempdir().unwrap();
+        let (table, roots) = calls_table(dir.path());
+        let pair = ["block_number", "transaction_index"];
+        let keys = KeyFilter::build(
+            std::slice::from_ref(&roots),
+            &pair,
+            &pair,
+            "block_number",
+            "block_number",
+        );
+        let children = HierarchicalFilter::build(
+            std::slice::from_ref(&roots),
+            &pair,
+            "address",
+            "address",
+            HierarchicalMode::Children,
+            false,
+        );
+        let item = RowPredicate::new(vec![crate::scan::predicate::col_in_list(
+            "transaction_index",
+            Arc::new(UInt32Array::from(vec![0])),
+        )]);
+
+        let output = vec!["address"];
+        let bounded = |request: &mut ScanRequest| {
+            request.block_number_column = Some("block_number");
+            request.from_block = Some(3);
+            request.to_block = Some(4);
+        };
+        let mut items = ScanRequest::new(output.clone());
+        bounded(&mut items);
+        items.predicates = vec![&item];
+        let mut keyed = ScanRequest::new(output.clone());
+        bounded(&mut keyed);
+        keyed.key_filter = Some(&keys);
+        let mut related = ScanRequest::new(output.clone());
+        bounded(&mut related);
+        related.key_filter = Some(&keys);
+        related.hierarchical_filter = Some(&children);
+        let mut unbounded = related.clone();
+        unbounded.from_block = None;
+        unbounded.to_block = None;
+
+        for (what, request, expected) in [
+            ("items", &items, &["address"][..]),
+            ("keys", &keyed, &["address"]),
+            ("addresses, bounded", &related, &["address", "block_number"]),
+            ("addresses", &unbounded, &["address"]),
+        ] {
+            let active: Vec<usize> = (0..request.predicates.len()).collect();
+            let filter = reader_filter(&table, request, &active, None);
+            let columns: Vec<&str> = reader_columns(request, &filter).collect();
+            assert_eq!(columns, expected, "{what}");
+        }
+
+        // Bounds checked on the rows read keep only the rows inside them.
+        let mut request = ScanRequest::new(vec!["block_number", "address"]);
+        bounded(&mut request);
+        request.hierarchical_filter = Some(&children);
+        let read = scan(&table, &request).unwrap();
+        let blocks: Vec<u64> = read
+            .iter()
+            .flat_map(|b| {
+                b.column(0)
+                    .as_primitive::<arrow::datatypes::UInt64Type>()
+                    .values()
+                    .to_vec()
+            })
+            .collect();
+        assert_eq!(blocks, [3, 4]);
+    }
+
+    /// Items over row groups whose statistics leave different items to run:
+    /// `["a", "b"]` in one row group runs the items listing `a` and `b`.
+    fn items_over_row_groups(dir: &Path) -> (ParquetTable, Vec<RowPredicate>) {
+        let addresses = ["a", "b", "a", "c", "b", "c", "a", "b", "c", "c", "b", "b"];
+        let table = crate::testing::write_table(
+            dir,
+            vec![
+                arrow::datatypes::Field::new("block_number", DataType::UInt64, false),
+                arrow::datatypes::Field::new("address", DataType::Utf8, false),
+            ],
+            vec![
+                Arc::new(UInt64Array::from_iter_values(0..addresses.len() as u64)),
+                Arc::new(StringArray::from(addresses.to_vec())),
+            ],
+            2,
+        );
+        let item = |value: &str| {
+            let values = Arc::new(StringArray::from(vec![value]));
+            RowPredicate::new(vec![crate::scan::predicate::col_in_list("address", values)])
+        };
+
+        (table, vec![item("a"), item("b"), item("c")])
+    }
+
+    /// A scan builds one union for each set of items that runs on some row
+    /// group, however many row groups that set runs on, and none for an item
+    /// that runs alone. Each admits the values its items list.
+    #[test]
+    fn a_scan_builds_one_union_per_set_of_items() {
+        let dir = tempfile::tempdir().unwrap();
+        let (table, items) = items_over_row_groups(dir.path());
+        let mut request = ScanRequest::new(vec!["address"]);
+        request.predicates = items.iter().collect();
+
+        let row_groups = select_row_groups(&table, &request);
+        let active: Vec<&[usize]> = row_groups
+            .iter()
+            .map(|g| g.active_items.as_slice())
+            .collect();
+        assert_eq!(
+            active,
+            [&[0, 1][..], &[0, 1, 2], &[1, 2], &[0, 1], &[2], &[1]],
+            "the row groups this test is about"
+        );
+
+        let unions = ItemUnions::build(&request, &row_groups);
+        assert_eq!(unions.0.len(), 3, "one per distinct set of several items");
+
+        let values: ArrayRef = Arc::new(StringArray::from(vec!["a", "b", "c"]));
+        let batch = RecordBatch::try_from_iter([("address", values)]).unwrap();
+        for (set, admitted) in [
+            (&[0, 1][..], [true, true, false]),
+            (&[0, 1, 2], [true, true, true]),
+            (&[1, 2], [false, true, true]),
+        ] {
+            let union = unions.get(set).expect("several items");
+            assert_eq!(
+                union.evaluate(&batch).unwrap(),
+                BooleanArray::from(admitted.to_vec())
+            );
+        }
+        assert!(unions.get(&[2]).is_none() && unions.get(&[1]).is_none());
+    }
+
+    /// Several items return the rows any of them matches, whichever set of
+    /// them each row group runs.
+    #[test]
+    fn several_items_return_the_rows_any_of_them_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let (table, items) = items_over_row_groups(dir.path());
+        for picked in [vec![0, 1], vec![0, 2], vec![1, 2], vec![0, 1, 2]] {
+            let mut request = ScanRequest::new(vec!["block_number", "address"]);
+            request.predicates = picked.iter().map(|&i| &items[i]).collect();
+
+            let read = scan(&table, &request).unwrap();
+            let blocks: Vec<u64> = read
+                .iter()
+                .flat_map(|b| {
+                    b.column(0)
+                        .as_primitive::<arrow::datatypes::UInt64Type>()
+                        .values()
+                        .to_vec()
+                })
+                .collect();
+            let listed: Vec<&str> = picked.iter().map(|&i| ["a", "b", "c"][i]).collect();
+            let addresses = ["a", "b", "a", "c", "b", "c", "a", "b", "c", "c", "b", "b"];
+            let expected: Vec<u64> = (0..addresses.len() as u64)
+                .filter(|&row| listed.contains(&addresses[row as usize]))
+                .collect();
+            assert_eq!(blocks, expected, "items {picked:?}");
         }
     }
 
