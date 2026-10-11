@@ -260,6 +260,12 @@ answers with a 200 where the reference, or the spec, errors.
   returns 0 for a non-integer key), which attaches logs to the wrong
   transaction; text on the source side matches nothing. The reference errors
   ("datatypes of join keys don't match"); INV-E7 wants `UnsupportedKeyType`.
+- A `children` or `parents` relation has the same hole. Its join reads a source
+  row's group key only after it skips a null address, so a group key stored as
+  `Float64` is answered with nothing when every followed address is null; the
+  joins refuse it. An address list whose elements are not integers reads as the
+  root path on the source side, so `children` relates the source to every row
+  of its group, and matches nothing on the target side.
 - Without `traces.type`, the variant writer writes no variant group, so
   `callValue` and its siblings vanish from every row. The reference errors with
   `ColumnNotFound`.
