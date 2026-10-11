@@ -1,9 +1,12 @@
-use super::arrow_out::blocks_mask;
-use super::block_index::compute_block_range;
-use super::columns::resolve_relation_output_columns;
-use super::row_order::build_full_sort_columns;
-use super::weight::{weight_scan_columns, TableOutput};
+use super::page::Page;
+use super::prepare::Execution;
+use super::Stopwatch;
 use crate::metadata::{DatasetDescription, TableDescription};
+use crate::output::block_index::compute_block_range;
+use crate::output::blocks_mask;
+use crate::output::columns::resolve_relation_output_columns;
+use crate::output::row_order::build_full_sort_columns;
+use crate::output::weight::{block_scan_columns, weight_scan_columns, TableOutput};
 use crate::query::{Plan, RelationKind};
 use crate::scan::predicate::RowPredicate;
 use crate::scan::{ChunkReader, ColumnCache, KeyFilter, Rows, ScanRequest, Scanned};
@@ -130,7 +133,7 @@ impl<'a> SelectionReader<'a> {
 
 impl SelectionReader<'_> {
     /// Release the columns kept for selection; payload reads do not use them.
-    pub(super) fn release_columns(&self) {
+    fn release_columns(&self) {
         self.decoded.clear();
     }
 }
@@ -161,7 +164,7 @@ impl ChunkReader for SelectionReader<'_> {
 }
 
 /// Drop rows beyond the selected prefix before retaining another range.
-pub(super) fn retain_blocks(rows: &Rows, block_column: &str, selected: &[u64]) -> Result<Rows> {
+fn retain_blocks(rows: &Rows, block_column: &str, selected: &[u64]) -> Result<Rows> {
     rows.filter(|_, batch| {
         blocks_mask(batch, block_column, |block| {
             selected.binary_search(&block).is_ok()
@@ -171,7 +174,7 @@ pub(super) fn retain_blocks(rows: &Rows, block_column: &str, selected: &[u64]) -
 
 /// Read back the rows of `rows` with `output_columns`: by their positions when
 /// the scan recorded them, and by their keys otherwise.
-pub(super) fn read_rows(
+fn read_rows(
     chunk: &dyn ChunkReader,
     table: &str,
     desc: &TableDescription,
@@ -224,10 +227,51 @@ pub(super) fn retain_selected_keys(
     Ok(())
 }
 
+/// Read back what a deferred selection left out: the output columns of every
+/// selected row, and the headers of the selected blocks. A page selected with
+/// its payloads comes back as it is.
+pub(super) fn materialize_page(execution: &Execution, page: Page) -> Result<Page> {
+    let Some(reader) = &execution.selection else {
+        return Ok(page);
+    };
+    let Page {
+        blocks,
+        headers,
+        mut tables,
+        read_through,
+    } = page;
+    let (plan, chunk, desc) = (execution.plan, execution.chunk, execution.blocks);
+
+    reader.release_columns();
+    let started = Stopwatch::start(execution.options.profile);
+    let (read, headers) = rayon::join(
+        || materialize_tables(&mut tables, plan, execution.metadata, chunk),
+        || -> Result<Vec<RecordBatch>> {
+            let headers = retain_blocks(&headers, &desc.block_number_column, &blocks)?;
+            read_rows(
+                chunk,
+                &plan.block_table,
+                desc,
+                &headers,
+                &block_scan_columns(&plan.block_output_columns, desc),
+            )
+        },
+    );
+    read?;
+    started.report("materialize selected rows");
+
+    Ok(Page {
+        blocks,
+        headers: Rows::new(headers?),
+        tables,
+        read_through,
+    })
+}
+
 /// Merge sources with the same projection before reading payloads. A table
 /// reached through several relations is decoded once and stored under its first
-/// source; output assembly already unions these sources by table name.
-pub(super) fn materialize_tables(
+/// source; `output_tables` already unions these sources by table name.
+fn materialize_tables(
     outputs: &mut HashMap<String, TableOutput>,
     plan: &Plan,
     metadata: &DatasetDescription,

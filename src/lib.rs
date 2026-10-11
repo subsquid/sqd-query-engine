@@ -1,4 +1,5 @@
 pub mod error;
+mod execution;
 pub mod integers;
 pub mod join;
 /// The catalog types and loader, a crate of their own in `crates/metadata`

@@ -39,6 +39,9 @@
 
 use crate::integers::BlockNumbers;
 use crate::metadata::{JsonEncoding, TableDescription};
+use crate::output::columns::physical_output_columns;
+use crate::output::row_order::build_full_sort_columns;
+use crate::output::sources::{OutputHeader, OutputTable};
 use anyhow::Result;
 use arrow::array::{Array, ArrayRef, BinaryBuilder, BooleanArray, StringArray};
 use arrow::compute::filter_record_batch;
@@ -47,6 +50,7 @@ use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
 use arrow::ipc::CompressionType;
 use arrow::record_batch::RecordBatch;
 use arrow::row::{OwnedRow, RowConverter, SortField};
+use rustc_hash::FxHashSet;
 use std::collections::HashSet;
 use std::io::Write;
 use std::sync::Arc;
@@ -62,7 +66,7 @@ pub struct ArrowOutput {
 }
 
 impl ArrowOutput {
-    pub(crate) fn new(data: Vec<u8>, selected_blocks: &[u64]) -> Self {
+    fn new(data: Vec<u8>, selected_blocks: &[u64]) -> Self {
         Self {
             data,
             first_block: selected_blocks[0],
@@ -104,6 +108,112 @@ pub enum OutputFormat {
     /// Flat per-table Arrow IPC streams. `compress` toggles Arrow's built-in
     /// Zstd; `binary` decodes hex `Utf8` columns to raw bytes.
     Arrow { compress: bool, binary: bool },
+}
+
+/// A page as flat per-table IPC streams, headers first. Columns are projected to
+/// the requested output fields (+ block_number key), rows are trimmed to the
+/// weight-limited `blocks`, and tables fed by several sources are merged +
+/// deduped to match JSON.
+pub(crate) fn arrow_output(
+    blocks: &[u64],
+    header: OutputHeader,
+    tables: Vec<OutputTable>,
+    compress: bool,
+    binary: bool,
+) -> Result<ArrowOutput> {
+    let selected: FxHashSet<u64> = blocks.iter().copied().collect();
+    let keep = |b: u64| selected.contains(&b);
+
+    let mut groups: Vec<(String, Vec<RecordBatch>)> = Vec::new();
+
+    // Block header stream: project + weight-trim.
+    {
+        let bd = header.desc;
+        let bn = bd.block_number_column.clone();
+        let mut wanted = vec![bn.clone()];
+        for c in physical_output_columns(header.fields, bd) {
+            if !wanted.contains(&c) {
+                wanted.push(c);
+            }
+        }
+        let name = bd.request_name(header.table).to_string();
+        let mut batches: Vec<RecordBatch> = Vec::with_capacity(header.batches.len());
+        for b in &header.batches {
+            let trimmed = filter_to_blocks(&project_columns(b, &wanted)?, &bn, keep)?;
+            if trimmed.num_rows() > 0 {
+                batches.push(trimmed);
+            }
+        }
+        let batches = if binary {
+            hexify_group(batches, bd)?
+        } else {
+            batches
+        };
+        groups.push((name, batches));
+    }
+
+    // Item tables.
+    for table in &tables {
+        let td = table.desc;
+        let bn = td.block_number_column.clone();
+        let mut emit_cols = vec![bn.clone()];
+        for c in physical_output_columns(table.sources[0].fields, td) {
+            if !emit_cols.contains(&c) {
+                emit_cols.push(c);
+            }
+        }
+        let multi = table.sources.len() > 1;
+        // For a multi-source table, carry the dedup key columns through the
+        // projection so they exist at dedup time, then drop them on emit.
+        let sort_cols = build_full_sort_columns(td);
+        let mut proc_cols = emit_cols.clone();
+        if multi {
+            for c in &sort_cols {
+                if !proc_cols.contains(c) {
+                    proc_cols.push(c.clone());
+                }
+            }
+        }
+
+        let mut projected: Vec<RecordBatch> = Vec::new();
+        for source in &table.sources {
+            for b in source.rows.batches() {
+                let f = filter_to_blocks(&project_columns(b, &proc_cols)?, &bn, keep)?;
+                if f.num_rows() > 0 {
+                    projected.push(f);
+                }
+            }
+        }
+        if projected.is_empty() {
+            continue;
+        }
+
+        let batches: Vec<RecordBatch> = if multi {
+            let schema = projected[0].schema();
+            let merged = arrow::compute::concat_batches(&schema, &projected)?;
+            let mut key = vec![bn.clone()];
+            for c in &sort_cols {
+                if !key.contains(c) {
+                    key.push(c.clone());
+                }
+            }
+            vec![project_columns(&dedup_first(&merged, &key)?, &emit_cols)?]
+        } else {
+            projected
+        };
+
+        groups.push((
+            table.name.to_string(),
+            if binary {
+                hexify_group(batches, td)?
+            } else {
+                batches
+            },
+        ));
+    }
+
+    let data = write_arrow_frames(Vec::new(), &groups, compress)?;
+    Ok(ArrowOutput::new(data, blocks))
 }
 
 /// Project a batch to `names` (by name, in the given order). Names absent from

@@ -5,7 +5,7 @@ use crate::output::encoder::{
     RollSource, Unrenderable,
 };
 use crate::output::row_order::RowOrder;
-use crate::output::sources::OutputTable;
+use crate::output::sources::{OutputHeader, OutputTable};
 use crate::text::StringColumn;
 use anyhow::Result;
 use arrow::array::*;
@@ -23,15 +23,12 @@ pub(crate) struct PreparedHeader {
 }
 
 impl PreparedHeader {
-    pub(crate) fn new(
-        batches: Vec<RecordBatch>,
-        desc: Option<&TableDescription>,
-        fields: &[String],
-    ) -> Result<Self> {
-        let number_column = desc.map_or("number", |d| d.block_number_column.as_str());
+    pub(crate) fn new(header: OutputHeader) -> Result<Self> {
+        let batches = header.batches;
+        let number_column = header.desc.block_number_column.as_str();
         let index = build_block_index(&batches, number_column)?;
 
-        let writers = build_field_writers(fields, desc);
+        let writers = build_field_writers(header.fields, Some(header.desc));
         let resolved = batches
             .iter()
             .map(|batch| resolve_writers(&writers, batch))
@@ -326,7 +323,7 @@ struct ResolvedGroupedWriters {
 /// Resolve field writers against a specific batch schema (done once per batch).
 ///
 /// A column stored at a type nothing renders is refused here as well as at the
-/// pre-scan check in assembly: that check is what makes the refusal independent
+/// pre-scan check in execution: that check is what makes the refusal independent
 /// of which rows a query reaches, and this is what makes it impossible to
 /// render `null` in a value's place if a batch ever carries a type the schema
 /// did not announce.
@@ -931,5 +928,17 @@ tables:
             ],
             "a group with nothing selected is left out and the rest keep their order"
         );
+    }
+
+    /// Covers CT-6 · INV-O1
+    #[test]
+    fn test_json_close() {
+        let mut buf = vec![b'{', b'"', b'a', b'"', b':', b'1', b','];
+        json_close(b'}', &mut buf);
+        assert_eq!(String::from_utf8(buf).unwrap(), "{\"a\":1}");
+
+        let mut buf = vec![b'{'];
+        json_close(b'}', &mut buf);
+        assert_eq!(String::from_utf8(buf).unwrap(), "{}");
     }
 }

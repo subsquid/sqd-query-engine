@@ -686,7 +686,7 @@ enum RollColumn {
 impl ResolvedRollEncoder {
     /// Resolve encoders for a Roll's sources against a specific batch.
     ///
-    /// Resolved with the declared encoding, as the pre-scan check in assembly
+    /// Resolved with the declared encoding, as the pre-scan check in execution
     /// resolves them: a source stored as bytes under `base58` is an address
     /// there and must be one here, not `0x…` hex.
     pub fn resolve(batch: &RecordBatch, sources: &[RollSource<'_>]) -> Result<Self, Unrenderable> {
@@ -1889,5 +1889,13 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Covers CT-6 · INV-O8
+    #[test]
+    fn test_snake_to_camel_in_output() {
+        assert_eq!(snake_to_camel("log_index"), "logIndex");
+        assert_eq!(snake_to_camel("transaction_hash"), "transactionHash");
+        assert_eq!(snake_to_camel("number"), "number");
     }
 }
