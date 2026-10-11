@@ -291,6 +291,64 @@ fn a_missing_block_table_is_an_error() {
     );
 }
 
+/// A plan is compiled against one catalog and executed with whichever the
+/// caller passes. A planned table the second does not describe can be neither
+/// read nor rendered, so the query is refused before the chunk is touched: a
+/// relation target was otherwise scanned and silently left out of the response,
+/// and a block table answered with bare block numbers.
+#[test]
+fn a_plan_naming_a_table_the_catalog_lacks_is_an_error() {
+    let compiled_with = catalog();
+    let source = weighted_chunk(BLOCKS, &uniform(BLOCKS, 0), &uniform(BLOCKS, 0));
+    let query = serde_json::json!({
+        "type": "test",
+        "fromBlock": 10,
+        "toBlock": 14,
+        "logs": [{"transaction": true}],
+        "fields": {
+            "block": {"number": true},
+            "log": {"data": true},
+            "transaction": {"input": true}
+        }
+    })
+    .to_string();
+    let parsed = parse_query(query.as_bytes(), &compiled_with).unwrap();
+    let plan = compile(&parsed, &compiled_with).unwrap();
+
+    for table in ["blocks", "logs", "transactions"] {
+        let mut metadata = compiled_with.clone();
+        metadata.tables.shift_remove(table);
+        let chunk = Recording {
+            inner: ParquetChunkReader::open(source.path()).unwrap(),
+            asked: Mutex::default(),
+        };
+
+        let json = execute_chunk(&plan, &metadata, &chunk, false).err();
+        let arrow = execute_chunk_arrow(&plan, &metadata, &chunk, false, false).err();
+
+        for (format, err) in [("json", json), ("arrow", arrow)] {
+            let err = err.unwrap_or_else(|| {
+                panic!("{format}: a plan naming '{table}' ran against a catalog without it")
+            });
+            assert_eq!(
+                error_kind(&err),
+                Some(ErrorKind::TableNotFound),
+                "{format}, {table}: {err:#}"
+            );
+            assert!(
+                err.root_cause().to_string().contains(table),
+                "{format}: the error must name '{table}', got: {}",
+                err.root_cause()
+            );
+        }
+        let asked = chunk.asked.lock().unwrap();
+        assert!(
+            asked.is_empty(),
+            "{table}: the chunk was asked for {asked:?}"
+        );
+    }
+}
+
 /// Covers CT-8 · INV-X2
 #[test]
 fn an_ignored_nullable_column_does_not_change_output() {
