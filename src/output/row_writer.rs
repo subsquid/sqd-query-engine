@@ -301,9 +301,11 @@ enum ResolvedIndices {
 }
 
 /// Pre-computed structure for polymorphic field grouping (e.g., EVM traces).
-/// A variant's groups, each a JSON key and the writers that fill it. `"_"` is
-/// the flat group, which is written without a wrapping object.
-type VariantGroups<W> = HashMap<String, Vec<(Vec<u8>, Vec<W>)>>;
+/// Each variant's groups, each a JSON key and the writers that fill it. `"_"`
+/// is the flat group, which is written without a wrapping object. A list, since
+/// every row looks its variant up among a handful, which comparing tags does
+/// faster than hashing them.
+type VariantGroups<W> = Vec<(String, Vec<(Vec<u8>, Vec<W>)>)>;
 
 struct GroupedWriters {
     /// Writers for the fields no variant claims, written flat on every row.
@@ -535,7 +537,7 @@ fn build_grouped_writers(
     }
 
     // Convert variant_groups into the final structure
-    let mut variant_writers: VariantGroups<FieldWriter> = HashMap::new();
+    let mut variant_writers: VariantGroups<FieldWriter> = Vec::new();
     for (variant, groups) in variant_groups {
         let mut group_list = Vec::new();
         for (group_name, writers) in groups {
@@ -550,7 +552,7 @@ fn build_grouped_writers(
             };
             group_list.push((key, writers));
         }
-        variant_writers.insert(variant, group_list);
+        variant_writers.push((variant, group_list));
     }
 
     Some(GroupedWriters {
@@ -580,13 +582,13 @@ fn resolve_grouped_writers(
         );
     }
 
-    let mut variant_resolved: VariantGroups<ResolvedFieldWriter> = HashMap::new();
+    let mut variant_resolved: VariantGroups<ResolvedFieldWriter> = Vec::new();
     for (variant, groups) in &gw.variant_writers {
         let mut resolved_groups = Vec::with_capacity(groups.len());
         for (key, writers) in groups {
             resolved_groups.push((key.clone(), resolve_writers(writers, batch)?));
         }
-        variant_resolved.insert(variant.clone(), resolved_groups);
+        variant_resolved.push((variant.clone(), resolved_groups));
     }
 
     Ok(ResolvedGroupedWriters {
@@ -645,7 +647,11 @@ fn write_row_grouped(
     });
 
     if let Some(tag) = tag_value {
-        if let Some(groups) = resolved.variant_resolved.get(tag) {
+        let variant = resolved
+            .variant_resolved
+            .iter()
+            .find(|(name, _)| name == tag);
+        if let Some((_, groups)) = variant {
             for (group_key, writers) in groups {
                 // Emit group if it has any selected fields (matching legacy behavior:
                 // group is emitted when user selected at least one field, even if all null)
@@ -760,6 +766,70 @@ tables:
         assert_eq!(flat, ["seq", "kind", "note"], "only the unclaimed fields");
     }
 
+    /// Each row writes the groups of its own variant; a tag no variant names,
+    /// and a null one, write the flat fields alone.
+    ///
+    /// Covers CT-6 · INV-O6
+    #[test]
+    fn a_row_writes_the_groups_of_its_own_variant() {
+        use arrow::array::{ArrayRef, StringArray, UInt32Array, UInt64Array};
+        use std::sync::Arc;
+
+        let meta = variant_catalog();
+        let table = meta.table("items").expect("the table is there");
+        let selected: Vec<String> = ["seq", "kind", "call_from", "call_gas", "create_init"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let text = |values: [Option<&str>; 4]| -> ArrayRef {
+            Arc::new(StringArray::from(values.to_vec()))
+        };
+        let batch = RecordBatch::try_from_iter([
+            (
+                "seq",
+                Arc::new(UInt32Array::from(vec![0, 1, 2, 3])) as ArrayRef,
+            ),
+            (
+                "kind",
+                text([Some("call"), Some("create"), Some("reward"), None]),
+            ),
+            (
+                "call_from",
+                text([Some("a"), Some("b"), Some("c"), Some("d")]),
+            ),
+            (
+                "call_gas",
+                Arc::new(UInt64Array::from(vec![5, 6, 7, 8])) as ArrayRef,
+            ),
+            (
+                "create_init",
+                text([Some("i"), Some("j"), Some("k"), Some("l")]),
+            ),
+        ])
+        .unwrap();
+
+        let grouped = build_grouped_writers(&selected, table).expect("the table dispatches");
+        let resolved = resolve_grouped_writers(&grouped, &batch).unwrap();
+        let rows: Vec<String> = (0..batch.num_rows())
+            .map(|row| {
+                let mut buf = vec![b'{'];
+                write_row_grouped(&mut buf, &batch, row, &resolved);
+                json_close(b'}', &mut buf);
+                String::from_utf8(buf).unwrap()
+            })
+            .collect();
+
+        assert_eq!(
+            rows,
+            [
+                r#"{"seq":0,"kind":"call","action":{"from":"a"},"result":{"gas":5}}"#,
+                r#"{"seq":1,"kind":"create","action":{"init":"j"}}"#,
+                r#"{"seq":2,"kind":"reward"}"#,
+                r#"{"seq":3,"kind":null}"#,
+            ]
+        );
+    }
+
     /// The groups of a variant are written in catalog order. Held in a `HashMap`
     /// they came out in the process's hash order instead, so `action` and
     /// `result` swapped places between restarts — the one part of field order
@@ -777,7 +847,12 @@ tables:
 
         for _ in 0..16 {
             let grouped = build_grouped_writers(&selected, table).expect("the table dispatches");
-            let keys: Vec<String> = grouped.variant_writers["call"]
+            let (_, call) = grouped
+                .variant_writers
+                .iter()
+                .find(|(variant, _)| variant == "call")
+                .expect("the variant is there");
+            let keys: Vec<String> = call
                 .iter()
                 .map(|(key, _)| String::from_utf8_lossy(key).into_owned())
                 .collect();

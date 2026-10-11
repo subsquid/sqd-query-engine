@@ -150,13 +150,17 @@ fn keys_outside(
     let (_, signed) = width_of(stored)?;
 
     Some(keys.all(|key| {
-        let value = if signed {
-            key as i64 as i128
-        } else {
-            key as i128
-        };
+        let value = key_value(key, signed);
         value < min || value > max
     }))
+}
+
+/// The value a key narrowed to a stored width stands for.
+fn key_value(key: u64, signed: bool) -> i128 {
+    match signed {
+        true => key as i64 as i128,
+        false => key as i128,
+    }
 }
 
 /// Whether a `>=` (`gte`) or `<=` threshold prunes the group, decided exactly
@@ -314,6 +318,11 @@ pub struct InListPredicate {
     /// [`slot_of`].
     stored_keys: [OnceLock<HashSet<u64>>; INT_TYPES],
     fixed_binary_set: Option<HashSet<Vec<u8>>>,
+    /// Text values by position, in order, built on first use: every row group
+    /// asks for the bounds, and a list can hold a hundred thousand values.
+    sorted_text: OnceLock<Vec<u32>>,
+    /// The same for [`Self::stored_keys`], as the values the column holds.
+    sorted_ints: [OnceLock<Vec<i128>>; INT_TYPES],
 }
 
 /// Bloom filter predicate: check if any of the given values might be in the bloom filter.
@@ -671,6 +680,8 @@ impl InListPredicate {
             ints,
             stored_keys: Default::default(),
             fixed_binary_set,
+            sorted_text: OnceLock::new(),
+            sorted_ints: Default::default(),
         }
     }
 
@@ -700,6 +711,19 @@ impl InListPredicate {
                 .expect("the slot exists only for integer types")
                 .collect()
         }))
+    }
+
+    /// [`Self::keys_at`] as the values the column holds, sorted.
+    fn sorted_values_at(&self, ints: &IntValues, stored: &DataType) -> Option<&[i128]> {
+        let (slot, (_, signed)) = (slot_of(stored)?, width_of(stored)?);
+        let keys = self.keys_at(ints, stored)?;
+
+        let sorted = self.sorted_ints[slot].get_or_init(|| {
+            let mut values: Vec<i128> = keys.iter().map(|&key| key_value(key, signed)).collect();
+            values.sort_unstable();
+            values
+        });
+        Some(sorted)
     }
 }
 
@@ -733,20 +757,28 @@ impl ArrayPredicate for InListPredicate {
                 let Some(list) = self.values.as_any().downcast_ref::<StringArray>() else {
                     return false;
                 };
-                (0..list.len()).all(|i| {
-                    let v = list.value(i);
-                    v < min.as_str() || v > max.as_str()
-                })
+                let value = |position: &u32| list.value(*position as usize);
+                let sorted = self.sorted_text.get_or_init(|| {
+                    let mut positions: Vec<u32> = (0..list.len() as u32).collect();
+                    positions.sort_unstable_by_key(value);
+                    positions
+                });
+
+                // The least value at or above `min` is inside, or none is.
+                let first = sorted.partition_point(|p| value(p) < min.as_str());
+                sorted.get(first).is_none_or(|p| value(p) > max.as_str())
             }
             StatRange::Ints { stored, min, max } => {
-                let Some(keys) = self
+                let Some(sorted) = self
                     .ints
                     .as_ref()
-                    .and_then(|ints| self.keys_at(ints, stored))
+                    .and_then(|ints| self.sorted_values_at(ints, stored))
                 else {
                     return false;
                 };
-                keys_outside(keys.iter().copied(), stored, *min, *max).unwrap_or(false)
+
+                let first = sorted.partition_point(|value| value < min);
+                sorted.get(first).is_none_or(|value| value > max)
             }
         }
     }
@@ -1837,6 +1869,81 @@ mod tests {
         // A value the group genuinely lacks still prunes.
         let absent = EqPredicate::new(ScalarValue::UInt8(9));
         assert!(absent.can_skip(&range));
+    }
+
+    /// A list prunes a row group exactly when every value it lists falls
+    /// outside the group's bounds, however long the list: text and integers
+    /// at every stored width, bounds inside, between, at and beyond the
+    /// values, inverted bounds and an empty list.
+    #[test]
+    fn a_list_prunes_exactly_when_every_value_is_outside_the_bounds() {
+        let mut seed = 0x0058_5EEDu64;
+        let mut next = move |bound: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % bound
+        };
+
+        let words = [
+            "", "0x", "0x0a", "0x0b", "0x1", "0xa0", "0xff", "a", "b", "zz",
+        ];
+        for _ in 0..300 {
+            let listed: Vec<&str> = (0..next(6)).map(|_| words[next(10) as usize]).collect();
+            let predicate = InListPredicate::from_strings(&listed);
+            for _ in 0..8 {
+                let (min, max) = (words[next(10) as usize], words[next(10) as usize]);
+                let outside = listed.iter().all(|v| *v < min || *v > max);
+                let range = StatRange::Text {
+                    min: min.to_owned(),
+                    max: max.to_owned(),
+                };
+                assert_eq!(
+                    predicate.can_skip(&range),
+                    outside,
+                    "{listed:?} in {min:?}..={max:?}"
+                );
+            }
+        }
+
+        let widths = [
+            DataType::Int8,
+            DataType::Int16,
+            DataType::Int32,
+            DataType::Int64,
+            DataType::UInt8,
+            DataType::UInt16,
+            DataType::UInt32,
+            DataType::UInt64,
+        ];
+        let edges: [i128; 9] = [-129, -1, 0, 1, 127, 128, 255, 65_536, u32::MAX as i128 + 1];
+        for _ in 0..300 {
+            let listed: Vec<u64> = (0..next(6))
+                .map(|_| match next(3) {
+                    0 => next(300),
+                    1 => u64::MAX - next(3),
+                    _ => 1 << next(40),
+                })
+                .collect();
+            let predicate = InListPredicate::from_u64s(&listed);
+            let ints = IntValues::from_array(&UInt64Array::from(listed.clone())).unwrap();
+            for stored in &widths {
+                for _ in 0..4 {
+                    let (min, max) = (edges[next(9) as usize], edges[next(9) as usize]);
+                    let outside = ints_outside(&ints, stored, min, max).unwrap();
+                    let range = StatRange::Ints {
+                        stored: stored.clone(),
+                        min,
+                        max,
+                    };
+                    assert_eq!(
+                        predicate.can_skip(&range),
+                        outside,
+                        "{listed:?} stored as {stored} in {min}..={max}"
+                    );
+                }
+            }
+        }
     }
 
     /// Statistics as the scan hands them over: the parquet physical arrays,

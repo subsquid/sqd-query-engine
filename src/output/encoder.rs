@@ -29,12 +29,13 @@ impl std::error::Error for Unrenderable {}
 /// a tree of them for a struct whose members the catalog renders differently
 /// from their stored type.
 ///
-/// The tree exists for one reason. A function pointer cannot carry which
+/// The tree exists for two reasons. A function pointer cannot carry which
 /// member is the `priorityFee` that renders as a decimal string, and a struct
 /// rendered member by member through `resolve_value_encoder` renders every
-/// member as its stored type. So a struct with declared members resolves each
-/// member's encoder up front and walks them per row; a struct without stays a
-/// plain function, which is the hot path.
+/// member as its stored type. Nor can it carry anything resolved once: a plain
+/// function would camel-case each member's name and resolve its encoder for
+/// every value. So every struct resolves its members up front and walks them
+/// per row.
 pub enum Encoder {
     Plain(EncoderFn),
     /// A struct's members in stored order: the JSON key, quoted and followed by
@@ -78,14 +79,16 @@ impl Encoder {
                     .as_any()
                     .downcast_ref::<GenericListArray<i32>>()
                     .expect("resolved against a list");
-                let values = a.value(row);
+                let offsets = a.value_offsets();
+                let elements = offsets[row] as usize..offsets[row + 1] as usize;
+                let values = a.values().as_ref();
 
                 buf.push(b'[');
-                for i in 0..values.len() {
-                    if i > 0 {
+                for i in elements.clone() {
+                    if i > elements.start {
                         buf.push(b',');
                     }
-                    element.encode(values.as_ref(), i, buf);
+                    element.encode(values, i, buf);
                 }
                 buf.push(b']');
             }
@@ -106,42 +109,40 @@ impl Encoder {
 /// `members` is the catalog's description of a struct's members. It applies
 /// where the column is a struct or a list of them, and to nothing else: a
 /// chunk that stores the column as something other than a struct has no
-/// members to describe, and renders as what it is.
+/// members to describe, and renders as what it is. No encoding applies to a
+/// struct itself, so one stored where the catalog declared another type
+/// renders as the struct it is.
 pub fn resolve_encoder(
     data_type: &DataType,
     encoding: Option<&JsonEncoding>,
     declared_type: Option<&ColumnType>,
     members: Option<&BTreeMap<String, MemberDescription>>,
 ) -> Result<Encoder, Unrenderable> {
-    if let Some(members) = members {
-        match data_type {
-            DataType::Struct(fields) => {
-                let mut resolved = Vec::with_capacity(fields.len());
-                for field in fields {
-                    let member = members.get(field.name());
-                    let encoder = resolve_encoder(
-                        field.data_type(),
-                        member.and_then(|m| m.encoding.as_ref()),
-                        None,
-                        member.and_then(|m| m.members.as_ref()),
-                    )?;
+    match data_type {
+        DataType::Struct(fields) => {
+            let mut resolved = Vec::with_capacity(fields.len());
+            for field in fields {
+                let member = members.and_then(|members| members.get(field.name()));
+                let encoder = resolve_encoder(
+                    field.data_type(),
+                    member.and_then(|m| m.encoding.as_ref()),
+                    None,
+                    member.and_then(|m| m.members.as_ref()),
+                )?;
 
-                    let mut key = Vec::with_capacity(field.name().len() + 4);
-                    encode_json_string(&snake_to_camel(field.name()), &mut key);
-                    key.push(b':');
-                    resolved.push((key, encoder));
-                }
-                return Ok(Encoder::Struct(resolved));
+                let mut key = Vec::with_capacity(field.name().len() + 4);
+                encode_json_string(&snake_to_camel(field.name()), &mut key);
+                key.push(b':');
+                resolved.push((key, encoder));
             }
-            DataType::List(item) if matches!(item.data_type(), DataType::Struct(_)) => {
-                let element = resolve_encoder(item.data_type(), None, None, Some(members))?;
-                return Ok(Encoder::List(Box::new(element)));
-            }
-            _ => {}
+            Ok(Encoder::Struct(resolved))
         }
+        DataType::List(item) if matches!(item.data_type(), DataType::Struct(_)) => {
+            let element = resolve_encoder(item.data_type(), None, None, members)?;
+            Ok(Encoder::List(Box::new(element)))
+        }
+        _ => resolve_encoder_fn(data_type, encoding, declared_type).map(Encoder::Plain),
     }
-
-    resolve_encoder_fn(data_type, encoding, declared_type).map(Encoder::Plain)
 }
 
 fn resolve_encoder_fn(
@@ -744,12 +745,13 @@ impl ResolvedRollEncoder {
                         .as_any()
                         .downcast_ref::<GenericListArray<i32>>()
                         .expect("resolved as a list");
-                    let values = list.value(row);
-                    for j in 0..values.len() {
+                    let offsets = list.value_offsets();
+                    let values = list.values().as_ref();
+                    for j in offsets[row] as usize..offsets[row + 1] as usize {
                         if has_items {
                             buf.push(b',');
                         }
-                        element_encoder(values.as_ref(), j, buf);
+                        element_encoder(values, j, buf);
                         has_items = true;
                     }
                 }
@@ -1615,6 +1617,127 @@ mod tests {
             String::from_utf8(buf).unwrap(),
             r#"[{"computeUnitLimit":2000,"priorityFee":"5000"},null]"#
         );
+    }
+
+    /// A struct, and a list of them, render through their resolved encoders
+    /// what resolving each member's encoder for each value renders: nested,
+    /// null at every level, with keys to camel-case and text to escape, whole
+    /// and sliced. A roll spliced from a list renders what the per-value roll
+    /// renders.
+    #[test]
+    fn resolved_containers_render_what_resolving_per_value_renders() {
+        use arrow::buffer::{NullBuffer, OffsetBuffer};
+        use arrow::datatypes::{Field, Fields, UInt8Type};
+        use std::sync::Arc;
+
+        let rows = 6;
+        let inner_fields: Fields = vec![
+            Field::new("x_y", DataType::Int64, true),
+            Field::new("tag", DataType::Utf8, true),
+        ]
+        .into();
+        let inner = StructArray::new(
+            inner_fields,
+            vec![
+                Arc::new(Int64Array::from(vec![
+                    Some(1),
+                    None,
+                    Some(-3),
+                    Some(4),
+                    Some(5),
+                    None,
+                ])),
+                Arc::new(StringArray::from(vec![
+                    Some("a\"b"),
+                    Some(""),
+                    None,
+                    Some("é\n"),
+                    Some("x"),
+                    Some("y"),
+                ])),
+            ],
+            Some(NullBuffer::from(vec![true, true, true, false, true, true])),
+        );
+        let indexes = || -> ArrayRef {
+            Arc::new(ListArray::from_iter_primitive::<UInt8Type, _, _>(vec![
+                Some(vec![Some(1), Some(2)]),
+                None,
+                Some(vec![]),
+                Some(vec![Some(3), None]),
+                Some(vec![Some(9)]),
+                Some(vec![Some(0), Some(0), Some(7)]),
+            ]))
+        };
+        let outer_fields: Fields = vec![
+            Field::new("account_key", DataType::Utf8, true),
+            Field::new("readonly_indexes", indexes().data_type().clone(), true),
+            Field::new("inner_value", inner.data_type().clone(), true),
+        ]
+        .into();
+        let outer = StructArray::new(
+            outer_fields,
+            vec![
+                Arc::new(StringArray::from(vec!["k0", "k1", "k2", "k3", "k4", "k5"])) as ArrayRef,
+                indexes(),
+                Arc::new(inner),
+            ],
+            Some(NullBuffer::from(vec![true, true, false, true, true, true])),
+        );
+        let list = ListArray::new(
+            Arc::new(Field::new("item", outer.data_type().clone(), true)),
+            OffsetBuffer::new(vec![0, 2, 2, 3, 6].into()),
+            Arc::new(outer.clone()),
+            Some(NullBuffer::from(vec![true, true, false, true])),
+        );
+
+        let arrays: Vec<ArrayRef> = vec![Arc::new(outer), Arc::new(list)];
+        for array in arrays {
+            for array in [array.clone(), array.slice(1, array.len() - 1)] {
+                let encoder = resolve_encoder(array.data_type(), None, None, None).unwrap();
+                for row in 0..array.len() {
+                    let (mut resolved, mut per_value) = (Vec::new(), Vec::new());
+                    encoder.encode(array.as_ref(), row, &mut resolved);
+                    encode_value(array.as_ref(), row, &mut per_value);
+                    assert_eq!(
+                        String::from_utf8(resolved).unwrap(),
+                        String::from_utf8(per_value).unwrap(),
+                        "row {row} of a {} of {}",
+                        array.data_type(),
+                        array.len()
+                    );
+                }
+            }
+        }
+
+        let batch = RecordBatch::try_from_iter([
+            (
+                "a0",
+                Arc::new(UInt8Array::from(vec![
+                    Some(1),
+                    Some(2),
+                    None,
+                    Some(4),
+                    Some(5),
+                    Some(6),
+                ])) as ArrayRef,
+            ),
+            ("rest", indexes()),
+        ])
+        .unwrap();
+        for batch in [batch.clone(), batch.slice(1, rows - 1)] {
+            let sources = [0, 1].map(|column_index| RollSource {
+                column_index,
+                encoding: None,
+                declared_type: None,
+            });
+            let roll = ResolvedRollEncoder::resolve(&batch, &sources).unwrap();
+            for row in 0..batch.num_rows() {
+                let (mut resolved, mut per_value) = (Vec::new(), Vec::new());
+                roll.encode(&batch, row, &mut resolved);
+                encode_roll(&batch, row, &[0, 1], &mut per_value);
+                assert_eq!(resolved, per_value, "row {row} of {}", batch.num_rows());
+            }
+        }
     }
 
     fn rendered_with(
