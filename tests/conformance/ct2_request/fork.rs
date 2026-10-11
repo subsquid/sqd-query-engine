@@ -800,12 +800,13 @@ fn hash_of(block: u64) -> String {
 }
 
 /// How a synthetic chain is written: the parent number's physical width, how
-/// many rows go in each row group, and whether the parent hash is there at all.
+/// many rows go in each row group, and the parent hash's physical type, if it
+/// is there at all.
 #[derive(Clone)]
 struct Writing {
     parent_number: arrow::datatypes::DataType,
     rows_per_group: usize,
-    parent_hash: bool,
+    parent_hash: Option<arrow::datatypes::DataType>,
 }
 
 impl Default for Writing {
@@ -813,7 +814,7 @@ impl Default for Writing {
         Self {
             parent_number: arrow::datatypes::DataType::UInt64,
             rows_per_group: usize::MAX,
-            parent_hash: true,
+            parent_hash: Some(arrow::datatypes::DataType::Utf8),
         }
     }
 }
@@ -830,8 +831,8 @@ fn skipping_chain(blocks: &[(u64, u64)], writing: &Writing) -> tempfile::TempDir
         Field::new("number", DataType::UInt64, false),
         Field::new("parent_number", writing.parent_number.clone(), false),
     ];
-    if writing.parent_hash {
-        fields.push(Field::new("parent_hash", DataType::Utf8, false));
+    if let Some(hash_type) = &writing.parent_hash {
+        fields.push(Field::new("parent_hash", hash_type.clone(), false));
     }
 
     let groups = blocks
@@ -846,9 +847,9 @@ fn skipping_chain(blocks: &[(u64, u64)], writing: &Writing) -> tempfile::TempDir
                 Arc::new(UInt64Array::from(numbers)) as ArrayRef,
                 parent_numbers,
             ];
-            if writing.parent_hash {
+            if let Some(hash_type) = &writing.parent_hash {
                 let hashes: Vec<String> = parents.iter().map(|p| hash_of(*p)).collect();
-                columns.push(Arc::new(StringArray::from(hashes)) as ArrayRef);
+                columns.push(cast(&StringArray::from(hashes), hash_type).unwrap());
             }
             columns
         })
@@ -1039,7 +1040,7 @@ fn a_chunk_holding_the_block_after_the_gap_must_carry_its_parent_hash() {
     use sqd_query_engine::metadata::parse_dataset_description;
 
     let writing = Writing {
-        parent_hash: false,
+        parent_hash: None,
         ..Writing::default()
     };
     let chain = skipping_chain(&[(1000, 999), (1500, 1000)], &writing);
@@ -1059,6 +1060,47 @@ fn a_chunk_holding_the_block_after_the_gap_must_carry_its_parent_hash() {
         answer(5000).is_ok(),
         "nothing at or after fromBlock, and nothing in the window behind it"
     );
+}
+
+/// The parent hash is text, and a chunk may store text as any of Arrow's three
+/// string types. Bytes are not text, so a hash stored as bytes is refused.
+///
+/// Covers CT-2 · INV-E5
+#[test]
+fn the_parent_hash_is_read_from_every_text_type() {
+    use arrow::datatypes::DataType;
+    use sqd_query_engine::metadata::parse_dataset_description;
+
+    let blocks = [(10, 9), (11, 10), (12, 11)];
+    for hash_type in [DataType::Utf8, DataType::LargeUtf8, DataType::Utf8View] {
+        let writing = Writing {
+            parent_hash: Some(hash_type.clone()),
+            ..Writing::default()
+        };
+        let chain = skipping_chain(&blocks, &writing);
+        let at = |from: u64, hash: &str| verdict(chain.path(), from, hash);
+
+        assert_eq!(at(11, &hash_of(10)), Verdict::Served, "{hash_type}");
+        assert_eq!(
+            at(11, "0xdead"),
+            Verdict::Fork(10, hash_of(10)),
+            "{hash_type}"
+        );
+    }
+
+    let writing = Writing {
+        parent_hash: Some(DataType::Binary),
+        ..Writing::default()
+    };
+    let chain = skipping_chain(&blocks, &writing);
+    let catalog = parse_dataset_description(SKIPPING_CATALOG).unwrap();
+    let query = format!(
+        r#"{{"type":"test","fromBlock":11,"includeAllBlocks":true,
+             "parentBlockHash":"{}","fields":{{"block":{{"number":true}}}}}}"#,
+        hash_of(10)
+    );
+    let err = run_against(&catalog, chain.path(), &query).expect_err("bytes are not text");
+    assert_eq!(error_kind(&err), Some(ErrorKind::MalformedChunkData));
 }
 
 /// The one message that is part of the contract. A transport that carries an

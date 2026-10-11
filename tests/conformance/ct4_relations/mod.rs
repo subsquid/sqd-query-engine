@@ -7,6 +7,7 @@
 //! a *pair* of queries and a hand-written case only ever asserts one pair of it.
 
 mod attribution;
+mod hierarchies;
 mod joins;
 mod laws;
 mod names;

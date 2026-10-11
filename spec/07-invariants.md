@@ -378,7 +378,8 @@ parent.
 
 ### INV-R8
 **Cross-table hierarchies include equal depth.** When the source and target
-address columns differ, the prefix relation relaxes from `≺` to `⪯`.
+are different tables, the prefix relation relaxes from `≺` to `⪯`, whatever
+their address columns are called.
 
 *Why:* an event whose `callAddress` equals a call's `address` is attached to that call. Requiring a strict extension drops exactly the rows the client wanted.
 *Test:* Substrate `calls.events` returns the events directly on the matched call.

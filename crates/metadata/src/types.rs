@@ -210,7 +210,7 @@ pub struct OutputSurface {
     /// EVM traces: `create` → `action.{from,value,gas,init}`, `result.{...}`;
     /// `call` → `action.{from,to,...}`, `result.{gasUsed,output}`; and so on.
     #[serde(default)]
-    pub variants: BTreeMap<String, BTreeMap<String, Vec<FieldMapping>>>,
+    pub variants: BTreeMap<String, IndexMap<String, Vec<FieldMapping>>>,
 }
 
 impl TableDescription {
