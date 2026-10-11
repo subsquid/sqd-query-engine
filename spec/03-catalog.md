@@ -303,7 +303,7 @@ compatible extension.
 | | `stack` | parents → `calls`, group [bn, extrinsicIndex], source address `callAddress`, target address `address` |
 
 `calls.events` and `events.stack` are **cross-table** hierarchies: source and
-target address columns differ, so equal-depth addresses match as well as strict
+target are different tables, so equal-depth addresses match as well as strict
 prefixes ([INV-R8](07-invariants.md#inv-r8)). An event whose `callAddress` equals
 a call's `address` belongs to that call.
 

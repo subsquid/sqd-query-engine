@@ -300,7 +300,7 @@ by union.
 
 ### 4.3.6 Cross-table hierarchies
 
-When the source and target address columns are *different* — Substrate's
+When the source and target are *different tables* — Substrate's
 `calls.address` and `events.callAddress` — the strict prefix relaxes to `⪯`
 ([INV-R8](07-invariants.md#inv-r8)):
 
@@ -313,8 +313,9 @@ An event whose `callAddress` equals a call's `address` is *attached to* that
 call, not a sibling of it. Requiring a strict extension would drop exactly the
 events the client wanted.
 
-The distinction is structural — same column or different column — not a flag a
-catalog author sets by hand.
+The distinction is structural — same table or different table — not a flag a
+catalog author sets by hand. Two tables whose address columns share a name are
+still two tables.
 
 ### 4.3.7 Relations and the covered range
 

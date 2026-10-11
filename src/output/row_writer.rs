@@ -501,10 +501,7 @@ fn build_grouped_writers(
 
     // Separate output columns into base vs grouped.
     let mut base_writers = Vec::new();
-    // variant -> group -> Vec<FieldWriter>. Ordered: the groups of a variant are
-    // written in this order, and a HashMap would give it the process's hash
-    // seed, so `action` and `result` would swap places between restarts.
-    let mut variant_groups: BTreeMap<String, BTreeMap<String, Vec<FieldWriter>>> = BTreeMap::new();
+    let mut variant_groups: HashMap<(&str, &str), Vec<FieldWriter>> = HashMap::new();
 
     for col_name in output_columns {
         let Some(&(variant, group, json_name, phys_col)) = field_to_group.get(col_name.as_str())
@@ -523,9 +520,7 @@ fn build_grouped_writers(
         prefix.push(b':');
         let declared = table_desc.columns.get(phys_col);
         variant_groups
-            .entry(variant.to_string())
-            .or_default()
-            .entry(group.to_string())
+            .entry((variant, group))
             .or_default()
             .push(FieldWriter::Regular {
                 json_key_prefix: prefix,
@@ -536,23 +531,29 @@ fn build_grouped_writers(
             });
     }
 
-    // Convert variant_groups into the final structure
+    // A variant's groups are written in the order the catalog declares them.
     let mut variant_writers: VariantGroups<FieldWriter> = Vec::new();
-    for (variant, groups) in variant_groups {
+    for (variant, groups) in &table_desc.output.variants {
         let mut group_list = Vec::new();
-        for (group_name, writers) in groups {
+        for group_name in groups.keys() {
+            let Some(writers) = variant_groups.remove(&(variant.as_str(), group_name.as_str()))
+            else {
+                continue;
+            };
             // Special group name "_" means flat output (no wrapping sub-object)
             let key = if group_name == "_" {
                 Vec::new()
             } else {
                 let mut key = Vec::with_capacity(group_name.len() + 4);
-                encode_json_string(&group_name, &mut key);
+                encode_json_string(group_name, &mut key);
                 key.push(b':');
                 key
             };
             group_list.push((key, writers));
         }
-        variant_writers.push((variant, group_list));
+        if !group_list.is_empty() {
+            variant_writers.push((variant.clone(), group_list));
+        }
     }
 
     Some(GroupedWriters {
@@ -830,33 +831,105 @@ tables:
         );
     }
 
-    /// The groups of a variant are written in catalog order. Held in a `HashMap`
-    /// they came out in the process's hash order instead, so `action` and
-    /// `result` swapped places between restarts — the one part of field order
-    /// the engine, rather than the catalog, decides.
+    /// The groups of a variant are written in the order the catalog declares
+    /// them. Neither the alphabet nor the column order decides it: here the
+    /// declared order is neither, and `_`, which sorts first, is declared last
+    /// for one variant and first for the other.
     ///
     /// Covers CT-6 · INV-O6
     #[test]
     fn variant_groups_keep_their_catalog_order() {
-        let meta = variant_catalog();
-        let table = meta.table("items").expect("the table is there");
-        let selected: Vec<String> = ["call_from", "call_gas"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        use arrow::array::{ArrayRef, StringArray, UInt32Array, UInt64Array};
+        use std::sync::Arc;
 
-        for _ in 0..16 {
+        let meta = crate::metadata::parse_dataset_description(
+            r#"
+version: v2
+name: test
+tables:
+  blocks:
+    block_number_column: number
+    sort_key: [number]
+    columns:
+      number: { type: uint64 }
+  items:
+    request:
+      filters: []
+    output:
+      name: item
+      fields: [ seq, kind, call_from, call_note, call_gas, create_init, create_salt ]
+      variant_column: kind
+      variants:
+        call:
+          result: [ { column: call_gas, as: gas } ]
+          action: [ { column: call_from, as: from } ]
+          _: [ { column: call_note, as: note } ]
+        create:
+          _: [ { column: create_salt, as: salt } ]
+          action: [ { column: create_init, as: init } ]
+    item_order_keys: [ seq ]
+    columns:
+      block_number: { type: uint64 }
+      seq: { type: uint32 }
+      kind: { type: string }
+      call_from: { type: string }
+      call_note: { type: string }
+      call_gas: { type: uint64 }
+      create_init: { type: string }
+      create_salt: { type: string }
+"#,
+        )
+        .expect("the catalog is valid");
+        let table = meta.table("items").expect("the table is there");
+        let text = |values: [&str; 2]| -> ArrayRef { Arc::new(StringArray::from(values.to_vec())) };
+        let batch = RecordBatch::try_from_iter([
+            ("seq", Arc::new(UInt32Array::from(vec![0, 1])) as ArrayRef),
+            ("kind", text(["call", "create"])),
+            ("call_from", text(["a", "b"])),
+            ("call_note", text(["n", "m"])),
+            (
+                "call_gas",
+                Arc::new(UInt64Array::from(vec![5, 6])) as ArrayRef,
+            ),
+            ("create_init", text(["i", "j"])),
+            ("create_salt", text(["s", "t"])),
+        ])
+        .unwrap();
+        let render = |selected: &[&str]| -> Vec<String> {
+            let selected: Vec<String> = selected.iter().map(|s| s.to_string()).collect();
             let grouped = build_grouped_writers(&selected, table).expect("the table dispatches");
-            let (_, call) = grouped
-                .variant_writers
-                .iter()
-                .find(|(variant, _)| variant == "call")
-                .expect("the variant is there");
-            let keys: Vec<String> = call
-                .iter()
-                .map(|(key, _)| String::from_utf8_lossy(key).into_owned())
-                .collect();
-            assert_eq!(keys, ["\"action\":", "\"result\":"]);
-        }
+            let resolved = resolve_grouped_writers(&grouped, &batch).unwrap();
+            (0..batch.num_rows())
+                .map(|row| {
+                    let mut buf = vec![b'{'];
+                    write_row_grouped(&mut buf, &batch, row, &resolved);
+                    json_close(b'}', &mut buf);
+                    String::from_utf8(buf).unwrap()
+                })
+                .collect()
+        };
+
+        assert_eq!(
+            render(&[
+                "seq",
+                "call_from",
+                "call_note",
+                "call_gas",
+                "create_init",
+                "create_salt"
+            ]),
+            [
+                r#"{"seq":0,"result":{"gas":5},"action":{"from":"a"},"note":"n"}"#,
+                r#"{"seq":1,"salt":"t","action":{"init":"j"}}"#,
+            ]
+        );
+        assert_eq!(
+            render(&["seq", "call_from", "call_gas"]),
+            [
+                r#"{"seq":0,"result":{"gas":5},"action":{"from":"a"}}"#,
+                r#"{"seq":1}"#,
+            ],
+            "a group with nothing selected is left out and the rest keep their order"
+        );
     }
 }

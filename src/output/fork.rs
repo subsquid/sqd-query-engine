@@ -10,6 +10,7 @@ use crate::metadata::{DatasetDescription, TableDescription};
 use crate::query::Plan;
 use crate::scan::predicate::{ColumnPredicate, RangeLtePredicate, RowPredicate, ScalarValue};
 use crate::scan::{ChunkReader, ScanRequest};
+use crate::text::StringColumn;
 use anyhow::Result;
 use arrow::array::Array;
 use std::fmt;
@@ -217,15 +218,12 @@ fn read_prev_blocks(
             continue;
         };
         let parent_numbers = parent_number_column.and_then(|c| batch.column_by_name(c));
-        let hashes = hashes
-            .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
-            .ok_or_else(|| {
-                crate::engine_err!(
-                    crate::error::ErrorKind::MalformedChunkData,
-                    "'{parent_hash_column}' must be a string column"
-                )
-            })?;
+        let hashes = StringColumn::resolve(hashes.as_ref()).ok_or_else(|| {
+            crate::engine_err!(
+                crate::error::ErrorKind::MalformedChunkData,
+                "'{parent_hash_column}' must be a string column"
+            )
+        })?;
 
         let block_numbers = crate::integers::BlockNumbers::resolve(blocks.as_ref(), block_column)?;
 
@@ -252,11 +250,7 @@ fn read_prev_blocks(
                 },
                 None => row_block.saturating_sub(1),
             };
-            let hash = if hashes.is_null(row) {
-                String::new()
-            } else {
-                hashes.value(row).to_string()
-            };
+            let hash = hashes.value(row).unwrap_or_default().to_string();
 
             let block_ref = BlockRef { number, hash };
 
