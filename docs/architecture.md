@@ -180,6 +180,9 @@ The Parquet entry is [`scan_rows` → `scan_batches`](../src/scan/scanner.rs):
 3. Otherwise collect physical columns and prune row groups using block bounds,
    relation keys, and per-item statistics. Keep only the active items for each
    group. A list prunes by binary search over its values, sorted on first use.
+   Leave out of each active item the filters the group's statistics prove for
+   every row: the column holds one value there, the filter lists it, and the
+   column holds no null.
 4. Choose a decoded-column cache read where eligible, or build a Parquet
    `RowFilter` for the row group. If the cache cannot admit the group, use the
    ordinary reader path. The reader decodes only the output columns, and the
@@ -189,10 +192,11 @@ The Parquet entry is [`scan_rows` → `scan_batches`](../src/scan/scanner.rs):
 
 `reader_filter` chooses the actual stages. Ordinary scans can apply block bounds,
 key membership, and item predicates with separate projections. A lone untagged
-item gets a stage for its first predicate column and another for the rest;
-multiple items or item tags use the combined item evaluator, after a stage that
-admits the values the items list. That union is built once per set of active
-items, before the row groups are read. Hierarchical scans
+item gets a stage for its first predicate column, in the client's order, and
+another for the rest; an item with no filter left needs no stage. Multiple items
+or item tags use the combined item evaluator, after a stage that admits the
+values the items list. That union is built once per set of active items, before
+the row groups are read, and is not used where one item matches every row. Hierarchical scans
 use their address stage and apply any remaining block bounds afterward. There
 is no single fixed stage sequence for all requests.
 

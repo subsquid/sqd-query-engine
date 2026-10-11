@@ -155,6 +155,14 @@ fn keys_outside(
     }))
 }
 
+/// Whether a row holding `value` at the stored width matches one of a filter's
+/// integer values, decided by the key evaluation looks it up by.
+fn ints_hold(ints: &IntValues, stored: &DataType, value: i128) -> Option<bool> {
+    let key = stored_key(value);
+
+    Some(ints.stored_keys(stored)?.any(|listed| listed == key))
+}
+
 /// The value a key narrowed to a stored width stands for.
 fn key_value(key: u64, signed: bool) -> i128 {
     match signed {
@@ -225,6 +233,18 @@ pub trait ArrayPredicate: Send + Sync {
     /// wrongly skipped loses its rows silently. Implementations derive the
     /// claim from the same narrowing evaluation uses rather than repeating it.
     fn can_skip(&self, stats: &StatRange) -> bool;
+
+    /// Whether every value of a row group whose statistics are `stats` matches,
+    /// so that the group needs no evaluation if it holds no null.
+    ///
+    /// The counterpart of [`can_skip`](Self::can_skip), under the same
+    /// contract: a `true` here claims [`evaluate`](Self::evaluate) would keep
+    /// every row that has a value, and a wrong claim keeps rows the filter
+    /// drops. Without an override nothing is proved.
+    fn matches_every_value(&self, stats: &StatRange) -> bool {
+        let _ = stats;
+        false
+    }
 
     /// The values a row's column must hold for the predicate to admit it, when
     /// that is all it asks.
@@ -654,6 +674,20 @@ impl ArrayPredicate for EqPredicate {
         }
     }
 
+    fn matches_every_value(&self, stats: &StatRange) -> bool {
+        match (&self.value, stats) {
+            (ScalarValue::Utf8(v), StatRange::Text { min, max }) => min == max && v == min,
+            (ScalarValue::Boolean(_), _) => false,
+            (value, StatRange::Ints { stored, min, max }) => {
+                let Some(ints) = value.as_ints() else {
+                    return false;
+                };
+                min == max && ints_hold(&ints, stored, *min).unwrap_or(false)
+            }
+            _ => false,
+        }
+    }
+
     fn describe(&self) -> String {
         format!("eq({:?})", self.value)
     }
@@ -780,6 +814,21 @@ impl ArrayPredicate for InListPredicate {
                 let first = sorted.partition_point(|value| value < min);
                 sorted.get(first).is_none_or(|value| value > max)
             }
+        }
+    }
+
+    fn matches_every_value(&self, stats: &StatRange) -> bool {
+        match stats {
+            StatRange::Text { min, max } if min == max => self
+                .string_set
+                .as_ref()
+                .is_some_and(|set| set.contains(min)),
+            StatRange::Ints { stored, min, max } if min == max => self
+                .ints
+                .as_ref()
+                .and_then(|ints| self.keys_at(ints, stored))
+                .is_some_and(|keys| keys.contains(&stored_key(*min))),
+            _ => false,
         }
     }
 
@@ -1235,6 +1284,26 @@ impl RowPredicate {
                 .all(|group| any_can_skip(group, stats_fn));
 
         any_can_skip(&self.columns, stats_fn) || no_alternative_can_match
+    }
+
+    /// This predicate without the column predicates that `proven` says hold
+    /// for every row, or `None` when it says that of none. An alternative
+    /// proved in full holds for every row, and so do all of them with it.
+    pub fn without_proven(&self, proven: impl Fn(&ColumnPredicate) -> bool) -> Option<Self> {
+        if !self.column_predicates().any(&proven) {
+            return None;
+        }
+
+        let unproven = |group: &[ColumnPredicate]| -> Vec<ColumnPredicate> {
+            group.iter().filter(|p| !proven(p)).cloned().collect()
+        };
+        let columns = unproven(&self.columns);
+        let mut alternatives: Vec<_> = self.alternatives.iter().map(|g| unproven(g)).collect();
+        if alternatives.iter().any(Vec::is_empty) {
+            alternatives.clear();
+        }
+
+        Some(Self::with_alternatives(columns, alternatives))
     }
 }
 
@@ -1944,6 +2013,172 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A proof may only leave out a filter the mask passes on every row of the
+    /// group, and an equality or a list that holds the group's one value is
+    /// proved: at every width a writer may pick, at every value kind the plan
+    /// compiles, on groups that hold one value and on groups that hold several.
+    ///
+    /// Covers CT-3 · INV-P16
+    #[test]
+    fn a_proof_holds_exactly_where_the_mask_keeps_every_row() {
+        let mut proved = 0;
+        for column in columns_at_every_width() {
+            let stored = column.data_type().clone();
+            let one_value = (0..column.len() as u32).map(|row| {
+                arrow::compute::take(&column, &UInt32Array::from(vec![row; 3]), None).unwrap()
+            });
+
+            for group in one_value.chain([column.clone()]) {
+                let (min, max) = parquet_stats(group.as_ref());
+                let range = StatRange::new(&stored, min.as_ref(), max.as_ref()).unwrap();
+
+                for (what, predicate) in predicates_over_widths() {
+                    let Ok(mask) = predicate.evaluate(group.as_ref()) else {
+                        continue;
+                    };
+                    let every_row = mask.true_count() == group.len();
+                    let proof = predicate.matches_every_value(&range);
+
+                    assert!(
+                        every_row || !proof,
+                        "{what} on {group:?} stored as {stored} was proved, \
+                         but the mask drops a row"
+                    );
+                    if what.starts_with("eq") || what.starts_with("in-list") {
+                        assert_eq!(proof, every_row, "{what} on {group:?} stored as {stored}");
+                    }
+                    proved += usize::from(proof);
+                }
+            }
+        }
+        assert!(proved > 0, "no group proved any filter");
+    }
+
+    /// The same for text: a proof needs the group to hold one value, and that
+    /// value to be listed.
+    #[test]
+    fn a_text_filter_is_proved_exactly_where_the_group_holds_one_listed_value() {
+        let words = ["", "0x", "0x0a", "0xa0", "a", "zz"];
+        let lists: [&[&str]; 4] = [&["0x0a"], &["a", "0x"], &["zz", "", "0xa0"], &[]];
+
+        for min in words {
+            for max in words.iter().filter(|max| **max >= min) {
+                let range = StatRange::Text {
+                    min: min.to_owned(),
+                    max: (*max).to_owned(),
+                };
+                for listed in lists {
+                    let expected = min == *max && listed.contains(&min);
+                    let in_list = InListPredicate::from_strings(listed);
+                    assert_eq!(
+                        in_list.matches_every_value(&range),
+                        expected,
+                        "{listed:?} in {min:?}..={max:?}"
+                    );
+                }
+
+                let eq = EqPredicate::new(ScalarValue::Utf8("a".to_owned()));
+                assert_eq!(eq.matches_every_value(&range), min == "a" && *max == "a");
+            }
+        }
+
+        // Text bounds prove nothing about a filter of another kind.
+        let range = StatRange::Text {
+            min: "7".to_owned(),
+            max: "7".to_owned(),
+        };
+        assert!(!InListPredicate::from_u64s(&[7]).matches_every_value(&range));
+        assert!(!EqPredicate::new(ScalarValue::UInt64(7)).matches_every_value(&range));
+        assert!(!EqPredicate::new(ScalarValue::Boolean(true)).matches_every_value(&range));
+    }
+
+    /// What is left of an item once some of its filters are proved selects the
+    /// rows the item selects, wherever the proved filters hold: a proved
+    /// filter goes, a proved alternative makes every alternative hold, and an
+    /// alternative proved only in part keeps the rest of its filters.
+    #[test]
+    fn an_item_without_its_proved_filters_selects_the_same_rows() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("program", DataType::UInt8, false),
+            Field::new("d1", DataType::UInt8, true),
+            Field::new("d8", DataType::UInt64, true),
+        ]));
+        // `program` is 7 in every row: that is what the proof claims.
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(UInt8Array::from(vec![7; 5])),
+                Arc::new(UInt8Array::from(vec![
+                    Some(1),
+                    None,
+                    Some(2),
+                    Some(1),
+                    None,
+                ])),
+                Arc::new(UInt64Array::from(vec![
+                    None,
+                    Some(100),
+                    Some(200),
+                    Some(100),
+                    Some(300),
+                ])),
+            ],
+        )
+        .unwrap();
+        let program = || col_eq("program", ScalarValue::UInt8(7));
+        let d1 = || col_eq("d1", ScalarValue::UInt8(1));
+        let d8 = || col_eq("d8", ScalarValue::UInt64(100));
+        let proven = |p: &ColumnPredicate| p.column == "program";
+        let columns = |item: &RowPredicate| -> (Vec<String>, Vec<Vec<String>>) {
+            let names =
+                |group: &[ColumnPredicate]| group.iter().map(|p| p.column.clone()).collect();
+            let alternatives = item.alternatives.iter().map(|g| names(g)).collect();
+            (names(&item.columns), alternatives)
+        };
+
+        let cases = [
+            (
+                "a proved filter beside another",
+                RowPredicate::new(vec![program(), d1()]),
+                (vec!["d1"], vec![]),
+            ),
+            (
+                "an item proved in full",
+                RowPredicate::new(vec![program()]),
+                (vec![], vec![]),
+            ),
+            (
+                "a proved alternative",
+                RowPredicate::with_alternatives(vec![d8()], vec![vec![d1()], vec![program()]]),
+                (vec!["d8"], vec![]),
+            ),
+            (
+                "an alternative proved in part",
+                RowPredicate::with_alternatives(vec![], vec![vec![d1()], vec![program(), d8()]]),
+                (vec![], vec![vec!["d1"], vec!["d8"]]),
+            ),
+        ];
+        for (what, item, (kept, alternatives)) in cases {
+            let left = item.without_proven(proven).expect(what);
+            let expected: (Vec<String>, Vec<Vec<String>>) = (
+                kept.iter().map(|c| c.to_string()).collect(),
+                alternatives
+                    .iter()
+                    .map(|g| g.iter().map(|c| c.to_string()).collect())
+                    .collect(),
+            );
+            assert_eq!(columns(&left), expected, "{what}");
+            assert_eq!(
+                left.evaluate(&batch).unwrap(),
+                item.evaluate(&batch).unwrap(),
+                "{what}"
+            );
+        }
+
+        let unproved = RowPredicate::with_alternatives(vec![d1()], vec![vec![d8()]]);
+        assert!(unproved.without_proven(proven).is_none());
     }
 
     /// Statistics as the scan hands them over: the parquet physical arrays,
