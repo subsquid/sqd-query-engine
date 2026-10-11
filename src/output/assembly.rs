@@ -165,6 +165,30 @@ enum FmtOutput {
     Arrow(Option<ArrowOutput>),
 }
 
+/// A plan compiled against another catalog can name a table this one lacks,
+/// and such a table can be neither read nor rendered.
+fn ensure_catalog_describes_plan(plan: &Plan, metadata: &DatasetDescription) -> Result<()> {
+    let ensure_described = |table: &str| {
+        crate::engine_ensure!(
+            metadata.table(table).is_some(),
+            crate::error::ErrorKind::TableNotFound,
+            "table '{}' is not in the catalog",
+            table
+        );
+        Ok(())
+    };
+
+    ensure_described(&plan.block_table)?;
+    for table_plan in &plan.table_plans {
+        ensure_described(&table_plan.table)?;
+        for relation in &table_plan.relations {
+            ensure_described(&relation.target_table)?;
+        }
+    }
+
+    Ok(())
+}
+
 /// The tables every query scans: the block table and each table with an item
 /// request. A relation's target is not among them — it is opened only when the
 /// relation has rows to follow, and its absence is reported there (INV-E4).
@@ -914,6 +938,7 @@ fn execute_chunk_fmt(
 
     let t_total = timer!();
 
+    ensure_catalog_describes_plan(plan, metadata)?;
     // 0. A missing table is an incompatible chunk, not an empty table (INV-E4).
     ensure_required_tables_present(plan, chunk)?;
     ensure_columns_renderable(plan, metadata, chunk, format)?;
