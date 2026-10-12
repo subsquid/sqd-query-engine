@@ -1,7 +1,7 @@
 //! HC-1 — the fixture chunk loader and query runner.
 //!
-//! The chunks are not in the repository: `tests/queries/<dataset>/chunks.yaml`
-//! says where each one is. `make test-data` sets `SQD_REQUIRE_CHUNKS=1`, which
+//! The chunks are not in the repository: `chunk-registry.yaml` says where each
+//! one is, under the dataset's name. `make test-data` sets `SQD_REQUIRE_CHUNKS=1`, which
 //! turns an absent chunk from a skip into a failure; the portable suite leaves
 //! it unset and does not select the tests that read one.
 

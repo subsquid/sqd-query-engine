@@ -1,0 +1,35 @@
+---
+source: tests/queries.rs
+---
+## json
+response 17881390..17882786 n=11 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash,timestamp] block_column=number at=11:4d3d92eaed7b01e8 -> rows=11
+read blocks blocks=17881390..17882786 cols=[number] block_column=number required=[hash,number,parent_hash,timestamp] positions -> rows=1397
+read logs blocks=-..- cols=[address,block_number,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] block_column=block_number at=18:d483e66c45d0eee3 -> rows=18
+read logs blocks=17881390..17882413 cols=[block_number,data_size,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(Utf8: "0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d") topic0 in(Utf8: "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")] positions window=17881390..17882413 -> rows=10
+read logs blocks=17882414..17882786 cols=[block_number,data_size,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(Utf8: "0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d") topic0 in(Utf8: "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")] positions window=17882414..17882786 -> rows=8
+read transactions blocks=-..- cols=[block_number,from,hash,to,transaction_index] block_column=block_number at=9:f5e2b12c2b8cea7f -> rows=9
+read transactions blocks=17881529..17882194 cols=[block_number,transaction_index] block_column=block_number required=[from,hash,to,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=17881390..17882413 -> rows=8
+read transactions blocks=17882502..17882502 cols=[block_number,transaction_index] block_column=block_number required=[from,hash,to,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=17882414..17882786 -> rows=1
+
+## json, page 256 KiB
+response 17881390..17882786 n=11 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash,timestamp] block_column=number at=11:4d3d92eaed7b01e8 -> rows=11
+read blocks blocks=17881390..17882786 cols=[number] block_column=number required=[hash,number,parent_hash,timestamp] positions -> rows=1397
+read logs blocks=-..- cols=[address,block_number,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] block_column=block_number at=18:d483e66c45d0eee3 -> rows=18
+read logs blocks=17881390..17882413 cols=[block_number,data_size,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(Utf8: "0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d") topic0 in(Utf8: "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")] positions window=17881390..17882413 -> rows=10
+read logs blocks=17882414..17882786 cols=[block_number,data_size,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(Utf8: "0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d") topic0 in(Utf8: "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")] positions window=17882414..17882786 -> rows=8
+read transactions blocks=-..- cols=[block_number,from,hash,to,transaction_index] block_column=block_number at=9:f5e2b12c2b8cea7f -> rows=9
+read transactions blocks=17881529..17882194 cols=[block_number,transaction_index] block_column=block_number required=[from,hash,to,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=17881390..17882413 -> rows=8
+read transactions blocks=17882502..17882502 cols=[block_number,transaction_index] block_column=block_number required=[from,hash,to,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=17882414..17882786 -> rows=1
+
+## arrow
+response 17881390..17882786 n=11
+read blocks blocks=-..- cols=[hash,number,parent_hash,timestamp] block_column=number at=11:4d3d92eaed7b01e8 -> rows=11
+read blocks blocks=17881390..17882786 cols=[number] block_column=number required=[hash,number,parent_hash,timestamp] positions -> rows=1397
+read logs blocks=-..- cols=[address,block_number,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] block_column=block_number at=18:d483e66c45d0eee3 -> rows=18
+read logs blocks=17881390..17882413 cols=[block_number,data_size,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(Utf8: "0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d") topic0 in(Utf8: "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")] positions window=17881390..17882413 -> rows=10
+read logs blocks=17882414..17882786 cols=[block_number,data_size,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(Utf8: "0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d") topic0 in(Utf8: "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")] positions window=17882414..17882786 -> rows=8
+read transactions blocks=-..- cols=[block_number,from,hash,to,transaction_index] block_column=block_number at=9:f5e2b12c2b8cea7f -> rows=9
+read transactions blocks=17881529..17882194 cols=[block_number,transaction_index] block_column=block_number required=[from,hash,to,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=17881390..17882413 -> rows=8
+read transactions blocks=17882502..17882502 cols=[block_number,transaction_index] block_column=block_number required=[from,hash,to,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=17882414..17882786 -> rows=1

@@ -1,0 +1,23 @@
+---
+source: tests/queries.rs
+---
+## json
+response 217710049..217710956 n=126 read_through=-
+read blocks blocks=-..- cols=[hash,height,number,timestamp] block_column=number at=126:6aba66a5557480ab -> rows=126
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,height,number,timestamp] positions -> rows=900
+read rewards blocks=-..- cols=[block_number,lamports,pubkey,reward_type] block_column=block_number at=131:68989630352b3305 -> rows=131
+read rewards blocks=0..- cols=[block_number] block_column=block_number required=[lamports,pubkey,reward_type] items=[pubkey in(Utf8: "Fd7btgySsrjuo25CJCj7oE7VPMyezDhnx7pZkj2v69Nk")] positions window=0..- -> rows=131
+
+## json, page 256 KiB
+response 217710049..217710956 n=126 read_through=-
+read blocks blocks=-..- cols=[hash,height,number,timestamp] block_column=number at=126:6aba66a5557480ab -> rows=126
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,height,number,timestamp] positions -> rows=900
+read rewards blocks=-..- cols=[block_number,lamports,pubkey,reward_type] block_column=block_number at=131:68989630352b3305 -> rows=131
+read rewards blocks=0..- cols=[block_number] block_column=block_number required=[lamports,pubkey,reward_type] items=[pubkey in(Utf8: "Fd7btgySsrjuo25CJCj7oE7VPMyezDhnx7pZkj2v69Nk")] positions window=0..- -> rows=131
+
+## arrow
+response 217710049..217710956 n=126
+read blocks blocks=-..- cols=[hash,height,number,timestamp] block_column=number at=126:6aba66a5557480ab -> rows=126
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,height,number,timestamp] positions -> rows=900
+read rewards blocks=-..- cols=[block_number,lamports,pubkey,reward_type] block_column=block_number at=131:68989630352b3305 -> rows=131
+read rewards blocks=0..- cols=[block_number] block_column=block_number required=[lamports,pubkey,reward_type] items=[pubkey in(Utf8: "Fd7btgySsrjuo25CJCj7oE7VPMyezDhnx7pZkj2v69Nk")] positions window=0..- -> rows=131

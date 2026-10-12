@@ -1,0 +1,29 @@
+---
+source: tests/queries.rs
+---
+## json
+response 17881390..17882786 n=3 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash,timestamp] block_column=number at=3:259dd9a94fe9f428 -> rows=3
+read blocks blocks=17881390..17882786 cols=[number] block_column=number required=[hash,number,parent_hash,timestamp] positions -> rows=1397
+read traces blocks=-..- cols=[block_number,call_from,call_input,call_input_size,call_result_output,call_result_output_size,call_to,trace_address,transaction_index,type] block_column=block_number at=7:42caaeb59b4b0876 -> rows=7
+read traces blocks=17881390..17882413 cols=[block_number,call_input_size,call_result_output_size,trace_address,transaction_index] block_column=block_number required=[call_from,call_input,call_input_size,call_result_output,call_result_output_size,call_to,trace_address,transaction_index,type] items=[call_to in(Utf8: "0xffdbe829d5a9afcd50482c23eb387b9050f1f825")] positions window=17881390..17882413 -> rows=1
+read traces blocks=17882154..17882154 cols=[block_number,call_input_size,call_result_output_size,trace_address,transaction_index] block_column=block_number required=[call_from,call_input,call_input_size,call_result_output,call_result_output_size,call_to,trace_address,transaction_index,type] keys=[block_number,transaction_index] block=block_number as pairs hierarchy=children[block_number,transaction_index]/trace_address positions window=17881390..17882413 -> rows=6
+read traces blocks=17882414..17882786 cols=[block_number,call_input_size,call_result_output_size,trace_address,transaction_index] block_column=block_number required=[call_from,call_input,call_input_size,call_result_output,call_result_output_size,call_to,trace_address,transaction_index,type] items=[call_to in(Utf8: "0xffdbe829d5a9afcd50482c23eb387b9050f1f825")] positions window=17882414..17882786 -> rows=0
+
+## json, page 256 KiB
+response 17881390..17882786 n=3 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash,timestamp] block_column=number at=3:259dd9a94fe9f428 -> rows=3
+read blocks blocks=17881390..17882786 cols=[number] block_column=number required=[hash,number,parent_hash,timestamp] positions -> rows=1397
+read traces blocks=-..- cols=[block_number,call_from,call_input,call_input_size,call_result_output,call_result_output_size,call_to,trace_address,transaction_index,type] block_column=block_number at=7:42caaeb59b4b0876 -> rows=7
+read traces blocks=17881390..17882413 cols=[block_number,call_input_size,call_result_output_size,trace_address,transaction_index] block_column=block_number required=[call_from,call_input,call_input_size,call_result_output,call_result_output_size,call_to,trace_address,transaction_index,type] items=[call_to in(Utf8: "0xffdbe829d5a9afcd50482c23eb387b9050f1f825")] positions window=17881390..17882413 -> rows=1
+read traces blocks=17882154..17882154 cols=[block_number,call_input_size,call_result_output_size,trace_address,transaction_index] block_column=block_number required=[call_from,call_input,call_input_size,call_result_output,call_result_output_size,call_to,trace_address,transaction_index,type] keys=[block_number,transaction_index] block=block_number as pairs hierarchy=children[block_number,transaction_index]/trace_address positions window=17881390..17882413 -> rows=6
+read traces blocks=17882414..17882786 cols=[block_number,call_input_size,call_result_output_size,trace_address,transaction_index] block_column=block_number required=[call_from,call_input,call_input_size,call_result_output,call_result_output_size,call_to,trace_address,transaction_index,type] items=[call_to in(Utf8: "0xffdbe829d5a9afcd50482c23eb387b9050f1f825")] positions window=17882414..17882786 -> rows=0
+
+## arrow
+response 17881390..17882786 n=3
+read blocks blocks=-..- cols=[hash,number,parent_hash,timestamp] block_column=number at=3:259dd9a94fe9f428 -> rows=3
+read blocks blocks=17881390..17882786 cols=[number] block_column=number required=[hash,number,parent_hash,timestamp] positions -> rows=1397
+read traces blocks=-..- cols=[block_number,call_from,call_input,call_input_size,call_result_output,call_result_output_size,call_to,trace_address,transaction_index,type] block_column=block_number at=7:42caaeb59b4b0876 -> rows=7
+read traces blocks=17881390..17882413 cols=[block_number,call_input_size,call_result_output_size,trace_address,transaction_index] block_column=block_number required=[call_from,call_input,call_input_size,call_result_output,call_result_output_size,call_to,trace_address,transaction_index,type] items=[call_to in(Utf8: "0xffdbe829d5a9afcd50482c23eb387b9050f1f825")] positions window=17881390..17882413 -> rows=1
+read traces blocks=17882154..17882154 cols=[block_number,call_input_size,call_result_output_size,trace_address,transaction_index] block_column=block_number required=[call_from,call_input,call_input_size,call_result_output,call_result_output_size,call_to,trace_address,transaction_index,type] keys=[block_number,transaction_index] block=block_number as pairs hierarchy=children[block_number,transaction_index]/trace_address positions window=17881390..17882413 -> rows=6
+read traces blocks=17882414..17882786 cols=[block_number,call_input_size,call_result_output_size,trace_address,transaction_index] block_column=block_number required=[call_from,call_input,call_input_size,call_result_output,call_result_output_size,call_to,trace_address,transaction_index,type] items=[call_to in(Utf8: "0xffdbe829d5a9afcd50482c23eb387b9050f1f825")] positions window=17882414..17882786 -> rows=0

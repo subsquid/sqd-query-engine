@@ -1,0 +1,23 @@
+---
+source: tests/queries.rs
+---
+## json
+response 4669460..4669500 n=9 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=9:23ed4473233d06d8 -> rows=9
+read blocks blocks=4669460..4669500 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=41
+read calls blocks=-..- cols=[address,args,args_size,block_number,extrinsic_index,name] block_column=block_number at=9:8df9b22d1b44a110 -> rows=9
+read calls blocks=4669460..4669500 cols=[args_size,block_number] block_column=block_number required=[address,args,args_size,extrinsic_index,name] items=[name in(Utf8: "Balances.transfer")] positions window=4669460..4669500 -> rows=9
+
+## json, page 256 KiB
+response 4669460..4669500 n=9 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=9:23ed4473233d06d8 -> rows=9
+read blocks blocks=4669460..4669500 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=41
+read calls blocks=-..- cols=[address,args,args_size,block_number,extrinsic_index,name] block_column=block_number at=9:8df9b22d1b44a110 -> rows=9
+read calls blocks=4669460..4669500 cols=[args_size,block_number] block_column=block_number required=[address,args,args_size,extrinsic_index,name] items=[name in(Utf8: "Balances.transfer")] positions window=4669460..4669500 -> rows=9
+
+## arrow
+response 4669460..4669500 n=9
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=9:23ed4473233d06d8 -> rows=9
+read blocks blocks=4669460..4669500 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=41
+read calls blocks=-..- cols=[address,args,args_size,block_number,extrinsic_index,name] block_column=block_number at=9:8df9b22d1b44a110 -> rows=9
+read calls blocks=4669460..4669500 cols=[args_size,block_number] block_column=block_number required=[address,args,args_size,extrinsic_index,name] items=[name in(Utf8: "Balances.transfer")] positions window=4669460..4669500 -> rows=9

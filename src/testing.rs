@@ -1,35 +1,48 @@
-//! Test-only access to external chunks under `data/`.
+//! Test-only access to the bench chunks, through the chunk store.
 //!
 //! Data-backed tests are ignored by the portable suite. `make test-data` selects
 //! them and sets `SQD_REQUIRE_CHUNKS=1`, making a missing input a failure.
 
 use std::path::{Path, PathBuf};
 
-/// The chunk directory for a dataset, or `None` when it is not checked out.
-pub(crate) fn chunk_dir(dataset: &str) -> Option<PathBuf> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("data")
-        .join(dataset)
-        .join("chunk");
+#[path = "../tests/conformance/harness/store.rs"]
+mod store;
 
+/// The registry names of the chunks the unit tests read; `make fetch` brings both.
+const EVM: &str = "evm-small";
+const SOLANA: &str = "solana-small";
+
+/// The chunk of that registry name, or `None` when it is not cached.
+fn chunk_dir(name: &str) -> Option<PathBuf> {
+    let path = store::chunk(name);
     if path.is_dir() {
         return Some(path);
     }
 
     assert!(
         std::env::var_os("SQD_REQUIRE_CHUNKS").is_none(),
-        "SQD_REQUIRE_CHUNKS is set but {} is not checked out, so this test would \
-         report green having read nothing",
+        "SQD_REQUIRE_CHUNKS is set but {name} is not at {}, so this test would \
+         report green having read nothing; run `make fetch`",
         path.display()
     );
 
     None
 }
 
-/// Whether both bundled chunks are checked out. They arrive together, and the
-/// tests that read one usually read the other.
+/// Whether both chunks are there. They arrive together, and the tests that
+/// read one usually read the other.
 pub(crate) fn chunks_present() -> bool {
-    chunk_dir("evm").is_some() && chunk_dir("solana").is_some()
+    chunk_dir(EVM).is_some() && chunk_dir(SOLANA).is_some()
+}
+
+/// The small Ethereum bench chunk, whether or not it is there.
+pub(crate) fn evm_chunk_path() -> PathBuf {
+    store::chunk(EVM)
+}
+
+/// The Solana bench chunk, whether or not it is there.
+pub(crate) fn solana_chunk_path() -> PathBuf {
+    store::chunk(SOLANA)
 }
 
 /// Where proptest keeps a test's counterexamples: beside its source file. Its

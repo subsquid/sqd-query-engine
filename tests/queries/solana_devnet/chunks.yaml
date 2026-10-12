@@ -1,1 +1,1 @@
-chunk: fixture:solana_devnet
+chunks: [solana_devnet]

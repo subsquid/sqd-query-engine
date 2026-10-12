@@ -1,0 +1,29 @@
+---
+source: tests/queries.rs
+---
+## json
+response 17881390..17881390 n=1 read_through=-
+read blocks blocks=-..- cols=[hash,number] block_column=number at=1:c77b3abb6f87acd9 -> rows=1
+read blocks blocks=17881390..17881390 cols=[number] block_column=number required=[hash,number] positions -> rows=1
+read logs blocks=-..- cols=[address,block_number,log_index,transaction_index] block_column=block_number at=373:669d452ea0dcaae2 -> rows=373
+read logs blocks=17881390..17881390 cols=[block_number,transaction_index] block_column=block_number required=[address,log_index,transaction_index] items=[] positions window=17881390..17881390 -> rows=373
+read traces blocks=-..- cols=[block_number,trace_address,transaction_index,type] block_column=block_number at=685:a55029f0215dc04a -> rows=685
+read traces blocks=17881390..17881390 cols=[block_number,transaction_index] block_column=block_number required=[trace_address,transaction_index,type] keys=[block_number,transaction_index] block=block_number as pairs positions window=17881390..17881390 -> rows=685
+
+## json, page 256 KiB
+response 17881390..17881390 n=1 read_through=-
+read blocks blocks=-..- cols=[hash,number] block_column=number at=1:c77b3abb6f87acd9 -> rows=1
+read blocks blocks=17881390..17881390 cols=[number] block_column=number required=[hash,number] positions -> rows=1
+read logs blocks=-..- cols=[address,block_number,log_index,transaction_index] block_column=block_number at=373:669d452ea0dcaae2 -> rows=373
+read logs blocks=17881390..17881390 cols=[block_number,transaction_index] block_column=block_number required=[address,log_index,transaction_index] items=[] positions window=17881390..17881390 -> rows=373
+read traces blocks=-..- cols=[block_number,trace_address,transaction_index,type] block_column=block_number at=685:a55029f0215dc04a -> rows=685
+read traces blocks=17881390..17881390 cols=[block_number,transaction_index] block_column=block_number required=[trace_address,transaction_index,type] keys=[block_number,transaction_index] block=block_number as pairs positions window=17881390..17881390 -> rows=685
+
+## arrow
+response 17881390..17881390 n=1
+read blocks blocks=-..- cols=[hash,number] block_column=number at=1:c77b3abb6f87acd9 -> rows=1
+read blocks blocks=17881390..17881390 cols=[number] block_column=number required=[hash,number] positions -> rows=1
+read logs blocks=-..- cols=[address,block_number,log_index,transaction_index] block_column=block_number at=373:669d452ea0dcaae2 -> rows=373
+read logs blocks=17881390..17881390 cols=[block_number,transaction_index] block_column=block_number required=[address,log_index,transaction_index] items=[] positions window=17881390..17881390 -> rows=373
+read traces blocks=-..- cols=[block_number,trace_address,transaction_index,type] block_column=block_number at=685:a55029f0215dc04a -> rows=685
+read traces blocks=17881390..17881390 cols=[block_number,transaction_index] block_column=block_number required=[trace_address,transaction_index,type] keys=[block_number,transaction_index] block=block_number as pairs positions window=17881390..17881390 -> rows=685

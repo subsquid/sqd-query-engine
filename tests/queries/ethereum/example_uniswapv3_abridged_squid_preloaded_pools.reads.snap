@@ -1,0 +1,33 @@
+---
+source: tests/queries.rs
+---
+## json
+response 17881390..17882786 n=1355 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash,timestamp] block_column=number at=1355:e5bc3a63e1b207eb -> rows=1355
+read blocks blocks=17881390..17882786 cols=[number] block_column=number required=[hash,number,parent_hash,timestamp] positions -> rows=1397
+read logs blocks=-..- cols=[address,block_number,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] block_column=block_number at=7296:cf68c3b888f85ec5 -> rows=7296
+read logs blocks=17881390..17882413 cols=[block_number,data_size,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(Utf8: "0x1f98431c8ad98523631ae4a59f267346ea31f984") topic0 in(Utf8: "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118"); address in(Utf8: "0xc36442b4a4522e871399cd717abdd847ab11fe88") topic0 in(#44b254b6bcaa2851); address in(#ba42598d61685afa) topic0 in(#4b9d8ecb21bbd619)] positions window=17881390..17882413 -> rows=5295
+read logs blocks=17882414..17882786 cols=[block_number,data_size,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(Utf8: "0x1f98431c8ad98523631ae4a59f267346ea31f984") topic0 in(Utf8: "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118"); address in(Utf8: "0xc36442b4a4522e871399cd717abdd847ab11fe88") topic0 in(#44b254b6bcaa2851); address in(#ba42598d61685afa) topic0 in(#4b9d8ecb21bbd619)] positions window=17882414..17882786 -> rows=2001
+read transactions blocks=-..- cols=[block_number,from,gas_price,gas_used,hash,to,transaction_index,value] block_column=block_number at=5828:c6867d1febab05ea -> rows=5828
+read transactions blocks=17881390..17882413 cols=[block_number,transaction_index] block_column=block_number required=[from,gas_price,gas_used,hash,to,transaction_index,value] keys=[block_number,transaction_index] block=block_number as pairs positions window=17881390..17882413 -> rows=4212
+read transactions blocks=17882414..17882786 cols=[block_number,transaction_index] block_column=block_number required=[from,gas_price,gas_used,hash,to,transaction_index,value] keys=[block_number,transaction_index] block=block_number as pairs positions window=17882414..17882786 -> rows=1616
+
+## json, page 256 KiB
+response 17881390..17881455 n=64 read_through=17882413
+read blocks blocks=-..- cols=[hash,number,parent_hash,timestamp] block_column=number at=64:af8764a239156312 -> rows=64
+read blocks blocks=17881390..17882786 cols=[number] block_column=number required=[hash,number,parent_hash,timestamp] positions -> rows=1397
+read logs blocks=-..- cols=[address,block_number,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] block_column=block_number at=321:7bfd0b7538d054a4 -> rows=321
+read logs blocks=17881390..17882413 cols=[block_number,data_size,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(Utf8: "0x1f98431c8ad98523631ae4a59f267346ea31f984") topic0 in(Utf8: "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118"); address in(Utf8: "0xc36442b4a4522e871399cd717abdd847ab11fe88") topic0 in(#44b254b6bcaa2851); address in(#ba42598d61685afa) topic0 in(#4b9d8ecb21bbd619)] positions window=17881390..17882413 -> rows=5295
+read transactions blocks=-..- cols=[block_number,from,gas_price,gas_used,hash,to,transaction_index,value] block_column=block_number at=268:129594ff913ead73 -> rows=268
+read transactions blocks=17881390..17882413 cols=[block_number,transaction_index] block_column=block_number required=[from,gas_price,gas_used,hash,to,transaction_index,value] keys=[block_number,transaction_index] block=block_number as pairs positions window=17881390..17882413 -> rows=4212
+
+## arrow
+response 17881390..17882786 n=1355
+read blocks blocks=-..- cols=[hash,number,parent_hash,timestamp] block_column=number at=1355:e5bc3a63e1b207eb -> rows=1355
+read blocks blocks=17881390..17882786 cols=[number] block_column=number required=[hash,number,parent_hash,timestamp] positions -> rows=1397
+read logs blocks=-..- cols=[address,block_number,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] block_column=block_number at=7296:cf68c3b888f85ec5 -> rows=7296
+read logs blocks=17881390..17882413 cols=[block_number,data_size,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(Utf8: "0x1f98431c8ad98523631ae4a59f267346ea31f984") topic0 in(Utf8: "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118"); address in(Utf8: "0xc36442b4a4522e871399cd717abdd847ab11fe88") topic0 in(#44b254b6bcaa2851); address in(#ba42598d61685afa) topic0 in(#4b9d8ecb21bbd619)] positions window=17881390..17882413 -> rows=5295
+read logs blocks=17882414..17882786 cols=[block_number,data_size,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(Utf8: "0x1f98431c8ad98523631ae4a59f267346ea31f984") topic0 in(Utf8: "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118"); address in(Utf8: "0xc36442b4a4522e871399cd717abdd847ab11fe88") topic0 in(#44b254b6bcaa2851); address in(#ba42598d61685afa) topic0 in(#4b9d8ecb21bbd619)] positions window=17882414..17882786 -> rows=2001
+read transactions blocks=-..- cols=[block_number,from,gas_price,gas_used,hash,to,transaction_index,value] block_column=block_number at=5828:c6867d1febab05ea -> rows=5828
+read transactions blocks=17881390..17882413 cols=[block_number,transaction_index] block_column=block_number required=[from,gas_price,gas_used,hash,to,transaction_index,value] keys=[block_number,transaction_index] block=block_number as pairs positions window=17881390..17882413 -> rows=4212
+read transactions blocks=17882414..17882786 cols=[block_number,transaction_index] block_column=block_number required=[from,gas_price,gas_used,hash,to,transaction_index,value] keys=[block_number,transaction_index] block=block_number as pairs positions window=17882414..17882786 -> rows=1616

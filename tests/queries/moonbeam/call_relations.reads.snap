@@ -1,0 +1,38 @@
+---
+source: tests/queries.rs
+---
+## json
+response 4669460..4669500 n=9 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=9:23ed4473233d06d8 -> rows=9
+read blocks blocks=4669460..4669500 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=41
+read calls blocks=-..- cols=[address,args,args_size,block_number,error,extrinsic_index,name,origin] block_column=block_number at=14:6a90e0c5b11cb8ea -> rows=14
+read calls blocks=4669460..4669500 cols=[address,args_size,block_number,extrinsic_index] block_column=block_number required=[address,args,args_size,error,extrinsic_index,name,origin] items=[name in(Utf8: "Balances.transfer")] positions window=4669460..4669500 -> rows=9
+read calls blocks=4669469..4669499 cols=[address,args_size,block_number,extrinsic_index] block_column=block_number required=[address,args,args_size,error,extrinsic_index,name,origin] keys=[block_number,extrinsic_index] block=block_number as pairs hierarchy=parents[block_number,extrinsic_index]/address positions window=4669460..4669500 -> rows=5
+read events blocks=-..- cols=[args,args_size,block_number,call_address,extrinsic_index,index,name] block_column=block_number at=30:c0e406bf406e640f -> rows=30
+read events blocks=4669469..4669499 cols=[args_size,block_number,call_address,extrinsic_index] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] keys=[block_number,extrinsic_index] block=block_number as pairs hierarchy=children[block_number,extrinsic_index]/call_address, inclusive positions window=4669460..4669500 -> rows=30
+read extrinsics blocks=-..- cols=[block_number,fee,hash,index,signature,tip] block_column=block_number at=9:00acd9a7f00f05b8 -> rows=9
+read extrinsics blocks=4669469..4669499 cols=[block_number,index] block_column=block_number required=[fee,hash,index,signature,tip] keys=[block_number,index] block=block_number as pairs positions window=4669460..4669500 -> rows=9
+
+## json, page 256 KiB
+response 4669460..4669500 n=9 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=9:23ed4473233d06d8 -> rows=9
+read blocks blocks=4669460..4669500 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=41
+read calls blocks=-..- cols=[address,args,args_size,block_number,error,extrinsic_index,name,origin] block_column=block_number at=14:6a90e0c5b11cb8ea -> rows=14
+read calls blocks=4669460..4669500 cols=[address,args_size,block_number,extrinsic_index] block_column=block_number required=[address,args,args_size,error,extrinsic_index,name,origin] items=[name in(Utf8: "Balances.transfer")] positions window=4669460..4669500 -> rows=9
+read calls blocks=4669469..4669499 cols=[address,args_size,block_number,extrinsic_index] block_column=block_number required=[address,args,args_size,error,extrinsic_index,name,origin] keys=[block_number,extrinsic_index] block=block_number as pairs hierarchy=parents[block_number,extrinsic_index]/address positions window=4669460..4669500 -> rows=5
+read events blocks=-..- cols=[args,args_size,block_number,call_address,extrinsic_index,index,name] block_column=block_number at=30:c0e406bf406e640f -> rows=30
+read events blocks=4669469..4669499 cols=[args_size,block_number,call_address,extrinsic_index] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] keys=[block_number,extrinsic_index] block=block_number as pairs hierarchy=children[block_number,extrinsic_index]/call_address, inclusive positions window=4669460..4669500 -> rows=30
+read extrinsics blocks=-..- cols=[block_number,fee,hash,index,signature,tip] block_column=block_number at=9:00acd9a7f00f05b8 -> rows=9
+read extrinsics blocks=4669469..4669499 cols=[block_number,index] block_column=block_number required=[fee,hash,index,signature,tip] keys=[block_number,index] block=block_number as pairs positions window=4669460..4669500 -> rows=9
+
+## arrow
+response 4669460..4669500 n=9
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=9:23ed4473233d06d8 -> rows=9
+read blocks blocks=4669460..4669500 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=41
+read calls blocks=-..- cols=[address,args,args_size,block_number,error,extrinsic_index,name,origin] block_column=block_number at=14:6a90e0c5b11cb8ea -> rows=14
+read calls blocks=4669460..4669500 cols=[address,args_size,block_number,extrinsic_index] block_column=block_number required=[address,args,args_size,error,extrinsic_index,name,origin] items=[name in(Utf8: "Balances.transfer")] positions window=4669460..4669500 -> rows=9
+read calls blocks=4669469..4669499 cols=[address,args_size,block_number,extrinsic_index] block_column=block_number required=[address,args,args_size,error,extrinsic_index,name,origin] keys=[block_number,extrinsic_index] block=block_number as pairs hierarchy=parents[block_number,extrinsic_index]/address positions window=4669460..4669500 -> rows=5
+read events blocks=-..- cols=[args,args_size,block_number,call_address,extrinsic_index,index,name] block_column=block_number at=30:c0e406bf406e640f -> rows=30
+read events blocks=4669469..4669499 cols=[args_size,block_number,call_address,extrinsic_index] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] keys=[block_number,extrinsic_index] block=block_number as pairs hierarchy=children[block_number,extrinsic_index]/call_address, inclusive positions window=4669460..4669500 -> rows=30
+read extrinsics blocks=-..- cols=[block_number,fee,hash,index,signature,tip] block_column=block_number at=9:00acd9a7f00f05b8 -> rows=9
+read extrinsics blocks=4669469..4669499 cols=[block_number,index] block_column=block_number required=[fee,hash,index,signature,tip] keys=[block_number,index] block=block_number as pairs positions window=4669460..4669500 -> rows=9

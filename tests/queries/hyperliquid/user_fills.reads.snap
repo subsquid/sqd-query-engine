@@ -1,0 +1,17 @@
+---
+source: tests/queries.rs
+---
+## json
+response 748640000..748640500 n=103 read_through=-
+read blocks blocks=748640000..748640500 cols=[hash,number] block_column=number required=[hash,number] -> rows=501
+read fills blocks=748640000..748640500 cols=[block_number,coin,fill_index,px,sz,user] block_column=block_number required=[coin,fill_index,px,sz,user] items=[user in(Utf8: "0x31ca8395cf837de08b24da3f660e77761dfb974b")] window=748640000..748640500 -> rows=131
+
+## json, page 256 KiB
+response 748640000..748640500 n=103 read_through=-
+read blocks blocks=748640000..748640500 cols=[hash,number] block_column=number required=[hash,number] -> rows=501
+read fills blocks=748640000..748640500 cols=[block_number,coin,fill_index,px,sz,user] block_column=block_number required=[coin,fill_index,px,sz,user] items=[user in(Utf8: "0x31ca8395cf837de08b24da3f660e77761dfb974b")] window=748640000..748640500 -> rows=131
+
+## arrow
+response 748640000..748640500 n=103
+read blocks blocks=748640000..748640500 cols=[hash,number] block_column=number required=[hash,number] -> rows=501
+read fills blocks=748640000..748640500 cols=[block_number,coin,fill_index,px,sz,user] block_column=block_number required=[coin,fill_index,px,sz,user] items=[user in(Utf8: "0x31ca8395cf837de08b24da3f660e77761dfb974b")] window=748640000..748640500 -> rows=131

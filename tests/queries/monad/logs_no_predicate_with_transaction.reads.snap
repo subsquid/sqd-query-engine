@@ -1,0 +1,20 @@
+---
+source: tests/queries.rs
+---
+## json
+response 45216..45220 n=5 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash,timestamp] block_column=number at=5:4393f8e7c137d5fb -> rows=5
+read blocks blocks=45216..45220 cols=[number] block_column=number required=[hash,number,parent_hash,timestamp] positions -> rows=5
+read logs blocks=45216..45220 cols=[block_number,data_size,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_hash,transaction_index] items=[] positions window=45216..45220 -> rows=0
+
+## json, page 256 KiB
+response 45216..45220 n=5 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash,timestamp] block_column=number at=5:4393f8e7c137d5fb -> rows=5
+read blocks blocks=45216..45220 cols=[number] block_column=number required=[hash,number,parent_hash,timestamp] positions -> rows=5
+read logs blocks=45216..45220 cols=[block_number,data_size,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_hash,transaction_index] items=[] positions window=45216..45220 -> rows=0
+
+## arrow
+response 45216..45220 n=5
+read blocks blocks=-..- cols=[hash,number,parent_hash,timestamp] block_column=number at=5:4393f8e7c137d5fb -> rows=5
+read blocks blocks=45216..45220 cols=[number] block_column=number required=[hash,number,parent_hash,timestamp] positions -> rows=5
+read logs blocks=45216..45220 cols=[block_number,data_size,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_hash,transaction_index] items=[] positions window=45216..45220 -> rows=0

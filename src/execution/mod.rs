@@ -255,7 +255,7 @@ mod tests {
     }
 
     fn evm_chunk() -> ParquetChunkReader {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/evm/chunk");
+        let dir = crate::testing::evm_chunk_path();
         ParquetChunkReader::open(&dir).unwrap()
     }
 
@@ -494,7 +494,7 @@ mod tests {
             "instructions": [{ "programId": ["whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc"] }]
         }"#;
         let plan = compile(&parse_query(q, &meta).unwrap(), &meta).unwrap();
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/chunk");
+        let dir = crate::testing::solana_chunk_path();
         let chunk = ParquetChunkReader::open(&dir).unwrap();
 
         let json = to_blocks(execute_chunk(&plan, &meta, &chunk, false).unwrap());
@@ -725,7 +725,7 @@ mod tests {
         let query = parse_query(json, &meta).unwrap();
         let plan = compile(&query, &meta).unwrap();
 
-        let chunk_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/chunk");
+        let chunk_dir = crate::testing::solana_chunk_path();
         let blocks = to_blocks(execute_plan(&plan, &meta, &chunk_dir).unwrap());
 
         assert!(!blocks.is_empty(), "should have at least one block");
@@ -774,7 +774,7 @@ mod tests {
         let query = parse_query(json, &meta).unwrap();
         let plan = compile(&query, &meta).unwrap();
 
-        let chunk_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/evm/chunk");
+        let chunk_dir = crate::testing::evm_chunk_path();
         let blocks = to_blocks(execute_plan(&plan, &meta, &chunk_dir).unwrap());
 
         assert!(!blocks.is_empty());
@@ -821,7 +821,7 @@ mod tests {
         let query = parse_query(json, &meta).unwrap();
         let plan = compile(&query, &meta).unwrap();
 
-        let chunk_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/chunk");
+        let chunk_dir = crate::testing::solana_chunk_path();
         let blocks = to_blocks(execute_plan(&plan, &meta, &chunk_dir).unwrap());
 
         // Should have both instructions and transactions
@@ -849,7 +849,7 @@ mod tests {
         let query = parse_query(json, &meta).unwrap();
         let plan = compile(&query, &meta).unwrap();
 
-        let chunk_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/chunk");
+        let chunk_dir = crate::testing::solana_chunk_path();
         let blocks = to_blocks(execute_plan(&plan, &meta, &chunk_dir).unwrap());
 
         assert!(blocks.is_empty());

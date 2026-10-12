@@ -1,0 +1,14 @@
+---
+source: tests/queries.rs
+---
+## json
+response 6000141..6000145 n=5 read_through=-
+read blocks blocks=6000141..6000145 cols=[gas_limit,gas_used,hash,main_block_general_gas_limit,number,shared_gas_limit,timestamp,timestamp_millis_part] block_column=number required=[gas_limit,gas_used,hash,main_block_general_gas_limit,number,shared_gas_limit,timestamp,timestamp_millis_part] -> rows=5
+
+## json, page 256 KiB
+response 6000141..6000145 n=5 read_through=-
+read blocks blocks=6000141..6000145 cols=[gas_limit,gas_used,hash,main_block_general_gas_limit,number,shared_gas_limit,timestamp,timestamp_millis_part] block_column=number required=[gas_limit,gas_used,hash,main_block_general_gas_limit,number,shared_gas_limit,timestamp,timestamp_millis_part] -> rows=5
+
+## arrow
+response 6000141..6000145 n=5
+read blocks blocks=6000141..6000145 cols=[gas_limit,gas_used,hash,main_block_general_gas_limit,number,shared_gas_limit,timestamp,timestamp_millis_part] block_column=number required=[gas_limit,gas_used,hash,main_block_general_gas_limit,number,shared_gas_limit,timestamp,timestamp_millis_part] -> rows=5

@@ -1,0 +1,26 @@
+---
+source: tests/queries.rs
+---
+## json
+response 17881390..17881870 n=5 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=5:63886941b052e8ca -> rows=5
+read blocks blocks=17881390..17881870 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=481
+read traces blocks=-..- cols=[block_number,call_from,call_sighash,call_to,trace_address,transaction_index,type] block_column=block_number at=72:217e32dbd4067db0 -> rows=72
+read traces blocks=17881390..17881870 cols=[block_number,trace_address,transaction_index] block_column=block_number required=[call_from,call_sighash,call_to,trace_address,transaction_index,type] items=[call_sighash in(Utf8: "0x590a41f5")] positions window=17881390..17881870 -> rows=50
+read traces blocks=17881444..17881870 cols=[block_number,trace_address,transaction_index] block_column=block_number required=[call_from,call_sighash,call_to,trace_address,transaction_index,type] keys=[block_number,transaction_index] block=block_number as pairs hierarchy=parents[block_number,transaction_index]/trace_address positions window=17881390..17881870 -> rows=22
+
+## json, page 256 KiB
+response 17881390..17881870 n=5 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=5:63886941b052e8ca -> rows=5
+read blocks blocks=17881390..17881870 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=481
+read traces blocks=-..- cols=[block_number,call_from,call_sighash,call_to,trace_address,transaction_index,type] block_column=block_number at=72:217e32dbd4067db0 -> rows=72
+read traces blocks=17881390..17881870 cols=[block_number,trace_address,transaction_index] block_column=block_number required=[call_from,call_sighash,call_to,trace_address,transaction_index,type] items=[call_sighash in(Utf8: "0x590a41f5")] positions window=17881390..17881870 -> rows=50
+read traces blocks=17881444..17881870 cols=[block_number,trace_address,transaction_index] block_column=block_number required=[call_from,call_sighash,call_to,trace_address,transaction_index,type] keys=[block_number,transaction_index] block=block_number as pairs hierarchy=parents[block_number,transaction_index]/trace_address positions window=17881390..17881870 -> rows=22
+
+## arrow
+response 17881390..17881870 n=5
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=5:63886941b052e8ca -> rows=5
+read blocks blocks=17881390..17881870 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=481
+read traces blocks=-..- cols=[block_number,call_from,call_sighash,call_to,trace_address,transaction_index,type] block_column=block_number at=72:217e32dbd4067db0 -> rows=72
+read traces blocks=17881390..17881870 cols=[block_number,trace_address,transaction_index] block_column=block_number required=[call_from,call_sighash,call_to,trace_address,transaction_index,type] items=[call_sighash in(Utf8: "0x590a41f5")] positions window=17881390..17881870 -> rows=50
+read traces blocks=17881444..17881870 cols=[block_number,trace_address,transaction_index] block_column=block_number required=[call_from,call_sighash,call_to,trace_address,transaction_index,type] keys=[block_number,transaction_index] block=block_number as pairs hierarchy=parents[block_number,transaction_index]/trace_address positions window=17881390..17881870 -> rows=22

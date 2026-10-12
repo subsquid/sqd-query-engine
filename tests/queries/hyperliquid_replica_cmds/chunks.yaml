@@ -1,1 +1,1 @@
-chunk: fixture:hyperliquid_replica_cmds
+chunks: [hyperliquid_replica_cmds]

@@ -1,0 +1,21 @@
+---
+source: tests/queries.rs
+---
+blocks: 2 (22562400 to 22563991)
+
+[
+  {
+    "header": {
+      "hash": "0x39a44096f4575ce55d9f73d2d2a30beb7a476bbb1761b47d4d8dae5095e453ef",
+      "number": 22562400,
+      "timestamp": 1748207135
+    }
+  },
+  {
+    "header": {
+      "hash": "0x23a565dedf0868972109bd1f365b2fdd541842a128ab81c5dbcb32267272cd7c",
+      "number": 22563991,
+      "timestamp": 1748226443
+    }
+  }
+]

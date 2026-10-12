@@ -1,0 +1,23 @@
+---
+source: tests/queries.rs
+---
+## json
+response 17881390..17881870 n=4 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=4:d205467b4f2f3ae3 -> rows=4
+read blocks blocks=17881390..17881870 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=481
+read traces blocks=-..- cols=[block_number,suicide_address,suicide_balance,suicide_refund_address,trace_address,transaction_index,type] block_column=block_number at=2:9196d9c00b17fbe1 -> rows=2
+read traces blocks=17881390..17881870 cols=[block_number] block_column=block_number required=[suicide_address,suicide_balance,suicide_refund_address,trace_address,transaction_index,type] items=[suicide_address in(#57c5385f045ebb3a)] positions window=17881390..17881870 -> rows=2
+
+## json, page 256 KiB
+response 17881390..17881870 n=4 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=4:d205467b4f2f3ae3 -> rows=4
+read blocks blocks=17881390..17881870 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=481
+read traces blocks=-..- cols=[block_number,suicide_address,suicide_balance,suicide_refund_address,trace_address,transaction_index,type] block_column=block_number at=2:9196d9c00b17fbe1 -> rows=2
+read traces blocks=17881390..17881870 cols=[block_number] block_column=block_number required=[suicide_address,suicide_balance,suicide_refund_address,trace_address,transaction_index,type] items=[suicide_address in(#57c5385f045ebb3a)] positions window=17881390..17881870 -> rows=2
+
+## arrow
+response 17881390..17881870 n=4
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=4:d205467b4f2f3ae3 -> rows=4
+read blocks blocks=17881390..17881870 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=481
+read traces blocks=-..- cols=[block_number,suicide_address,suicide_balance,suicide_refund_address,trace_address,transaction_index,type] block_column=block_number at=2:9196d9c00b17fbe1 -> rows=2
+read traces blocks=17881390..17881870 cols=[block_number] block_column=block_number required=[suicide_address,suicide_balance,suicide_refund_address,trace_address,transaction_index,type] items=[suicide_address in(#57c5385f045ebb3a)] positions window=17881390..17881870 -> rows=2

@@ -1,0 +1,23 @@
+---
+source: tests/queries.rs
+---
+## json
+response 17881390..17881395 n=6 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=6:3940f46318223a2f -> rows=6
+read blocks blocks=17881390..17881395 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=6
+read logs blocks=-..- cols=[address,block_number,log_index,topic0,topic1,topic2,topic3,transaction_index] block_column=block_number at=835:beb6c3e7a6e35f05 -> rows=835
+read logs blocks=17881390..17881395 cols=[block_number] block_column=block_number required=[address,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(#aabadf915a3bd72f)] positions window=17881390..17881395 -> rows=835
+
+## json, page 256 KiB
+response 17881390..17881395 n=6 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=6:3940f46318223a2f -> rows=6
+read blocks blocks=17881390..17881395 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=6
+read logs blocks=-..- cols=[address,block_number,log_index,topic0,topic1,topic2,topic3,transaction_index] block_column=block_number at=835:beb6c3e7a6e35f05 -> rows=835
+read logs blocks=17881390..17881395 cols=[block_number] block_column=block_number required=[address,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(#aabadf915a3bd72f)] positions window=17881390..17881395 -> rows=835
+
+## arrow
+response 17881390..17881395 n=6
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=6:3940f46318223a2f -> rows=6
+read blocks blocks=17881390..17881395 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=6
+read logs blocks=-..- cols=[address,block_number,log_index,topic0,topic1,topic2,topic3,transaction_index] block_column=block_number at=835:beb6c3e7a6e35f05 -> rows=835
+read logs blocks=17881390..17881395 cols=[block_number] block_column=block_number required=[address,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(#aabadf915a3bd72f)] positions window=17881390..17881395 -> rows=835

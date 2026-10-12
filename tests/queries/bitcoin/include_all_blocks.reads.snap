@@ -1,0 +1,14 @@
+---
+source: tests/queries.rs
+---
+## json
+response 401050..401060 n=11 read_through=-
+read blocks blocks=401050..401060 cols=[bits,chain_work,difficulty,hash,median_time,merkle_root,nonce,number,parent_hash,size,stripped_size,target,timestamp,version,weight] block_column=number required=[bits,chain_work,difficulty,hash,median_time,merkle_root,nonce,number,parent_hash,size,stripped_size,target,timestamp,version,weight] -> rows=11
+
+## json, page 256 KiB
+response 401050..401060 n=11 read_through=-
+read blocks blocks=401050..401060 cols=[bits,chain_work,difficulty,hash,median_time,merkle_root,nonce,number,parent_hash,size,stripped_size,target,timestamp,version,weight] block_column=number required=[bits,chain_work,difficulty,hash,median_time,merkle_root,nonce,number,parent_hash,size,stripped_size,target,timestamp,version,weight] -> rows=11
+
+## arrow
+response 401050..401060 n=11
+read blocks blocks=401050..401060 cols=[bits,chain_work,difficulty,hash,median_time,merkle_root,nonce,number,parent_hash,size,stripped_size,target,timestamp,version,weight] block_column=number required=[bits,chain_work,difficulty,hash,median_time,merkle_root,nonce,number,parent_hash,size,stripped_size,target,timestamp,version,weight] -> rows=11

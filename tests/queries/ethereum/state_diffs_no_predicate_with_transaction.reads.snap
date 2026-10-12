@@ -1,0 +1,29 @@
+---
+source: tests/queries.rs
+---
+## json
+response 17881390..17881390 n=1 read_through=-
+read blocks blocks=-..- cols=[hash,number] block_column=number at=1:c77b3abb6f87acd9 -> rows=1
+read blocks blocks=17881390..17881390 cols=[number] block_column=number required=[hash,number] positions -> rows=1
+read statediffs blocks=-..- cols=[address,block_number,key,transaction_index] block_column=block_number at=868:36760e65254fa905 -> rows=868
+read statediffs blocks=17881390..17881390 cols=[block_number,transaction_index] block_column=block_number required=[address,key,transaction_index] items=[] positions window=17881390..17881390 -> rows=868
+read transactions blocks=-..- cols=[block_number,from,sighash,transaction_index] block_column=block_number at=127:59db9381a95d1c7b -> rows=127
+read transactions blocks=17881390..17881390 cols=[block_number,transaction_index] block_column=block_number required=[from,sighash,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=17881390..17881390 -> rows=127
+
+## json, page 256 KiB
+response 17881390..17881390 n=1 read_through=-
+read blocks blocks=-..- cols=[hash,number] block_column=number at=1:c77b3abb6f87acd9 -> rows=1
+read blocks blocks=17881390..17881390 cols=[number] block_column=number required=[hash,number] positions -> rows=1
+read statediffs blocks=-..- cols=[address,block_number,key,transaction_index] block_column=block_number at=868:36760e65254fa905 -> rows=868
+read statediffs blocks=17881390..17881390 cols=[block_number,transaction_index] block_column=block_number required=[address,key,transaction_index] items=[] positions window=17881390..17881390 -> rows=868
+read transactions blocks=-..- cols=[block_number,from,sighash,transaction_index] block_column=block_number at=127:59db9381a95d1c7b -> rows=127
+read transactions blocks=17881390..17881390 cols=[block_number,transaction_index] block_column=block_number required=[from,sighash,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=17881390..17881390 -> rows=127
+
+## arrow
+response 17881390..17881390 n=1
+read blocks blocks=-..- cols=[hash,number] block_column=number at=1:c77b3abb6f87acd9 -> rows=1
+read blocks blocks=17881390..17881390 cols=[number] block_column=number required=[hash,number] positions -> rows=1
+read statediffs blocks=-..- cols=[address,block_number,key,transaction_index] block_column=block_number at=868:36760e65254fa905 -> rows=868
+read statediffs blocks=17881390..17881390 cols=[block_number,transaction_index] block_column=block_number required=[address,key,transaction_index] items=[] positions window=17881390..17881390 -> rows=868
+read transactions blocks=-..- cols=[block_number,from,sighash,transaction_index] block_column=block_number at=127:59db9381a95d1c7b -> rows=127
+read transactions blocks=17881390..17881390 cols=[block_number,transaction_index] block_column=block_number required=[from,sighash,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=17881390..17881390 -> rows=127

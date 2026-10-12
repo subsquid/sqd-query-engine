@@ -47,17 +47,19 @@ src/
 metadata/       # Dataset YAML catalogs and catalog format documentation
 spec/           # Behavioral contract, invariants, conformance matrix, decisions
 docs/           # Architecture reading guide, weight model, design history
-benches/        # Latency, throughput, memory, profiling and instruction-count benchmarks
+chunk-registry.yaml # Every real chunk the tests and benches read: where it is, its hashes
+benches/
+  queries/      # The bench workload, in the format of tests/queries/
+  instructions/ # Instructions and heap of each bench query, under Valgrind
+  throughput/   # Queries per second under concurrency
 tests/
   conformance/
     main.rs     # CT-1 through CT-9 modules (some classes have subdirectories)
-    harness/    # Fixture loaders, runners, synthetic chunk writers
-  queries.rs
-  queries/      # Queries, their answers' snapshots, the chunk they run on; see its README
+    harness/    # Fixture loaders, runners, synthetic chunk writers, the chunk store
+  queries.rs    # Runs every query of tests/queries/ and benches/queries/
+  queries/      # Queries, snapshots of their answers and reads, the chunks they run on; see its README
   fixtures/     # The fixture chunks per dataset; a link into the legacy repo
-  reads.rs      # What each bench query reads, as snapshots
-  snapshots/    # Those snapshots
-  throughput.rs # How the throughput bench counts its rate
+  throughput.rs # That the throughput bench times every query it counts
 ```
 
 [Tests](#tests) says which kind of test goes where.
@@ -157,13 +159,14 @@ New engine is faster on **every** RPC call at every concurrency level
 (1.1×–4.7×); single-thread RPC latency is 1.4×–4.6× faster.
 
 ```bash
-cargo bench --bench latency               # latency (divan)
-cargo bench --bench throughput -- --all    # throughput (all CPU levels)
+make fetch                                 # the chunks, once
+cargo bench --bench throughput             # queries/s at 8 threads
 
-# A/B vs the legacy engine on the same chunk (requires sibling ../data repo):
-cargo bench --bench latency    --features legacy-query
-cargo bench --bench throughput --features legacy-query -- --all
+# Beside the legacy engine on the same chunk (requires sibling ../data repo):
+cargo bench --bench throughput --features legacy-query
 ```
+
+[BENCHMARKS.md](BENCHMARKS.md#how-to-run) has the options.
 
 ## Supported Datasets
 
@@ -181,13 +184,13 @@ Pick the place for a test by what it checks and what data it needs.
 
 | What the test checks | Where it goes | What it needs |
 |---|---|---|
-| One function or module | `#[cfg(test)] mod tests` in `src/` | Nothing, or the chunks in `data/` |
+| One function or module | `#[cfg(test)] mod tests` in `src/` | Nothing, or the bench chunks from `make fetch` |
 | A rule of the spec | `tests/conformance/ctN_*`, in its class | A small chunk the harness writes |
 | Generated queries answer as the legacy engine does | `tests/conformance/ct7_differential.rs` | The fixture tree and `--features legacy-query` |
-| A query on a real chunk matches the legacy engine and keeps its answer | `tests/queries/` | The chunk; see [the query guide](tests/queries/README.md) |
-| What each bench query reads | `tests/reads.rs` | The chunks in `data/` |
+| A query on a real chunk matches the legacy engine and keeps its answer and its reads | `tests/queries/` | The chunk; see [the query guide](tests/queries/README.md) |
+| The same, for a query of the bench workload | `benches/queries/` | The same |
 | CPU and heap cost of each bench query | `benches/instructions` | Linux and `valgrind`; see [BENCHMARKS.md](BENCHMARKS.md) |
-| How `throughput` turns finished queries into a rate | `tests/throughput.rs` | Nothing |
+| How `throughput` times queries that run at once | `tests/throughput.rs` | Nothing |
 
 ### Where a new end-to-end test goes
 
@@ -229,13 +232,14 @@ that calls the same check with that input.
 
 ### Running them
 
-The chunks in `data/` and the fixture tree are not in git, so tests that need
-them are `#[ignore]`d. CI runs the rest.
+Real chunks are not in git. `make fetch` downloads the stored ones into a cache,
+and the fixture tree is a link into the legacy repo. Tests that need them are
+`#[ignore]`d. CI runs the rest.
 
 ```bash
 make test           # what CI runs; tests that need data show as ignored
 make test-data      # tests that need external data, CT-7 aside
-make fetch          # download the chunks tests/queries/ names, check their hashes
+make fetch          # download the chunks chunk-registry.yaml names, check their hashes
 make test-nightly   # CT-7 to CT-9, with the legacy engine
 make spec-check     # the spec, the conformance matrix and the test tags agree
 
@@ -248,6 +252,6 @@ SQD_REQUIRE_CHUNKS=1 \
 whose data is missing returns early and passes, which is fine on a laptop and
 useless as evidence.
 
-Selected queries under `tests/queries/` always fail when their cached chunks are
-missing. They compare with the legacy engine only in a build with
+Selected queries under `tests/queries/` and `benches/queries/` always fail when
+their cached chunks are missing. They compare with the legacy engine only in a build with
 `--features legacy-query`, such as the one above.

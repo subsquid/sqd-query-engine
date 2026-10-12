@@ -1,0 +1,23 @@
+---
+source: tests/queries.rs
+---
+## json
+response 17881390..17881870 n=66 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=66:335793979fe11a46 -> rows=66
+read blocks blocks=17881390..17881870 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=481
+read traces blocks=-..- cols=[block_number,call_sighash,call_type,call_value,create_result_address,create_value,reward_value,suicide_balance,suicide_refund_address,trace_address,transaction_index,type] block_column=block_number at=70:37f28e4d27ae45a8 -> rows=70
+read traces blocks=17881390..17881870 cols=[block_number] block_column=block_number required=[call_sighash,call_type,call_value,create_result_address,create_value,reward_value,suicide_balance,suicide_refund_address,trace_address,transaction_index,type] items=[create_value gte(Utf8("0x1")); call_type in(Utf8: "call") call_sighash in(Utf8: "0x3598d8ab") call_value gte(Utf8("0x1")); suicide_balance gte(Utf8("0x1"))] positions window=17881390..17881870 -> rows=70
+
+## json, page 256 KiB
+response 17881390..17881870 n=66 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=66:335793979fe11a46 -> rows=66
+read blocks blocks=17881390..17881870 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=481
+read traces blocks=-..- cols=[block_number,call_sighash,call_type,call_value,create_result_address,create_value,reward_value,suicide_balance,suicide_refund_address,trace_address,transaction_index,type] block_column=block_number at=70:37f28e4d27ae45a8 -> rows=70
+read traces blocks=17881390..17881870 cols=[block_number] block_column=block_number required=[call_sighash,call_type,call_value,create_result_address,create_value,reward_value,suicide_balance,suicide_refund_address,trace_address,transaction_index,type] items=[create_value gte(Utf8("0x1")); call_type in(Utf8: "call") call_sighash in(Utf8: "0x3598d8ab") call_value gte(Utf8("0x1")); suicide_balance gte(Utf8("0x1"))] positions window=17881390..17881870 -> rows=70
+
+## arrow
+response 17881390..17881870 n=66
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=66:335793979fe11a46 -> rows=66
+read blocks blocks=17881390..17881870 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=481
+read traces blocks=-..- cols=[block_number,call_sighash,call_type,call_value,create_result_address,create_value,reward_value,suicide_balance,suicide_refund_address,trace_address,transaction_index,type] block_column=block_number at=70:37f28e4d27ae45a8 -> rows=70
+read traces blocks=17881390..17881870 cols=[block_number] block_column=block_number required=[call_sighash,call_type,call_value,create_result_address,create_value,reward_value,suicide_balance,suicide_refund_address,trace_address,transaction_index,type] items=[create_value gte(Utf8("0x1")); call_type in(Utf8: "call") call_sighash in(Utf8: "0x3598d8ab") call_value gte(Utf8("0x1")); suicide_balance gte(Utf8("0x1"))] positions window=17881390..17881870 -> rows=70

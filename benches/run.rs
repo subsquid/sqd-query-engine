@@ -19,22 +19,7 @@ pub enum Format {
 }
 
 impl Format {
-    /// `--format json|stream|arrow`; JSON when absent.
-    pub fn from_args(args: &[String]) -> Format {
-        let value = args
-            .iter()
-            .position(|a| a == "--format")
-            .and_then(|i| args.get(i + 1));
-        match value.map(String::as_str) {
-            None | Some("json") => Format::Json,
-            Some("stream") => Format::Stream,
-            Some("arrow") => Format::Arrow,
-            Some(other) => {
-                eprintln!("unknown --format {other}; expected json, stream or arrow");
-                std::process::exit(2);
-            }
-        }
-    }
+    pub const ALL: [Format; 3] = [Format::Json, Format::Stream, Format::Arrow];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -43,22 +28,6 @@ impl Format {
             Format::Arrow => "arrow",
         }
     }
-}
-
-/// Whether to run the legacy engine beside this one. Legacy writes JSON lines
-/// into one fresh buffer and has no other mode, so beside any other format the
-/// two columns would measure different work.
-pub fn compare_with_legacy(format: Format) -> bool {
-    if !cfg!(feature = "legacy-query") {
-        return false;
-    }
-
-    if format != Format::Json {
-        eprintln!("legacy answers only --format json; its columns are left out");
-        return false;
-    }
-
-    true
 }
 
 thread_local! {

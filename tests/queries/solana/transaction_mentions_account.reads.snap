@@ -1,0 +1,23 @@
+---
+source: tests/queries.rs
+---
+## json
+response 217710049..217710956 n=18 read_through=-
+read blocks blocks=-..- cols=[hash,number] block_column=number at=18:9fae7fe7338974b5 -> rows=18
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,number] positions -> rows=900
+read transactions blocks=-..- cols=[account_keys,account_keys_size,block_number,loaded_addresses,loaded_addresses_size,signatures,signatures_size,transaction_index] block_column=block_number at=231:676915271f8675b4 -> rows=231
+read transactions blocks=0..- cols=[account_keys_size,block_number,loaded_addresses_size,signatures_size] block_column=block_number required=[account_keys,account_keys_size,loaded_addresses,loaded_addresses_size,signatures,signatures_size,transaction_index] items=[accounts_bloom bloom(#02677342a4c56838)] positions window=0..- -> rows=231
+
+## json, page 256 KiB
+response 217710049..217710627 n=9 read_through=-
+read blocks blocks=-..- cols=[hash,number] block_column=number at=9:123608a6513b07c4 -> rows=9
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,number] positions -> rows=900
+read transactions blocks=-..- cols=[account_keys,account_keys_size,block_number,loaded_addresses,loaded_addresses_size,signatures,signatures_size,transaction_index] block_column=block_number at=93:927828bd91e209cb -> rows=93
+read transactions blocks=0..- cols=[account_keys_size,block_number,loaded_addresses_size,signatures_size] block_column=block_number required=[account_keys,account_keys_size,loaded_addresses,loaded_addresses_size,signatures,signatures_size,transaction_index] items=[accounts_bloom bloom(#02677342a4c56838)] positions window=0..- -> rows=231
+
+## arrow
+response 217710049..217710956 n=18
+read blocks blocks=-..- cols=[hash,number] block_column=number at=18:9fae7fe7338974b5 -> rows=18
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,number] positions -> rows=900
+read transactions blocks=-..- cols=[account_keys,account_keys_size,block_number,loaded_addresses,loaded_addresses_size,signatures,signatures_size,transaction_index] block_column=block_number at=231:676915271f8675b4 -> rows=231
+read transactions blocks=0..- cols=[account_keys_size,block_number,loaded_addresses_size,signatures_size] block_column=block_number required=[account_keys,account_keys_size,loaded_addresses,loaded_addresses_size,signatures,signatures_size,transaction_index] items=[accounts_bloom bloom(#02677342a4c56838)] positions window=0..- -> rows=231

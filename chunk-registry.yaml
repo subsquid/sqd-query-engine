@@ -1,0 +1,63 @@
+# Every real chunk a test or bench reads, once, by name. `ref` says where the
+# chunk is: `s3://<dataset id>/<chunk path>` in the chunk store, or
+# `fixture:<dataset>` for a chunk only the legacy repo's fixture tree holds. A
+# stored chunk also gives the XXH3-128 of each of its files, which `make fetch`
+# checks. A query directory's own `chunks.yaml` names the chunks its queries run
+# on. See tests/queries/README.md.
+
+# The bench chunks: 224 blocks of Ethereum, 1592 older blocks of Ethereum, and
+# 48 blocks of Solana.
+evm-small:
+  ref: s3://ethereum-mainnet-2/0024541717/0024550597-0024550820-4292c586
+  xxh3:
+    blocks.parquet: 24ea70dced8902adfb8a635e0fbd139c
+    logs.parquet: 39278146d7db748672372c315df1d059
+    statediffs.parquet: c6f022b88601c0e10206c40c117de832
+    traces.parquet: dd906e26debc4c2861892486e0087436
+    transactions.parquet: d3be9db1c74c1e28472963b2c1d09842
+evm-big:
+  ref: s3://ethereum-mainnet-2/0022562400/0022562400-0022563991-23a565de
+  xxh3:
+    blocks.parquet: 3355a9132999158479bae8274de90e4a
+    logs.parquet: 76bdc3c1756dda888fe2d3db0c382c12
+    statediffs.parquet: e795e72e9c7a415b049f6c2b283b33fc
+    traces.parquet: f5c945df7ec20e6256cd7ed6e3db7a47
+    transactions.parquet: 316333941411c850812a0df9eb6a3863
+solana-small:
+  ref: s3://solana-mainnet-3/0406021645/0406021645-0406021692-bPC4w7XB
+  xxh3:
+    balances.parquet: c1e184cffe873f4dacb3a673e75c7b2f
+    blocks.parquet: ce4434ef21f38d7fb2cdcbce7c39b7b2
+    instructions.parquet: 2df4558cde7798d9ff8be863ba6d1c7c
+    logs.parquet: a71ff25b9de705106c98473f2e257a4b
+    rewards.parquet: b454fd62f612404a2f62d4ed11f94ccd
+    token_balances.parquet: a6ea360f39ad2c51e41a244492f7a566
+    transactions.parquet: 54e9c6376bdb310a8537baa23ab22afd
+
+# The fixture chunks, one per dataset.
+binance:
+  ref: fixture:binance
+bitcoin:
+  ref: fixture:bitcoin
+ethereum:
+  ref: fixture:ethereum
+hyperliquid:
+  ref: fixture:hyperliquid
+hyperliquid_replica_cmds:
+  ref: fixture:hyperliquid_replica_cmds
+kusama:
+  ref: fixture:kusama
+monad:
+  ref: fixture:monad
+moonbeam:
+  ref: fixture:moonbeam
+optimism:
+  ref: fixture:optimism
+solana:
+  ref: fixture:solana
+solana_devnet:
+  ref: fixture:solana_devnet
+tempo:
+  ref: fixture:tempo
+tron:
+  ref: fixture:tron

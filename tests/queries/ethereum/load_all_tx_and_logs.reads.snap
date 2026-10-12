@@ -1,0 +1,29 @@
+---
+source: tests/queries.rs
+---
+## json
+response 17881390..17881395 n=6 read_through=-
+read blocks blocks=-..- cols=[difficulty,gas_limit,gas_used,hash,nonce,number,parent_hash,sha3_uncles,size,timestamp] block_column=number at=6:3940f46318223a2f -> rows=6
+read blocks blocks=17881390..17881395 cols=[number] block_column=number required=[difficulty,gas_limit,gas_used,hash,nonce,number,parent_hash,sha3_uncles,size,timestamp] positions -> rows=6
+read logs blocks=-..- cols=[address,block_number,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_hash,transaction_index] block_column=block_number at=2164:e4941d65e96311ef -> rows=2164
+read logs blocks=17881390..17881395 cols=[block_number,data_size] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_hash,transaction_index] items=[] positions window=17881390..17881395 -> rows=2164
+read transactions blocks=-..- cols=[block_number,chain_id,contract_address,cumulative_gas_used,effective_gas_price,from,gas,gas_price,gas_used,hash,input,input_size,max_fee_per_gas,max_priority_fee_per_gas,nonce,status,to,transaction_index,type,value] block_column=block_number at=849:d1f6657fac9a8f8d -> rows=849
+read transactions blocks=17881390..17881395 cols=[block_number,input_size] block_column=block_number required=[chain_id,contract_address,cumulative_gas_used,effective_gas_price,from,gas,gas_price,gas_used,hash,input,input_size,max_fee_per_gas,max_priority_fee_per_gas,nonce,status,to,transaction_index,type,value] items=[] positions window=17881390..17881395 -> rows=849
+
+## json, page 256 KiB
+response 17881390..17881390 n=1 read_through=-
+read blocks blocks=-..- cols=[difficulty,gas_limit,gas_used,hash,nonce,number,parent_hash,sha3_uncles,size,timestamp] block_column=number at=1:c77b3abb6f87acd9 -> rows=1
+read blocks blocks=17881390..17881395 cols=[number] block_column=number required=[difficulty,gas_limit,gas_used,hash,nonce,number,parent_hash,sha3_uncles,size,timestamp] positions -> rows=6
+read logs blocks=-..- cols=[address,block_number,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_hash,transaction_index] block_column=block_number at=373:669d452ea0dcaae2 -> rows=373
+read logs blocks=17881390..17881395 cols=[block_number,data_size] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_hash,transaction_index] items=[] positions window=17881390..17881395 -> rows=2164
+read transactions blocks=-..- cols=[block_number,chain_id,contract_address,cumulative_gas_used,effective_gas_price,from,gas,gas_price,gas_used,hash,input,input_size,max_fee_per_gas,max_priority_fee_per_gas,nonce,status,to,transaction_index,type,value] block_column=block_number at=127:59db9381a95d1c7b -> rows=127
+read transactions blocks=17881390..17881395 cols=[block_number,input_size] block_column=block_number required=[chain_id,contract_address,cumulative_gas_used,effective_gas_price,from,gas,gas_price,gas_used,hash,input,input_size,max_fee_per_gas,max_priority_fee_per_gas,nonce,status,to,transaction_index,type,value] items=[] positions window=17881390..17881395 -> rows=849
+
+## arrow
+response 17881390..17881395 n=6
+read blocks blocks=-..- cols=[difficulty,gas_limit,gas_used,hash,nonce,number,parent_hash,sha3_uncles,size,timestamp] block_column=number at=6:3940f46318223a2f -> rows=6
+read blocks blocks=17881390..17881395 cols=[number] block_column=number required=[difficulty,gas_limit,gas_used,hash,nonce,number,parent_hash,sha3_uncles,size,timestamp] positions -> rows=6
+read logs blocks=-..- cols=[address,block_number,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_hash,transaction_index] block_column=block_number at=2164:e4941d65e96311ef -> rows=2164
+read logs blocks=17881390..17881395 cols=[block_number,data_size] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_hash,transaction_index] items=[] positions window=17881390..17881395 -> rows=2164
+read transactions blocks=-..- cols=[block_number,chain_id,contract_address,cumulative_gas_used,effective_gas_price,from,gas,gas_price,gas_used,hash,input,input_size,max_fee_per_gas,max_priority_fee_per_gas,nonce,status,to,transaction_index,type,value] block_column=block_number at=849:d1f6657fac9a8f8d -> rows=849
+read transactions blocks=17881390..17881395 cols=[block_number,input_size] block_column=block_number required=[chain_id,contract_address,cumulative_gas_used,effective_gas_price,from,gas,gas_price,gas_used,hash,input,input_size,max_fee_per_gas,max_priority_fee_per_gas,nonce,status,to,transaction_index,type,value] items=[] positions window=17881390..17881395 -> rows=849

@@ -1,0 +1,23 @@
+---
+source: tests/queries.rs
+---
+## json
+response 4668500..4668520 n=15 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=15:4b1196e6825806f9 -> rows=15
+read blocks blocks=4668500..4668520 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=21
+read events blocks=-..- cols=[args,args_size,block_number,call_address,extrinsic_index,index,name] block_column=block_number at=211:1a201b5e21d2050a -> rows=211
+read events blocks=4668500..4668520 cols=[args_size,block_number] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[_evm_log_topic0 in(Utf8: "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef") name in(Utf8: "EVM.Log")] positions window=4668500..4668520 -> rows=211
+
+## json, page 256 KiB
+response 4668500..4668520 n=15 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=15:4b1196e6825806f9 -> rows=15
+read blocks blocks=4668500..4668520 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=21
+read events blocks=-..- cols=[args,args_size,block_number,call_address,extrinsic_index,index,name] block_column=block_number at=211:1a201b5e21d2050a -> rows=211
+read events blocks=4668500..4668520 cols=[args_size,block_number] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[_evm_log_topic0 in(Utf8: "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef") name in(Utf8: "EVM.Log")] positions window=4668500..4668520 -> rows=211
+
+## arrow
+response 4668500..4668520 n=15
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=15:4b1196e6825806f9 -> rows=15
+read blocks blocks=4668500..4668520 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=21
+read events blocks=-..- cols=[args,args_size,block_number,call_address,extrinsic_index,index,name] block_column=block_number at=211:1a201b5e21d2050a -> rows=211
+read events blocks=4668500..4668520 cols=[args_size,block_number] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[_evm_log_topic0 in(Utf8: "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef") name in(Utf8: "EVM.Log")] positions window=4668500..4668520 -> rows=211

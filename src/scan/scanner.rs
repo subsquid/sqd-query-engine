@@ -1404,7 +1404,7 @@ mod tests {
     use super::*;
     use crate::scan::addresses::HierarchicalMode;
     use crate::scan::predicate::InListPredicate;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     /// A byte statistic no string can carry prunes nothing. Rendered as `""` it
     /// sorts below every filter value, and the row group goes with it.
@@ -1430,13 +1430,7 @@ mod tests {
         assert!(!InListPredicate::from_strings(&["0xabc"]).can_skip(&range));
     }
 
-    fn solana_chunk_path() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/chunk")
-    }
-
-    fn evm_chunk_path() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("data/evm/chunk")
-    }
+    use crate::testing::{evm_chunk_path, solana_chunk_path};
 
     // --- A3: block_range_mask must filter Int64/UInt16/Int16 columns ---
 

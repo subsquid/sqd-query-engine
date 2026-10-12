@@ -1,0 +1,19 @@
+---
+source: tests/queries.rs
+---
+## json
+response 82644089..82644090 n=2 read_through=-
+read blocks blocks=82644089..82644090 cols=[hash,number,timestamp] block_column=number required=[hash,number,timestamp] -> rows=2
+read logs blocks=82644089..82644090 cols=[address,block_number,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(Utf8: "a614f803b6fd780986a42c78ec9c7f77e6ded13c") topic0 in(Utf8: "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")] window=82644089..82644090 -> rows=235
+
+## json, page 256 KiB
+response 82644089..82644090 n=2 read_through=-
+read blocks blocks=-..- cols=[hash,number,timestamp] block_column=number at=2:0cfbaea74a8cc0e5 -> rows=2
+read blocks blocks=82644089..82644090 cols=[number] block_column=number required=[hash,number,timestamp] positions -> rows=2
+read logs blocks=-..- cols=[address,block_number,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] block_column=block_number at=235:e730fdc31dd15f49 -> rows=235
+read logs blocks=82644089..82644090 cols=[block_number,data_size] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(Utf8: "a614f803b6fd780986a42c78ec9c7f77e6ded13c") topic0 in(Utf8: "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")] positions window=82644089..82644090 -> rows=235
+
+## arrow
+response 82644089..82644090 n=2
+read blocks blocks=82644089..82644090 cols=[hash,number,timestamp] block_column=number required=[hash,number,timestamp] -> rows=2
+read logs blocks=82644089..82644090 cols=[address,block_number,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(Utf8: "a614f803b6fd780986a42c78ec9c7f77e6ded13c") topic0 in(Utf8: "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")] window=82644089..82644090 -> rows=235

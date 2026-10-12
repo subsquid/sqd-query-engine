@@ -1,0 +1,19 @@
+---
+source: tests/queries.rs
+---
+## json
+response 401050..401060 n=11 read_through=-
+read blocks blocks=401050..401060 cols=[hash,number,parent_hash,timestamp] block_column=number required=[hash,number,parent_hash,timestamp] -> rows=11
+read inputs blocks=401050..401060 cols=[block_number,coinbase,input_index,prevout_generated,prevout_height,prevout_script_pub_key_address,prevout_script_pub_key_asm,prevout_script_pub_key_desc,prevout_script_pub_key_hex,prevout_script_pub_key_type,prevout_value,script_sig_asm,script_sig_hex,sequence,transaction_index,tx_in_witness,txid,type,vout] block_column=block_number required=[coinbase,input_index,prevout_generated,prevout_height,prevout_script_pub_key_address,prevout_script_pub_key_asm,prevout_script_pub_key_desc,prevout_script_pub_key_hex,prevout_script_pub_key_type,prevout_value,script_sig_asm,script_sig_hex,sequence,transaction_index,tx_in_witness,txid,type,vout] items=[type in(Utf8: "coinbase")] window=401050..401060 -> rows=11
+
+## json, page 256 KiB
+response 401050..401060 n=11 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash,timestamp] block_column=number at=11:1951357ebf5dff9f -> rows=11
+read blocks blocks=401050..401060 cols=[number] block_column=number required=[hash,number,parent_hash,timestamp] positions -> rows=11
+read inputs blocks=-..- cols=[block_number,coinbase,input_index,prevout_generated,prevout_height,prevout_script_pub_key_address,prevout_script_pub_key_asm,prevout_script_pub_key_desc,prevout_script_pub_key_hex,prevout_script_pub_key_type,prevout_value,script_sig_asm,script_sig_hex,sequence,transaction_index,tx_in_witness,txid,type,vout] block_column=block_number at=11:27ca7d65f0f40484 -> rows=11
+read inputs blocks=401050..401060 cols=[block_number] block_column=block_number required=[coinbase,input_index,prevout_generated,prevout_height,prevout_script_pub_key_address,prevout_script_pub_key_asm,prevout_script_pub_key_desc,prevout_script_pub_key_hex,prevout_script_pub_key_type,prevout_value,script_sig_asm,script_sig_hex,sequence,transaction_index,tx_in_witness,txid,type,vout] items=[type in(Utf8: "coinbase")] positions window=401050..401060 -> rows=11
+
+## arrow
+response 401050..401060 n=11
+read blocks blocks=401050..401060 cols=[hash,number,parent_hash,timestamp] block_column=number required=[hash,number,parent_hash,timestamp] -> rows=11
+read inputs blocks=401050..401060 cols=[block_number,coinbase,input_index,prevout_generated,prevout_height,prevout_script_pub_key_address,prevout_script_pub_key_asm,prevout_script_pub_key_desc,prevout_script_pub_key_hex,prevout_script_pub_key_type,prevout_value,script_sig_asm,script_sig_hex,sequence,transaction_index,tx_in_witness,txid,type,vout] block_column=block_number required=[coinbase,input_index,prevout_generated,prevout_height,prevout_script_pub_key_address,prevout_script_pub_key_asm,prevout_script_pub_key_desc,prevout_script_pub_key_hex,prevout_script_pub_key_type,prevout_value,script_sig_asm,script_sig_hex,sequence,transaction_index,tx_in_witness,txid,type,vout] items=[type in(Utf8: "coinbase")] window=401050..401060 -> rows=11

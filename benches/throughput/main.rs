@@ -1,195 +1,134 @@
-#[path = "../queries.rs"]
-mod queries;
-#[path = "../run.rs"]
-mod run;
-mod measure;
+//! Queries per second under concurrency, by criterion: every case of
+//! `benches/queries/`, with threads that each run the same query back to back.
+//! With `--features legacy-query` the legacy engine runs the same query on the
+//! same chunk beside JSON, as the `legacy` function of each group.
+//!
+//!   cargo bench --bench throughput
+//!   cargo bench --bench throughput --features legacy-query -- evm/selective
+//!   SQD_BENCH_THREADS=1,8,96 SQD_BENCH_FORMATS=json,arrow cargo bench --bench throughput
+//!
+//! `SQD_BENCH_THREADS` lists the thread counts, 8 when unset. `SQD_BENCH_FORMATS`
+//! lists how the response is consumed, from `json`, `stream` and `arrow`, JSON
+//! when unset; legacy writes JSON only, so it runs only beside `json`. Criterion's
+//! own options apply: a filter, `--save-baseline`, `--baseline`,
+//! `--measurement-time`.
+//!
+//! One iteration is one query on each thread, all started together, and lasts
+//! until the last of them finishes. With few iterations to a sample, the
+//! slowest query of each round sets the time; a longer `--measurement-time`
+//! gives a slow case more of them.
+
+#[path = "../cases.rs"]
+mod cases;
+mod concurrently;
 #[cfg(feature = "legacy-query")]
 #[path = "../legacy.rs"]
 mod legacy;
+#[path = "../run.rs"]
+mod run;
 
-use measure::measure;
-use queries::*;
-use run::{compare_with_legacy, run_query, Format};
-use sqd_query_engine::metadata::load_dataset_description;
+use cases::Case;
+use concurrently::concurrently;
+use criterion::{
+    criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
+};
+use run::{run_query, Format};
+use sqd_query_engine::metadata::DatasetDescription;
 use sqd_query_engine::scan::ParquetChunkReader;
-use std::path::Path;
-use std::sync::{Arc, LazyLock};
+use std::cell::OnceCell;
 use std::time::Duration;
 
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-static SOLANA_META: LazyLock<sqd_query_engine::metadata::DatasetDescription> =
-    LazyLock::new(|| load_dataset_description(Path::new("metadata/solana.yaml")).unwrap());
-
-static EVM_META: LazyLock<sqd_query_engine::metadata::DatasetDescription> =
-    LazyLock::new(|| load_dataset_description(Path::new("metadata/evm.yaml")).unwrap());
-
-struct BenchCase {
-    name: String,
-    query_json: &'static [u8],
-    meta: &'static sqd_query_engine::metadata::DatasetDescription,
-    chunk: Arc<ParquetChunkReader>,
-    /// Only read by the legacy comparison path (`--features legacy-query`).
-    #[cfg_attr(not(feature = "legacy-query"), allow(dead_code))]
-    chunk_dir: String,
+/// A case opened for running, on the first bench that runs it.
+struct Prepared {
+    query: Vec<u8>,
+    meta: DatasetDescription,
+    chunk: ParquetChunkReader,
+    #[cfg(feature = "legacy-query")]
+    legacy_chunk: sqd_query::ParquetChunk,
 }
 
-fn measure_new(case: &BenchCase, format: Format, concurrency: usize, duration: Duration) -> f64 {
-    measure(
-        || {
-            std::hint::black_box(run_query(case.query_json, case.meta, &*case.chunk, format));
-        },
-        concurrency,
-        duration,
-    )
-}
-
-/// Throughput of the legacy engine on the same query/chunk, or `None` when the
-/// `legacy-query` feature is disabled.
-#[cfg(feature = "legacy-query")]
-fn measure_legacy(case: &BenchCase, concurrency: usize, duration: Duration) -> Option<f64> {
-    let chunk = legacy::open_chunk(Path::new(&case.chunk_dir));
-    // Warm the lazily-populated per-table reader cache before timing.
-    std::hint::black_box(legacy::run_query(case.query_json, &chunk));
-    Some(measure(
-        || {
-            std::hint::black_box(legacy::run_query(case.query_json, &chunk));
-        },
-        concurrency,
-        duration,
-    ))
-}
-
-#[cfg(not(feature = "legacy-query"))]
-fn measure_legacy(_case: &BenchCase, _concurrency: usize, _duration: Duration) -> Option<f64> {
-    None
-}
-
-/// Build one case per query against a single chunk. `label` is prefixed to the
-/// case name (e.g. `big/`), empty for single-chunk sets (RPC, Solana).
-fn build_cases(
-    queries: &'static [(&'static str, &'static [u8])],
-    meta: &'static sqd_query_engine::metadata::DatasetDescription,
-    label: &str,
-    chunk_dir: &str,
-) -> Vec<BenchCase> {
-    if !Path::new(chunk_dir).exists() {
-        return Vec::new();
+impl Prepared {
+    fn open(case: &Case) -> Prepared {
+        let dir = case.chunk_dir();
+        Prepared {
+            query: case.query(),
+            meta: case.catalog(),
+            chunk: ParquetChunkReader::open(&dir).unwrap(),
+            #[cfg(feature = "legacy-query")]
+            legacy_chunk: legacy::open_chunk(&dir),
+        }
     }
-    let chunk = Arc::new(ParquetChunkReader::open(Path::new(chunk_dir)).unwrap());
-    queries
-        .iter()
-        .map(|(name, json)| BenchCase {
-            name: if label.is_empty() {
-                name.to_string()
-            } else {
-                format!("{label}/{name}")
-            },
-            query_json: json,
-            meta,
-            chunk: chunk.clone(),
-            chunk_dir: chunk_dir.to_string(),
+}
+
+fn throughput(c: &mut Criterion) {
+    let threads = list("SQD_BENCH_THREADS", "8", concurrently::thread_count);
+    let formats = list("SQD_BENCH_FORMATS", "json", |name| {
+        Format::ALL.into_iter().find(|format| format.name() == name)
+    });
+
+    for case in cases::all_cases() {
+        let opened = OnceCell::new();
+        let prepared = || opened.get_or_init(|| Prepared::open(&case));
+
+        let mut group = c.benchmark_group(&case.name);
+        group.sampling_mode(SamplingMode::Flat);
+
+        for &n in &threads {
+            group.throughput(Throughput::Elements(n as u64));
+
+            for &format in &formats {
+                group.bench_function(BenchmarkId::new(format.name(), n), |b| {
+                    let case = prepared();
+                    b.iter_custom(|iters| {
+                        concurrently(n, iters, || {
+                            run_query(&case.query, &case.meta, &case.chunk, format);
+                        })
+                    })
+                });
+            }
+
+            #[cfg(feature = "legacy-query")]
+            {
+                if formats.contains(&Format::Json) {
+                    group.bench_function(BenchmarkId::new("legacy", n), |b| {
+                        let case = prepared();
+                        b.iter_custom(|iters| {
+                            concurrently(n, iters, || {
+                                let body = legacy::run_query(&case.query, &case.legacy_chunk);
+                                std::hint::black_box(body);
+                            })
+                        })
+                    });
+                }
+            }
+        }
+
+        group.finish();
+    }
+}
+
+/// The comma-separated values of `variable`, or of `default` when it is unset.
+fn list<T>(variable: &str, default: &str, parse: impl Fn(&str) -> Option<T>) -> Vec<T> {
+    let text = std::env::var(variable).unwrap_or_else(|_| default.to_owned());
+    text.split(',')
+        .map(|value| {
+            let value = value.trim();
+            parse(value).unwrap_or_else(|| panic!("{variable}: cannot use {value:?}"))
         })
         .collect()
 }
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-
-    // Default: only test at CPU=8. Pass "--all" for full sweep (1,2,4,8,...,max).
-    let all_levels = args.iter().any(|a| a == "--all");
-    let format = Format::from_args(&args);
-    let legacy_enabled = compare_with_legacy(format);
-    let secs = args
-        .iter()
-        .position(|a| a == "--secs")
-        .and_then(|i| args.get(i + 1))
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(5);
-    // Optional substring filter: `--filter trace_block` runs only matching cases.
-    let filter = args
-        .iter()
-        .position(|a| a == "--filter")
-        .and_then(|i| args.get(i + 1))
-        .cloned();
-
-    let mut cases: Vec<BenchCase> = Vec::new();
-    // EVM indexer + full-scan queries across the chunk matrix (small + big).
-    for (label, path) in evm_chunk_matrix() {
-        cases.extend(build_cases(EVM_QUERIES, &EVM_META, label, &path));
-        cases.extend(build_cases(EVM_FULLSCAN_QUERIES, &EVM_META, label, &path));
-    }
-    // RPC queries are block-pinned to the small chunk; Solana has one chunk.
-    cases.extend(build_cases(EVM_RPC_QUERIES, &EVM_META, "", &evm_chunk_path("small")));
-    cases.extend(build_cases(SOL_QUERIES, &SOLANA_META, "", &sol_chunk_path()));
-
-    if cases.is_empty() {
-        eprintln!("No chunk data found. Expected data/{{evm,solana}}/chunk/");
-        return;
-    }
-    if let Some(f) = &filter {
-        cases.retain(|case| case.name.contains(f.as_str()));
-    }
-
-    let concurrency_levels: Vec<usize> = if all_levels {
-        let cpus = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4);
-        let mut levels = vec![1];
-        let mut c = 2;
-        while c <= cpus {
-            levels.push(c);
-            c *= 2;
-        }
-        if *levels.last().unwrap() != cpus {
-            levels.push(cpus);
-        }
-        levels
-    } else if let Some(pos) = args.iter().position(|a| a == "--cpu") {
-        args.get(pos + 1)
-            .and_then(|v| v.parse::<usize>().ok())
-            .map(|c| vec![c])
-            .unwrap_or(vec![8])
-    } else {
-        vec![8]
-    };
-
-    let duration = Duration::from_secs(secs);
-
-    // Warmup (new engine; legacy warms its own cache inside measure_legacy)
-    eprintln!("Warming up...");
-    for case in &cases {
-        std::hint::black_box(run_query(case.query_json, case.meta, &*case.chunk, format));
-    }
-
-    println!();
-    println!("=== Throughput (rps, {secs}s per level, format {}) ===", format.name());
-    if legacy_enabled {
-        println!("{:<40}{:>6}{:>13}{:>13}{:>9}", "Benchmark", "CPU", "New", "Legacy", "New/Leg");
-        println!("{}", "-".repeat(81));
-    } else {
-        println!("{:<40}{:>6}{:>13}", "Benchmark", "CPU", "New");
-        println!("{}", "-".repeat(59));
-    }
-
-    for case in &cases {
-        for &cpu in &concurrency_levels {
-            eprint!("\r  {:<40} CPU={cpu:<4}", case.name);
-            let new_rps = measure_new(case, format, cpu, duration);
-            if legacy_enabled {
-                let leg = measure_legacy(case, cpu, duration).unwrap_or(0.0);
-                let ratio = if leg > 0.0 { new_rps / leg } else { f64::NAN };
-                println!(
-                    "{:<40}{:>6}{:>13.3}{:>13.3}{:>8.2}x",
-                    case.name, cpu, new_rps, leg, ratio
-                );
-            } else {
-                println!("{:<40}{:>6}{:>13.3}", case.name, cpu, new_rps);
-            }
-        }
-        eprint!("\r{:<40}\r", "");
-        println!();
-    }
+criterion_group! {
+    name = benches;
+    // A sample of a slow case lasts seconds, so ten of them.
+    config = Criterion::default()
+        .sample_size(10)
+        .warm_up_time(Duration::from_secs(2))
+        .measurement_time(Duration::from_secs(5));
+    targets = throughput
 }
+criterion_main!(benches);

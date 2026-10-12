@@ -593,8 +593,10 @@ mod tests {
         }
 
         let mut checked = 0;
-        for dataset in ["evm", "solana"] {
-            let dir = crate::testing::chunk_dir(dataset).unwrap();
+        for dir in [
+            crate::testing::evm_chunk_path(),
+            crate::testing::solana_chunk_path(),
+        ] {
             for entry in std::fs::read_dir(dir).unwrap() {
                 let path = entry.unwrap().path();
                 if path.extension().is_some_and(|ext| ext == "parquet") {

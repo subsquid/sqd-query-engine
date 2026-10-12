@@ -393,13 +393,7 @@ fn convert_stats(stats: &Statistics) -> ColumnStats {
 mod tests {
     use super::*;
 
-    fn solana_chunk_path() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/chunk")
-    }
-
-    fn evm_chunk_path() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("data/evm/chunk")
-    }
+    use crate::testing::{evm_chunk_path, solana_chunk_path};
 
     #[test]
     #[ignore = "requires external chunk data"]

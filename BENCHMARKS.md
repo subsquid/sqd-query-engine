@@ -1,13 +1,18 @@
 # Benchmarks
 
-Data: R2 production chunks. The EVM suite runs a **chunk matrix**:
+Data: R2 production chunks, described in `chunk-registry.yaml` at the repository root
+and downloaded by `make fetch`. The EVM suite runs a **chunk matrix**:
 
-- **small** — `data/evm/chunk`, 224 blocks (24550597–24550820), ~70 MB
-- **big** — `data/evm/big`, 1592 blocks (22562400–22563991), ~287 MB (dense,
-  USDC-active; downloaded, gitignored — the matrix auto-skips it if absent)
+- **small** — `evm-small`, 224 blocks (24550597–24550820), ~70 MB
+- **big** — `evm-big`, 1592 blocks (22562400–22563991), ~287 MB (dense,
+  USDC-active)
 
-Solana: 48 blocks, ~27 MB. Jemalloc allocator, pre-cached ParquetTable. Chunk
-paths override via `$EVM_CHUNK` (small), `$EVM_CHUNK_BIG` (big), `$SOL_CHUNK`.
+Solana: `solana-small`, 48 blocks, ~27 MB. Jemalloc allocator, pre-cached
+ParquetTable.
+
+The workload is the queries under `benches/queries/`, one directory per group:
+`evm/selective` and `evm/fullscan` on both EVM chunks, `evm/rpc` on the small one,
+and `solana`. A directory's `chunks.yaml` says which chunks its queries run on.
 
 The legacy engine (`sqd-query`) runs the **identical** query JSON on the
 **identical** chunk via `--features legacy-query`. Whether the two engines
@@ -17,8 +22,12 @@ differential suite, not by the benches.
 ## Query catalog
 
 All RPC queries reproduce the real Ethereum JSON-RPC method semantics and run
-on `data/evm/chunk` (block 24550620 for the single-block calls; getLogs windows
+on `evm-small` (block 24550620 for the single-block calls; getLogs windows
 anchored there).
+
+The result tables further down predate `benches/queries/` and use the old
+names: `evm/contract_calls+logs` there is `evm/selective/contract_calls_and_logs`
+here, `rpc/getLogs:1blk` is `evm/rpc/getLogs_1blk`, `sol/hard` is `solana/hard`.
 
 Response sizes are the emitted JSON (capped at the 20 MB / 20 MiB response
 budget). EVM-matrix rows show **small / big** chunk; RPC and Solana rows have a
@@ -26,26 +35,26 @@ single chunk.
 
 | Name | RPC / indexer equivalent | Shape | Response |
 |------|--------------------------|-------|----------|
-| `evm/usdc_transfers`            | indexer log scan                  | USDC `Transfer` logs, whole chunk | 6.3 / 16.8 MB |
-| `evm/contract_calls+logs`       | indexer tx + join                 | USDT txs + their logs | 6.6 / 13.2 MB |
-| `evm/usdc_traces+diffs`         | indexer multi-table               | USDC traces + state diffs + tx | 14.7 / 20.4 MB |
-| `evm/sparse`                    | empty-result floor                | all logs of a non-existent contract (0 rows) | 0 (empty) |
-| `evm/all_blocks`                | full scan                         | every block header (`includeAllBlocks`) | 0.07 / 0.47 MB |
-| `evm/all_txs`                   | full scan                         | every transaction (`transactions:[{}]`) | 19.6 / 19.9 MB |
-| `evm/all_logs`                  | full scan                         | every log (`logs:[{}]`) | 22.3 / 21.7 MB |
-| `evm/all_traces`                | full scan                         | every trace (`traces:[{}]`) | 19.1 / 19.0 MB |
-| `evm/all_statediffs`            | full scan                         | every state diff (`stateDiffs:[{}]`) | 18.8 / 19.2 MB |
-| `rpc/getBlockByNumber`          | `eth_getBlockByNumber(N, true)`   | one block, header + full tx objects (~17 cols) | 320 KB |
-| `rpc/getBlockByNumber:txHashes` | `eth_getBlockByNumber(N, false)`  | one block, header + tx **hashes** only | 32 KB |
-| `rpc/getBlockReceipts`          | `eth_getBlockReceipts(N)`         | one block, all tx receipts + their logs | 451 KB |
-| `rpc/trace_block`               | `trace_block(N)`                  | one block, **all** traces (call/create/suicide/reward), full action+result fields | 1.10 MB |
-| `rpc/getLogs:1blk`              | `eth_getLogs` (1-block range)     | USDC `Transfer` logs, 1 block (63 logs) | 29 KB |
-| `rpc/getLogs:10blk`             | `eth_getLogs` (10-block range)    | USDC `Transfer` logs, 10 blocks (729 logs) | 340 KB |
-| `rpc/getLogs:100blk`            | `eth_getLogs` (100-block range)   | USDC `Transfer` logs, 100 blocks (7784 logs) | 3.5 MB |
-| `sol/whirlpool_swap`            | indexer                           | Whirlpool swaps + inner ix + tx | 80 KB |
-| `sol/hard`                      | indexer                           | Meteora DLMM, all relations | 0.38 MB |
-| `sol/instr+logs`                | indexer                           | Jupiter ix + logs | 7.5 MB |
-| `sol/instr+balances`            | indexer                           | Whirlpool ix + balance changes | 62 KB |
+| `evm/selective/usdc_transfers` | indexer log scan                  | USDC `Transfer` logs, whole chunk | 6.3 / 16.8 MB |
+| `evm/selective/contract_calls_and_logs` | indexer tx + join                 | USDT txs + their logs | 6.6 / 13.2 MB |
+| `evm/selective/usdc_traces_and_diffs` | indexer multi-table               | USDC traces + state diffs + tx | 14.7 / 20.4 MB |
+| `evm/selective/sparse` | empty-result floor                | all logs of a non-existent contract (0 rows) | 0 (empty) |
+| `evm/fullscan/all_blocks` | full scan                         | every block header (`includeAllBlocks`) | 0.07 / 0.47 MB |
+| `evm/fullscan/all_txs` | full scan                         | every transaction (`transactions:[{}]`) | 19.6 / 19.9 MB |
+| `evm/fullscan/all_logs` | full scan                         | every log (`logs:[{}]`) | 22.3 / 21.7 MB |
+| `evm/fullscan/all_traces` | full scan                         | every trace (`traces:[{}]`) | 19.1 / 19.0 MB |
+| `evm/fullscan/all_statediffs` | full scan                         | every state diff (`stateDiffs:[{}]`) | 18.8 / 19.2 MB |
+| `evm/rpc/getBlockByNumber` | `eth_getBlockByNumber(N, true)`   | one block, header + full tx objects (~17 cols) | 320 KB |
+| `evm/rpc/getBlockByNumber_txHashes` | `eth_getBlockByNumber(N, false)`  | one block, header + tx **hashes** only | 32 KB |
+| `evm/rpc/getBlockReceipts` | `eth_getBlockReceipts(N)`         | one block, all tx receipts + their logs | 451 KB |
+| `evm/rpc/trace_block` | `trace_block(N)`                  | one block, **all** traces (call/create/suicide/reward), full action+result fields | 1.10 MB |
+| `evm/rpc/getLogs_1blk` | `eth_getLogs` (1-block range)     | USDC `Transfer` logs, 1 block (63 logs) | 29 KB |
+| `evm/rpc/getLogs_10blk` | `eth_getLogs` (10-block range)    | USDC `Transfer` logs, 10 blocks (729 logs) | 340 KB |
+| `evm/rpc/getLogs_100blk` | `eth_getLogs` (100-block range)   | USDC `Transfer` logs, 100 blocks (7784 logs) | 3.5 MB |
+| `solana/whirlpool_swap` | indexer                           | Whirlpool swaps + inner ix + tx | 80 KB |
+| `solana/hard` | indexer                           | Meteora DLMM, all relations | 0.38 MB |
+| `solana/instr_and_logs` | indexer                           | Jupiter ix + logs | 7.5 MB |
+| `solana/instr_and_balances` | indexer                           | Whirlpool ix + balance changes | 62 KB |
 
 ### What the RPC numbers reveal
 
@@ -366,38 +375,31 @@ corrected to match), so an `address` filter can't prune row groups — but a
 
 ## How to run
 
-All commands take an optional `--features legacy-query` to additionally run the
-legacy `sqd-query` engine on the same chunk for a side-by-side comparison
-(requires the sibling `../data` repo to be present). The EVM suites run the
-chunk matrix automatically: `data/evm/chunk` (small) plus `data/evm/big` (big)
-if present. To point the big slot elsewhere, set `EVM_CHUNK_BIG=/path`.
+`make fetch` downloads the chunks first; see [the query guide](tests/queries/README.md).
+Add `--features legacy-query` to run the legacy `sqd-query` engine on the same
+chunk beside this one (requires the sibling `../data` repo).
 
 ```bash
-# Latency (divan). EVM benches nest one sub-bench per chunk ("small"/"big").
-# With the feature, prints parallel `*_legacy` groups.
-cargo bench --bench latency
-cargo bench --bench latency --features legacy-query
-# Scope to one group/query, e.g. the full-scan family on both chunks:
-cargo bench --bench latency --features legacy-query -- evm_fullscan
+# Queries per second, by criterion: each case at 8 threads, JSON. With the
+# feature, a `legacy` function in each group beside `json`.
+cargo bench --bench throughput
+cargo bench --bench throughput --features legacy-query
 
-# Throughput (default CPU=8, --all for full sweep). With the feature, prints
-# New / Legacy / ratio columns. --format json|stream|arrow picks how the
-# response is consumed, --secs N the time per case. Legacy answers only JSON,
-# so its columns appear with --format json alone.
-cargo bench --bench throughput -- --all
-cargo bench --bench throughput --features legacy-query -- --all
+# One group, at several thread counts and in several formats. Formats are
+# json, stream (one block at a time into a kept buffer) and arrow; legacy
+# answers JSON only, so it runs only beside json.
+SQD_BENCH_THREADS=1,8,96 SQD_BENCH_FORMATS=json,arrow \
+  cargo bench --bench throughput -- evm/selective
 
-# Single-query profiling with stage timing breakdown
-cargo bench --bench profile -- "rpc/getLogs" 1 --profile
-
-# Profile the same query through the legacy engine
-cargo bench --bench profile --features legacy-query -- "rpc/getBlockReceipts" 1000 --legacy
-
-# Memory: alloc/query + peak heap under concurrency (add --features legacy-query
-# for the legacy columns; --cpu N sets the concurrency, --filter <substr> scopes,
-# --format as above)
-cargo bench --bench memory --features legacy-query -- --cpu 8
+# Two builds against each other: save a baseline, then compare.
+git switch master  && cargo bench --bench throughput -- --save-baseline base
+git switch my-work && cargo bench --bench throughput -- --baseline base
 ```
+
+One iteration is one query on each thread, all started together, and lasts until
+the last of them finishes, so a slow case with few iterations to a sample measures
+its slowest query. `--measurement-time 30` gives it more. Criterion keeps its
+reports under `target/criterion/`.
 
 ### Checking that a change keeps reads and costs
 
@@ -406,12 +408,13 @@ and the heap counts repeat exactly, and instruction counts move by about 2% at
 most between runs of one binary, under the 3% limit.
 
 What each bench query asks the chunk reader for is a snapshot test, one
-snapshot per query under `tests/snapshots/`. A change that reads other tables,
-columns, filters or block ranges changes a snapshot, and the diff shows in
-review. Row groups the reader skips inside a scan are not recorded.
+`.reads.snap` per query and chunk beside the query in `benches/queries/`. A
+change that reads other tables, columns, filters or block ranges changes a
+snapshot, and the diff shows in review. Row groups the reader skips inside a
+scan are not recorded.
 
 ```bash
-SQD_REQUIRE_CHUNKS=1 cargo test --test reads -- --ignored
+cargo test --test queries -- --ignored benches/queries/
 cargo insta review    # accept an intended change
 ```
 
@@ -428,7 +431,15 @@ git switch master  && cargo bench --bench instructions -- --save-baseline=base -
 git switch my-work && cargo bench --bench instructions -- --baseline=base --parallel
 ```
 
+Gungraun names a case by its directory and an index, such as
+`evm_selective_5`: the Nth case of that directory, its chunks in the order its
+`chunks.yaml` lists them and, for each, its queries sorted by name. So a query
+added to a directory moves the index of the ones after it, and a baseline saved
+before that compares them against other queries.
+
 Instruction counts leave out wall time, cache misses, page faults and lock
 contention. A change to threading, I/O or buffer lifetimes also needs
-`throughput` and `memory` on both builds, alternated on the same machine with
-the same settings, and a run of one build against itself to measure the noise.
+`throughput` on both builds, alternated on the same machine with the same
+settings, and a run of one build against itself to measure the noise. Nothing
+measures peak memory under concurrency any more: DHAT gives the peak of one
+query only.

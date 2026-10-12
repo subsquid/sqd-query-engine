@@ -1,0 +1,19 @@
+---
+source: tests/queries.rs
+---
+## json
+response 82644089..82644098 n=10 read_through=-
+read blocks blocks=82644089..82644098 cols=[hash,number,parent_hash,timestamp,witness_address] block_column=number required=[hash,number,parent_hash,timestamp,witness_address] -> rows=10
+read logs blocks=82644089..82644098 cols=[address,block_number,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(Utf8: "39dd12a54e2bab7c82aa14a1e158b34263d2d510") topic0 in(Utf8: "fe6f7f8574ad66f5a9001635fa07c426dbed515866253867ebd1ca6ac43f0d12")] window=82644089..82644098 -> rows=13
+
+## json, page 256 KiB
+response 82644089..82644098 n=10 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash,timestamp,witness_address] block_column=number at=10:a1b53e553e1d1aa9 -> rows=10
+read blocks blocks=82644089..82644098 cols=[number] block_column=number required=[hash,number,parent_hash,timestamp,witness_address] positions -> rows=10
+read logs blocks=-..- cols=[address,block_number,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] block_column=block_number at=13:cf53ddb66b6c3eb6 -> rows=13
+read logs blocks=82644089..82644098 cols=[block_number,data_size] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(Utf8: "39dd12a54e2bab7c82aa14a1e158b34263d2d510") topic0 in(Utf8: "fe6f7f8574ad66f5a9001635fa07c426dbed515866253867ebd1ca6ac43f0d12")] positions window=82644089..82644098 -> rows=13
+
+## arrow
+response 82644089..82644098 n=10
+read blocks blocks=82644089..82644098 cols=[hash,number,parent_hash,timestamp,witness_address] block_column=number required=[hash,number,parent_hash,timestamp,witness_address] -> rows=10
+read logs blocks=82644089..82644098 cols=[address,block_number,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(Utf8: "39dd12a54e2bab7c82aa14a1e158b34263d2d510") topic0 in(Utf8: "fe6f7f8574ad66f5a9001635fa07c426dbed515866253867ebd1ca6ac43f0d12")] window=82644089..82644098 -> rows=13

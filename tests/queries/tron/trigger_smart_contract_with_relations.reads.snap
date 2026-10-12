@@ -1,0 +1,35 @@
+---
+source: tests/queries.rs
+---
+## json
+response 82644089..82644120 n=22 read_through=-
+read blocks blocks=-..- cols=[hash,number] block_column=number at=22:39b3700d55b298a9 -> rows=22
+read blocks blocks=82644089..82644120 cols=[number] block_column=number required=[hash,number] positions -> rows=32
+read internal_transactions blocks=-..- cols=[block_number,call_value_info,caller_address,internal_transaction_index,transaction_index,transfer_to_address] block_column=block_number at=616:718af752da7a3e89 -> rows=616
+read internal_transactions blocks=82644089..82644119 cols=[block_number,transaction_index] block_column=block_number required=[call_value_info,caller_address,internal_transaction_index,transaction_index,transfer_to_address] keys=[block_number,transaction_index] block=block_number as pairs positions window=82644089..82644120 -> rows=616
+read logs blocks=-..- cols=[address,block_number,log_index,topic0,topic1,topic2,topic3,transaction_index] block_column=block_number at=154:6bd0121b444b5845 -> rows=154
+read logs blocks=82644089..82644119 cols=[block_number,transaction_index] block_column=block_number required=[address,log_index,topic0,topic1,topic2,topic3,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=82644089..82644120 -> rows=154
+read transactions blocks=-..- cols=[block_number,contract_address,hash,transaction_index,type] block_column=block_number at=50:95ca73b6e3dfb97c -> rows=50
+read transactions blocks=82644089..82644120 cols=[block_number,transaction_index] block_column=block_number required=[contract_address,hash,transaction_index,type] items=[_trigger_smart_contract_contract in(Utf8: "4139dd12a54e2bab7c82aa14a1e158b34263d2d510") _trigger_smart_contract_sighash in(Utf8: "6f21b898") type in(Utf8: "TriggerSmartContract")] positions window=82644089..82644120 -> rows=50
+
+## json, page 256 KiB
+response 82644089..82644120 n=22 read_through=-
+read blocks blocks=-..- cols=[hash,number] block_column=number at=22:39b3700d55b298a9 -> rows=22
+read blocks blocks=82644089..82644120 cols=[number] block_column=number required=[hash,number] positions -> rows=32
+read internal_transactions blocks=-..- cols=[block_number,call_value_info,caller_address,internal_transaction_index,transaction_index,transfer_to_address] block_column=block_number at=616:718af752da7a3e89 -> rows=616
+read internal_transactions blocks=82644089..82644119 cols=[block_number,transaction_index] block_column=block_number required=[call_value_info,caller_address,internal_transaction_index,transaction_index,transfer_to_address] keys=[block_number,transaction_index] block=block_number as pairs positions window=82644089..82644120 -> rows=616
+read logs blocks=-..- cols=[address,block_number,log_index,topic0,topic1,topic2,topic3,transaction_index] block_column=block_number at=154:6bd0121b444b5845 -> rows=154
+read logs blocks=82644089..82644119 cols=[block_number,transaction_index] block_column=block_number required=[address,log_index,topic0,topic1,topic2,topic3,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=82644089..82644120 -> rows=154
+read transactions blocks=-..- cols=[block_number,contract_address,hash,transaction_index,type] block_column=block_number at=50:95ca73b6e3dfb97c -> rows=50
+read transactions blocks=82644089..82644120 cols=[block_number,transaction_index] block_column=block_number required=[contract_address,hash,transaction_index,type] items=[_trigger_smart_contract_contract in(Utf8: "4139dd12a54e2bab7c82aa14a1e158b34263d2d510") _trigger_smart_contract_sighash in(Utf8: "6f21b898") type in(Utf8: "TriggerSmartContract")] positions window=82644089..82644120 -> rows=50
+
+## arrow
+response 82644089..82644120 n=22
+read blocks blocks=-..- cols=[hash,number] block_column=number at=22:39b3700d55b298a9 -> rows=22
+read blocks blocks=82644089..82644120 cols=[number] block_column=number required=[hash,number] positions -> rows=32
+read internal_transactions blocks=-..- cols=[block_number,call_value_info,caller_address,internal_transaction_index,transaction_index,transfer_to_address] block_column=block_number at=616:718af752da7a3e89 -> rows=616
+read internal_transactions blocks=82644089..82644119 cols=[block_number,transaction_index] block_column=block_number required=[call_value_info,caller_address,internal_transaction_index,transaction_index,transfer_to_address] keys=[block_number,transaction_index] block=block_number as pairs positions window=82644089..82644120 -> rows=616
+read logs blocks=-..- cols=[address,block_number,log_index,topic0,topic1,topic2,topic3,transaction_index] block_column=block_number at=154:6bd0121b444b5845 -> rows=154
+read logs blocks=82644089..82644119 cols=[block_number,transaction_index] block_column=block_number required=[address,log_index,topic0,topic1,topic2,topic3,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=82644089..82644120 -> rows=154
+read transactions blocks=-..- cols=[block_number,contract_address,hash,transaction_index,type] block_column=block_number at=50:95ca73b6e3dfb97c -> rows=50
+read transactions blocks=82644089..82644120 cols=[block_number,transaction_index] block_column=block_number required=[contract_address,hash,transaction_index,type] items=[_trigger_smart_contract_contract in(Utf8: "4139dd12a54e2bab7c82aa14a1e158b34263d2d510") _trigger_smart_contract_sighash in(Utf8: "6f21b898") type in(Utf8: "TriggerSmartContract")] positions window=82644089..82644120 -> rows=50

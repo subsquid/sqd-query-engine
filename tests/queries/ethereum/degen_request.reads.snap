@@ -1,0 +1,53 @@
+---
+source: tests/queries.rs
+---
+## json
+response 17881390..17881391 n=2 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=2:0cfbaea74a8cc0e5 -> rows=2
+read blocks blocks=17881390..17881391 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=2
+read logs blocks=-..- cols=[block_number,log_index,transaction_index] block_column=block_number at=769:29ab12da8d38ab7e -> rows=769
+read logs blocks=17881390..17881391 cols=[block_number,transaction_index] block_column=block_number required=[log_index,transaction_index] items=[] positions cached window=17881390..17881391 -> rows=769
+read logs blocks=17881390..17881391 cols=[block_number,transaction_index] block_column=block_number required=[log_index,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions cached window=17881390..17881391 -> rows=769
+read traces blocks=-..- cols=[block_number,trace_address,transaction_index,type] block_column=block_number at=1614:1950fb800902f290 -> rows=1614
+read traces blocks=17881390..17881391 cols=[block_number,trace_address,transaction_index] block_column=block_number required=[trace_address,transaction_index,type] items=[] positions cached window=17881390..17881391 -> rows=1614
+read traces blocks=17881390..17881391 cols=[block_number,trace_address,transaction_index] block_column=block_number required=[trace_address,transaction_index,type] keys=[block_number,transaction_index] block=block_number as pairs hierarchy=parents[block_number,transaction_index]/trace_address positions cached window=17881390..17881391 -> rows=478
+read traces blocks=17881390..17881391 cols=[block_number,trace_address,transaction_index] block_column=block_number required=[trace_address,transaction_index,type] keys=[block_number,transaction_index] block=block_number as pairs positions cached window=17881390..17881391 -> rows=1444
+read traces blocks=17881390..17881391 cols=[block_number,trace_address,transaction_index] block_column=block_number required=[trace_address,transaction_index,type] keys=[block_number,transaction_index] block=block_number as pairs positions cached window=17881390..17881391 -> rows=1614
+read transactions blocks=-..- cols=[block_number,transaction_index] block_column=block_number at=267:222539fcc90861c1 -> rows=267
+read transactions blocks=17881390..17881391 cols=[block_number,transaction_index] block_column=block_number required=[transaction_index] items=[] positions cached window=17881390..17881391 -> rows=267
+read transactions blocks=17881390..17881391 cols=[block_number,transaction_index] block_column=block_number required=[transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions cached window=17881390..17881391 -> rows=176
+read transactions blocks=17881390..17881391 cols=[block_number,transaction_index] block_column=block_number required=[transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions cached window=17881390..17881391 -> rows=267
+
+## json, page 256 KiB
+response 17881390..17881390 n=1 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=1:c77b3abb6f87acd9 -> rows=1
+read blocks blocks=17881390..17881391 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=2
+read logs blocks=-..- cols=[block_number,log_index,transaction_index] block_column=block_number at=373:669d452ea0dcaae2 -> rows=373
+read logs blocks=17881390..17881391 cols=[block_number,transaction_index] block_column=block_number required=[log_index,transaction_index] items=[] positions cached window=17881390..17881391 -> rows=769
+read logs blocks=17881390..17881391 cols=[block_number,transaction_index] block_column=block_number required=[log_index,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions cached window=17881390..17881391 -> rows=769
+read traces blocks=-..- cols=[block_number,trace_address,transaction_index,type] block_column=block_number at=733:978348dbb9725e52 -> rows=733
+read traces blocks=17881390..17881391 cols=[block_number,trace_address,transaction_index] block_column=block_number required=[trace_address,transaction_index,type] items=[] positions cached window=17881390..17881391 -> rows=1614
+read traces blocks=17881390..17881391 cols=[block_number,trace_address,transaction_index] block_column=block_number required=[trace_address,transaction_index,type] keys=[block_number,transaction_index] block=block_number as pairs hierarchy=parents[block_number,transaction_index]/trace_address positions cached window=17881390..17881391 -> rows=478
+read traces blocks=17881390..17881391 cols=[block_number,trace_address,transaction_index] block_column=block_number required=[trace_address,transaction_index,type] keys=[block_number,transaction_index] block=block_number as pairs positions cached window=17881390..17881391 -> rows=1444
+read traces blocks=17881390..17881391 cols=[block_number,trace_address,transaction_index] block_column=block_number required=[trace_address,transaction_index,type] keys=[block_number,transaction_index] block=block_number as pairs positions cached window=17881390..17881391 -> rows=1614
+read transactions blocks=-..- cols=[block_number,transaction_index] block_column=block_number at=127:59db9381a95d1c7b -> rows=127
+read transactions blocks=17881390..17881391 cols=[block_number,transaction_index] block_column=block_number required=[transaction_index] items=[] positions cached window=17881390..17881391 -> rows=267
+read transactions blocks=17881390..17881391 cols=[block_number,transaction_index] block_column=block_number required=[transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions cached window=17881390..17881391 -> rows=176
+read transactions blocks=17881390..17881391 cols=[block_number,transaction_index] block_column=block_number required=[transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions cached window=17881390..17881391 -> rows=267
+
+## arrow
+response 17881390..17881391 n=2
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=2:0cfbaea74a8cc0e5 -> rows=2
+read blocks blocks=17881390..17881391 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=2
+read logs blocks=-..- cols=[block_number,log_index,transaction_index] block_column=block_number at=769:29ab12da8d38ab7e -> rows=769
+read logs blocks=17881390..17881391 cols=[block_number,transaction_index] block_column=block_number required=[log_index,transaction_index] items=[] positions cached window=17881390..17881391 -> rows=769
+read logs blocks=17881390..17881391 cols=[block_number,transaction_index] block_column=block_number required=[log_index,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions cached window=17881390..17881391 -> rows=769
+read traces blocks=-..- cols=[block_number,trace_address,transaction_index,type] block_column=block_number at=1614:1950fb800902f290 -> rows=1614
+read traces blocks=17881390..17881391 cols=[block_number,trace_address,transaction_index] block_column=block_number required=[trace_address,transaction_index,type] items=[] positions cached window=17881390..17881391 -> rows=1614
+read traces blocks=17881390..17881391 cols=[block_number,trace_address,transaction_index] block_column=block_number required=[trace_address,transaction_index,type] keys=[block_number,transaction_index] block=block_number as pairs hierarchy=parents[block_number,transaction_index]/trace_address positions cached window=17881390..17881391 -> rows=478
+read traces blocks=17881390..17881391 cols=[block_number,trace_address,transaction_index] block_column=block_number required=[trace_address,transaction_index,type] keys=[block_number,transaction_index] block=block_number as pairs positions cached window=17881390..17881391 -> rows=1444
+read traces blocks=17881390..17881391 cols=[block_number,trace_address,transaction_index] block_column=block_number required=[trace_address,transaction_index,type] keys=[block_number,transaction_index] block=block_number as pairs positions cached window=17881390..17881391 -> rows=1614
+read transactions blocks=-..- cols=[block_number,transaction_index] block_column=block_number at=267:222539fcc90861c1 -> rows=267
+read transactions blocks=17881390..17881391 cols=[block_number,transaction_index] block_column=block_number required=[transaction_index] items=[] positions cached window=17881390..17881391 -> rows=267
+read transactions blocks=17881390..17881391 cols=[block_number,transaction_index] block_column=block_number required=[transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions cached window=17881390..17881391 -> rows=176
+read transactions blocks=17881390..17881391 cols=[block_number,transaction_index] block_column=block_number required=[transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions cached window=17881390..17881391 -> rows=267

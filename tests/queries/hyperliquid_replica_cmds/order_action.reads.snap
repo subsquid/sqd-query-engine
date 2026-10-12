@@ -1,0 +1,23 @@
+---
+source: tests/queries.rs
+---
+## json
+response 748640000..748640100 n=13 read_through=-
+read actions blocks=-..- cols=[action,action_index,action_size,block_number,nonce,response,response_size,signature,status,user,vault_address] block_column=block_number at=13:48d4dc863789b8e9 -> rows=13
+read actions blocks=748640000..748640100 cols=[action_size,block_number,response_size] block_column=block_number required=[action,action_index,action_size,nonce,response,response_size,signature,status,user,vault_address] items=[order_asset contains_any(UInt32: 1) user in(Utf8: "0x4a1b3580f7ac72bc54175f05b76092eeb7a266aa") action_type in(Utf8: "order")] positions window=748640000..748640100 -> rows=13
+read blocks blocks=-..- cols=[hash,number] block_column=number at=13:2b68007efb4f88c9 -> rows=13
+read blocks blocks=748640000..748640100 cols=[number] block_column=number required=[hash,number] positions -> rows=101
+
+## json, page 256 KiB
+response 748640000..748640100 n=13 read_through=-
+read actions blocks=-..- cols=[action,action_index,action_size,block_number,nonce,response,response_size,signature,status,user,vault_address] block_column=block_number at=13:48d4dc863789b8e9 -> rows=13
+read actions blocks=748640000..748640100 cols=[action_size,block_number,response_size] block_column=block_number required=[action,action_index,action_size,nonce,response,response_size,signature,status,user,vault_address] items=[order_asset contains_any(UInt32: 1) user in(Utf8: "0x4a1b3580f7ac72bc54175f05b76092eeb7a266aa") action_type in(Utf8: "order")] positions window=748640000..748640100 -> rows=13
+read blocks blocks=-..- cols=[hash,number] block_column=number at=13:2b68007efb4f88c9 -> rows=13
+read blocks blocks=748640000..748640100 cols=[number] block_column=number required=[hash,number] positions -> rows=101
+
+## arrow
+response 748640000..748640100 n=13
+read actions blocks=-..- cols=[action,action_index,action_size,block_number,nonce,response,response_size,signature,status,user,vault_address] block_column=block_number at=13:48d4dc863789b8e9 -> rows=13
+read actions blocks=748640000..748640100 cols=[action_size,block_number,response_size] block_column=block_number required=[action,action_index,action_size,nonce,response,response_size,signature,status,user,vault_address] items=[order_asset contains_any(UInt32: 1) user in(Utf8: "0x4a1b3580f7ac72bc54175f05b76092eeb7a266aa") action_type in(Utf8: "order")] positions window=748640000..748640100 -> rows=13
+read blocks blocks=-..- cols=[hash,number] block_column=number at=13:2b68007efb4f88c9 -> rows=13
+read blocks blocks=748640000..748640100 cols=[number] block_column=number required=[hash,number] positions -> rows=101

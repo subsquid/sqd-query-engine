@@ -1,0 +1,29 @@
+---
+source: tests/queries.rs
+---
+## json
+response 217710049..217710956 n=47 read_through=-
+read blocks blocks=-..- cols=[hash,height,number,parent_hash,parent_number,timestamp] block_column=number at=47:3e2c6d2d1cbe54d5 -> rows=47
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,height,number,parent_hash,parent_number,timestamp] positions -> rows=900
+read instructions blocks=-..- cols=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,block_number,data,data_size,instruction_address,is_committed,program_id,rest_accounts,transaction_index] block_column=block_number at=250:98c8e1a1837e2dd7 -> rows=250
+read instructions blocks=0..- cols=[accounts_size,block_number,data_size,transaction_index] block_column=block_number required=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,data,data_size,instruction_address,is_committed,program_id,rest_accounts,transaction_index] items=[program_id in(Utf8: "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc") a2 in(Utf8: "7qbRF6YsyGuLUVs6Y1q64bdVrfe4ZcUUz1JRdoVNUJnm") d8 in(UInt64: "17926189716184860616") is_committed eq(Boolean(true))] positions window=0..- -> rows=250
+read transactions blocks=-..- cols=[block_number,err,fee_payer,signatures,signatures_size,transaction_index] block_column=block_number at=250:362de456ee76d852 -> rows=250
+read transactions blocks=217710049..217710850 cols=[block_number,signatures_size,transaction_index] block_column=block_number required=[err,fee_payer,signatures,signatures_size,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=0..- -> rows=250
+
+## json, page 256 KiB
+response 217710049..217710956 n=47 read_through=-
+read blocks blocks=-..- cols=[hash,height,number,parent_hash,parent_number,timestamp] block_column=number at=47:3e2c6d2d1cbe54d5 -> rows=47
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,height,number,parent_hash,parent_number,timestamp] positions -> rows=900
+read instructions blocks=-..- cols=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,block_number,data,data_size,instruction_address,is_committed,program_id,rest_accounts,transaction_index] block_column=block_number at=250:98c8e1a1837e2dd7 -> rows=250
+read instructions blocks=0..- cols=[accounts_size,block_number,data_size,transaction_index] block_column=block_number required=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,data,data_size,instruction_address,is_committed,program_id,rest_accounts,transaction_index] items=[program_id in(Utf8: "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc") a2 in(Utf8: "7qbRF6YsyGuLUVs6Y1q64bdVrfe4ZcUUz1JRdoVNUJnm") d8 in(UInt64: "17926189716184860616") is_committed eq(Boolean(true))] positions window=0..- -> rows=250
+read transactions blocks=-..- cols=[block_number,err,fee_payer,signatures,signatures_size,transaction_index] block_column=block_number at=250:362de456ee76d852 -> rows=250
+read transactions blocks=217710049..217710850 cols=[block_number,signatures_size,transaction_index] block_column=block_number required=[err,fee_payer,signatures,signatures_size,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=0..- -> rows=250
+
+## arrow
+response 217710049..217710956 n=47
+read blocks blocks=-..- cols=[hash,height,number,parent_hash,parent_number,timestamp] block_column=number at=47:3e2c6d2d1cbe54d5 -> rows=47
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,height,number,parent_hash,parent_number,timestamp] positions -> rows=900
+read instructions blocks=-..- cols=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,block_number,data,data_size,instruction_address,is_committed,program_id,rest_accounts,transaction_index] block_column=block_number at=250:98c8e1a1837e2dd7 -> rows=250
+read instructions blocks=0..- cols=[accounts_size,block_number,data_size,transaction_index] block_column=block_number required=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,data,data_size,instruction_address,is_committed,program_id,rest_accounts,transaction_index] items=[program_id in(Utf8: "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc") a2 in(Utf8: "7qbRF6YsyGuLUVs6Y1q64bdVrfe4ZcUUz1JRdoVNUJnm") d8 in(UInt64: "17926189716184860616") is_committed eq(Boolean(true))] positions window=0..- -> rows=250
+read transactions blocks=-..- cols=[block_number,err,fee_payer,signatures,signatures_size,transaction_index] block_column=block_number at=250:362de456ee76d852 -> rows=250
+read transactions blocks=217710049..217710850 cols=[block_number,signatures_size,transaction_index] block_column=block_number required=[err,fee_payer,signatures,signatures_size,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=0..- -> rows=250

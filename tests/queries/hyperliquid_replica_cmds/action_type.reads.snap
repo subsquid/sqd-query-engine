@@ -1,0 +1,19 @@
+---
+source: tests/queries.rs
+---
+## json
+response 748640000..748640100 n=23 read_through=-
+read actions blocks=748640000..748640100 cols=[action,action_index,action_size,block_number,nonce,response,response_size,signature,status,user,vault_address] block_column=block_number required=[action,action_index,action_size,nonce,response,response_size,signature,status,user,vault_address] items=[action_type in(Utf8: "evmRawTx") status in(Utf8: "ok")] window=748640000..748640100 -> rows=28
+read blocks blocks=748640000..748640100 cols=[hash,number] block_column=number required=[hash,number] -> rows=101
+
+## json, page 256 KiB
+response 748640000..748640100 n=23 read_through=-
+read actions blocks=-..- cols=[action,action_index,action_size,block_number,nonce,response,response_size,signature,status,user,vault_address] block_column=block_number at=28:298e05ad2e849cee -> rows=28
+read actions blocks=748640000..748640100 cols=[action_size,block_number,response_size] block_column=block_number required=[action,action_index,action_size,nonce,response,response_size,signature,status,user,vault_address] items=[action_type in(Utf8: "evmRawTx") status in(Utf8: "ok")] positions window=748640000..748640100 -> rows=28
+read blocks blocks=-..- cols=[hash,number] block_column=number at=23:fdef4c4194d9f04c -> rows=23
+read blocks blocks=748640000..748640100 cols=[number] block_column=number required=[hash,number] positions -> rows=101
+
+## arrow
+response 748640000..748640100 n=23
+read actions blocks=748640000..748640100 cols=[action,action_index,action_size,block_number,nonce,response,response_size,signature,status,user,vault_address] block_column=block_number required=[action,action_index,action_size,nonce,response,response_size,signature,status,user,vault_address] items=[action_type in(Utf8: "evmRawTx") status in(Utf8: "ok")] window=748640000..748640100 -> rows=28
+read blocks blocks=748640000..748640100 cols=[hash,number] block_column=number required=[hash,number] -> rows=101
