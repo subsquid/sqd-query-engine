@@ -232,6 +232,17 @@ CT-7 builds its queries from the catalog. For a specific query compared live
 with the legacy engine, add it under `tests/queries/`: a `chunks.yaml` naming
 the chunk and query files beside it. See [the query guide](tests/queries/README.md).
 
+### Property tests
+
+proptest keeps the cases it finds in a `.proptest-regressions` file beside the
+test, and replays them before any new ones. `seeds_beside_source()` in
+`src/testing.rs` puts the file there; proptest's default puts it under a
+directory at the crate root instead.
+
+A seed replays its case only while the strategy that drew it stays the same.
+So when proptest finds a bug, pin the case it printed as a named test too, one
+that calls the same check with that input.
+
 ### Running them
 
 The chunks in `data/` and the fixture tree are not in git, so tests that need

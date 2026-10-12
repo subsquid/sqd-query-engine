@@ -32,6 +32,14 @@ pub(crate) fn chunks_present() -> bool {
     chunk_dir("evm").is_some() && chunk_dir("solana").is_some()
 }
 
+/// Where proptest keeps a test's counterexamples: beside its source file. Its
+/// default mirrors `src/` under a `proptest-regressions/` at the crate root,
+/// away from the test the seeds belong to.
+pub(crate) fn seeds_beside_source() -> Option<Box<dyn proptest::test_runner::FailurePersistence>> {
+    let beside = proptest::test_runner::FileFailurePersistence::WithSource("proptest-regressions");
+    Some(Box::new(beside))
+}
+
 /// Counts the bytes each thread holds, so that a test can bound the memory a
 /// call takes while other tests run beside it.
 pub(crate) struct Counting;

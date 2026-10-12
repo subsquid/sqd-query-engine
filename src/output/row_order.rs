@@ -631,7 +631,7 @@ mod tests {
             }
         }
 
-        fn row() -> impl Strategy<Value = (i32, u64, String, Vec<u16>)> {
+        fn row() -> impl Strategy<Value = Row> {
             (
                 prop_oneof![
                     Just(i32::MIN),
@@ -651,7 +651,92 @@ mod tests {
             )
         }
 
+        type Row = (i32, u64, String, Vec<u16>);
+
+        /// Sorts the rows `parts` hold by `columns`, taken in `order`, both ways
+        /// the engine can, and checks each against the key values read directly.
+        fn check_order(
+            parts: &[(Vec<Row>, u8)],
+            columns: &[&str],
+            order: &[&str],
+            nulls: bool,
+            deep: bool,
+        ) -> Result<(), TestCaseError> {
+            let batches: Vec<RecordBatch> = parts
+                .iter()
+                .map(|(rows, width)| batch(rows, *width, nulls, deep))
+                .collect();
+            let columns: Vec<String> = order
+                .iter()
+                .filter(|name| columns.contains(name))
+                .map(|name| name.to_string())
+                .collect();
+            let keys = row_sort_keys(&batches, &columns);
+            let found = match &keys {
+                Some(SortKeys::Typed(_)) => "typed",
+                Some(SortKeys::Packed(_)) => "packed",
+                None => "none",
+            };
+            let keyed = RowOrder {
+                columns: columns.clone(),
+                resolved: resolve_sort_columns(&batches, &columns),
+                keys,
+            };
+            let compared = RowOrder {
+                columns: columns.clone(),
+                resolved: resolve_sort_columns(&batches, &columns),
+                keys: None,
+            };
+
+            let all: Vec<(usize, usize)> = batches
+                .iter()
+                .enumerate()
+                .flat_map(|(b, batch)| (0..batch.num_rows()).map(move |r| (b, r)))
+                .collect();
+            let key_values = |(b, r): (usize, usize)| -> Vec<Key> {
+                let batch = &batches[b];
+                columns
+                    .iter()
+                    .map(|name| key(batch.column_by_name(name).unwrap(), r))
+                    .collect()
+            };
+            let mut expected = all.clone();
+            expected.sort_by(|&a, &b| key_values(a).cmp(&key_values(b)).then(a.cmp(&b)));
+            let mut by_comparator = all.clone();
+            compared.sort(&mut by_comparator);
+            let mut by_keys = all;
+            keyed.sort(&mut by_keys);
+            prop_assert_eq!(&by_comparator, &expected);
+            prop_assert_eq!(&by_keys, &expected);
+
+            // Integers with a trailing path of one type are read at their
+            // types, deep paths as bytes; the rest by the comparator alone.
+            let has = |name: &str| columns.iter().any(|c| c == name);
+            let path_last = columns
+                .iter()
+                .position(|c| c == "path")
+                .is_none_or(|at| at + 1 == columns.len());
+            let widths: std::collections::HashSet<u8> =
+                parts.iter().map(|(_, width)| *width).collect();
+            let rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
+            let expected_form = if (has("path") && widths.len() > 1) || has("text") || !path_last {
+                "none"
+            } else if has("path") && deep && rows > 0 {
+                "packed"
+            } else {
+                "typed"
+            };
+            prop_assert_eq!(found, expected_form);
+
+            Ok(())
+        }
+
         proptest! {
+            #![proptest_config(ProptestConfig {
+                failure_persistence: crate::testing::seeds_beside_source(),
+                ..ProptestConfig::default()
+            })]
+
             /// Rows order by their key values, column by column, then by file
             /// order, whatever width each batch stores its path at; and the
             /// prepared keys, in the form the rule picks, order them the same.
@@ -670,69 +755,55 @@ mod tests {
                 nulls in any::<bool>(),
                 deep in any::<bool>(),
             ) {
-                let batches: Vec<RecordBatch> = parts
-                    .iter()
-                    .map(|(rows, width)| batch(rows, *width, nulls, deep))
-                    .collect();
-                let columns: Vec<String> = order
-                    .iter()
-                    .filter(|name| columns.contains(name))
-                    .map(|name| name.to_string())
-                    .collect();
-                let keys = row_sort_keys(&batches, &columns);
-                let found = match &keys {
-                    Some(SortKeys::Typed(_)) => "typed",
-                    Some(SortKeys::Packed(_)) => "packed",
-                    None => "none",
-                };
-                let keyed = RowOrder {
-                    columns: columns.clone(),
-                    resolved: resolve_sort_columns(&batches, &columns),
-                    keys,
-                };
-                let compared = RowOrder {
-                    columns: columns.clone(),
-                    resolved: resolve_sort_columns(&batches, &columns),
-                    keys: None,
-                };
-
-                let all: Vec<(usize, usize)> = batches
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(b, batch)| (0..batch.num_rows()).map(move |r| (b, r)))
-                    .collect();
-                let key_values = |(b, r): (usize, usize)| -> Vec<Key> {
-                    let batch = &batches[b];
-                    columns.iter().map(|name| key(batch.column_by_name(name).unwrap(), r)).collect()
-                };
-                let mut expected = all.clone();
-                expected.sort_by(|&a, &b| key_values(a).cmp(&key_values(b)).then(a.cmp(&b)));
-                let mut by_comparator = all.clone();
-                compared.sort(&mut by_comparator);
-                let mut by_keys = all;
-                keyed.sort(&mut by_keys);
-                prop_assert_eq!(&by_comparator, &expected);
-                prop_assert_eq!(&by_keys, &expected);
-
-                // Integers with a trailing path of one type are read at their
-                // types, deep paths as bytes; the rest by the comparator alone.
-                let has = |name: &str| columns.iter().any(|c| c == name);
-                let path_last = columns
-                    .iter()
-                    .position(|c| c == "path")
-                    .is_none_or(|at| at + 1 == columns.len());
-                let widths: std::collections::HashSet<u8> =
-                    parts.iter().map(|(_, width)| *width).collect();
-                let rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
-                let expected_form = if (has("path") && widths.len() > 1) || has("text") || !path_last {
-                    "none"
-                } else if has("path") && deep && rows > 0 {
-                    "packed"
-                } else {
-                    "typed"
-                };
-                prop_assert_eq!(found, expected_form);
+                check_order(&parts, &columns, &order, nulls, deep)?;
             }
+        }
+
+        // What proptest found. Its seed file replays a case only while the
+        // strategies above stay as they were, so each case is pinned here too.
+
+        fn row_of(signed: i32, text: &str, path: &[u16]) -> Row {
+            (signed, 0, text.to_owned(), path.to_vec())
+        }
+
+        const ALL: [&str; 4] = ["signed", "unsigned", "text", "path"];
+
+        #[test]
+        fn a_deep_signed_path_orders_a_negative_element_first() {
+            let below = row_of(i32::MIN, "", &[0]);
+            let above = row_of(i32::MIN, "", &[65535]);
+
+            for rows in [vec![above.clone(), below.clone()], vec![below, above]] {
+                check_order(&[(rows, 2)], &["path"], &ALL, false, true).unwrap();
+            }
+        }
+
+        #[test]
+        fn an_empty_path_orders_before_one_holding_zero() {
+            let rows = vec![row_of(i32::MIN, "acc", &[]), row_of(i32::MIN, "acc", &[0])];
+            check_order(&[(rows, 0)], &["path"], &ALL, false, false).unwrap();
+        }
+
+        #[test]
+        fn paths_stored_at_two_widths_order_by_value() {
+            let parts = [
+                (vec![row_of(i32::MIN, "", &[0])], 1),
+                (vec![row_of(i32::MIN, "", &[])], 0),
+            ];
+            check_order(&parts, &["path"], &ALL, false, false).unwrap();
+        }
+
+        #[test]
+        fn a_null_signed_key_after_a_text_key() {
+            let rows = vec![row_of(1, "", &[])];
+            let order = ["path", "unsigned", "text", "signed"];
+            check_order(&[(rows, 0)], &["signed", "text"], &order, true, false).unwrap();
+        }
+
+        #[test]
+        fn a_signed_key_ahead_of_a_deep_path_orders_by_sign() {
+            let rows = vec![row_of(i32::MIN, "", &[]), row_of(0, "", &[])];
+            check_order(&[(rows, 0)], &["signed", "path"], &ALL, false, true).unwrap();
         }
 
         #[test]
