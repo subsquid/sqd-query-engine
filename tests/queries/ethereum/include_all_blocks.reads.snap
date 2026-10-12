@@ -6,7 +6,7 @@ response 17881390..17882786 n=1397 read_through=-
 read blocks blocks=17881390..17882786 cols=[difficulty,gas_limit,gas_used,hash,nonce,number,parent_beacon_block_root,parent_hash,requests_hash,sha3_uncles,size,timestamp,uncles,withdrawals,withdrawals_root,withdrawals_size] block_column=number required=[difficulty,gas_limit,gas_used,hash,nonce,number,parent_beacon_block_root,parent_hash,requests_hash,sha3_uncles,size,timestamp,uncles,withdrawals,withdrawals_root,withdrawals_size] -> rows=1397
 
 ## json, page 256 KiB
-response 17881390..17881584 n=195 read_through=17882413
+response 17881390..17881584 n=195 read_through=-
 read blocks blocks=-..- cols=[difficulty,gas_limit,gas_used,hash,nonce,number,parent_beacon_block_root,parent_hash,requests_hash,sha3_uncles,size,timestamp,uncles,withdrawals,withdrawals_root,withdrawals_size] block_column=number at=195:b7891212d5c30240 -> rows=195
 read blocks blocks=17881390..17882786 cols=[number,withdrawals_size] block_column=number required=[difficulty,gas_limit,gas_used,hash,nonce,number,parent_beacon_block_root,parent_hash,requests_hash,sha3_uncles,size,timestamp,uncles,withdrawals,withdrawals_root,withdrawals_size] positions -> rows=1397
 

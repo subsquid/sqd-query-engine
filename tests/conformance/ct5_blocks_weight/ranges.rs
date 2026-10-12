@@ -5,7 +5,7 @@ use crate::harness::chunk::{
 use crate::harness::evm_like;
 use crate::harness::json::{assert_same_response, block_numbers, parse_response};
 use crate::harness::synthetic::{catalog, catalog_with_heavy_headers, weighted_chunk, MB};
-use arrow::array::{ArrayRef, BinaryArray, UInt32Array, UInt64Array};
+use arrow::array::{ArrayRef, BinaryArray, StringArray, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, SchemaRef};
 use parquet::basic::Encoding;
 use parquet::file::metadata::ColumnChunkMetaData;
@@ -306,6 +306,198 @@ fn overlapping_groups_and_missing_statistics_do_not_cause_repeated_reads() {
             assert_eq!(table_reads[0].to, None, "a full read added a block filter");
         }
     }
+}
+
+/// Logs sorted by their filter columns, as EVM chunks store them: one row group
+/// holds two addresses, each in every block, so the group's block bounds span the
+/// whole chunk and no block range can skip it. Each log carries `payload` bytes,
+/// and each block `transactions` transactions.
+fn unprunable_chunk(blocks: u64, payload: usize, transactions: u32) -> TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let numbers: Vec<u64> = (0..blocks).collect();
+    write_table(
+        dir.path(),
+        "blocks",
+        vec![
+            Field::new("number", DataType::UInt64, false),
+            Field::new("hash", DataType::Utf8, false),
+        ],
+        vec![
+            Arc::new(UInt64Array::from(numbers.clone())) as ArrayRef,
+            Arc::new(StringArray::from_iter_values(
+                numbers.iter().map(|&n| evm_like::word(n as u8)),
+            )) as ArrayRef,
+        ],
+    );
+
+    let rows: Vec<(u8, u64)> = [0, 2]
+        .into_iter()
+        .flat_map(|address| numbers.iter().map(move |&block| (address, block)))
+        .collect();
+    let data = format!("0x{}", "ab".repeat(payload / 2));
+    write_table(
+        dir.path(),
+        "logs",
+        vec![
+            Field::new("block_number", DataType::UInt64, false),
+            Field::new("log_index", DataType::UInt32, false),
+            Field::new("transaction_index", DataType::UInt32, false),
+            Field::new("address", DataType::Utf8, false),
+            Field::new("topic0", DataType::Utf8, false),
+            Field::new("data", DataType::Utf8, false),
+        ],
+        vec![
+            Arc::new(UInt64Array::from_iter_values(rows.iter().map(|r| r.1))) as ArrayRef,
+            Arc::new(UInt32Array::from_iter_values(
+                rows.iter().map(|r| r.0 as u32),
+            )) as ArrayRef,
+            Arc::new(UInt32Array::from(vec![0; rows.len()])) as ArrayRef,
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|r| evm_like::address(r.0)),
+            )) as ArrayRef,
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|_| evm_like::word(0)),
+            )) as ArrayRef,
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|_| data.as_str()),
+            )) as ArrayRef,
+        ],
+    );
+
+    let txs: Vec<(u64, u32)> = numbers
+        .iter()
+        .flat_map(|&block| (0..transactions).map(move |index| (block, index)))
+        .collect();
+    write_table(
+        dir.path(),
+        "transactions",
+        vec![
+            Field::new("block_number", DataType::UInt64, false),
+            Field::new("transaction_index", DataType::UInt32, false),
+            Field::new("gas_used", DataType::UInt64, false),
+        ],
+        vec![
+            Arc::new(UInt64Array::from_iter_values(txs.iter().map(|t| t.0))) as ArrayRef,
+            Arc::new(UInt32Array::from_iter_values(txs.iter().map(|t| t.1))) as ArrayRef,
+            Arc::new(UInt64Array::from(vec![21_000; txs.len()])) as ArrayRef,
+        ],
+    );
+
+    dir
+}
+
+/// Each selection read of `table`, as the blocks it spanned.
+fn narrow_reads(
+    reader: &ObservedReader,
+    table: &str,
+    payload: &str,
+) -> Vec<(Option<u64>, Option<u64>)> {
+    let reads = reader.reads.lock().unwrap();
+    reads
+        .iter()
+        .filter(|read| read.table == table && !read.physical_rows)
+        .filter(|read| !read.columns.iter().any(|c| c == payload))
+        .map(|read| (read.from, read.to))
+        .collect()
+}
+
+const UNPRUNABLE_BLOCKS: u64 = 2_500;
+
+fn address_query(address: u8, transaction: bool) -> String {
+    serde_json::json!({"type": "test", "fromBlock": 0,
+        "logs": [{"address": [evm_like::address(address)], "transaction": transaction}],
+        "fields": {"block": {"number": true}, "log": {"logIndex": true, "data": true},
+                   "transaction": {"gasUsed": true}}})
+    .to_string()
+}
+
+/// A block range cannot skip a row group whose blocks span the request, so a
+/// selection split into ranges reads it again for each. Where the footer bounds
+/// the selection's columns within the budget, one read covers the request.
+///
+/// Covers CT-5 · INV-B7
+#[test]
+fn a_selection_reads_groups_no_range_can_skip_once() {
+    let chunk = unprunable_chunk(UNPRUNABLE_BLOCKS, 1024, 1);
+    let meta = evm_like::catalog();
+
+    let mut failures = Vec::new();
+    for (address, what) in [
+        (1, "an address no row has"),
+        (0, "an address half the rows have"),
+    ] {
+        let query = address_query(address, false);
+        let full = run(
+            &meta,
+            &ParquetChunkReader::open(chunk.path()).unwrap(),
+            &query,
+            MB,
+            false,
+        );
+        let reader = ObservedReader::new(chunk.path(), None);
+        let paged = run(&meta, &reader, &query, MB, true);
+        assert_same_response(&full, &paged, what);
+
+        let reads = narrow_reads(&reader, "logs", "data");
+        if reads.len() != 1 {
+            failures.push(format!(
+                "{what}: logs were selected in {} reads: {reads:?}",
+                reads.len()
+            ));
+        }
+    }
+
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// Where the footer cannot bound the selection within the budget, the selection
+/// keeps its block ranges, so that what it holds stays bounded. A relation's
+/// target counts toward it whole, since the selection reads it too.
+///
+/// Covers CT-5 · INV-B7
+#[test]
+fn a_selection_over_the_budget_keeps_its_ranges() {
+    // Twenty transactions a block weigh more than the logs' own selection.
+    let chunk = unprunable_chunk(UNPRUNABLE_BLOCKS, 1024, 20);
+    let meta = evm_like::catalog();
+    let cases = [
+        (address_query(1, false), 16 * 1024, "the logs alone"),
+        (
+            address_query(1, true),
+            256 * 1024,
+            "the logs and their transactions",
+        ),
+    ];
+
+    let mut failures = Vec::new();
+    for (query, budget, what) in cases {
+        let full = run(
+            &meta,
+            &ParquetChunkReader::open(chunk.path()).unwrap(),
+            &query,
+            budget,
+            false,
+        );
+        let reader = ObservedReader::new(chunk.path(), None);
+        let paged = run(&meta, &reader, &query, budget, true);
+        assert_same_response(&full, &paged, what);
+
+        let reads = narrow_reads(&reader, "logs", "data");
+        if reads.len() < 2 {
+            failures.push(format!(
+                "{what}: one read held the whole selection: {reads:?}"
+            ));
+        }
+        for (from, to) in reads {
+            let last = to.unwrap_or(UNPRUNABLE_BLOCKS - 1);
+            let span = last - from.unwrap_or(0) + 1;
+            if span > 1024 {
+                failures.push(format!("{what}: a read spanned {from:?}..{to:?}"));
+            }
+        }
+    }
+
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }
 
 #[test]

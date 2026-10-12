@@ -6,8 +6,7 @@ response 17881390..17882786 n=4 read_through=-
 read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=4:1bf92d40d1babd12 -> rows=4
 read blocks blocks=17881390..17882786 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=1397
 read traces blocks=-..- cols=[block_number,create_result_address,trace_address,transaction_index,type] block_column=block_number at=2:7d7474630ddd733d -> rows=2
-read traces blocks=17881390..17882413 cols=[block_number] block_column=block_number required=[create_result_address,trace_address,transaction_index,type] items=[create_result_address in(#9936f11c9b07fdb8)] positions window=17881390..17882413 -> rows=2
-read traces blocks=17882414..17882786 cols=[block_number] block_column=block_number required=[create_result_address,trace_address,transaction_index,type] items=[create_result_address in(#9936f11c9b07fdb8)] positions window=17882414..17882786 -> rows=0
+read traces blocks=17881390..17882786 cols=[block_number] block_column=block_number required=[create_result_address,trace_address,transaction_index,type] items=[create_result_address in(#9936f11c9b07fdb8)] positions window=17881390..17882786 -> rows=2
 
 ## json, page 256 KiB
 response 17881390..17882786 n=4 read_through=-
@@ -22,5 +21,4 @@ response 17881390..17882786 n=4
 read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=4:1bf92d40d1babd12 -> rows=4
 read blocks blocks=17881390..17882786 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=1397
 read traces blocks=-..- cols=[block_number,create_result_address,trace_address,transaction_index,type] block_column=block_number at=2:7d7474630ddd733d -> rows=2
-read traces blocks=17881390..17882413 cols=[block_number] block_column=block_number required=[create_result_address,trace_address,transaction_index,type] items=[create_result_address in(#9936f11c9b07fdb8)] positions window=17881390..17882413 -> rows=2
-read traces blocks=17882414..17882786 cols=[block_number] block_column=block_number required=[create_result_address,trace_address,transaction_index,type] items=[create_result_address in(#9936f11c9b07fdb8)] positions window=17882414..17882786 -> rows=0
+read traces blocks=17881390..17882786 cols=[block_number] block_column=block_number required=[create_result_address,trace_address,transaction_index,type] items=[create_result_address in(#9936f11c9b07fdb8)] positions window=17881390..17882786 -> rows=2

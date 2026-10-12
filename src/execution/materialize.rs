@@ -136,22 +136,34 @@ impl SelectionReader<'_> {
     fn release_columns(&self) {
         self.decoded.clear();
     }
+
+    /// `request` as this reader runs it on `table`: its selection columns, with
+    /// positions. `None` for a table it reads as asked.
+    fn narrowed<'r>(&'r self, table: &str, request: &ScanRequest<'r>) -> Option<ScanRequest<'r>> {
+        let columns = self.columns.get(table)?;
+
+        Some(ScanRequest {
+            output_columns: columns.iter().map(String::as_str).collect(),
+            positions: self.track_positions,
+            column_cache: self.shared.contains(table).then_some(&self.decoded),
+            ..request.clone()
+        })
+    }
 }
 
 impl ChunkReader for SelectionReader<'_> {
     fn scan_rows(&self, table: &str, request: &ScanRequest) -> Result<Scanned> {
-        let Some(columns) = self.columns.get(table) else {
-            return self.inner.scan_rows(table, request);
-        };
-        self.inner.scan_rows(
-            table,
-            &ScanRequest {
-                output_columns: columns.iter().map(String::as_str).collect(),
-                positions: self.track_positions,
-                column_cache: self.shared.contains(table).then_some(&self.decoded),
-                ..request.clone()
-            },
-        )
+        match self.narrowed(table, request) {
+            Some(narrowed) => self.inner.scan_rows(table, &narrowed),
+            None => self.inner.scan_rows(table, request),
+        }
+    }
+
+    fn estimate_scan_bytes(&self, table: &str, request: &ScanRequest) -> Option<u64> {
+        match self.narrowed(table, request) {
+            Some(narrowed) => self.inner.estimate_scan_bytes(table, &narrowed),
+            None => self.inner.estimate_scan_bytes(table, request),
+        }
     }
 
     fn has_table(&self, table: &str) -> bool {

@@ -15,6 +15,7 @@ use crate::scan::predicate::RowPredicate;
 use crate::scan::{ChunkReader, ScanRequest};
 use crate::text::StringColumn;
 use anyhow::Result;
+use std::sync::OnceLock;
 
 /// One query's execution: the request, the catalog entries it reads, the
 /// chunk, and how payloads are read. Every step after preparation reads it.
@@ -30,6 +31,8 @@ pub(super) struct Execution<'a> {
     /// Present when payloads are deferred: a page is selected through it from
     /// row identities, keys and sizes, and its rows are read back afterwards.
     pub(super) selection: Option<SelectionReader<'a>>,
+    /// See [`Self::selection_fits`].
+    selection_fits: OnceLock<bool>,
 }
 
 /// A table plan with the catalog entries of its table and of each relation's
@@ -67,6 +70,7 @@ impl<'a> Execution<'a> {
             blocks,
             tables,
             selection: None,
+            selection_fits: OnceLock::new(),
         };
 
         // A missing table is an incompatible chunk, not an empty table (INV-E4).
@@ -274,12 +278,14 @@ impl<'a> Execution<'a> {
         }
 
         let columns = block_scan_columns(&plan.block_output_columns, self.blocks);
-        let mut estimate = self.estimate_range_bytes(&plan.block_table, self.blocks, &columns, &[]);
+        let mut estimate =
+            self.estimate_range_bytes(self.chunk, &plan.block_table, self.blocks, &columns, &[]);
 
         if self.prescanned_table().is_none() {
             for table in &self.tables {
                 let columns = resolve_output_columns(table.plan, table.desc);
                 let bytes = self.estimate_range_bytes(
+                    self.chunk,
                     &table.plan.table,
                     table.desc,
                     &columns,
@@ -292,10 +298,57 @@ impl<'a> Execution<'a> {
         estimate > self.options.weight_budget
     }
 
-    /// What one pass over the request's range decodes for one table. A reader that
-    /// cannot tell counts as unbounded, which only an unbounded budget holds.
+    /// Whether one selection pass over the whole request holds no more than the
+    /// budget, by the same footer bound as the payloads (ADR-15). Taken when
+    /// first asked, since only a request that ranges would split needs it.
+    pub(super) fn selection_fits(&self) -> bool {
+        *self.selection_fits.get_or_init(|| {
+            self.selection.as_ref().is_some_and(|selection| {
+                self.selection_bound(selection) <= self.options.weight_budget
+            })
+        })
+    }
+
+    /// What one selection pass over the whole request holds, by the footer: each
+    /// table's matching row groups and every row group of each relation's target.
+    /// Header rows are read for the whole range either way.
+    fn selection_bound(&self, selection: &SelectionReader) -> u64 {
+        // The selection reader reads its own columns of a table.
+        let columns = [];
+
+        let mut bound = 0u64;
+        for table in &self.tables {
+            let predicates = &table.plan.predicates;
+            let bytes = self.estimate_range_bytes(
+                selection,
+                &table.plan.table,
+                table.desc,
+                &columns,
+                predicates,
+            );
+            bound = bound.saturating_add(bytes);
+
+            for (relation, target) in table.relations() {
+                let bytes = self.estimate_range_bytes(
+                    selection,
+                    &relation.target_table,
+                    target,
+                    &columns,
+                    &[],
+                );
+                bound = bound.saturating_add(bytes);
+            }
+        }
+
+        bound
+    }
+
+    /// What one pass of `reader` over the request's range decodes for one table.
+    /// A reader that cannot tell counts as unbounded, which only an unbounded
+    /// budget holds.
     fn estimate_range_bytes(
         &self,
+        reader: &dyn ChunkReader,
         table: &str,
         desc: &TableDescription,
         columns: &[String],
@@ -307,7 +360,7 @@ impl<'a> Execution<'a> {
         request.to_block = self.plan.to_block;
         request.block_number_column = Some(&desc.block_number_column);
 
-        self.chunk
+        reader
             .estimate_scan_bytes(table, &request)
             .unwrap_or(u64::MAX)
     }
