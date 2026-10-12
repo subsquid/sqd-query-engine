@@ -74,8 +74,7 @@ fetch:
 # are separate crates, so each root is named. Expanded by `make` rather than by
 # `git ls-files`: a gate that quietly checks fewer files where git is unavailable
 # is worse than one that fails.
-ENGINE_SOURCES = src/lib.rs src/bin/generate_fixtures.rs \
-                 $(wildcard crates/*/src/lib.rs) \
+ENGINE_SOURCES = src/lib.rs $(wildcard crates/*/src/lib.rs) \
                  tests/conformance/main.rs $(wildcard tests/*.rs)
 
 fmt:

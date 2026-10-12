@@ -1,0 +1,43 @@
+---
+source: tests/queries.rs
+---
+blocks: 1 (17882154 to 17882154)
+logs: 1
+traces: 1
+
+[
+  {
+    "header": {
+      "difficulty": "0x0",
+      "gasLimit": "0x1c9c380",
+      "gasUsed": "0x90a479",
+      "hash": "0xc8b1c4bd44d627f1dc5789379c23a2d907a8e984c2719637a5c9859a240ffe90",
+      "nonce": "0x0000000000000000",
+      "number": 17882154,
+      "parentHash": "0x5ad63ca5a0f25437699b0b81d7b7265ebc2869ada4ea6ce155e8fd4f80db1cfa",
+      "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+      "size": 35728,
+      "timestamp": 1691642255
+    },
+    "logs": [
+      {
+        "address": "0x01cd62ed13d0b666e2a10d13879a763dfd1dab99",
+        "data": "0x0000000000000000000000006be62bb025aef49fed1fbbf91f1311dfd9317957",
+        "logIndex": 75,
+        "topics": [
+          "0xd627a1aeb13261b560c345aaf7d003d55a27193b9284c0b941f53cd62a045f16"
+        ],
+        "transactionIndex": 26
+      }
+    ],
+    "traces": [
+      {
+        "traceAddress": [
+          0
+        ],
+        "transactionIndex": 26,
+        "type": "create"
+      }
+    ]
+  }
+]

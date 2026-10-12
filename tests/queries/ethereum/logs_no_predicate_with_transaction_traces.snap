@@ -1,0 +1,7 @@
+---
+source: tests/queries.rs
+---
+blocks: 1 (17881390 to 17881390)
+logs: 373
+traces: 685
+digest: f775ec4a6840a1781fbed1d21577ccdb

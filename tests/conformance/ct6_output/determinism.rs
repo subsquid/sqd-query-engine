@@ -19,13 +19,13 @@ use crate::harness::chunk::{
 use crate::harness::columnar::{run_columnar, MemoryChunk};
 use crate::harness::evm_like;
 use crate::harness::fixtures::{
-    answers_the_same, fixture_chunk, fixture_queries_present, fixture_tree_has,
-    fixture_tree_has_all, meta, run, run_against, FIXTURE_DATASETS,
+    answers_the_same, fixture_chunk, fixture_tree_has, fixture_tree_has_all, meta, run,
+    run_against, FIXTURE_DATASETS,
 };
 use crate::harness::generator::{Generator, ItemRequest, Rng, TableCorpus};
-use crate::harness::guard::fixture_dir;
 use crate::harness::json::{assert_same_response, block_numbers, parse_response};
 use crate::harness::sol_like;
+use crate::harness::store::queries_dir;
 use crate::harness::synthetic::{catalog, paged_at, part_blocks, partitioned_chunk, MB};
 use sqd_query_engine::output::ExecOptions;
 
@@ -402,7 +402,7 @@ fn a_fixture_chunk_answers_the_same_under_any_layout() {
     }
 }
 
-/// Every fixture query of every dataset, through the parquet reader and the
+/// Every query on a fixture dataset's chunk, through the parquet reader and the
 /// columnar one. A query the parquet reader refuses must be refused with the
 /// same message.
 ///
@@ -410,8 +410,7 @@ fn a_fixture_chunk_answers_the_same_under_any_layout() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn every_fixture_query_answers_the_same_through_the_columnar_reader() {
-    let chunks_present = fixture_tree_has_all(FIXTURE_DATASETS.map(|(dataset, _)| dataset));
-    if !chunks_present || !fixture_queries_present() {
+    if !fixture_tree_has_all(FIXTURE_DATASETS.map(|(dataset, _)| dataset)) {
         return;
     }
 
@@ -421,18 +420,18 @@ fn every_fixture_query_answers_the_same_through_the_columnar_reader() {
         let chunk = fixture_chunk(dataset);
         let readers = [None, Some(4096), Some(100)].map(|w| (w, MemoryChunk::load(&chunk, w)));
 
-        let mut queries: Vec<_> = std::fs::read_dir(fixture_dir().join(dataset).join("queries"))
+        let mut queries: Vec<_> = std::fs::read_dir(queries_dir().join(dataset))
             .unwrap()
             .map(|entry| entry.unwrap().path())
-            .filter(|dir| dir.join("query.json").is_file())
+            .filter(|path| path.extension().is_some_and(|e| e == "json"))
             .collect();
         queries.sort();
 
-        for dir in queries {
-            let query = std::fs::read(dir.join("query.json")).unwrap();
+        for file in queries {
+            let query = std::fs::read(&file).unwrap();
             let expected = run(dataset, &catalog, &query);
             for (window, reader) in &readers {
-                let what = format!("{}, statistics windows {window:?}", dir.display());
+                let what = format!("{}, statistics windows {window:?}", file.display());
                 match (&expected, run_columnar(&catalog, reader, &query)) {
                     (Ok(expected), Ok(actual)) => assert_same_response(expected, &actual, &what),
                     (Err(expected), Err(actual)) => assert_eq!(
@@ -454,7 +453,7 @@ fn every_fixture_query_answers_the_same_through_the_columnar_reader() {
         }
     }
 
-    assert!(compared > 300, "only {compared} fixture runs were compared");
+    assert!(compared > 300, "only {compared} query runs were compared");
 }
 
 /// Covers CT-6 · INV-D7

@@ -11,7 +11,7 @@ tests/queries/bench/evm/
 
 The dataset id is the `id` the network lists for the dataset, and the chunk path is the chunk's directory under it. The `bench/` queries are the benchmark queries on the chunks the benchmarks read.
 
-A directory named after a dataset, such as `ethereum/`, holds `chunk: fixture:ethereum` instead. That is the chunk of the fixture tree in the legacy repo, and the conformance tests that need a real chunk read it through this file. When the store holds that chunk, the line becomes an `s3://` reference, and every test that reads the chunk moves with it.
+A directory named after a dataset, such as `ethereum/`, holds `chunk: fixture:ethereum` instead. That is the chunk of the fixture tree in the legacy repo, and the conformance tests that need a real chunk read it through this file. Its queries are the legacy repo's fixture queries, and each first snapshot was accepted only where the answer equalled the answer recorded there. When the store holds that chunk, the line becomes an `s3://` reference, and every test that reads the chunk moves with it.
 
 ## Running them
 

@@ -1,0 +1,75 @@
+---
+source: tests/queries.rs
+---
+blocks: 1 (6000208 to 6000208)
+transactions: 1
+
+[
+  {
+    "header": {
+      "hash": "0xb85a8c8095990c45a3da971757b520afef76bb53836d4d9a1f51852fdc85a8b8",
+      "number": 6000208
+    },
+    "transactions": [
+      {
+        "aaAuthorizationList": [],
+        "calls": [
+          {
+            "input": "0x95777d59000000000000000000000000beefcafe54750903ac1c8909323af7beb21ea2cb0000000000000000000000000000000000000000000000000000000005f5e1000000000000000000000000000000000000000000000000000000006767666a68",
+            "to": "0x20c0000000000000000000000000000000000001",
+            "value": "0x0"
+          }
+        ],
+        "feePayerR": null,
+        "feePayerS": null,
+        "feePayerV": null,
+        "feeToken": "0x20c0000000000000000000000000000000000001",
+        "from": "0x90b68902916580b64f1b80ed3ae6a21180601dbf",
+        "gas": "0x93ccb",
+        "gasUsed": "0x8ebd6",
+        "hash": "0xcbce72bc74b8d717758ee1b53a88f701a15a30b555b109ec43d701d1ddcaf126",
+        "keyAuthorization": {
+          "chainId": "0x0",
+          "expiry": "0x699d61c0",
+          "keyId": "0xcf2f376146d5ac21aedfffaf8ab475bbf960e5f2",
+          "keyType": "p256",
+          "limits": [],
+          "signature": {
+            "preHash": null,
+            "pubKeyX": "0xb330d84fa5118ea94d9e2050d3ab2a4a1891f799ced7c27b010ff7532cecfba5",
+            "pubKeyY": "0x6eba57549ff5cc47f16740de0ddede1e5b2d2cbfae917b75e328310eda19246c",
+            "r": "0xd02c361bfba24a872d2e6f75ddf844a31ab700fa85f2d0442bac141d3f704cd7",
+            "s": "0x4cc3508476be9339deb2838782e0ed0da9d755c15dfa1417ded76fe834db15b8",
+            "sigType": "webAuthn",
+            "v": null,
+            "webauthnData": "0xa7cb28053c8ee4e5394fc67a0018dc1c622dad5ce3591b8ca13094ae86d11ba61d000000007b2274797065223a22776562617574686e2e676574222c226368616c6c656e6765223a223559386a586463453147394e4950574e6f556a756f53366a734f6d5f3069456b4a5450425343446a63366f222c226f726967696e223a2268747470733a2f2f646f63732e74656d706f2e78797a222c2263726f73734f726967696e223a66616c73657d",
+            "yParity": null
+          }
+        },
+        "nonce": 0,
+        "nonceKey": "0x0",
+        "signature": {
+          "primitive": {
+            "preHash": true,
+            "pubKeyX": "0xfe3d1d4241b522dbd585719bff78a68445f5f9e3dadefe1a3dd9d8d090ff5ce6",
+            "pubKeyY": "0x318179fd96e9c413ccca7c23981afa6db5c0a7343b27a9fbbf2e1e079d1bdc75",
+            "r": "0xdc593757e9b8728be5e359e1164d83cdd912a73ee7e78ec123730b247af9538b",
+            "s": "0x0eac9bede6bfdf50af72f242c3f9bcc9e23576fc7c0bf762073635966ad03eda",
+            "sigType": "p256",
+            "v": null,
+            "webauthnData": null,
+            "yParity": null
+          },
+          "userAddress": "0x90b68902916580b64f1b80ed3ae6a21180601dbf",
+          "version": null
+        },
+        "status": 1,
+        "to": null,
+        "transactionIndex": 36,
+        "type": 118,
+        "validAfter": null,
+        "validBefore": null
+      }
+    ]
+  }
+]

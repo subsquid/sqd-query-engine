@@ -1,0 +1,24 @@
+{
+  "type": "solana",
+  "fromBlock": 0,
+  "fields": {
+    "block": {
+      "timestamp": true,
+      "hash": true,
+      "height": true,
+      "number": true
+    },
+    "reward": {
+      "lamports": true,
+      "rewardType": true,
+      "pubkey": true
+    }
+  },
+  "rewards": [
+    {
+      "pubkey": [
+        "Fd7btgySsrjuo25CJCj7oE7VPMyezDhnx7pZkj2v69Nk"
+      ]
+    }
+  ]
+}

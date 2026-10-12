@@ -590,17 +590,6 @@ TAG_RE = re.compile(r"^\s*///\s*Covers\s+(CT-\d+)\s+·\s+(INV-[A-Z]\d+(?:\s*,\s*
 # the `·`, a trailing sentence, or `//` for `///` has to be a finding of its own.
 TAG_LOOSE_RE = re.compile(r"^\s*//[/!]?\s*Covers\b")
 FN_RE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
-# `paste::paste!` composes a name the source never spells. `paste_tests` expands
-# the one shape the suite uses; this matches the definition so a tag above one is
-# not read as sitting on nothing.
-PASTE_FN_RE = re.compile(
-    r"^\s*(?:pub(?:\([^)]*\))?\s+)?fn\s+"
-    r"\[<\s*([A-Za-z_][A-Za-z0-9_]*)\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*>\]"
-)
-MACRO_DEF_RE = re.compile(r"^\s*macro_rules!\s+([A-Za-z_][A-Za-z0-9_]*)")
-# `name!(arg);` and `name!(arg, "extra");` alike — the name is composed from the
-# first argument, and a second one for the fixture file changes nothing.
-MACRO_CALL_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)!\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*[,)]")
 # `#[test]` and the wrappers that stand in for it. Substring matching read
 # `#[tokio::test]` as *not* a test and reported every async one as an orphan.
 TEST_ATTR_RE = re.compile(r"^\s*#\[\s*(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*test\s*[\]\(]")
@@ -658,34 +647,6 @@ def rust_sources(repo: Path):
     return cached[key]
 
 
-def paste_tests(lines):
-    """Test names a `paste::paste!` macro in this file composes.
-
-    One shape, the one the fixture suite uses: a `macro_rules!` whose body is a
-    `#[test] fn [<prefix_ $arg>]()`, invoked as `name!(arg);`. Without this the
-    113 fixture tests are invisible to every rule below, which is the population
-    §8.11's prose-only rows are meant to be moved into.
-    """
-    prefixes, macro = {}, None
-    for line in lines:
-        m = MACRO_DEF_RE.match(line)
-        if m:
-            macro = m.group(1)
-            continue
-        if macro:
-            m = PASTE_FN_RE.match(line)
-            if m:
-                prefixes[macro] = m.group(1)
-                macro = None
-
-    names = set()
-    for line in lines:
-        m = MACRO_CALL_RE.match(line)
-        if m and m.group(1) in prefixes:
-            names.add(prefixes[m.group(1)] + m.group(2))
-    return names
-
-
 def tagged_item(lines, i):
     """(name, is a test, is ignored) for the item the tag on line `i` sits on.
 
@@ -711,13 +672,6 @@ def tagged_item(lines, i):
         fn = FN_RE.match(lines[j])
         if fn:
             name = fn.group(1)
-            break
-
-        paste = PASTE_FN_RE.match(lines[j])
-        if paste:
-            # A macro composes the name, so there is none to record — but the
-            # tag does sit on a test, which is what the orphan rule asks.
-            name = f"[<{paste.group(1)} ${paste.group(2)}>]"
             break
 
         if not SKIP_RE.match(lines[j]):
@@ -766,7 +720,6 @@ def test_fns(repo: Path):
         return cached[key]
     names = set()
     for _rel, lines in rust_sources(repo):
-        names |= paste_tests(lines)
         marked = False
         for line in lines:
             if TEST_ATTR_RE.match(line):

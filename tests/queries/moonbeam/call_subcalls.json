@@ -1,0 +1,35 @@
+{
+  "type": "substrate",
+  "fromBlock": 4669460,
+  "toBlock": 4669500,
+  "fields": {
+    "call": {
+      "name": true,
+      "args": true,
+      "origin": true,
+      "extrinsicIndex": true,
+      "address": true
+    },
+    "block": {
+      "number": true,
+      "hash": true,
+      "parentHash": true
+    },
+    "extrinsic": {
+      "index": true
+    },
+    "event": {
+      "index": true,
+      "extrinsicIndex": true,
+      "callAddress": true
+    }
+  },
+  "calls": [
+    {
+      "name": [
+        "Proxy.proxy"
+      ],
+      "subcalls": true
+    }
+  ]
+}

@@ -1,0 +1,66 @@
+---
+source: tests/queries.rs
+---
+blocks: 2 (401050 to 401060)
+outputs: 4
+
+[
+  {
+    "header": {
+      "hash": "00000000000000000290d0a710715a535307136041f7f6f1489aedc537900662",
+      "number": 401050,
+      "parentHash": "00000000000000000453c55edb50aa1e54aebaa8a313c1286b3be6aaed678e7f",
+      "timestamp": 1457059740
+    },
+    "outputs": [
+      {
+        "outputIndex": 1,
+        "scriptPubKeyAddress": "1KvgXvFJKnLeRbgFDfQYfDakjHXnpknESP",
+        "scriptPubKeyAsm": "OP_DUP OP_HASH160 cf994f85493606aa0114208133f531feb780c2ad OP_EQUALVERIFY OP_CHECKSIG",
+        "scriptPubKeyDesc": "addr(1KvgXvFJKnLeRbgFDfQYfDakjHXnpknESP)#a9m5juwg",
+        "scriptPubKeyHex": "76a914cf994f85493606aa0114208133f531feb780c2ad88ac",
+        "scriptPubKeyType": "pubkeyhash",
+        "transactionIndex": 1,
+        "value": 50.0
+      },
+      {
+        "outputIndex": 0,
+        "scriptPubKeyAddress": "1713vWZeZutpG698WCgybrtLPy48wGbhT5",
+        "scriptPubKeyAsm": "OP_DUP OP_HASH160 41d331c0f4c08ddbf45c661aae8605f17a69b8da OP_EQUALVERIFY OP_CHECKSIG",
+        "scriptPubKeyDesc": "addr(1713vWZeZutpG698WCgybrtLPy48wGbhT5)#40c3sclx",
+        "scriptPubKeyHex": "76a91441d331c0f4c08ddbf45c661aae8605f17a69b8da88ac",
+        "scriptPubKeyType": "pubkeyhash",
+        "transactionIndex": 19,
+        "value": 2.0
+      },
+      {
+        "outputIndex": 0,
+        "scriptPubKeyAddress": "1713vWZeZutpG698WCgybrtLPy48wGbhT5",
+        "scriptPubKeyAsm": "OP_DUP OP_HASH160 41d331c0f4c08ddbf45c661aae8605f17a69b8da OP_EQUALVERIFY OP_CHECKSIG",
+        "scriptPubKeyDesc": "addr(1713vWZeZutpG698WCgybrtLPy48wGbhT5)#40c3sclx",
+        "scriptPubKeyHex": "76a91441d331c0f4c08ddbf45c661aae8605f17a69b8da88ac",
+        "scriptPubKeyType": "pubkeyhash",
+        "transactionIndex": 855,
+        "value": 0.4986921
+      },
+      {
+        "outputIndex": 0,
+        "scriptPubKeyAddress": "1713vWZeZutpG698WCgybrtLPy48wGbhT5",
+        "scriptPubKeyAsm": "OP_DUP OP_HASH160 41d331c0f4c08ddbf45c661aae8605f17a69b8da OP_EQUALVERIFY OP_CHECKSIG",
+        "scriptPubKeyDesc": "addr(1713vWZeZutpG698WCgybrtLPy48wGbhT5)#40c3sclx",
+        "scriptPubKeyHex": "76a91441d331c0f4c08ddbf45c661aae8605f17a69b8da88ac",
+        "scriptPubKeyType": "pubkeyhash",
+        "transactionIndex": 861,
+        "value": 0.1
+      }
+    ]
+  },
+  {
+    "header": {
+      "hash": "000000000000000003c7de5e76d7a6673d4c658e4deff841c4ca97efa880a3f6",
+      "number": 401060,
+      "parentHash": "000000000000000001006ad8784b217bf313ee7a809b4ee1d88fc42f51131e99",
+      "timestamp": 1457065356
+    }
+  }
+]

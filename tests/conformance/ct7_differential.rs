@@ -1,7 +1,7 @@
 //! CT-7 — differential testing against the reference implementation.
 //!
-//! The fixture suite compares against recorded answers, so it only ever asks the
-//! questions someone thought to record. This one builds its questions out of the
+//! The queries in `tests/queries/` were written by hand, so they only ever ask
+//! the questions someone thought to ask. This one builds its questions out of the
 //! catalog instead: every table, every filter it declares, every relation, with
 //! values sampled from the chunk itself. Both engines answer, and the answers
 //! must agree.

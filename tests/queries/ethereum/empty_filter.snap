@@ -1,0 +1,21 @@
+---
+source: tests/queries.rs
+---
+blocks: 2 (17881390 to 17881395)
+
+[
+  {
+    "header": {
+      "hash": "0xdda0a722c34ab011af33454e333937253d6bdd5a82f18edc4c5b6f332ed6e976",
+      "number": 17881390,
+      "parentHash": "0xb38b7d93d8221ccb406b832f9f545122e54f09ebe5e9f7c89b6f9f11821c649c"
+    }
+  },
+  {
+    "header": {
+      "hash": "0x90224cca1a096cb566f33d610ab850e451394abe0b8005e1079339aa26e3a546",
+      "number": 17881395,
+      "parentHash": "0xdd68e4426ddd634404e6c28a7c48c57f54930c8c88fe63793e304efb7d8cb0aa"
+    }
+  }
+]

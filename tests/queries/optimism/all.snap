@@ -1,0 +1,9 @@
+---
+source: tests/queries.rs
+---
+blocks: 2 (125800000 to 125800001)
+logs: 236
+stateDiffs: 578
+traces: 1543
+transactions: 46
+digest: 55a910c020c0cc517ab58189c8951e44

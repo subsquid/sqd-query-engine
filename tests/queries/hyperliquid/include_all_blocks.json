@@ -1,0 +1,14 @@
+{
+  "type": "hyperliquidFills",
+  "fromBlock": 748640000,
+  "toBlock": 748640500,
+  "includeAllBlocks": true,
+  "fields": {
+    "block": {
+      "number": true,
+      "hash": true,
+      "parentHash": true,
+      "timestamp": true
+    }
+  }
+}

@@ -1,9 +1,8 @@
 //! Whether the real chunk a test needs is there, and what its absence means.
 //!
-//! Shared verbatim by both test targets through `#[path]`, because a skip guard
-//! in two copies is a skip guard that will disagree with itself — and the copy
-//! that says "absent" when the tree is present reports green having compared
-//! nothing, which §8.1 names as the most common way a conformance suite lies.
+//! A guard that says "absent" when the chunk is there reports green having
+//! compared nothing, which §8.1 names as the most common way a conformance
+//! suite lies.
 //!
 //! A guard names the dataset its test reads. A guard on some other dataset
 //! skips a test whose chunk is there, or lets one through whose chunk is not.
@@ -33,24 +32,6 @@ pub fn fixture_tree_has(dataset: &str) -> bool {
 /// [`fixture_tree_has`] for a test that reads several datasets.
 pub fn fixture_tree_has_all<'a>(datasets: impl IntoIterator<Item = &'a str>) -> bool {
     datasets.into_iter().all(fixture_tree_has)
-}
-
-/// Whether the fixture tree's queries are checked out, for a test that reads
-/// them rather than a chunk. Same contract as [`fixture_tree_has`].
-pub fn fixture_queries_present() -> bool {
-    let dir = fixture_dir();
-    if dir.is_dir() {
-        return true;
-    }
-
-    assert!(
-        std::env::var_os("SQD_REQUIRE_CHUNKS").is_none(),
-        "SQD_REQUIRE_CHUNKS is set but the fixture tree is not at {}, \
-         so these tests would report green having compared nothing",
-        dir.display()
-    );
-
-    false
 }
 
 /// Where the reference implementation's query sources are, if they are.

@@ -1,0 +1,55 @@
+---
+source: tests/queries.rs
+---
+blocks: 3 (17881390 to 17882786)
+stateDiffs: 3
+
+[
+  {
+    "header": {
+      "hash": "0xdda0a722c34ab011af33454e333937253d6bdd5a82f18edc4c5b6f332ed6e976",
+      "number": 17881390,
+      "parentHash": "0xb38b7d93d8221ccb406b832f9f545122e54f09ebe5e9f7c89b6f9f11821c649c"
+    }
+  },
+  {
+    "header": {
+      "hash": "0xc8b1c4bd44d627f1dc5789379c23a2d907a8e984c2719637a5c9859a240ffe90",
+      "number": 17882154,
+      "parentHash": "0x5ad63ca5a0f25437699b0b81d7b7265ebc2869ada4ea6ce155e8fd4f80db1cfa"
+    },
+    "stateDiffs": [
+      {
+        "address": "0xffdbe829d5a9afcd50482c23eb387b9050f1f825",
+        "key": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "kind": "*",
+        "next": "0x000100000100010000fda5760000000000000000001d5207b6e3917a7e83de3c",
+        "prev": "0x000100000100010000fda9150000000000000000001eb5d49eed1e1dbb0a26a5",
+        "transactionIndex": 85
+      },
+      {
+        "address": "0xffdbe829d5a9afcd50482c23eb387b9050f1f825",
+        "key": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "kind": "*",
+        "next": "0x000000000000000000000000000001931fa0a25cc48808a1a47eff014f316fba",
+        "prev": "0x000000000000000000000000000001921a0d4b98971c635150c04d81993e3d82",
+        "transactionIndex": 85
+      },
+      {
+        "address": "0xffdbe829d5a9afcd50482c23eb387b9050f1f825",
+        "key": "0x0000000000000000000000000000000000000000000000000000000000000008",
+        "kind": "*",
+        "next": "0x010006145800000000000006461f7de1652bf4c255fffe8519e4732c64d4698f",
+        "prev": "0x010006145800000000000006443b6d0a860aeb220efffe85a36998c464d42ec7",
+        "transactionIndex": 85
+      }
+    ]
+  },
+  {
+    "header": {
+      "hash": "0x32ee94575704dcf7cd704c34d0521200cdf18b56abe4fee95a718d58e338c076",
+      "number": 17882786,
+      "parentHash": "0x1aa5064ef3ca9a7391565777199bf605ec0190a2a1b88634eb045787766b8856"
+    }
+  }
+]

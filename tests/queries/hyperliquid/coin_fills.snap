@@ -1,0 +1,1354 @@
+---
+source: tests/queries.rs
+---
+blocks: 45 (748640000 to 748640500)
+fills: 110
+
+[
+  {
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640000
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 2,
+        "px": 116391.0,
+        "side": "B",
+        "sz": 0.001,
+        "user": "0xcf0a36dec06e90263288100c11cf69828338e826"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 3,
+        "px": 116391.0,
+        "side": "A",
+        "sz": 0.001,
+        "user": "0xecb63caa47c7c4e77f60f1ce858cf28dc2b82b00"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640002
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 6,
+        "px": 116391.0,
+        "side": "B",
+        "sz": 0.00015,
+        "user": "0xcf0a36dec06e90263288100c11cf69828338e826"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 7,
+        "px": 116391.0,
+        "side": "A",
+        "sz": 0.00015,
+        "user": "0xecb63caa47c7c4e77f60f1ce858cf28dc2b82b00"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640005
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 8,
+        "px": 116391.0,
+        "side": "B",
+        "sz": 0.00015,
+        "user": "0xcf0a36dec06e90263288100c11cf69828338e826"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 9,
+        "px": 116391.0,
+        "side": "A",
+        "sz": 0.00015,
+        "user": "0xecb63caa47c7c4e77f60f1ce858cf28dc2b82b00"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640007
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 0,
+        "px": 116391.0,
+        "side": "B",
+        "sz": 0.00859,
+        "user": "0x823b80a92389e7362e71fbd2d2eff6392294e266"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 1,
+        "px": 116391.0,
+        "side": "A",
+        "sz": 0.00859,
+        "user": "0xd503048cd88a942086d7735b8e74bc1c29ab7aa9"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640014
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Close Short",
+        "fillIndex": 4,
+        "px": 116391.0,
+        "side": "B",
+        "sz": 0.00039,
+        "user": "0x4a1b3580f7ac72bc54175f05b76092eeb7a266aa"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 5,
+        "px": 116391.0,
+        "side": "A",
+        "sz": 0.00039,
+        "user": "0xd503048cd88a942086d7735b8e74bc1c29ab7aa9"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Close Short",
+        "fillIndex": 6,
+        "px": 116397.0,
+        "side": "B",
+        "sz": 0.00018,
+        "user": "0x4a1b3580f7ac72bc54175f05b76092eeb7a266aa"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Close Long",
+        "fillIndex": 7,
+        "px": 116397.0,
+        "side": "A",
+        "sz": 0.00018,
+        "user": "0xbf1935fe7ab6d0aa3ee8d3da47c2f80e215b2a1c"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640017
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 0,
+        "px": 116400.0,
+        "side": "B",
+        "sz": 0.0003,
+        "user": "0x34d7f603b69209c41cea348bdc0f8bf488c1ac88"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 1,
+        "px": 116400.0,
+        "side": "A",
+        "sz": 0.0003,
+        "user": "0x950931d24bfc8a4f80d1270dd337f438df38f488"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640022
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Close Short",
+        "fillIndex": 10,
+        "px": 116400.0,
+        "side": "B",
+        "sz": 0.0083,
+        "user": "0xc6ac58a7a63339898aeda32499a8238a46d88e84"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 11,
+        "px": 116400.0,
+        "side": "A",
+        "sz": 0.0083,
+        "user": "0x950931d24bfc8a4f80d1270dd337f438df38f488"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640026
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 0,
+        "px": 116403.0,
+        "side": "B",
+        "sz": 0.00018,
+        "user": "0x544d60c23f349f9b1ddb8d1315571d1adf694b95"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Close Long",
+        "fillIndex": 1,
+        "px": 116403.0,
+        "side": "A",
+        "sz": 0.00018,
+        "user": "0xbf1935fe7ab6d0aa3ee8d3da47c2f80e215b2a1c"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 2,
+        "px": 116403.0,
+        "side": "B",
+        "sz": 0.12887,
+        "user": "0x544d60c23f349f9b1ddb8d1315571d1adf694b95"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Close Long",
+        "fillIndex": 3,
+        "px": 116403.0,
+        "side": "A",
+        "sz": 0.12887,
+        "user": "0x023a3d058020fb76cca98f01b3c48c8938a22355"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 4,
+        "px": 116404.0,
+        "side": "B",
+        "sz": 0.0086,
+        "user": "0x544d60c23f349f9b1ddb8d1315571d1adf694b95"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 5,
+        "px": 116404.0,
+        "side": "A",
+        "sz": 0.0086,
+        "user": "0xf2f5890897988c4f3c46e9b2b313936674d32b2e"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 6,
+        "px": 116404.0,
+        "side": "B",
+        "sz": 0.017,
+        "user": "0x544d60c23f349f9b1ddb8d1315571d1adf694b95"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Close Long",
+        "fillIndex": 7,
+        "px": 116404.0,
+        "side": "A",
+        "sz": 0.017,
+        "user": "0x57dd78cd36e76e2011e8f6dc25cabbaba994494b"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640031
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 0,
+        "px": 116406.0,
+        "side": "B",
+        "sz": 0.0055,
+        "user": "0x88b0d5665238a4158bd0d4b076381c4063f0f96c"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 1,
+        "px": 116406.0,
+        "side": "A",
+        "sz": 0.0055,
+        "user": "0xecb63caa47c7c4e77f60f1ce858cf28dc2b82b00"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640046
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 4,
+        "px": 116406.0,
+        "side": "B",
+        "sz": 0.00047,
+        "user": "0xc7354e0ea8268bbc2c59805092847abf01d72ecc"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 5,
+        "px": 116406.0,
+        "side": "A",
+        "sz": 0.00047,
+        "user": "0xecb63caa47c7c4e77f60f1ce858cf28dc2b82b00"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640050
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 6,
+        "px": 116411.0,
+        "side": "B",
+        "sz": 0.00015,
+        "user": "0xa3652867632777bd42f12561d28bfd2064a11721"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 7,
+        "px": 116411.0,
+        "side": "A",
+        "sz": 0.00015,
+        "user": "0xcfbeabe899fade3a19d18e5ea24ee37924fe5604"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640059
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 2,
+        "px": 116414.0,
+        "side": "B",
+        "sz": 0.00145,
+        "user": "0xd3ac49f89a1f2767c448ab2b90726c8479dedf5d"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Close Long",
+        "fillIndex": 3,
+        "px": 116414.0,
+        "side": "A",
+        "sz": 0.00145,
+        "user": "0x023a3d058020fb76cca98f01b3c48c8938a22355"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640071
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Close Short",
+        "fillIndex": 10,
+        "px": 116413.0,
+        "side": "B",
+        "sz": 0.00962,
+        "user": "0x9fb98b1e71c168301713bb083e79720716a8f8cb"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Close Long",
+        "fillIndex": 11,
+        "px": 116413.0,
+        "side": "A",
+        "sz": 0.00962,
+        "user": "0x35546eb5ab0725939bf7754e3f1a481d10592db8"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640083
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Close Short",
+        "fillIndex": 0,
+        "px": 116413.0,
+        "side": "B",
+        "sz": 0.01308,
+        "user": "0x9fb98b1e71c168301713bb083e79720716a8f8cb"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Close Long",
+        "fillIndex": 1,
+        "px": 116413.0,
+        "side": "A",
+        "sz": 0.01308,
+        "user": "0x9457d53b83a56a116e58ef0a976e5e330a2c9e13"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640091
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 2,
+        "px": 116414.0,
+        "side": "B",
+        "sz": 0.0001,
+        "user": "0x173df2ca1a2bfaf2e036869c63ee7067afb661e9"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Close Long",
+        "fillIndex": 3,
+        "px": 116414.0,
+        "side": "A",
+        "sz": 0.0001,
+        "user": "0x023a3d058020fb76cca98f01b3c48c8938a22355"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 8,
+        "px": 116414.0,
+        "side": "B",
+        "sz": 0.00244,
+        "user": "0xd3ac49f89a1f2767c448ab2b90726c8479dedf5d"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Close Long",
+        "fillIndex": 9,
+        "px": 116414.0,
+        "side": "A",
+        "sz": 0.00244,
+        "user": "0x023a3d058020fb76cca98f01b3c48c8938a22355"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640106
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Close Short",
+        "fillIndex": 0,
+        "px": 116413.0,
+        "side": "B",
+        "sz": 0.0055,
+        "user": "0x9fb98b1e71c168301713bb083e79720716a8f8cb"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Close Long",
+        "fillIndex": 1,
+        "px": 116413.0,
+        "side": "A",
+        "sz": 0.0055,
+        "user": "0x88b0d5665238a4158bd0d4b076381c4063f0f96c"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640110
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Close Short",
+        "fillIndex": 0,
+        "px": 116413.0,
+        "side": "B",
+        "sz": 0.00029,
+        "user": "0x9fb98b1e71c168301713bb083e79720716a8f8cb"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 1,
+        "px": 116413.0,
+        "side": "A",
+        "sz": 0.00029,
+        "user": "0x96a27a8e80a8d9c42a08d033be8ed3e4c4d84cc0"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 2,
+        "px": 116414.0,
+        "side": "B",
+        "sz": 0.02487,
+        "user": "0x59319c81c0cf3d02e3b68996c2dfe47308a006dc"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Close Long",
+        "fillIndex": 3,
+        "px": 116414.0,
+        "side": "A",
+        "sz": 0.02487,
+        "user": "0x023a3d058020fb76cca98f01b3c48c8938a22355"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640117
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Close Short",
+        "fillIndex": 2,
+        "px": 116413.0,
+        "side": "B",
+        "sz": 0.03861,
+        "user": "0x9fb98b1e71c168301713bb083e79720716a8f8cb"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 3,
+        "px": 116413.0,
+        "side": "A",
+        "sz": 0.03861,
+        "user": "0x7477be6928becbb712514ab117fad809892701a8"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640122
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Close Short",
+        "fillIndex": 2,
+        "px": 116413.0,
+        "side": "B",
+        "sz": 0.00209,
+        "user": "0x9fb98b1e71c168301713bb083e79720716a8f8cb"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Close Long",
+        "fillIndex": 3,
+        "px": 116413.0,
+        "side": "A",
+        "sz": 0.00209,
+        "user": "0x5faed49291db46f90e9af7331e41046e65776e5f"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640129
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Close Short",
+        "fillIndex": 0,
+        "px": 116413.0,
+        "side": "B",
+        "sz": 0.00013,
+        "user": "0x9fb98b1e71c168301713bb083e79720716a8f8cb"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 1,
+        "px": 116413.0,
+        "side": "A",
+        "sz": 0.00013,
+        "user": "0x1f432b1b711401bb940d17a4dd180977362d1093"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640150
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 8,
+        "px": 116414.0,
+        "side": "B",
+        "sz": 0.0152,
+        "user": "0x13d7abcbfe88a95134c509b5d423b212b323f8d8"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Close Long",
+        "fillIndex": 9,
+        "px": 116414.0,
+        "side": "A",
+        "sz": 0.0152,
+        "user": "0x023a3d058020fb76cca98f01b3c48c8938a22355"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640153
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 6,
+        "px": 116414.0,
+        "side": "B",
+        "sz": 0.00039,
+        "user": "0x4c180462a051ab67d8237ede2c987590df2fbbe6"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Close Long",
+        "fillIndex": 7,
+        "px": 116414.0,
+        "side": "A",
+        "sz": 0.00039,
+        "user": "0x023a3d058020fb76cca98f01b3c48c8938a22355"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640157
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Close Short",
+        "fillIndex": 0,
+        "px": 116413.0,
+        "side": "B",
+        "sz": 0.0001,
+        "user": "0x9fb98b1e71c168301713bb083e79720716a8f8cb"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 1,
+        "px": 116413.0,
+        "side": "A",
+        "sz": 0.0001,
+        "user": "0x959cf04483af209a5e5e8592feaf94c848382dfd"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640171
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 2,
+        "px": 116414.0,
+        "side": "B",
+        "sz": 0.0002,
+        "user": "0x6a1ed0b20c1cd6cc1a8218119d3b85f946583e1d"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Close Long",
+        "fillIndex": 3,
+        "px": 116414.0,
+        "side": "A",
+        "sz": 0.0002,
+        "user": "0x023a3d058020fb76cca98f01b3c48c8938a22355"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640191
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Short > Long",
+        "fillIndex": 0,
+        "px": 116413.0,
+        "side": "B",
+        "sz": 0.10238,
+        "user": "0x9fb98b1e71c168301713bb083e79720716a8f8cb"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Close Long",
+        "fillIndex": 1,
+        "px": 116413.0,
+        "side": "A",
+        "sz": 0.10238,
+        "user": "0x7effe0a6f64bbe8fc2857095f5ff8fe6c9f7404a"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 2,
+        "px": 116413.0,
+        "side": "B",
+        "sz": 0.05262,
+        "user": "0x839fb7089af2091b9bd9487a977c41daf56394c0"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Close Long",
+        "fillIndex": 3,
+        "px": 116413.0,
+        "side": "A",
+        "sz": 0.05262,
+        "user": "0x7effe0a6f64bbe8fc2857095f5ff8fe6c9f7404a"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640210
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 0,
+        "px": 116413.0,
+        "side": "B",
+        "sz": 0.0003,
+        "user": "0x839fb7089af2091b9bd9487a977c41daf56394c0"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 1,
+        "px": 116413.0,
+        "side": "A",
+        "sz": 0.0003,
+        "user": "0xf967239debef10dbc78e9bbbb2d8a16b72a614eb"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640232
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 8,
+        "px": 116414.0,
+        "side": "B",
+        "sz": 0.00016,
+        "user": "0xd1c167e2d91f759fb2125aa4a827d4e21c0eb99c"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Close Long",
+        "fillIndex": 9,
+        "px": 116414.0,
+        "side": "A",
+        "sz": 0.00016,
+        "user": "0x023a3d058020fb76cca98f01b3c48c8938a22355"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640257
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 22,
+        "px": 116414.0,
+        "side": "B",
+        "sz": 0.08404,
+        "user": "0x772993d2da0243eb392394cda15c2987b2eb589c"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Close Long",
+        "fillIndex": 23,
+        "px": 116414.0,
+        "side": "A",
+        "sz": 0.08404,
+        "user": "0x023a3d058020fb76cca98f01b3c48c8938a22355"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 24,
+        "px": 116414.0,
+        "side": "B",
+        "sz": 0.03073,
+        "user": "0x772993d2da0243eb392394cda15c2987b2eb589c"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 25,
+        "px": 116414.0,
+        "side": "A",
+        "sz": 0.03073,
+        "user": "0x7fdafde5cfb5465924316eced2d3715494c517d1"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 26,
+        "px": 116414.0,
+        "side": "B",
+        "sz": 0.12914,
+        "user": "0x772993d2da0243eb392394cda15c2987b2eb589c"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 27,
+        "px": 116414.0,
+        "side": "A",
+        "sz": 0.12914,
+        "user": "0xecb63caa47c7c4e77f60f1ce858cf28dc2b82b00"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640267
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 16,
+        "px": 116413.0,
+        "side": "B",
+        "sz": 0.03045,
+        "user": "0x839fb7089af2091b9bd9487a977c41daf56394c0"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Close Long",
+        "fillIndex": 17,
+        "px": 116413.0,
+        "side": "A",
+        "sz": 0.03045,
+        "user": "0xa092b5feabba185422d5eeea27f7390c57719f6c"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640280
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 0,
+        "px": 116413.0,
+        "side": "B",
+        "sz": 0.01099,
+        "user": "0x839fb7089af2091b9bd9487a977c41daf56394c0"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 1,
+        "px": 116413.0,
+        "side": "A",
+        "sz": 0.01099,
+        "user": "0xd4c1f7e8d876c4749228d515473d36f919583d1d"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640312
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 0,
+        "px": 116413.0,
+        "side": "B",
+        "sz": 0.01101,
+        "user": "0x839fb7089af2091b9bd9487a977c41daf56394c0"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 1,
+        "px": 116413.0,
+        "side": "A",
+        "sz": 0.01101,
+        "user": "0xe841980d8d55e7338d19417fec01ee36acbcd706"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640316
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 2,
+        "px": 116414.0,
+        "side": "B",
+        "sz": 0.00258,
+        "user": "0x540b0c6c6a3bd7393c72d012e0440ee04a9b010d"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 3,
+        "px": 116414.0,
+        "side": "A",
+        "sz": 0.00258,
+        "user": "0xecb63caa47c7c4e77f60f1ce858cf28dc2b82b00"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 8,
+        "px": 116414.0,
+        "side": "B",
+        "sz": 0.00221,
+        "user": "0x6bb88a7b982edd0498aa1362574d1e2cbe84eb20"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 9,
+        "px": 116414.0,
+        "side": "A",
+        "sz": 0.00221,
+        "user": "0xecb63caa47c7c4e77f60f1ce858cf28dc2b82b00"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640327
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 0,
+        "px": 116414.0,
+        "side": "B",
+        "sz": 0.00392,
+        "user": "0xbc4768612aa698e6fcab8f04a0d0595494f9b697"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 1,
+        "px": 116414.0,
+        "side": "A",
+        "sz": 0.00392,
+        "user": "0xecb63caa47c7c4e77f60f1ce858cf28dc2b82b00"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640336
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 12,
+        "px": 116413.0,
+        "side": "B",
+        "sz": 0.00059,
+        "user": "0x839fb7089af2091b9bd9487a977c41daf56394c0"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 13,
+        "px": 116413.0,
+        "side": "A",
+        "sz": 0.00059,
+        "user": "0x96a27a8e80a8d9c42a08d033be8ed3e4c4d84cc0"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 14,
+        "px": 116414.0,
+        "side": "B",
+        "sz": 0.00211,
+        "user": "0x540b0c6c6a3bd7393c72d012e0440ee04a9b010d"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 15,
+        "px": 116414.0,
+        "side": "A",
+        "sz": 0.00211,
+        "user": "0xecb63caa47c7c4e77f60f1ce858cf28dc2b82b00"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640337
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 2,
+        "px": 116414.0,
+        "side": "B",
+        "sz": 0.02979,
+        "user": "0xa092b5feabba185422d5eeea27f7390c57719f6c"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 3,
+        "px": 116414.0,
+        "side": "A",
+        "sz": 0.02979,
+        "user": "0xecb63caa47c7c4e77f60f1ce858cf28dc2b82b00"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640340
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 4,
+        "px": 116414.0,
+        "side": "B",
+        "sz": 0.00145,
+        "user": "0x735ea75f8de325db9e6c1b0ccf95bbc136a608f3"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 5,
+        "px": 116414.0,
+        "side": "A",
+        "sz": 0.00145,
+        "user": "0xecb63caa47c7c4e77f60f1ce858cf28dc2b82b00"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640349
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 0,
+        "px": 116414.0,
+        "side": "B",
+        "sz": 0.00031,
+        "user": "0x34d7f603b69209c41cea348bdc0f8bf488c1ac88"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 1,
+        "px": 116414.0,
+        "side": "A",
+        "sz": 0.00031,
+        "user": "0xecb63caa47c7c4e77f60f1ce858cf28dc2b82b00"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640393
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 4,
+        "px": 116414.0,
+        "side": "B",
+        "sz": 0.00047,
+        "user": "0xc7354e0ea8268bbc2c59805092847abf01d72ecc"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 5,
+        "px": 116414.0,
+        "side": "A",
+        "sz": 0.00047,
+        "user": "0xecb63caa47c7c4e77f60f1ce858cf28dc2b82b00"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640421
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 4,
+        "px": 116413.0,
+        "side": "B",
+        "sz": 0.00016,
+        "user": "0x839fb7089af2091b9bd9487a977c41daf56394c0"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 5,
+        "px": 116413.0,
+        "side": "A",
+        "sz": 0.00016,
+        "user": "0xcfbeabe899fade3a19d18e5ea24ee37924fe5604"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640434
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 0,
+        "px": 116414.0,
+        "side": "B",
+        "sz": 0.03846,
+        "user": "0x6f1eee2c71635952fe30ef6fde826d95d6ba2f85"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 1,
+        "px": 116414.0,
+        "side": "A",
+        "sz": 0.03846,
+        "user": "0xecb63caa47c7c4e77f60f1ce858cf28dc2b82b00"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640438
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 2,
+        "px": 116414.0,
+        "side": "B",
+        "sz": 0.00115,
+        "user": "0xd3ac49f89a1f2767c448ab2b90726c8479dedf5d"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 3,
+        "px": 116414.0,
+        "side": "A",
+        "sz": 0.00115,
+        "user": "0xecb63caa47c7c4e77f60f1ce858cf28dc2b82b00"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640449
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 8,
+        "px": 116413.0,
+        "side": "B",
+        "sz": 0.01005,
+        "user": "0x839fb7089af2091b9bd9487a977c41daf56394c0"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Close Long",
+        "fillIndex": 9,
+        "px": 116413.0,
+        "side": "A",
+        "sz": 0.01005,
+        "user": "0x35546eb5ab0725939bf7754e3f1a481d10592db8"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640461
+    }
+  },
+  {
+    "fills": [
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 2,
+        "px": 116414.0,
+        "side": "B",
+        "sz": 0.0001,
+        "user": "0x173df2ca1a2bfaf2e036869c63ee7067afb661e9"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 3,
+        "px": 116414.0,
+        "side": "A",
+        "sz": 0.0001,
+        "user": "0xecb63caa47c7c4e77f60f1ce858cf28dc2b82b00"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Long",
+        "fillIndex": 8,
+        "px": 116414.0,
+        "side": "B",
+        "sz": 0.00173,
+        "user": "0xd3ac49f89a1f2767c448ab2b90726c8479dedf5d"
+      },
+      {
+        "coin": "BTC",
+        "dir": "Open Short",
+        "fillIndex": 9,
+        "px": 116414.0,
+        "side": "A",
+        "sz": 0.00173,
+        "user": "0xecb63caa47c7c4e77f60f1ce858cf28dc2b82b00"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640487
+    }
+  },
+  {
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640500
+    }
+  }
+]

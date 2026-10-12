@@ -1,0 +1,29 @@
+---
+source: tests/queries.rs
+---
+blocks: 2 (24136800 to 24140649)
+
+[
+  {
+    "header": {
+      "hash": "0x8dd488e3995ac174e4397b4db4f16eb0f2942734c810475378e02025181269e8",
+      "implName": "parity-kusama",
+      "implVersion": 0,
+      "number": 24136800,
+      "parentHash": "0xa2377200c4b7f4251a0fc38613fb15e4c49720fa195241c34198737b22fb482e",
+      "specName": "kusama",
+      "specVersion": 1002006
+    }
+  },
+  {
+    "header": {
+      "hash": "0x8c5ed4ba2060b7a3f9409fe63ee86f1c85d94dc1bace95abdc975e375b897820",
+      "implName": "parity-kusama",
+      "implVersion": 0,
+      "number": 24140649,
+      "parentHash": "0x2e3470af95a1b1b44136c94248d358425161d34c71f1bb77d7d366b5a3226cee",
+      "specName": "kusama",
+      "specVersion": 1002006
+    }
+  }
+]

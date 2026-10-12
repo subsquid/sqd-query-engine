@@ -1,0 +1,82 @@
+---
+source: tests/queries.rs
+---
+blocks: 4 (748640000 to 748640100)
+actions: 2
+
+[
+  {
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640000
+    }
+  },
+  {
+    "actions": [
+      {
+        "action": {
+          "amount": "0.0000003199999980552093",
+          "hyperliquidChain": "Mainnet",
+          "nonce": 1759313975139,
+          "signatureChainId": "0x66eee",
+          "toPerp": false,
+          "type": "usdClassTransfer"
+        },
+        "actionIndex": 504,
+        "nonce": 1759313975139,
+        "response": {
+          "type": "default"
+        },
+        "signature": {
+          "r": "0x9b5d697d5c1a5d642e1fcf7dd9b9e39c56dde5c37a1b04fe19ea349072a2b82",
+          "s": "0x4996098c7de3cf80790227e272043bf240804c79a4f7923d9dfdb817b42b0826",
+          "v": 28
+        },
+        "status": "ok",
+        "user": "0x6b55a1b2634720d5ec5bcd149a6cf698414540f5",
+        "vaultAddress": null
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640045
+    }
+  },
+  {
+    "actions": [
+      {
+        "action": {
+          "amount": "70.58",
+          "hyperliquidChain": "Mainnet",
+          "nonce": 1759313967095,
+          "signatureChainId": "0xa4b1",
+          "toPerp": true,
+          "type": "usdClassTransfer"
+        },
+        "actionIndex": 254,
+        "nonce": 1759313967095,
+        "response": {
+          "type": "default"
+        },
+        "signature": {
+          "r": "0xda5a12eedb073af42aa57ec63eccf2eedd6b246b5c9c3d66a4b1c4380adbc6cc",
+          "s": "0x139bc56b5a063b05ffc9ae373dfee558d16c5f0662aa62b12d629cfac6b75e1a",
+          "v": 28
+        },
+        "status": "ok",
+        "user": "0x42c62a7a3dfdcdefb6811b227ab42bb043b5ad7f",
+        "vaultAddress": null
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640097
+    }
+  },
+  {
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640100
+    }
+  }
+]

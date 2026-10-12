@@ -18,9 +18,9 @@
 //!   not by cost — CT-9's proptests run in a tenth of a second and `make test`
 //!   runs them per-PR, while CT-7 and CT-8 wait on inputs no job supplies yet.
 //!
-//! Fixture-comparison tests are deliberately *not* here. They stop regressions
-//! rather than find gaps (§8.1), so they keep their own target,
-//! `tests/e2e_fixtures.rs`.
+//! Recorded queries on real chunks are deliberately *not* here. They stop
+//! regressions rather than find gaps (§8.1), so they keep their own target,
+//! `tests/queries.rs`.
 //!
 //! [`spec/08-conformance.md`]: ../../spec/08-conformance.md
 

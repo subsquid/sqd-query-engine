@@ -1,0 +1,8 @@
+---
+source: tests/queries.rs
+---
+blocks: 86 (217710049 to 217710956)
+instructions: 3446
+tokenBalances: 272
+transactions: 272
+digest: 92f4bd99a3e9c2152c76e91966914bab

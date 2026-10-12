@@ -535,14 +535,6 @@ def test_a_test_filed_under_a_class_it_does_not_claim_is_caught(s):
 
 
 @case
-def test_a_tag_on_a_macro_generated_test_is_not_an_orphan(s):
-    """113 fixture tests are composed by `paste!` and spelled nowhere."""
-    assert "tag-orphan" not in checks_in(run(s.root)[1])
-    names = check.test_fns(s.root.parent)
-    assert "solana_include_all_blocks" in names, "paste-generated tests are invisible"
-
-
-@case
 def test_a_stale_evidence_count_is_caught(s):
     s.edit("08-conformance.md", "are backed by a tagged test", "are backed by no tagged test")
     assert "trace-evidence-stale" in checks_in(run(s.root)[1])

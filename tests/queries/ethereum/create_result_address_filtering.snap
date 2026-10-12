@@ -1,0 +1,56 @@
+---
+source: tests/queries.rs
+---
+blocks: 4 (17881390 to 17882786)
+traces: 2
+
+[
+  {
+    "header": {
+      "hash": "0xdda0a722c34ab011af33454e333937253d6bdd5a82f18edc4c5b6f332ed6e976",
+      "number": 17881390,
+      "parentHash": "0xb38b7d93d8221ccb406b832f9f545122e54f09ebe5e9f7c89b6f9f11821c649c"
+    }
+  },
+  {
+    "header": {
+      "hash": "0x5707afb062b1ba77c8dfbc647ebcb25d639bd958e523a35fac4987a385ae4440",
+      "number": 17881403,
+      "parentHash": "0x2c7c785e7a71c3cb458eb8e2e445941aa401c6bc8a53b9d66f91939b015b7ef2"
+    },
+    "traces": [
+      {
+        "result": {
+          "address": "0x28d16daf8999504db54cb16eb0b30e9c62a152a2"
+        },
+        "traceAddress": [],
+        "transactionIndex": 88,
+        "type": "create"
+      }
+    ]
+  },
+  {
+    "header": {
+      "hash": "0x1000f054f032ef3903c9daff553d4bdda6f11a1b06a29746adcddb9896609223",
+      "number": 17881407,
+      "parentHash": "0x705523e3160b32bd3133566d22289a9d15c6aa1127216e00cb752a87be0e8e2c"
+    },
+    "traces": [
+      {
+        "result": {
+          "address": "0x2ab2c9bf0ef689a02dbcc51b5e7cf7c5db3edb60"
+        },
+        "traceAddress": [],
+        "transactionIndex": 226,
+        "type": "create"
+      }
+    ]
+  },
+  {
+    "header": {
+      "hash": "0x32ee94575704dcf7cd704c34d0521200cdf18b56abe4fee95a718d58e338c076",
+      "number": 17882786,
+      "parentHash": "0x1aa5064ef3ca9a7391565777199bf605ec0190a2a1b88634eb045787766b8856"
+    }
+  }
+]
