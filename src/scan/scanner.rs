@@ -465,10 +465,10 @@ pub(crate) fn next_block_range_end(
 
 /// An upper bound on what a scan's output arrays hold, from the footer alone:
 /// every row of every row group the scan would read, at what each column decodes
-/// to. A group counts whole however little of its block span the request
-/// covers, because its bounds say nothing about how its rows spread between
-/// them. `None` when the footer cannot bound a column. ADR-15 lists what the
-/// bound deliberately does not trust.
+/// to, and its position when the request records positions. A group counts whole
+/// however little of its block span the request covers, because its bounds say
+/// nothing about how its rows spread between them. `None` when the footer cannot
+/// bound a column. ADR-15 lists what the bound deliberately does not trust.
 pub(crate) fn estimate_scan_bytes(
     table: &ParquetTable,
     request: &ScanRequest,
@@ -496,6 +496,11 @@ pub(crate) fn estimate_scan_bytes(
                 return Ok(None);
             };
             total = total.saturating_add(bytes);
+        }
+
+        if request.positions {
+            let positions = rows.saturating_mul(size_of::<u64>() as u64);
+            total = total.saturating_add(positions);
         }
     }
 

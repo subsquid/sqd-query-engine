@@ -76,6 +76,14 @@ that asks for header fields, and no change on one-block RPC queries
 or on queries that defer anyway. This cost is accepted: the memory bound must not
 depend on how a file was written.
 
+The narrow pass is bounded the same way. It covers the whole request when the
+footer bound of its columns, row positions included, fits the budget; otherwise
+it reads ranges of 1 024 header blocks, or of 16 when an item matches every row.
+A range reads again every row group whose blocks it shares with another, and a
+table sorted by its filter columns shares them all: an address-only log query
+over a 10 247-block chunk read the table eleven times, at a sixth of the speed
+of one pass.
+
 CT-5 pins the decision. `the_estimate_never_undercounts_what_a_scan_decodes`
 checks the bound against what the scan decodes for eleven column types under
 twelve writer layouts. `a_query_without_relations_reads_payloads_only_for_the_page`

@@ -33,7 +33,7 @@ use parquet::arrow::ArrowSchemaConverter;
 use parquet::basic::{Encoding, Type as PhysicalType};
 use parquet::file::metadata::ColumnChunkMetaData;
 use parquet::file::properties::{EnabledStatistics, WriterProperties, WriterVersion};
-use sqd_query_engine::scan::{ChunkReader, ParquetChunkReader, ScanRequest};
+use sqd_query_engine::scan::{ChunkReader, ParquetChunkReader, ScanRequest, Scanned};
 use std::sync::Arc;
 
 const TABLE: &str = "items";
@@ -248,6 +248,19 @@ fn decoded_bytes(batches: &[RecordBatch]) -> u64 {
         .sum()
 }
 
+/// The same, with the row positions the scan recorded beside its batches.
+fn scanned_bytes(scanned: &Scanned) -> u64 {
+    let rows = scanned.rows();
+    let positions: u64 = rows
+        .positions()
+        .unwrap_or_default()
+        .iter()
+        .map(|array| array.to_data().get_slice_memory_size().unwrap() as u64)
+        .sum();
+
+    decoded_bytes(rows.batches()) + positions
+}
+
 #[test]
 fn the_estimate_never_undercounts_what_a_scan_decodes() {
     let columns = columns();
@@ -279,14 +292,19 @@ fn the_estimate_never_undercounts_what_a_scan_decodes() {
         let reader = ParquetChunkReader::open(dir.path()).unwrap();
 
         for (column, _, _) in &columns {
-            for (from, to) in ranges {
+            for ((from, to), positions) in ranges.into_iter().flat_map(|r| [(r, false), (r, true)])
+            {
                 let mut request = ScanRequest::new(vec![column]);
                 request.block_number_column = Some("block_number");
                 request.from_block = from;
                 request.to_block = to;
+                request.positions = positions;
 
-                let decoded = decoded_bytes(&reader.scan(TABLE, &request).unwrap());
-                let case = format!("{} / {column} / {from:?}..{to:?}", writer.name);
+                let decoded = scanned_bytes(&reader.scan_rows(TABLE, &request).unwrap());
+                let case = format!(
+                    "{} / {column} / {from:?}..{to:?} / positions {positions}",
+                    writer.name
+                );
 
                 match reader.estimate_scan_bytes(TABLE, &request) {
                     Some(estimate) if estimate < decoded => failures.push(format!(

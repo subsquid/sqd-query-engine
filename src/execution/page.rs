@@ -191,22 +191,11 @@ fn range_end(
     } else {
         None
     };
-    if execution.selection.is_some() {
-        // Bound each key/size pass even when row groups overlap or have no
-        // statistics. Count actual headers so sparse block numbers do not
-        // turn into empty scans across numeric gaps.
-        // Unfiltered scans fill a page quickly; selective scans use larger
-        // ranges to amortize predicate decoding over overlapping row groups.
-        let blocks_per_selection = if plan
-            .table_plans
-            .iter()
-            .any(|table| table.predicates.iter().any(RowPredicate::matches_every_row))
-        {
-            16
-        } else {
-            1024
-        };
-        let first = header_numbers.partition_point(|&block| block < from_block);
+    // Count actual headers so sparse block numbers do not turn into empty
+    // scans across numeric gaps.
+    let first = header_numbers.partition_point(|&block| block < from_block);
+    let headers_left = header_numbers.len() - first;
+    if let Some(blocks_per_selection) = selection_span(execution, headers_left) {
         if let Some(&end) = header_numbers.get(first + blocks_per_selection - 1) {
             hint = Some(hint.map_or(end, |hint| hint.min(end)));
         }
@@ -223,6 +212,40 @@ fn range_end(
     let last_range = hint.is_none() || to_block == request_end;
 
     Ok((to_block, last_range))
+}
+
+/// How many header blocks one selection pass may span, with `headers_left` of
+/// the request still to read; `None` when it may span the request, or when
+/// payloads are not deferred.
+///
+/// Each pass is bounded even when row groups overlap or have no statistics.
+/// Unfiltered scans fill a page within a few blocks. A selective scan spans the
+/// request when the footer bounds its selection within the budget: a range reads
+/// again every row group whose blocks it shares with another, and a table sorted
+/// by its filter columns shares them all. Otherwise it uses larger ranges to
+/// amortize predicate decoding over overlapping row groups.
+fn selection_span(execution: &Execution, headers_left: usize) -> Option<usize> {
+    const UNFILTERED: usize = 16;
+    const SELECTIVE: usize = 1024;
+
+    execution.selection.as_ref()?;
+
+    let unfiltered = execution
+        .plan
+        .table_plans
+        .iter()
+        .any(|table| table.predicates.iter().any(RowPredicate::matches_every_row));
+    if unfiltered {
+        return Some(UNFILTERED);
+    }
+
+    // Only a request that a range would split asks the footer.
+    let splits = headers_left > SELECTIVE;
+    if splits && execution.selection_fits() {
+        return None;
+    }
+
+    Some(SELECTIVE)
 }
 
 /// A narrow size scan avoids decoding wide columns for a large unfiltered query.
