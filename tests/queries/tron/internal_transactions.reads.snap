@@ -1,0 +1,29 @@
+---
+source: tests/queries.rs
+---
+## json
+response 82644089..82644098 n=6 read_through=-
+read blocks blocks=-..- cols=[hash,number] block_column=number at=6:f313158b3ae457bd -> rows=6
+read blocks blocks=82644089..82644098 cols=[number] block_column=number required=[hash,number] positions -> rows=10
+read internal_transactions blocks=-..- cols=[block_number,call_value_info,caller_address,hash,internal_transaction_index,note,rejected,transaction_index,transfer_to_address] block_column=block_number at=27:80563c4f7227b04d -> rows=27
+read internal_transactions blocks=82644089..82644098 cols=[block_number,transaction_index] block_column=block_number required=[call_value_info,caller_address,hash,internal_transaction_index,note,rejected,transaction_index,transfer_to_address] items=[caller_address in(Utf8: "41b4090d337ef8fbf880c1c287412cfb72324d711e")] positions window=82644089..82644098 -> rows=27
+read transactions blocks=-..- cols=[block_number,hash,transaction_index,type] block_column=block_number at=13:37ea40e884fc6521 -> rows=13
+read transactions blocks=82644089..82644097 cols=[block_number,transaction_index] block_column=block_number required=[hash,transaction_index,type] keys=[block_number,transaction_index] block=block_number as pairs positions window=82644089..82644098 -> rows=13
+
+## json, page 256 KiB
+response 82644089..82644098 n=6 read_through=-
+read blocks blocks=-..- cols=[hash,number] block_column=number at=6:f313158b3ae457bd -> rows=6
+read blocks blocks=82644089..82644098 cols=[number] block_column=number required=[hash,number] positions -> rows=10
+read internal_transactions blocks=-..- cols=[block_number,call_value_info,caller_address,hash,internal_transaction_index,note,rejected,transaction_index,transfer_to_address] block_column=block_number at=27:80563c4f7227b04d -> rows=27
+read internal_transactions blocks=82644089..82644098 cols=[block_number,transaction_index] block_column=block_number required=[call_value_info,caller_address,hash,internal_transaction_index,note,rejected,transaction_index,transfer_to_address] items=[caller_address in(Utf8: "41b4090d337ef8fbf880c1c287412cfb72324d711e")] positions window=82644089..82644098 -> rows=27
+read transactions blocks=-..- cols=[block_number,hash,transaction_index,type] block_column=block_number at=13:37ea40e884fc6521 -> rows=13
+read transactions blocks=82644089..82644097 cols=[block_number,transaction_index] block_column=block_number required=[hash,transaction_index,type] keys=[block_number,transaction_index] block=block_number as pairs positions window=82644089..82644098 -> rows=13
+
+## arrow
+response 82644089..82644098 n=6
+read blocks blocks=-..- cols=[hash,number] block_column=number at=6:f313158b3ae457bd -> rows=6
+read blocks blocks=82644089..82644098 cols=[number] block_column=number required=[hash,number] positions -> rows=10
+read internal_transactions blocks=-..- cols=[block_number,call_value_info,caller_address,hash,internal_transaction_index,note,rejected,transaction_index,transfer_to_address] block_column=block_number at=27:80563c4f7227b04d -> rows=27
+read internal_transactions blocks=82644089..82644098 cols=[block_number,transaction_index] block_column=block_number required=[call_value_info,caller_address,hash,internal_transaction_index,note,rejected,transaction_index,transfer_to_address] items=[caller_address in(Utf8: "41b4090d337ef8fbf880c1c287412cfb72324d711e")] positions window=82644089..82644098 -> rows=27
+read transactions blocks=-..- cols=[block_number,hash,transaction_index,type] block_column=block_number at=13:37ea40e884fc6521 -> rows=13
+read transactions blocks=82644089..82644097 cols=[block_number,transaction_index] block_column=block_number required=[hash,transaction_index,type] keys=[block_number,transaction_index] block=block_number as pairs positions window=82644089..82644098 -> rows=13

@@ -1,0 +1,23 @@
+---
+source: tests/queries.rs
+---
+## json
+response 17881390..17881870 n=266 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=266:7cc678195932b3c1 -> rows=266
+read blocks blocks=17881390..17881870 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=481
+read traces blocks=-..- cols=[block_number,call_from,call_type,trace_address,transaction_index,type] block_column=block_number at=2073:e81984c6fd561809 -> rows=2073
+read traces blocks=17881390..17881870 cols=[block_number] block_column=block_number required=[call_from,call_type,trace_address,transaction_index,type] items=[call_from in(Utf8: "0x58df81babdf15276e761808e872a3838cbecbcf9") call_type in(Utf8: "staticcall")] positions window=17881390..17881870 -> rows=2073
+
+## json, page 256 KiB
+response 17881390..17881714 n=184 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=184:bf513b60650cc5dd -> rows=184
+read blocks blocks=17881390..17881870 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=481
+read traces blocks=-..- cols=[block_number,call_from,call_type,trace_address,transaction_index,type] block_column=block_number at=1244:e746dacf4c0d9f31 -> rows=1244
+read traces blocks=17881390..17881870 cols=[block_number] block_column=block_number required=[call_from,call_type,trace_address,transaction_index,type] items=[call_from in(Utf8: "0x58df81babdf15276e761808e872a3838cbecbcf9") call_type in(Utf8: "staticcall")] positions window=17881390..17881870 -> rows=2073
+
+## arrow
+response 17881390..17881870 n=266
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=266:7cc678195932b3c1 -> rows=266
+read blocks blocks=17881390..17881870 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=481
+read traces blocks=-..- cols=[block_number,call_from,call_type,trace_address,transaction_index,type] block_column=block_number at=2073:e81984c6fd561809 -> rows=2073
+read traces blocks=17881390..17881870 cols=[block_number] block_column=block_number required=[call_from,call_type,trace_address,transaction_index,type] items=[call_from in(Utf8: "0x58df81babdf15276e761808e872a3838cbecbcf9") call_type in(Utf8: "staticcall")] positions window=17881390..17881870 -> rows=2073

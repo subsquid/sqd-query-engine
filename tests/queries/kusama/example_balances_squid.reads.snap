@@ -1,0 +1,56 @@
+---
+source: tests/queries.rs
+---
+## json
+response 24136800..24136924 n=125 read_through=24136927
+read blocks blocks=-..- cols=[hash,impl_name,impl_version,number,parent_hash,spec_name,spec_version] block_column=number at=125:c8818f627dff4c38 -> rows=125
+read blocks blocks=24136800..24140649 cols=[number] block_column=number required=[hash,impl_name,impl_version,number,parent_hash,spec_name,spec_version] positions -> rows=3850
+read calls blocks=-..- cols=[address,args,args_size,block_number,extrinsic_index,name,origin] block_column=block_number at=287:cc78bb685e0fff63 -> rows=287
+read calls blocks=24136800..24136815 cols=[args_size,block_number] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] items=[] positions window=24136800..24136815 -> rows=32
+read calls blocks=24136816..24136831 cols=[args_size,block_number] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] items=[] positions window=24136816..24136831 -> rows=33
+read calls blocks=24136832..24136847 cols=[args_size,block_number] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] items=[] positions window=24136832..24136847 -> rows=32
+read calls blocks=24136848..24136863 cols=[args_size,block_number] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] items=[] positions window=24136848..24136863 -> rows=33
+read calls blocks=24136864..24136879 cols=[args_size,block_number] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] items=[] positions window=24136864..24136879 -> rows=33
+read calls blocks=24136880..24136895 cols=[args_size,block_number] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] items=[] positions window=24136880..24136895 -> rows=64
+read calls blocks=24136896..24136911 cols=[args_size,block_number] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] items=[] positions window=24136896..24136911 -> rows=32
+read calls blocks=24136912..24136927 cols=[args_size,block_number] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] items=[] positions window=24136912..24136927 -> rows=34
+read events blocks=-..- cols=[args,args_size,block_number,call_address,extrinsic_index,index,name] block_column=block_number at=167:efecbcdbb3f96349 -> rows=167
+read events blocks=24136800..24136815 cols=[args_size,block_number] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[name in(#c8ba3f3b3bab0896)] positions window=24136800..24136815 -> rows=0
+read events blocks=24136816..24136831 cols=[args_size,block_number] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[name in(#c8ba3f3b3bab0896)] positions window=24136816..24136831 -> rows=4
+read events blocks=24136832..24136847 cols=[args_size,block_number] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[name in(#c8ba3f3b3bab0896)] positions window=24136832..24136847 -> rows=0
+read events blocks=24136848..24136863 cols=[args_size,block_number] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[name in(#c8ba3f3b3bab0896)] positions window=24136848..24136863 -> rows=5
+read events blocks=24136864..24136879 cols=[args_size,block_number] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[name in(#c8ba3f3b3bab0896)] positions window=24136864..24136879 -> rows=5
+read events blocks=24136880..24136895 cols=[args_size,block_number] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[name in(#c8ba3f3b3bab0896)] positions window=24136880..24136895 -> rows=144
+read events blocks=24136896..24136911 cols=[args_size,block_number] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[name in(#c8ba3f3b3bab0896)] positions window=24136896..24136911 -> rows=0
+read events blocks=24136912..24136927 cols=[args_size,block_number] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[name in(#c8ba3f3b3bab0896)] positions window=24136912..24136927 -> rows=9
+
+## json, page 256 KiB
+response 24136800..24136800 n=1 read_through=24136815
+read blocks blocks=-..- cols=[hash,impl_name,impl_version,number,parent_hash,spec_name,spec_version] block_column=number at=1:c77b3abb6f87acd9 -> rows=1
+read blocks blocks=24136800..24140649 cols=[number] block_column=number required=[hash,impl_name,impl_version,number,parent_hash,spec_name,spec_version] positions -> rows=3850
+read calls blocks=-..- cols=[address,args,args_size,block_number,extrinsic_index,name,origin] block_column=block_number at=2:b0e50088c6111b58 -> rows=2
+read calls blocks=24136800..24136815 cols=[args_size,block_number] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] items=[] positions window=24136800..24136815 -> rows=32
+read events blocks=24136800..24136815 cols=[args_size,block_number] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[name in(#c8ba3f3b3bab0896)] positions window=24136800..24136815 -> rows=0
+
+## arrow
+response 24136800..24136924 n=125
+read blocks blocks=-..- cols=[hash,impl_name,impl_version,number,parent_hash,spec_name,spec_version] block_column=number at=125:c8818f627dff4c38 -> rows=125
+read blocks blocks=24136800..24140649 cols=[number] block_column=number required=[hash,impl_name,impl_version,number,parent_hash,spec_name,spec_version] positions -> rows=3850
+read calls blocks=-..- cols=[address,args,args_size,block_number,extrinsic_index,name,origin] block_column=block_number at=287:cc78bb685e0fff63 -> rows=287
+read calls blocks=24136800..24136815 cols=[args_size,block_number] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] items=[] positions window=24136800..24136815 -> rows=32
+read calls blocks=24136816..24136831 cols=[args_size,block_number] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] items=[] positions window=24136816..24136831 -> rows=33
+read calls blocks=24136832..24136847 cols=[args_size,block_number] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] items=[] positions window=24136832..24136847 -> rows=32
+read calls blocks=24136848..24136863 cols=[args_size,block_number] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] items=[] positions window=24136848..24136863 -> rows=33
+read calls blocks=24136864..24136879 cols=[args_size,block_number] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] items=[] positions window=24136864..24136879 -> rows=33
+read calls blocks=24136880..24136895 cols=[args_size,block_number] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] items=[] positions window=24136880..24136895 -> rows=64
+read calls blocks=24136896..24136911 cols=[args_size,block_number] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] items=[] positions window=24136896..24136911 -> rows=32
+read calls blocks=24136912..24136927 cols=[args_size,block_number] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] items=[] positions window=24136912..24136927 -> rows=34
+read events blocks=-..- cols=[args,args_size,block_number,call_address,extrinsic_index,index,name] block_column=block_number at=167:efecbcdbb3f96349 -> rows=167
+read events blocks=24136800..24136815 cols=[args_size,block_number] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[name in(#c8ba3f3b3bab0896)] positions window=24136800..24136815 -> rows=0
+read events blocks=24136816..24136831 cols=[args_size,block_number] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[name in(#c8ba3f3b3bab0896)] positions window=24136816..24136831 -> rows=4
+read events blocks=24136832..24136847 cols=[args_size,block_number] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[name in(#c8ba3f3b3bab0896)] positions window=24136832..24136847 -> rows=0
+read events blocks=24136848..24136863 cols=[args_size,block_number] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[name in(#c8ba3f3b3bab0896)] positions window=24136848..24136863 -> rows=5
+read events blocks=24136864..24136879 cols=[args_size,block_number] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[name in(#c8ba3f3b3bab0896)] positions window=24136864..24136879 -> rows=5
+read events blocks=24136880..24136895 cols=[args_size,block_number] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[name in(#c8ba3f3b3bab0896)] positions window=24136880..24136895 -> rows=144
+read events blocks=24136896..24136911 cols=[args_size,block_number] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[name in(#c8ba3f3b3bab0896)] positions window=24136896..24136911 -> rows=0
+read events blocks=24136912..24136927 cols=[args_size,block_number] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[name in(#c8ba3f3b3bab0896)] positions window=24136912..24136927 -> rows=9

@@ -1,0 +1,35 @@
+---
+source: tests/queries.rs
+---
+## json
+response 4668500..4668510 n=11 read_through=-
+read blocks blocks=-..- cols=[digest,extrinsics_root,hash,impl_name,impl_version,number,parent_hash,spec_name,spec_version,state_root,timestamp,validator] block_column=number at=11:1951357ebf5dff9f -> rows=11
+read blocks blocks=4668500..4668510 cols=[number] block_column=number required=[digest,extrinsics_root,hash,impl_name,impl_version,number,parent_hash,spec_name,spec_version,state_root,timestamp,validator] positions -> rows=11
+read calls blocks=-..- cols=[address,args,args_size,block_number,error,extrinsic_index,name,origin,success] block_column=block_number at=127:cfe761dbc94bb951 -> rows=127
+read calls blocks=4668500..4668510 cols=[address,args_size,block_number,extrinsic_index] block_column=block_number required=[address,args,args_size,error,extrinsic_index,name,origin,success] items=[] positions window=4668500..4668510 -> rows=127
+read events blocks=-..- cols=[args,args_size,block_number,call_address,extrinsic_index,index,name,phase] block_column=block_number at=808:47981970cb6420c8 -> rows=808
+read events blocks=4668500..4668510 cols=[args_size,block_number,call_address,extrinsic_index] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name,phase] keys=[block_number,extrinsic_index] block=block_number as pairs hierarchy=children[block_number,extrinsic_index]/call_address, inclusive positions window=4668500..4668510 -> rows=808
+read extrinsics blocks=-..- cols=[block_number,error,fee,hash,index,signature,success,tip,version] block_column=block_number at=127:6ff0a79ee0b166e0 -> rows=127
+read extrinsics blocks=4668500..4668510 cols=[block_number,index] block_column=block_number required=[error,fee,hash,index,signature,success,tip,version] keys=[block_number,index] block=block_number as pairs positions window=4668500..4668510 -> rows=127
+
+## json, page 256 KiB
+response 4668500..4668502 n=3 read_through=-
+read blocks blocks=-..- cols=[digest,extrinsics_root,hash,impl_name,impl_version,number,parent_hash,spec_name,spec_version,state_root,timestamp,validator] block_column=number at=3:7fb6f0c094f81c5d -> rows=3
+read blocks blocks=4668500..4668510 cols=[number] block_column=number required=[digest,extrinsics_root,hash,impl_name,impl_version,number,parent_hash,spec_name,spec_version,state_root,timestamp,validator] positions -> rows=11
+read calls blocks=-..- cols=[address,args,args_size,block_number,error,extrinsic_index,name,origin,success] block_column=block_number at=25:69ae3941ff583408 -> rows=25
+read calls blocks=4668500..4668510 cols=[address,args_size,block_number,extrinsic_index] block_column=block_number required=[address,args,args_size,error,extrinsic_index,name,origin,success] items=[] positions window=4668500..4668510 -> rows=127
+read events blocks=-..- cols=[args,args_size,block_number,call_address,extrinsic_index,index,name,phase] block_column=block_number at=157:d41cd9bc68b6dea9 -> rows=157
+read events blocks=4668500..4668510 cols=[args_size,block_number,call_address,extrinsic_index] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name,phase] keys=[block_number,extrinsic_index] block=block_number as pairs hierarchy=children[block_number,extrinsic_index]/call_address, inclusive positions window=4668500..4668510 -> rows=808
+read extrinsics blocks=-..- cols=[block_number,error,fee,hash,index,signature,success,tip,version] block_column=block_number at=25:b22d764ce03641e4 -> rows=25
+read extrinsics blocks=4668500..4668510 cols=[block_number,index] block_column=block_number required=[error,fee,hash,index,signature,success,tip,version] keys=[block_number,index] block=block_number as pairs positions window=4668500..4668510 -> rows=127
+
+## arrow
+response 4668500..4668510 n=11
+read blocks blocks=-..- cols=[digest,extrinsics_root,hash,impl_name,impl_version,number,parent_hash,spec_name,spec_version,state_root,timestamp,validator] block_column=number at=11:1951357ebf5dff9f -> rows=11
+read blocks blocks=4668500..4668510 cols=[number] block_column=number required=[digest,extrinsics_root,hash,impl_name,impl_version,number,parent_hash,spec_name,spec_version,state_root,timestamp,validator] positions -> rows=11
+read calls blocks=-..- cols=[address,args,args_size,block_number,error,extrinsic_index,name,origin,success] block_column=block_number at=127:cfe761dbc94bb951 -> rows=127
+read calls blocks=4668500..4668510 cols=[address,args_size,block_number,extrinsic_index] block_column=block_number required=[address,args,args_size,error,extrinsic_index,name,origin,success] items=[] positions window=4668500..4668510 -> rows=127
+read events blocks=-..- cols=[args,args_size,block_number,call_address,extrinsic_index,index,name,phase] block_column=block_number at=808:47981970cb6420c8 -> rows=808
+read events blocks=4668500..4668510 cols=[args_size,block_number,call_address,extrinsic_index] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name,phase] keys=[block_number,extrinsic_index] block=block_number as pairs hierarchy=children[block_number,extrinsic_index]/call_address, inclusive positions window=4668500..4668510 -> rows=808
+read extrinsics blocks=-..- cols=[block_number,error,fee,hash,index,signature,success,tip,version] block_column=block_number at=127:6ff0a79ee0b166e0 -> rows=127
+read extrinsics blocks=4668500..4668510 cols=[block_number,index] block_column=block_number required=[error,fee,hash,index,signature,success,tip,version] keys=[block_number,index] block=block_number as pairs positions window=4668500..4668510 -> rows=127

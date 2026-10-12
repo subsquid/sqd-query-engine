@@ -1,0 +1,29 @@
+---
+source: tests/queries.rs
+---
+## json
+response 82644089..82644089 n=1 read_through=-
+read blocks blocks=-..- cols=[hash,number] block_column=number at=1:c77b3abb6f87acd9 -> rows=1
+read blocks blocks=82644089..82644089 cols=[number] block_column=number required=[hash,number] positions -> rows=1
+read logs blocks=-..- cols=[address,block_number,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] block_column=block_number at=91:d57eb90487acac30 -> rows=91
+read logs blocks=82644089..82644089 cols=[block_number,data_size,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(Utf8: "a614f803b6fd780986a42c78ec9c7f77e6ded13c") topic0 in(Utf8: "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")] positions window=82644089..82644089 -> rows=91
+read transactions blocks=-..- cols=[block_number,contract_address,energy_usage_total,hash,transaction_index,type] block_column=block_number at=86:1b1934d0cc3fb4fc -> rows=86
+read transactions blocks=82644089..82644089 cols=[block_number,transaction_index] block_column=block_number required=[contract_address,energy_usage_total,hash,transaction_index,type] keys=[block_number,transaction_index] block=block_number as pairs positions window=82644089..82644089 -> rows=86
+
+## json, page 256 KiB
+response 82644089..82644089 n=1 read_through=-
+read blocks blocks=-..- cols=[hash,number] block_column=number at=1:c77b3abb6f87acd9 -> rows=1
+read blocks blocks=82644089..82644089 cols=[number] block_column=number required=[hash,number] positions -> rows=1
+read logs blocks=-..- cols=[address,block_number,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] block_column=block_number at=91:d57eb90487acac30 -> rows=91
+read logs blocks=82644089..82644089 cols=[block_number,data_size,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(Utf8: "a614f803b6fd780986a42c78ec9c7f77e6ded13c") topic0 in(Utf8: "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")] positions window=82644089..82644089 -> rows=91
+read transactions blocks=-..- cols=[block_number,contract_address,energy_usage_total,hash,transaction_index,type] block_column=block_number at=86:1b1934d0cc3fb4fc -> rows=86
+read transactions blocks=82644089..82644089 cols=[block_number,transaction_index] block_column=block_number required=[contract_address,energy_usage_total,hash,transaction_index,type] keys=[block_number,transaction_index] block=block_number as pairs positions window=82644089..82644089 -> rows=86
+
+## arrow
+response 82644089..82644089 n=1
+read blocks blocks=-..- cols=[hash,number] block_column=number at=1:c77b3abb6f87acd9 -> rows=1
+read blocks blocks=82644089..82644089 cols=[number] block_column=number required=[hash,number] positions -> rows=1
+read logs blocks=-..- cols=[address,block_number,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] block_column=block_number at=91:d57eb90487acac30 -> rows=91
+read logs blocks=82644089..82644089 cols=[block_number,data_size,transaction_index] block_column=block_number required=[address,data,data_size,log_index,topic0,topic1,topic2,topic3,transaction_index] items=[address in(Utf8: "a614f803b6fd780986a42c78ec9c7f77e6ded13c") topic0 in(Utf8: "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")] positions window=82644089..82644089 -> rows=91
+read transactions blocks=-..- cols=[block_number,contract_address,energy_usage_total,hash,transaction_index,type] block_column=block_number at=86:1b1934d0cc3fb4fc -> rows=86
+read transactions blocks=82644089..82644089 cols=[block_number,transaction_index] block_column=block_number required=[contract_address,energy_usage_total,hash,transaction_index,type] keys=[block_number,transaction_index] block=block_number as pairs positions window=82644089..82644089 -> rows=86

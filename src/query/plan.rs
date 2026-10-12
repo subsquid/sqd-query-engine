@@ -1048,8 +1048,7 @@ mod tests {
     /// tests assert against data rather than a guessed constant.
     fn first_d4_value() -> u32 {
         use arrow::array::UInt32Array;
-        let table_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/chunk/instructions.parquet");
+        let table_path = crate::testing::solana_chunk_path().join("instructions.parquet");
         let table = crate::scan::ParquetTable::open(&table_path).unwrap();
         let request = crate::scan::ScanRequest::new(vec!["d4"]);
         let batches = crate::scan::scan(&table, &request).unwrap();
@@ -1253,7 +1252,7 @@ mod tests {
         let plan = compile(&query, &meta).unwrap();
 
         // Execute the plan against real data
-        let evm_chunk_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/evm/chunk");
+        let evm_chunk_path = crate::testing::evm_chunk_path();
         let table_path = evm_chunk_path.join("logs.parquet");
         let parquet_table = crate::scan::ParquetTable::open(&table_path).unwrap();
 
@@ -1323,7 +1322,7 @@ mod tests {
         let query = parse_query(json.as_bytes(), &meta).unwrap();
         let plan = compile(&query, &meta).unwrap();
 
-        let chunk_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/chunk");
+        let chunk_path = crate::testing::solana_chunk_path();
         let table_path = chunk_path.join("instructions.parquet");
         let parquet_table = crate::scan::ParquetTable::open(&table_path).unwrap();
 
@@ -1382,7 +1381,7 @@ mod tests {
         let query = parse_query(json.as_bytes(), &meta).unwrap();
         let plan = compile(&query, &meta).unwrap();
 
-        let chunk_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/chunk");
+        let chunk_path = crate::testing::solana_chunk_path();
         let table_path = chunk_path.join("instructions.parquet");
         let parquet_table = crate::scan::ParquetTable::open(&table_path).unwrap();
 
@@ -1433,7 +1432,7 @@ mod tests {
         let query = parse_query(json, &meta).unwrap();
         let plan = compile(&query, &meta).unwrap();
 
-        let chunk_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/solana/chunk");
+        let chunk_path = crate::testing::solana_chunk_path();
         let table_path = chunk_path.join("instructions.parquet");
         let parquet_table = crate::scan::ParquetTable::open(&table_path).unwrap();
 

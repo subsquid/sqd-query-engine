@@ -1,0 +1,19 @@
+---
+source: tests/queries.rs
+---
+## json
+response 82644089..82644098 n=3 read_through=-
+read blocks blocks=82644089..82644098 cols=[hash,number,timestamp] block_column=number required=[hash,number,timestamp] -> rows=10
+read transactions blocks=82644089..82644098 cols=[block_number,expiration,fee,fee_limit,hash,net_fee,net_usage,parameter,timestamp,transaction_index,type] block_column=block_number required=[expiration,fee,fee_limit,hash,net_fee,net_usage,parameter,timestamp,transaction_index,type] items=[_transfer_contract_owner in(Utf8: "4192ddf3501ad77cfd87c32594207c8fcbe107b4bd") type in(Utf8: "TransferContract")] window=82644089..82644098 -> rows=4
+
+## json, page 256 KiB
+response 82644089..82644098 n=3 read_through=-
+read blocks blocks=-..- cols=[hash,number,timestamp] block_column=number at=3:76389fe1cd296ef0 -> rows=3
+read blocks blocks=82644089..82644098 cols=[number] block_column=number required=[hash,number,timestamp] positions -> rows=10
+read transactions blocks=-..- cols=[block_number,expiration,fee,fee_limit,hash,net_fee,net_usage,parameter,timestamp,transaction_index,type] block_column=block_number at=4:e37ce668f7b5e8cd -> rows=4
+read transactions blocks=82644089..82644098 cols=[block_number] block_column=block_number required=[expiration,fee,fee_limit,hash,net_fee,net_usage,parameter,timestamp,transaction_index,type] items=[_transfer_contract_owner in(Utf8: "4192ddf3501ad77cfd87c32594207c8fcbe107b4bd") type in(Utf8: "TransferContract")] positions window=82644089..82644098 -> rows=4
+
+## arrow
+response 82644089..82644098 n=3
+read blocks blocks=82644089..82644098 cols=[hash,number,timestamp] block_column=number required=[hash,number,timestamp] -> rows=10
+read transactions blocks=82644089..82644098 cols=[block_number,expiration,fee,fee_limit,hash,net_fee,net_usage,parameter,timestamp,transaction_index,type] block_column=block_number required=[expiration,fee,fee_limit,hash,net_fee,net_usage,parameter,timestamp,transaction_index,type] items=[_transfer_contract_owner in(Utf8: "4192ddf3501ad77cfd87c32594207c8fcbe107b4bd") type in(Utf8: "TransferContract")] window=82644089..82644098 -> rows=4

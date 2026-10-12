@@ -1,0 +1,26 @@
+---
+source: tests/queries.rs
+---
+## json
+response 17881390..17882786 n=4 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash,timestamp] block_column=number at=4:8dea690d19d3165e -> rows=4
+read blocks blocks=17881390..17882786 cols=[number] block_column=number required=[hash,number,parent_hash,timestamp] positions -> rows=1397
+read transactions blocks=-..- cols=[block_number,from,hash,input,input_size,to,transaction_index,value] block_column=block_number at=2:7ec7bcd406527fa2 -> rows=2
+read transactions blocks=17881390..17882413 cols=[block_number,input_size] block_column=block_number required=[from,hash,input,input_size,to,transaction_index,value] items=[to in(Utf8: "0xeedc81030f90444fe65244fdac4ef5f89942d2eb") sighash in(Utf8: "0x1e1bc3c5")] positions window=17881390..17882413 -> rows=2
+read transactions blocks=17882414..17882786 cols=[block_number,input_size] block_column=block_number required=[from,hash,input,input_size,to,transaction_index,value] items=[to in(Utf8: "0xeedc81030f90444fe65244fdac4ef5f89942d2eb") sighash in(Utf8: "0x1e1bc3c5")] positions window=17882414..17882786 -> rows=0
+
+## json, page 256 KiB
+response 17881390..17882786 n=4 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash,timestamp] block_column=number at=4:8dea690d19d3165e -> rows=4
+read blocks blocks=17881390..17882786 cols=[number] block_column=number required=[hash,number,parent_hash,timestamp] positions -> rows=1397
+read transactions blocks=-..- cols=[block_number,from,hash,input,input_size,to,transaction_index,value] block_column=block_number at=2:7ec7bcd406527fa2 -> rows=2
+read transactions blocks=17881390..17882413 cols=[block_number,input_size] block_column=block_number required=[from,hash,input,input_size,to,transaction_index,value] items=[to in(Utf8: "0xeedc81030f90444fe65244fdac4ef5f89942d2eb") sighash in(Utf8: "0x1e1bc3c5")] positions window=17881390..17882413 -> rows=2
+read transactions blocks=17882414..17882786 cols=[block_number,input_size] block_column=block_number required=[from,hash,input,input_size,to,transaction_index,value] items=[to in(Utf8: "0xeedc81030f90444fe65244fdac4ef5f89942d2eb") sighash in(Utf8: "0x1e1bc3c5")] positions window=17882414..17882786 -> rows=0
+
+## arrow
+response 17881390..17882786 n=4
+read blocks blocks=-..- cols=[hash,number,parent_hash,timestamp] block_column=number at=4:8dea690d19d3165e -> rows=4
+read blocks blocks=17881390..17882786 cols=[number] block_column=number required=[hash,number,parent_hash,timestamp] positions -> rows=1397
+read transactions blocks=-..- cols=[block_number,from,hash,input,input_size,to,transaction_index,value] block_column=block_number at=2:7ec7bcd406527fa2 -> rows=2
+read transactions blocks=17881390..17882413 cols=[block_number,input_size] block_column=block_number required=[from,hash,input,input_size,to,transaction_index,value] items=[to in(Utf8: "0xeedc81030f90444fe65244fdac4ef5f89942d2eb") sighash in(Utf8: "0x1e1bc3c5")] positions window=17881390..17882413 -> rows=2
+read transactions blocks=17882414..17882786 cols=[block_number,input_size] block_column=block_number required=[from,hash,input,input_size,to,transaction_index,value] items=[to in(Utf8: "0xeedc81030f90444fe65244fdac4ef5f89942d2eb") sighash in(Utf8: "0x1e1bc3c5")] positions window=17882414..17882786 -> rows=0

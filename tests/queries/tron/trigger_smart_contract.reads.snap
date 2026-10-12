@@ -1,0 +1,17 @@
+---
+source: tests/queries.rs
+---
+## json
+response 82644089..82644089 n=1 read_through=-
+read blocks blocks=82644089..82644089 cols=[hash,number] block_column=number required=[hash,number] -> rows=1
+read transactions blocks=82644089..82644089 cols=[block_number,energy_usage_total,fee,fee_limit,hash,net_usage,parameter,result,transaction_index,type] block_column=block_number required=[energy_usage_total,fee,fee_limit,hash,net_usage,parameter,result,transaction_index,type] items=[_trigger_smart_contract_contract in(Utf8: "41a614f803b6fd780986a42c78ec9c7f77e6ded13c") _trigger_smart_contract_sighash in(Utf8: "a9059cbb") type in(Utf8: "TriggerSmartContract")] window=82644089..82644089 -> rows=81
+
+## json, page 256 KiB
+response 82644089..82644089 n=1 read_through=-
+read blocks blocks=82644089..82644089 cols=[hash,number] block_column=number required=[hash,number] -> rows=1
+read transactions blocks=82644089..82644089 cols=[block_number,energy_usage_total,fee,fee_limit,hash,net_usage,parameter,result,transaction_index,type] block_column=block_number required=[energy_usage_total,fee,fee_limit,hash,net_usage,parameter,result,transaction_index,type] items=[_trigger_smart_contract_contract in(Utf8: "41a614f803b6fd780986a42c78ec9c7f77e6ded13c") _trigger_smart_contract_sighash in(Utf8: "a9059cbb") type in(Utf8: "TriggerSmartContract")] window=82644089..82644089 -> rows=81
+
+## arrow
+response 82644089..82644089 n=1
+read blocks blocks=82644089..82644089 cols=[hash,number] block_column=number required=[hash,number] -> rows=1
+read transactions blocks=82644089..82644089 cols=[block_number,energy_usage_total,fee,fee_limit,hash,net_usage,parameter,result,transaction_index,type] block_column=block_number required=[energy_usage_total,fee,fee_limit,hash,net_usage,parameter,result,transaction_index,type] items=[_trigger_smart_contract_contract in(Utf8: "41a614f803b6fd780986a42c78ec9c7f77e6ded13c") _trigger_smart_contract_sighash in(Utf8: "a9059cbb") type in(Utf8: "TriggerSmartContract")] window=82644089..82644089 -> rows=81

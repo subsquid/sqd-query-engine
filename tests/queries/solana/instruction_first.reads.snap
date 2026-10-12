@@ -1,0 +1,35 @@
+---
+source: tests/queries.rs
+---
+## json
+response 217710049..217710956 n=201 read_through=-
+read blocks blocks=-..- cols=[hash,height,number,parent_hash,parent_number,timestamp] block_column=number at=201:6b3c9452c005ea42 -> rows=201
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,height,number,parent_hash,parent_number,timestamp] positions -> rows=900
+read instructions blocks=-..- cols=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,block_number,data,data_size,error,has_dropped_log_messages,instruction_address,program_id,rest_accounts,transaction_index] block_column=block_number at=822:3f4ea3f4140bef1d -> rows=822
+read instructions blocks=0..- cols=[accounts_size,block_number,data_size,instruction_address,transaction_index] block_column=block_number required=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,data,data_size,error,has_dropped_log_messages,instruction_address,program_id,rest_accounts,transaction_index] items=[program_id in(Utf8: "SSwpkEEcbUqx4vtoEByFjSkhKdCT862DNVb52nZg1UZ")] positions window=0..- -> rows=822
+read logs blocks=-..- cols=[block_number,instruction_address,kind,log_index,message,message_size,transaction_index] block_column=block_number at=2462:1db76a86c7fec9b2 -> rows=2462
+read logs blocks=217710049..217710954 cols=[block_number,instruction_address,message_size,transaction_index] block_column=block_number required=[instruction_address,kind,log_index,message,message_size,transaction_index] keys=[block_number,transaction_index,instruction_address] block=block_number as pair paths positions window=0..- -> rows=2462
+read transactions blocks=-..- cols=[block_number,err,fee_payer,signatures,signatures_size,transaction_index] block_column=block_number at=799:54fcd8b917aa42e9 -> rows=799
+read transactions blocks=217710049..217710954 cols=[block_number,signatures_size,transaction_index] block_column=block_number required=[err,fee_payer,signatures,signatures_size,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=0..- -> rows=799
+
+## json, page 256 KiB
+response 217710049..217710292 n=63 read_through=-
+read blocks blocks=-..- cols=[hash,height,number,parent_hash,parent_number,timestamp] block_column=number at=63:e65e8fc964fdda89 -> rows=63
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,height,number,parent_hash,parent_number,timestamp] positions -> rows=900
+read instructions blocks=-..- cols=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,block_number,data,data_size,error,has_dropped_log_messages,instruction_address,program_id,rest_accounts,transaction_index] block_column=block_number at=176:2a910dd0bb7567d7 -> rows=176
+read instructions blocks=0..- cols=[accounts_size,block_number,data_size,instruction_address,transaction_index] block_column=block_number required=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,data,data_size,error,has_dropped_log_messages,instruction_address,program_id,rest_accounts,transaction_index] items=[program_id in(Utf8: "SSwpkEEcbUqx4vtoEByFjSkhKdCT862DNVb52nZg1UZ")] positions window=0..- -> rows=822
+read logs blocks=-..- cols=[block_number,instruction_address,kind,log_index,message,message_size,transaction_index] block_column=block_number at=528:11dfd4463d4fc147 -> rows=528
+read logs blocks=217710049..217710954 cols=[block_number,instruction_address,message_size,transaction_index] block_column=block_number required=[instruction_address,kind,log_index,message,message_size,transaction_index] keys=[block_number,transaction_index,instruction_address] block=block_number as pair paths positions window=0..- -> rows=2462
+read transactions blocks=-..- cols=[block_number,err,fee_payer,signatures,signatures_size,transaction_index] block_column=block_number at=173:669e2bbe073c845f -> rows=173
+read transactions blocks=217710049..217710954 cols=[block_number,signatures_size,transaction_index] block_column=block_number required=[err,fee_payer,signatures,signatures_size,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=0..- -> rows=799
+
+## arrow
+response 217710049..217710956 n=201
+read blocks blocks=-..- cols=[hash,height,number,parent_hash,parent_number,timestamp] block_column=number at=201:6b3c9452c005ea42 -> rows=201
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,height,number,parent_hash,parent_number,timestamp] positions -> rows=900
+read instructions blocks=-..- cols=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,block_number,data,data_size,error,has_dropped_log_messages,instruction_address,program_id,rest_accounts,transaction_index] block_column=block_number at=822:3f4ea3f4140bef1d -> rows=822
+read instructions blocks=0..- cols=[accounts_size,block_number,data_size,instruction_address,transaction_index] block_column=block_number required=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,data,data_size,error,has_dropped_log_messages,instruction_address,program_id,rest_accounts,transaction_index] items=[program_id in(Utf8: "SSwpkEEcbUqx4vtoEByFjSkhKdCT862DNVb52nZg1UZ")] positions window=0..- -> rows=822
+read logs blocks=-..- cols=[block_number,instruction_address,kind,log_index,message,message_size,transaction_index] block_column=block_number at=2462:1db76a86c7fec9b2 -> rows=2462
+read logs blocks=217710049..217710954 cols=[block_number,instruction_address,message_size,transaction_index] block_column=block_number required=[instruction_address,kind,log_index,message,message_size,transaction_index] keys=[block_number,transaction_index,instruction_address] block=block_number as pair paths positions window=0..- -> rows=2462
+read transactions blocks=-..- cols=[block_number,err,fee_payer,signatures,signatures_size,transaction_index] block_column=block_number at=799:54fcd8b917aa42e9 -> rows=799
+read transactions blocks=217710049..217710954 cols=[block_number,signatures_size,transaction_index] block_column=block_number required=[err,fee_payer,signatures,signatures_size,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=0..- -> rows=799

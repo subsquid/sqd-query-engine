@@ -1,0 +1,26 @@
+---
+source: tests/queries.rs
+---
+## json
+response 17881390..17882786 n=3 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=3:259dd9a94fe9f428 -> rows=3
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=1397
+read statediffs blocks=-..- cols=[address,block_number,key,kind,next,next_size,prev,prev_size,transaction_index] block_column=block_number at=3:05fd5ac421442bcb -> rows=3
+read statediffs blocks=0..17882413 cols=[block_number,next_size,prev_size] block_column=block_number required=[address,key,kind,next,next_size,prev,prev_size,transaction_index] items=[address in(Utf8: "0xffdbe829d5a9afcd50482c23eb387b9050f1f825")] positions window=0..17882413 -> rows=3
+read statediffs blocks=17882414..- cols=[block_number,next_size,prev_size] block_column=block_number required=[address,key,kind,next,next_size,prev,prev_size,transaction_index] items=[address in(Utf8: "0xffdbe829d5a9afcd50482c23eb387b9050f1f825")] positions window=17882414..- -> rows=0
+
+## json, page 256 KiB
+response 17881390..17882786 n=3 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=3:259dd9a94fe9f428 -> rows=3
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=1397
+read statediffs blocks=-..- cols=[address,block_number,key,kind,next,next_size,prev,prev_size,transaction_index] block_column=block_number at=3:05fd5ac421442bcb -> rows=3
+read statediffs blocks=0..17882413 cols=[block_number,next_size,prev_size] block_column=block_number required=[address,key,kind,next,next_size,prev,prev_size,transaction_index] items=[address in(Utf8: "0xffdbe829d5a9afcd50482c23eb387b9050f1f825")] positions window=0..17882413 -> rows=3
+read statediffs blocks=17882414..- cols=[block_number,next_size,prev_size] block_column=block_number required=[address,key,kind,next,next_size,prev,prev_size,transaction_index] items=[address in(Utf8: "0xffdbe829d5a9afcd50482c23eb387b9050f1f825")] positions window=17882414..- -> rows=0
+
+## arrow
+response 17881390..17882786 n=3
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=3:259dd9a94fe9f428 -> rows=3
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=1397
+read statediffs blocks=-..- cols=[address,block_number,key,kind,next,next_size,prev,prev_size,transaction_index] block_column=block_number at=3:05fd5ac421442bcb -> rows=3
+read statediffs blocks=0..17882413 cols=[block_number,next_size,prev_size] block_column=block_number required=[address,key,kind,next,next_size,prev,prev_size,transaction_index] items=[address in(Utf8: "0xffdbe829d5a9afcd50482c23eb387b9050f1f825")] positions window=0..17882413 -> rows=3
+read statediffs blocks=17882414..- cols=[block_number,next_size,prev_size] block_column=block_number required=[address,key,kind,next,next_size,prev,prev_size,transaction_index] items=[address in(Utf8: "0xffdbe829d5a9afcd50482c23eb387b9050f1f825")] positions window=17882414..- -> rows=0

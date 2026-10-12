@@ -1,0 +1,17 @@
+---
+source: tests/queries.rs
+---
+## json
+response 6000208..6000208 n=1 read_through=-
+read blocks blocks=6000208..6000208 cols=[hash,number] block_column=number required=[hash,number] -> rows=1
+read transactions blocks=6000208..6000208 cols=[aa_authorization_list,block_number,calls,fee_payer_r,fee_payer_s,fee_payer_v,fee_token,from,gas,gas_used,hash,key_authorization,nonce,nonce_key,signature,status,to,transaction_index,type,valid_after,valid_before] block_column=block_number required=[aa_authorization_list,calls,fee_payer_r,fee_payer_s,fee_payer_v,fee_token,from,gas,gas_used,hash,key_authorization,nonce,nonce_key,signature,status,to,transaction_index,type,valid_after,valid_before] items=[from in(Utf8: "0x90b68902916580b64f1b80ed3ae6a21180601dbf")] window=6000208..6000208 -> rows=1
+
+## json, page 256 KiB
+response 6000208..6000208 n=1 read_through=-
+read blocks blocks=6000208..6000208 cols=[hash,number] block_column=number required=[hash,number] -> rows=1
+read transactions blocks=6000208..6000208 cols=[aa_authorization_list,block_number,calls,fee_payer_r,fee_payer_s,fee_payer_v,fee_token,from,gas,gas_used,hash,key_authorization,nonce,nonce_key,signature,status,to,transaction_index,type,valid_after,valid_before] block_column=block_number required=[aa_authorization_list,calls,fee_payer_r,fee_payer_s,fee_payer_v,fee_token,from,gas,gas_used,hash,key_authorization,nonce,nonce_key,signature,status,to,transaction_index,type,valid_after,valid_before] items=[from in(Utf8: "0x90b68902916580b64f1b80ed3ae6a21180601dbf")] window=6000208..6000208 -> rows=1
+
+## arrow
+response 6000208..6000208 n=1
+read blocks blocks=6000208..6000208 cols=[hash,number] block_column=number required=[hash,number] -> rows=1
+read transactions blocks=6000208..6000208 cols=[aa_authorization_list,block_number,calls,fee_payer_r,fee_payer_s,fee_payer_v,fee_token,from,gas,gas_used,hash,key_authorization,nonce,nonce_key,signature,status,to,transaction_index,type,valid_after,valid_before] block_column=block_number required=[aa_authorization_list,calls,fee_payer_r,fee_payer_s,fee_payer_v,fee_token,from,gas,gas_used,hash,key_authorization,nonce,nonce_key,signature,status,to,transaction_index,type,valid_after,valid_before] items=[from in(Utf8: "0x90b68902916580b64f1b80ed3ae6a21180601dbf")] window=6000208..6000208 -> rows=1

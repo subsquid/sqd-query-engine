@@ -1,0 +1,29 @@
+---
+source: tests/queries.rs
+---
+## json
+response 217710049..217710956 n=651 read_through=-
+read blocks blocks=-..- cols=[hash,number] block_column=number at=651:941b2322959309c1 -> rows=651
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,number] positions -> rows=900
+read instructions blocks=-..- cols=[block_number,instruction_address,program_id,transaction_index] block_column=block_number at=6634:2d3372d4e76a578c -> rows=6634
+read instructions blocks=217710049..217710956 cols=[block_number,instruction_address,transaction_index] block_column=block_number required=[instruction_address,program_id,transaction_index] keys=[block_number,transaction_index,instruction_address] block=block_number as pair paths positions window=0..- -> rows=6634
+read logs blocks=-..- cols=[block_number,instruction_address,kind,log_index,message,message_size,program_id,transaction_index] block_column=block_number at=12563:5ca72ed287599151 -> rows=12563
+read logs blocks=0..- cols=[block_number,instruction_address,message_size,transaction_index] block_column=block_number required=[instruction_address,kind,log_index,message,message_size,program_id,transaction_index] items=[program_id in(Utf8: "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc")] positions window=0..- -> rows=12563
+
+## json, page 256 KiB
+response 217710049..217710080 n=22 read_through=-
+read blocks blocks=-..- cols=[hash,number] block_column=number at=22:961d62e1ecf50fc2 -> rows=22
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,number] positions -> rows=900
+read instructions blocks=-..- cols=[block_number,instruction_address,program_id,transaction_index] block_column=block_number at=454:00fbf9bcef630d4e -> rows=454
+read instructions blocks=217710049..217710956 cols=[block_number,instruction_address,transaction_index] block_column=block_number required=[instruction_address,program_id,transaction_index] keys=[block_number,transaction_index,instruction_address] block=block_number as pair paths positions window=0..- -> rows=6634
+read logs blocks=-..- cols=[block_number,instruction_address,kind,log_index,message,message_size,program_id,transaction_index] block_column=block_number at=876:5325a04b6242f2f0 -> rows=876
+read logs blocks=0..- cols=[block_number,instruction_address,message_size,transaction_index] block_column=block_number required=[instruction_address,kind,log_index,message,message_size,program_id,transaction_index] items=[program_id in(Utf8: "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc")] positions window=0..- -> rows=12563
+
+## arrow
+response 217710049..217710956 n=651
+read blocks blocks=-..- cols=[hash,number] block_column=number at=651:941b2322959309c1 -> rows=651
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,number] positions -> rows=900
+read instructions blocks=-..- cols=[block_number,instruction_address,program_id,transaction_index] block_column=block_number at=6634:2d3372d4e76a578c -> rows=6634
+read instructions blocks=217710049..217710956 cols=[block_number,instruction_address,transaction_index] block_column=block_number required=[instruction_address,program_id,transaction_index] keys=[block_number,transaction_index,instruction_address] block=block_number as pair paths positions window=0..- -> rows=6634
+read logs blocks=-..- cols=[block_number,instruction_address,kind,log_index,message,message_size,program_id,transaction_index] block_column=block_number at=12563:5ca72ed287599151 -> rows=12563
+read logs blocks=0..- cols=[block_number,instruction_address,message_size,transaction_index] block_column=block_number required=[instruction_address,kind,log_index,message,message_size,program_id,transaction_index] items=[program_id in(Utf8: "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc")] positions window=0..- -> rows=12563

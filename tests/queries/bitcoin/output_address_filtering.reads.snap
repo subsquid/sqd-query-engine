@@ -1,0 +1,19 @@
+---
+source: tests/queries.rs
+---
+## json
+response 401050..401060 n=2 read_through=-
+read blocks blocks=401050..401060 cols=[hash,number,parent_hash,timestamp] block_column=number required=[hash,number,parent_hash,timestamp] -> rows=11
+read outputs blocks=401050..401060 cols=[block_number,output_index,script_pub_key_address,script_pub_key_asm,script_pub_key_desc,script_pub_key_hex,script_pub_key_type,transaction_index,value] block_column=block_number required=[output_index,script_pub_key_address,script_pub_key_asm,script_pub_key_desc,script_pub_key_hex,script_pub_key_type,transaction_index,value] items=[script_pub_key_address in(#207abc54f538e49b)] window=401050..401060 -> rows=4
+
+## json, page 256 KiB
+response 401050..401060 n=2 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash,timestamp] block_column=number at=2:54672872443b2b9b -> rows=2
+read blocks blocks=401050..401060 cols=[number] block_column=number required=[hash,number,parent_hash,timestamp] positions -> rows=11
+read outputs blocks=-..- cols=[block_number,output_index,script_pub_key_address,script_pub_key_asm,script_pub_key_desc,script_pub_key_hex,script_pub_key_type,transaction_index,value] block_column=block_number at=4:0100dabc9800d277 -> rows=4
+read outputs blocks=401050..401060 cols=[block_number] block_column=block_number required=[output_index,script_pub_key_address,script_pub_key_asm,script_pub_key_desc,script_pub_key_hex,script_pub_key_type,transaction_index,value] items=[script_pub_key_address in(#207abc54f538e49b)] positions window=401050..401060 -> rows=4
+
+## arrow
+response 401050..401060 n=2
+read blocks blocks=401050..401060 cols=[hash,number,parent_hash,timestamp] block_column=number required=[hash,number,parent_hash,timestamp] -> rows=11
+read outputs blocks=401050..401060 cols=[block_number,output_index,script_pub_key_address,script_pub_key_asm,script_pub_key_desc,script_pub_key_hex,script_pub_key_type,transaction_index,value] block_column=block_number required=[output_index,script_pub_key_address,script_pub_key_asm,script_pub_key_desc,script_pub_key_hex,script_pub_key_type,transaction_index,value] items=[script_pub_key_address in(#207abc54f538e49b)] window=401050..401060 -> rows=4

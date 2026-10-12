@@ -1,0 +1,14 @@
+---
+source: tests/queries.rs
+---
+## json
+response 748640000..748640500 n=501 read_through=-
+read blocks blocks=748640000..748640500 cols=[hash,number,parent_hash,timestamp] block_column=number required=[hash,number,parent_hash,timestamp] -> rows=501
+
+## json, page 256 KiB
+response 748640000..748640500 n=501 read_through=-
+read blocks blocks=748640000..748640500 cols=[hash,number,parent_hash,timestamp] block_column=number required=[hash,number,parent_hash,timestamp] -> rows=501
+
+## arrow
+response 748640000..748640500 n=501
+read blocks blocks=748640000..748640500 cols=[hash,number,parent_hash,timestamp] block_column=number required=[hash,number,parent_hash,timestamp] -> rows=501

@@ -1,0 +1,32 @@
+---
+source: tests/queries.rs
+---
+## json
+response 24136800..24140649 n=3 read_through=-
+read blocks blocks=-..- cols=[hash,impl_name,impl_version,number,parent_hash,spec_name,spec_version] block_column=number at=3:e24f375f5a6e5eed -> rows=3
+read blocks blocks=24136800..24140649 cols=[number] block_column=number required=[hash,impl_name,impl_version,number,parent_hash,spec_name,spec_version] positions -> rows=3850
+read events blocks=-..- cols=[args,args_size,block_number,call_address,extrinsic_index,index,name] block_column=block_number at=1:85ad37095e99be6f -> rows=1
+read events blocks=24136800..24137823 cols=[args_size,block_number] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[name in(Utf8: "Grandpa.NewAuthorities")] positions window=24136800..24137823 -> rows=1
+read events blocks=24137824..24138847 cols=[args_size,block_number] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[name in(Utf8: "Grandpa.NewAuthorities")] positions window=24137824..24138847 -> rows=0
+read events blocks=24138848..24139871 cols=[args_size,block_number] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[name in(Utf8: "Grandpa.NewAuthorities")] positions window=24138848..24139871 -> rows=0
+read events blocks=24139872..24140649 cols=[args_size,block_number] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[name in(Utf8: "Grandpa.NewAuthorities")] positions window=24139872..24140649 -> rows=0
+
+## json, page 256 KiB
+response 24136800..24140649 n=3 read_through=-
+read blocks blocks=-..- cols=[hash,impl_name,impl_version,number,parent_hash,spec_name,spec_version] block_column=number at=3:e24f375f5a6e5eed -> rows=3
+read blocks blocks=24136800..24140649 cols=[number] block_column=number required=[hash,impl_name,impl_version,number,parent_hash,spec_name,spec_version] positions -> rows=3850
+read events blocks=-..- cols=[args,args_size,block_number,call_address,extrinsic_index,index,name] block_column=block_number at=1:85ad37095e99be6f -> rows=1
+read events blocks=24136800..24137823 cols=[args_size,block_number] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[name in(Utf8: "Grandpa.NewAuthorities")] positions window=24136800..24137823 -> rows=1
+read events blocks=24137824..24138847 cols=[args_size,block_number] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[name in(Utf8: "Grandpa.NewAuthorities")] positions window=24137824..24138847 -> rows=0
+read events blocks=24138848..24139871 cols=[args_size,block_number] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[name in(Utf8: "Grandpa.NewAuthorities")] positions window=24138848..24139871 -> rows=0
+read events blocks=24139872..24140649 cols=[args_size,block_number] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[name in(Utf8: "Grandpa.NewAuthorities")] positions window=24139872..24140649 -> rows=0
+
+## arrow
+response 24136800..24140649 n=3
+read blocks blocks=-..- cols=[hash,impl_name,impl_version,number,parent_hash,spec_name,spec_version] block_column=number at=3:e24f375f5a6e5eed -> rows=3
+read blocks blocks=24136800..24140649 cols=[number] block_column=number required=[hash,impl_name,impl_version,number,parent_hash,spec_name,spec_version] positions -> rows=3850
+read events blocks=-..- cols=[args,args_size,block_number,call_address,extrinsic_index,index,name] block_column=block_number at=1:85ad37095e99be6f -> rows=1
+read events blocks=24136800..24137823 cols=[args_size,block_number] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[name in(Utf8: "Grandpa.NewAuthorities")] positions window=24136800..24137823 -> rows=1
+read events blocks=24137824..24138847 cols=[args_size,block_number] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[name in(Utf8: "Grandpa.NewAuthorities")] positions window=24137824..24138847 -> rows=0
+read events blocks=24138848..24139871 cols=[args_size,block_number] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[name in(Utf8: "Grandpa.NewAuthorities")] positions window=24138848..24139871 -> rows=0
+read events blocks=24139872..24140649 cols=[args_size,block_number] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[name in(Utf8: "Grandpa.NewAuthorities")] positions window=24139872..24140649 -> rows=0

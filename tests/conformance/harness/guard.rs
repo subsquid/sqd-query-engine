@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-pub use super::store::{dataset_chunk as fixture_chunk, fixture_dir};
+pub use super::store::{chunk as fixture_chunk, fixture_dir};
 
 /// Whether one dataset's chunk is available. `make test-data` sets
 /// `SQD_REQUIRE_CHUNKS=1`, which turns its absence from a skip into a failure.

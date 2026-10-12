@@ -1,0 +1,19 @@
+---
+source: tests/queries.rs
+---
+## json
+response 401050..401060 n=4 read_through=-
+read blocks blocks=401050..401060 cols=[hash,number,parent_hash,timestamp] block_column=number required=[hash,number,parent_hash,timestamp] -> rows=11
+read inputs blocks=401050..401060 cols=[block_number,coinbase,input_index,prevout_generated,prevout_height,prevout_script_pub_key_address,prevout_script_pub_key_asm,prevout_script_pub_key_desc,prevout_script_pub_key_hex,prevout_script_pub_key_type,prevout_value,script_sig_asm,script_sig_hex,sequence,transaction_index,tx_in_witness,txid,type,vout] block_column=block_number required=[coinbase,input_index,prevout_generated,prevout_height,prevout_script_pub_key_address,prevout_script_pub_key_asm,prevout_script_pub_key_desc,prevout_script_pub_key_hex,prevout_script_pub_key_type,prevout_value,script_sig_asm,script_sig_hex,sequence,transaction_index,tx_in_witness,txid,type,vout] items=[prevout_script_pub_key_address in(#d82c2bc289c9caaf)] window=401050..401060 -> rows=9
+
+## json, page 256 KiB
+response 401050..401060 n=4 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash,timestamp] block_column=number at=4:b2691d498a0c7f5c -> rows=4
+read blocks blocks=401050..401060 cols=[number] block_column=number required=[hash,number,parent_hash,timestamp] positions -> rows=11
+read inputs blocks=-..- cols=[block_number,coinbase,input_index,prevout_generated,prevout_height,prevout_script_pub_key_address,prevout_script_pub_key_asm,prevout_script_pub_key_desc,prevout_script_pub_key_hex,prevout_script_pub_key_type,prevout_value,script_sig_asm,script_sig_hex,sequence,transaction_index,tx_in_witness,txid,type,vout] block_column=block_number at=9:4762e13233e1b7d1 -> rows=9
+read inputs blocks=401050..401060 cols=[block_number] block_column=block_number required=[coinbase,input_index,prevout_generated,prevout_height,prevout_script_pub_key_address,prevout_script_pub_key_asm,prevout_script_pub_key_desc,prevout_script_pub_key_hex,prevout_script_pub_key_type,prevout_value,script_sig_asm,script_sig_hex,sequence,transaction_index,tx_in_witness,txid,type,vout] items=[prevout_script_pub_key_address in(#d82c2bc289c9caaf)] positions window=401050..401060 -> rows=9
+
+## arrow
+response 401050..401060 n=4
+read blocks blocks=401050..401060 cols=[hash,number,parent_hash,timestamp] block_column=number required=[hash,number,parent_hash,timestamp] -> rows=11
+read inputs blocks=401050..401060 cols=[block_number,coinbase,input_index,prevout_generated,prevout_height,prevout_script_pub_key_address,prevout_script_pub_key_asm,prevout_script_pub_key_desc,prevout_script_pub_key_hex,prevout_script_pub_key_type,prevout_value,script_sig_asm,script_sig_hex,sequence,transaction_index,tx_in_witness,txid,type,vout] block_column=block_number required=[coinbase,input_index,prevout_generated,prevout_height,prevout_script_pub_key_address,prevout_script_pub_key_asm,prevout_script_pub_key_desc,prevout_script_pub_key_hex,prevout_script_pub_key_type,prevout_value,script_sig_asm,script_sig_hex,sequence,transaction_index,tx_in_witness,txid,type,vout] items=[prevout_script_pub_key_address in(#d82c2bc289c9caaf)] window=401050..401060 -> rows=9

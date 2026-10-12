@@ -1,0 +1,29 @@
+---
+source: tests/queries.rs
+---
+## json
+response 4669000..4669010 n=8 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=8:2d37c82151c89b71 -> rows=8
+read blocks blocks=4669000..4669010 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=11
+read calls blocks=-..- cols=[address,args,args_size,block_number,extrinsic_index,name,origin] block_column=block_number at=12:ae1eec7a65a0e19e -> rows=12
+read calls blocks=4669000..4669008 cols=[address,args_size,block_number,extrinsic_index] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] keys=[block_number,extrinsic_index] block=block_number as pairs hierarchy=parents[block_number,extrinsic_index]/address, inclusive positions window=4669000..4669010 -> rows=12
+read events blocks=-..- cols=[args,args_size,block_number,call_address,extrinsic_index,index,name] block_column=block_number at=27:41cc33ffc923c958 -> rows=27
+read events blocks=4669000..4669010 cols=[args_size,block_number,call_address,extrinsic_index] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[name in(Utf8: "Balances.Transfer")] positions window=4669000..4669010 -> rows=27
+
+## json, page 256 KiB
+response 4669000..4669010 n=8 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=8:2d37c82151c89b71 -> rows=8
+read blocks blocks=4669000..4669010 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=11
+read calls blocks=-..- cols=[address,args,args_size,block_number,extrinsic_index,name,origin] block_column=block_number at=12:ae1eec7a65a0e19e -> rows=12
+read calls blocks=4669000..4669008 cols=[address,args_size,block_number,extrinsic_index] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] keys=[block_number,extrinsic_index] block=block_number as pairs hierarchy=parents[block_number,extrinsic_index]/address, inclusive positions window=4669000..4669010 -> rows=12
+read events blocks=-..- cols=[args,args_size,block_number,call_address,extrinsic_index,index,name] block_column=block_number at=27:41cc33ffc923c958 -> rows=27
+read events blocks=4669000..4669010 cols=[args_size,block_number,call_address,extrinsic_index] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[name in(Utf8: "Balances.Transfer")] positions window=4669000..4669010 -> rows=27
+
+## arrow
+response 4669000..4669010 n=8
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=8:2d37c82151c89b71 -> rows=8
+read blocks blocks=4669000..4669010 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=11
+read calls blocks=-..- cols=[address,args,args_size,block_number,extrinsic_index,name,origin] block_column=block_number at=12:ae1eec7a65a0e19e -> rows=12
+read calls blocks=4669000..4669008 cols=[address,args_size,block_number,extrinsic_index] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] keys=[block_number,extrinsic_index] block=block_number as pairs hierarchy=parents[block_number,extrinsic_index]/address, inclusive positions window=4669000..4669010 -> rows=12
+read events blocks=-..- cols=[args,args_size,block_number,call_address,extrinsic_index,index,name] block_column=block_number at=27:41cc33ffc923c958 -> rows=27
+read events blocks=4669000..4669010 cols=[args_size,block_number,call_address,extrinsic_index] block_column=block_number required=[args,args_size,call_address,extrinsic_index,index,name] items=[name in(Utf8: "Balances.Transfer")] positions window=4669000..4669010 -> rows=27

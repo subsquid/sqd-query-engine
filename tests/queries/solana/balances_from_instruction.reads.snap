@@ -1,0 +1,29 @@
+---
+source: tests/queries.rs
+---
+## json
+response 217710049..217710956 n=299 read_through=-
+read balances blocks=-..- cols=[account,block_number,post,pre,transaction_index] block_column=block_number at=2327:d80e6f279561b27b -> rows=2327
+read balances blocks=217710049..217710949 cols=[block_number,transaction_index] block_column=block_number required=[account,post,pre,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=0..- -> rows=2327
+read blocks blocks=-..- cols=[hash,height,number] block_column=number at=299:d8e84317ec4cb148 -> rows=299
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,height,number] positions -> rows=900
+read instructions blocks=-..- cols=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,block_number,data,data_size,instruction_address,program_id,rest_accounts,transaction_index] block_column=block_number at=1003:1c35f618d75b082b -> rows=1003
+read instructions blocks=0..- cols=[accounts_size,block_number,data_size,transaction_index] block_column=block_number required=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,data,data_size,program_id,rest_accounts] items=[program_id in(Utf8: "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc") is_committed eq(Boolean(true)) d8 in(UInt64: "17926189716184860616")] positions window=0..- -> rows=1003
+
+## json, page 256 KiB
+response 217710049..217710266 n=70 read_through=-
+read balances blocks=-..- cols=[account,block_number,post,pre,transaction_index] block_column=block_number at=576:636683923e6b0068 -> rows=576
+read balances blocks=217710049..217710949 cols=[block_number,transaction_index] block_column=block_number required=[account,post,pre,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=0..- -> rows=2327
+read blocks blocks=-..- cols=[hash,height,number] block_column=number at=70:8233f40f565f021f -> rows=70
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,height,number] positions -> rows=900
+read instructions blocks=-..- cols=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,block_number,data,data_size,instruction_address,program_id,rest_accounts,transaction_index] block_column=block_number at=243:21a7881e9d8bd335 -> rows=243
+read instructions blocks=0..- cols=[accounts_size,block_number,data_size,transaction_index] block_column=block_number required=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,data,data_size,program_id,rest_accounts] items=[program_id in(Utf8: "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc") is_committed eq(Boolean(true)) d8 in(UInt64: "17926189716184860616")] positions window=0..- -> rows=1003
+
+## arrow
+response 217710049..217710956 n=299
+read balances blocks=-..- cols=[account,block_number,post,pre,transaction_index] block_column=block_number at=2327:d80e6f279561b27b -> rows=2327
+read balances blocks=217710049..217710949 cols=[block_number,transaction_index] block_column=block_number required=[account,post,pre,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=0..- -> rows=2327
+read blocks blocks=-..- cols=[hash,height,number] block_column=number at=299:d8e84317ec4cb148 -> rows=299
+read blocks blocks=0..- cols=[number] block_column=number required=[hash,height,number] positions -> rows=900
+read instructions blocks=-..- cols=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,block_number,data,data_size,instruction_address,program_id,rest_accounts,transaction_index] block_column=block_number at=1003:1c35f618d75b082b -> rows=1003
+read instructions blocks=0..- cols=[accounts_size,block_number,data_size,transaction_index] block_column=block_number required=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,data,data_size,program_id,rest_accounts] items=[program_id in(Utf8: "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc") is_committed eq(Boolean(true)) d8 in(UInt64: "17926189716184860616")] positions window=0..- -> rows=1003

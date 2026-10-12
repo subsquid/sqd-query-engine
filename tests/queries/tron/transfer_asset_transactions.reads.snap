@@ -1,0 +1,17 @@
+---
+source: tests/queries.rs
+---
+## json
+response 82644089..82644089 n=1 read_through=-
+read blocks blocks=82644089..82644089 cols=[hash,number] block_column=number required=[hash,number] -> rows=1
+read transactions blocks=82644089..82644089 cols=[block_number,fee,hash,net_fee,net_usage,parameter,transaction_index,type] block_column=block_number required=[fee,hash,net_fee,net_usage,parameter,transaction_index,type] items=[_transfer_asset_contract_asset in(Utf8: "31303035313134") type in(Utf8: "TransferAssetContract")] window=82644089..82644089 -> rows=74
+
+## json, page 256 KiB
+response 82644089..82644089 n=1 read_through=-
+read blocks blocks=82644089..82644089 cols=[hash,number] block_column=number required=[hash,number] -> rows=1
+read transactions blocks=82644089..82644089 cols=[block_number,fee,hash,net_fee,net_usage,parameter,transaction_index,type] block_column=block_number required=[fee,hash,net_fee,net_usage,parameter,transaction_index,type] items=[_transfer_asset_contract_asset in(Utf8: "31303035313134") type in(Utf8: "TransferAssetContract")] window=82644089..82644089 -> rows=74
+
+## arrow
+response 82644089..82644089 n=1
+read blocks blocks=82644089..82644089 cols=[hash,number] block_column=number required=[hash,number] -> rows=1
+read transactions blocks=82644089..82644089 cols=[block_number,fee,hash,net_fee,net_usage,parameter,transaction_index,type] block_column=block_number required=[fee,hash,net_fee,net_usage,parameter,transaction_index,type] items=[_transfer_asset_contract_asset in(Utf8: "31303035313134") type in(Utf8: "TransferAssetContract")] window=82644089..82644089 -> rows=74

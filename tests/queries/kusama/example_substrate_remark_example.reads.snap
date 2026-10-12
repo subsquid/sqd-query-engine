@@ -1,0 +1,29 @@
+---
+source: tests/queries.rs
+---
+## json
+response 24136800..24140649 n=2 read_through=-
+read blocks blocks=-..- cols=[hash,impl_name,impl_version,number,parent_hash,spec_name,spec_version] block_column=number at=2:0b4be2d74b3f5d9a -> rows=2
+read blocks blocks=24136800..24140649 cols=[number] block_column=number required=[hash,impl_name,impl_version,number,parent_hash,spec_name,spec_version] positions -> rows=3850
+read calls blocks=24136800..24137823 cols=[args_size,block_number] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] items=[name in(Utf8: "System.remark")] positions window=24136800..24137823 -> rows=0
+read calls blocks=24137824..24138847 cols=[args_size,block_number] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] items=[name in(Utf8: "System.remark")] positions window=24137824..24138847 -> rows=0
+read calls blocks=24138848..24139871 cols=[args_size,block_number] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] items=[name in(Utf8: "System.remark")] positions window=24138848..24139871 -> rows=0
+read calls blocks=24139872..24140649 cols=[args_size,block_number] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] items=[name in(Utf8: "System.remark")] positions window=24139872..24140649 -> rows=0
+
+## json, page 256 KiB
+response 24136800..24140649 n=2 read_through=-
+read blocks blocks=-..- cols=[hash,impl_name,impl_version,number,parent_hash,spec_name,spec_version] block_column=number at=2:0b4be2d74b3f5d9a -> rows=2
+read blocks blocks=24136800..24140649 cols=[number] block_column=number required=[hash,impl_name,impl_version,number,parent_hash,spec_name,spec_version] positions -> rows=3850
+read calls blocks=24136800..24137823 cols=[args_size,block_number] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] items=[name in(Utf8: "System.remark")] positions window=24136800..24137823 -> rows=0
+read calls blocks=24137824..24138847 cols=[args_size,block_number] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] items=[name in(Utf8: "System.remark")] positions window=24137824..24138847 -> rows=0
+read calls blocks=24138848..24139871 cols=[args_size,block_number] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] items=[name in(Utf8: "System.remark")] positions window=24138848..24139871 -> rows=0
+read calls blocks=24139872..24140649 cols=[args_size,block_number] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] items=[name in(Utf8: "System.remark")] positions window=24139872..24140649 -> rows=0
+
+## arrow
+response 24136800..24140649 n=2
+read blocks blocks=-..- cols=[hash,impl_name,impl_version,number,parent_hash,spec_name,spec_version] block_column=number at=2:0b4be2d74b3f5d9a -> rows=2
+read blocks blocks=24136800..24140649 cols=[number] block_column=number required=[hash,impl_name,impl_version,number,parent_hash,spec_name,spec_version] positions -> rows=3850
+read calls blocks=24136800..24137823 cols=[args_size,block_number] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] items=[name in(Utf8: "System.remark")] positions window=24136800..24137823 -> rows=0
+read calls blocks=24137824..24138847 cols=[args_size,block_number] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] items=[name in(Utf8: "System.remark")] positions window=24137824..24138847 -> rows=0
+read calls blocks=24138848..24139871 cols=[args_size,block_number] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] items=[name in(Utf8: "System.remark")] positions window=24138848..24139871 -> rows=0
+read calls blocks=24139872..24140649 cols=[args_size,block_number] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] items=[name in(Utf8: "System.remark")] positions window=24139872..24140649 -> rows=0

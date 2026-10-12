@@ -45,14 +45,15 @@ test-nightly:
 test-data:
 	SQD_REQUIRE_CHUNKS=1 cargo test --workspace -- --ignored
 
-# Queries on real chunks, see tests/queries/README.md. The chunks live in a cache
-# outside the repo, and the test reads the same variable.
+# Real chunks, see tests/queries/README.md. They live in a cache outside the
+# repo, and the tests and benches read the same variable.
 export SQD_CHUNK_CACHE ?= $(HOME)/.cache/sqd-chunks
 
-# Downloads each chunk a `chunks.yaml` names and the cache lacks. The copy lands in a
-# `.part` directory first, so an interrupted one never looks complete. The AWS
-# CLI must be configured for the chunk store. Then every cached chunk, new or
-# not, is hashed against its `chunks.yaml`, and the tests read only those that match.
+# Downloads each stored chunk `chunk-registry.yaml` names and the cache lacks.
+# The copy lands in a `.part` directory first, so an interrupted one never looks
+# complete. The AWS CLI must be configured for the chunk store. Then every cached
+# chunk, new or not, is hashed against the registry, and the tests read only those
+# that match.
 fetch:
 	@refs=$$(cargo test --quiet --test queries -- --list-chunks) || exit 1; \
 	for ref in $$refs; do \

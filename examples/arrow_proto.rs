@@ -15,9 +15,8 @@
 //!
 //! Run: `cargo run --release --example arrow_proto`
 
-#[path = "../benches/queries.rs"]
-mod queries;
-use queries::*;
+#[path = "../tests/conformance/harness/store.rs"]
+mod store;
 
 use arrow::ipc::reader::StreamReader;
 use sqd_query_engine::metadata::{load_dataset_description, DatasetDescription};
@@ -111,16 +110,20 @@ fn mb(bytes: usize) -> String {
 
 fn main() {
     let meta = load_dataset_description(Path::new("metadata/evm.yaml")).unwrap();
-    let chunk = ParquetChunkReader::open(Path::new("data/evm/chunk")).unwrap();
+    let chunk = ParquetChunkReader::open(&store::chunk("evm-small")).unwrap();
 
-    let cases: &[(&str, &[u8])] = &[
-        ("usdc_transfers (flat logs)", EVM_USDC_TRANSFERS),
-        ("contract_calls+logs (nested)", EVM_CONTRACT_CALLS_WITH_LOGS),
-        ("all_logs (full scan)", EVM_ALL_LOGS),
-        ("usdc_traces+diffs (heavy)", EVM_USDC_TRACES_AND_STATEDIFFS),
+    // Flat logs, nested logs under transactions, a full scan, and the heaviest.
+    let cases = [
+        "evm/selective/usdc_transfers",
+        "evm/selective/contract_calls_and_logs",
+        "evm/fullscan/all_logs",
+        "evm/selective/usdc_traces_and_diffs",
     ];
 
-    for (name, query) in cases {
+    for name in cases {
+        let path = store::bench_queries_dir().join(format!("{name}.json"));
+        let query = std::fs::read(path).unwrap();
+        let query = query.as_slice();
         let json = run_json(query, &meta, &chunk);
         let arrow = run_arrow(query, &meta, &chunk, false, false);
         let bin = run_arrow(query, &meta, &chunk, false, true);

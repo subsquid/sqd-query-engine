@@ -1,0 +1,19 @@
+---
+source: tests/queries.rs
+---
+## json
+response 748640000..748640500 n=45 read_through=-
+read blocks blocks=748640000..748640500 cols=[hash,number] block_column=number required=[hash,number] -> rows=501
+read fills blocks=748640000..748640500 cols=[block_number,coin,dir,fill_index,px,side,sz,user] block_column=block_number required=[coin,dir,fill_index,px,side,sz,user] items=[coin in(Utf8: "BTC")] window=748640000..748640500 -> rows=110
+
+## json, page 256 KiB
+response 748640000..748640500 n=45 read_through=-
+read blocks blocks=-..- cols=[hash,number] block_column=number at=45:0f4a0c4b3860cfee -> rows=45
+read blocks blocks=748640000..748640500 cols=[number] block_column=number required=[hash,number] positions -> rows=501
+read fills blocks=-..- cols=[block_number,coin,dir,fill_index,px,side,sz,user] block_column=block_number at=110:c3cf136cae890d42 -> rows=110
+read fills blocks=748640000..748640500 cols=[block_number] block_column=block_number required=[coin,dir,fill_index,px,side,sz,user] items=[coin in(Utf8: "BTC")] positions window=748640000..748640500 -> rows=110
+
+## arrow
+response 748640000..748640500 n=45
+read blocks blocks=748640000..748640500 cols=[hash,number] block_column=number required=[hash,number] -> rows=501
+read fills blocks=748640000..748640500 cols=[block_number,coin,dir,fill_index,px,side,sz,user] block_column=block_number required=[coin,dir,fill_index,px,side,sz,user] items=[coin in(Utf8: "BTC")] window=748640000..748640500 -> rows=110

@@ -1,0 +1,20 @@
+---
+source: tests/queries.rs
+---
+## json
+response 17881390..17882786 n=15 read_through=-
+read blocks blocks=17881390..17882786 cols=[hash,number,parent_hash,timestamp] block_column=number required=[hash,number,parent_hash,timestamp] -> rows=1397
+read transactions blocks=17881390..17882786 cols=[block_number,from,hash,input,input_size,sighash,to,transaction_index] block_column=block_number required=[from,hash,input,input_size,sighash,to,transaction_index] items=[to in(Utf8: "0x0a252663dbcc0b073063d6420a40319e438cfa59") sighash in(Utf8: "0xecef9201", "0xf5878b9b")] window=17881390..17882786 -> rows=13
+
+## json, page 256 KiB
+response 17881390..17882786 n=15 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash,timestamp] block_column=number at=15:3fee4899ee2d0e21 -> rows=15
+read blocks blocks=17881390..17882786 cols=[number] block_column=number required=[hash,number,parent_hash,timestamp] positions -> rows=1397
+read transactions blocks=-..- cols=[block_number,from,hash,input,input_size,sighash,to,transaction_index] block_column=block_number at=13:7282bc225c054774 -> rows=13
+read transactions blocks=17881390..17882413 cols=[block_number,input_size] block_column=block_number required=[from,hash,input,input_size,sighash,to,transaction_index] items=[to in(Utf8: "0x0a252663dbcc0b073063d6420a40319e438cfa59") sighash in(Utf8: "0xecef9201", "0xf5878b9b")] positions window=17881390..17882413 -> rows=6
+read transactions blocks=17882414..17882786 cols=[block_number,input_size] block_column=block_number required=[from,hash,input,input_size,sighash,to,transaction_index] items=[to in(Utf8: "0x0a252663dbcc0b073063d6420a40319e438cfa59") sighash in(Utf8: "0xecef9201", "0xf5878b9b")] positions window=17882414..17882786 -> rows=7
+
+## arrow
+response 17881390..17882786 n=15
+read blocks blocks=17881390..17882786 cols=[hash,number,parent_hash,timestamp] block_column=number required=[hash,number,parent_hash,timestamp] -> rows=1397
+read transactions blocks=17881390..17882786 cols=[block_number,from,hash,input,input_size,sighash,to,transaction_index] block_column=block_number required=[from,hash,input,input_size,sighash,to,transaction_index] items=[to in(Utf8: "0x0a252663dbcc0b073063d6420a40319e438cfa59") sighash in(Utf8: "0xecef9201", "0xf5878b9b")] window=17881390..17882786 -> rows=13

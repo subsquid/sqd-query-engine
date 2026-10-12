@@ -1,0 +1,26 @@
+---
+source: tests/queries.rs
+---
+## json
+response 4669460..4669500 n=8 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=8:c8ff1e26aabd7812 -> rows=8
+read blocks blocks=4669460..4669500 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=41
+read calls blocks=-..- cols=[address,args,args_size,block_number,extrinsic_index,name,origin] block_column=block_number at=12:7d6975a9d83bfb08 -> rows=12
+read calls blocks=4669460..4669500 cols=[address,args_size,block_number,extrinsic_index] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] items=[name in(Utf8: "Proxy.proxy")] positions window=4669460..4669500 -> rows=6
+read calls blocks=4669483..4669493 cols=[address,args_size,block_number,extrinsic_index] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] keys=[block_number,extrinsic_index] block=block_number as pairs hierarchy=children[block_number,extrinsic_index]/address positions window=4669460..4669500 -> rows=6
+
+## json, page 256 KiB
+response 4669460..4669500 n=8 read_through=-
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=8:c8ff1e26aabd7812 -> rows=8
+read blocks blocks=4669460..4669500 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=41
+read calls blocks=-..- cols=[address,args,args_size,block_number,extrinsic_index,name,origin] block_column=block_number at=12:7d6975a9d83bfb08 -> rows=12
+read calls blocks=4669460..4669500 cols=[address,args_size,block_number,extrinsic_index] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] items=[name in(Utf8: "Proxy.proxy")] positions window=4669460..4669500 -> rows=6
+read calls blocks=4669483..4669493 cols=[address,args_size,block_number,extrinsic_index] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] keys=[block_number,extrinsic_index] block=block_number as pairs hierarchy=children[block_number,extrinsic_index]/address positions window=4669460..4669500 -> rows=6
+
+## arrow
+response 4669460..4669500 n=8
+read blocks blocks=-..- cols=[hash,number,parent_hash] block_column=number at=8:c8ff1e26aabd7812 -> rows=8
+read blocks blocks=4669460..4669500 cols=[number] block_column=number required=[hash,number,parent_hash] positions -> rows=41
+read calls blocks=-..- cols=[address,args,args_size,block_number,extrinsic_index,name,origin] block_column=block_number at=12:7d6975a9d83bfb08 -> rows=12
+read calls blocks=4669460..4669500 cols=[address,args_size,block_number,extrinsic_index] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] items=[name in(Utf8: "Proxy.proxy")] positions window=4669460..4669500 -> rows=6
+read calls blocks=4669483..4669493 cols=[address,args_size,block_number,extrinsic_index] block_column=block_number required=[address,args,args_size,extrinsic_index,name,origin] keys=[block_number,extrinsic_index] block=block_number as pairs hierarchy=children[block_number,extrinsic_index]/address positions window=4669460..4669500 -> rows=6

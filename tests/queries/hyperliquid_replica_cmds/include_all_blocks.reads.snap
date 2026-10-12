@@ -1,0 +1,14 @@
+---
+source: tests/queries.rs
+---
+## json
+response 748640000..748640100 n=101 read_through=-
+read blocks blocks=748640000..748640100 cols=[hardfork,hash,number,parent_hash,parent_round,proposer,round,timestamp] block_column=number required=[hardfork,hash,number,parent_hash,parent_round,proposer,round,timestamp] -> rows=101
+
+## json, page 256 KiB
+response 748640000..748640100 n=101 read_through=-
+read blocks blocks=748640000..748640100 cols=[hardfork,hash,number,parent_hash,parent_round,proposer,round,timestamp] block_column=number required=[hardfork,hash,number,parent_hash,parent_round,proposer,round,timestamp] -> rows=101
+
+## arrow
+response 748640000..748640100 n=101
+read blocks blocks=748640000..748640100 cols=[hardfork,hash,number,parent_hash,parent_round,proposer,round,timestamp] block_column=number required=[hardfork,hash,number,parent_hash,parent_round,proposer,round,timestamp] -> rows=101

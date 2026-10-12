@@ -1,0 +1,35 @@
+---
+source: tests/queries.rs
+---
+## json
+response 217710049..217710956 n=28 read_through=-
+read balances blocks=-..- cols=[account,block_number,post,pre,transaction_index] block_column=block_number at=58:4e8bc76818f0e434 -> rows=58
+read balances blocks=217710049..- cols=[block_number,transaction_index] block_column=block_number required=[account,post,pre,transaction_index] items=[account in(Utf8: "FSduwbdC1cgtVV7ovQFYt3WrVqym2GxC6b9X7ERaFzG9")] positions window=217710049..- -> rows=58
+read blocks blocks=-..- cols=[hash,height,number] block_column=number at=28:2fa55625012777c4 -> rows=28
+read blocks blocks=217710049..- cols=[number] block_column=number required=[hash,height,number] positions -> rows=900
+read instructions blocks=-..- cols=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,block_number,data,data_size,instruction_address,program_id,rest_accounts,transaction_index] block_column=block_number at=598:6f8f368788e24638 -> rows=598
+read instructions blocks=217710049..217710597 cols=[accounts_size,block_number,data_size,transaction_index] block_column=block_number required=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,data,data_size,instruction_address,program_id,rest_accounts,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=217710049..- -> rows=598
+read transactions blocks=-..- cols=[block_number,fee_payer,signatures,signatures_size,transaction_index] block_column=block_number at=58:ec12829fa94fb84f -> rows=58
+read transactions blocks=217710049..217710597 cols=[block_number,signatures_size,transaction_index] block_column=block_number required=[fee_payer,signatures,signatures_size,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=217710049..- -> rows=58
+
+## json, page 256 KiB
+response 217710049..217710596 n=26 read_through=-
+read balances blocks=-..- cols=[account,block_number,post,pre,transaction_index] block_column=block_number at=52:f0d200216fe806ca -> rows=52
+read balances blocks=217710049..- cols=[block_number,transaction_index] block_column=block_number required=[account,post,pre,transaction_index] items=[account in(Utf8: "FSduwbdC1cgtVV7ovQFYt3WrVqym2GxC6b9X7ERaFzG9")] positions window=217710049..- -> rows=58
+read blocks blocks=-..- cols=[hash,height,number] block_column=number at=26:f7dfede64a984a95 -> rows=26
+read blocks blocks=217710049..- cols=[number] block_column=number required=[hash,height,number] positions -> rows=900
+read instructions blocks=-..- cols=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,block_number,data,data_size,instruction_address,program_id,rest_accounts,transaction_index] block_column=block_number at=548:e526fec9e40d053f -> rows=548
+read instructions blocks=217710049..217710597 cols=[accounts_size,block_number,data_size,transaction_index] block_column=block_number required=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,data,data_size,instruction_address,program_id,rest_accounts,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=217710049..- -> rows=598
+read transactions blocks=-..- cols=[block_number,fee_payer,signatures,signatures_size,transaction_index] block_column=block_number at=52:0fa17f7995a7bb18 -> rows=52
+read transactions blocks=217710049..217710597 cols=[block_number,signatures_size,transaction_index] block_column=block_number required=[fee_payer,signatures,signatures_size,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=217710049..- -> rows=58
+
+## arrow
+response 217710049..217710956 n=28
+read balances blocks=-..- cols=[account,block_number,post,pre,transaction_index] block_column=block_number at=58:4e8bc76818f0e434 -> rows=58
+read balances blocks=217710049..- cols=[block_number,transaction_index] block_column=block_number required=[account,post,pre,transaction_index] items=[account in(Utf8: "FSduwbdC1cgtVV7ovQFYt3WrVqym2GxC6b9X7ERaFzG9")] positions window=217710049..- -> rows=58
+read blocks blocks=-..- cols=[hash,height,number] block_column=number at=28:2fa55625012777c4 -> rows=28
+read blocks blocks=217710049..- cols=[number] block_column=number required=[hash,height,number] positions -> rows=900
+read instructions blocks=-..- cols=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,block_number,data,data_size,instruction_address,program_id,rest_accounts,transaction_index] block_column=block_number at=598:6f8f368788e24638 -> rows=598
+read instructions blocks=217710049..217710597 cols=[accounts_size,block_number,data_size,transaction_index] block_column=block_number required=[a0,a1,a10,a11,a12,a13,a14,a15,a2,a3,a4,a5,a6,a7,a8,a9,accounts_size,data,data_size,instruction_address,program_id,rest_accounts,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=217710049..- -> rows=598
+read transactions blocks=-..- cols=[block_number,fee_payer,signatures,signatures_size,transaction_index] block_column=block_number at=58:ec12829fa94fb84f -> rows=58
+read transactions blocks=217710049..217710597 cols=[block_number,signatures_size,transaction_index] block_column=block_number required=[fee_payer,signatures,signatures_size,transaction_index] keys=[block_number,transaction_index] block=block_number as pairs positions window=217710049..- -> rows=58
