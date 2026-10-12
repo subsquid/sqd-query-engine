@@ -1,6 +1,6 @@
 # Queries on real chunks
 
-Each directory here holds queries plus a reference to the network chunk they run on. Git keeps the queries and the reference, never the chunk and never the answers. So a directory costs a few kilobytes however big its chunk is.
+Each directory here holds queries, a snapshot of each answer, and a reference to the network chunk they run on. Git keeps the queries, the snapshots and the reference, never the chunk. So a directory stays small however big its chunk is.
 
 ```text
 tests/queries/bench/evm/
@@ -49,7 +49,7 @@ A `fixture:` chunk takes no hashes, since the legacy repo's LFS already pins it.
 
 With `--features legacy-query`, each query runs through this engine and the legacy one, and the answers must match. When they don't, the test prints the first difference, with the block, the path and both values, and writes both full answers under `target/tmp/queries/`.
 
-Then the answer is checked against the snapshot beside the query: the block count, the items in each table, and a digest of the whole answer. The snapshot is what keeps a query useful without the legacy engine, because without the feature it's the only check. A new or changed answer fails until you accept it with `cargo insta review` or `INSTA_UPDATE=always`, so read the diff first.
+Then the answer is checked against the snapshot beside the query: the block count, the items in each table, and the answer itself, with object keys sorted. An answer over 64 KB is too long to review, so its snapshot keeps a digest of it instead. The snapshot is what keeps a query useful without the legacy engine, because without the feature it's the only check. A new or changed answer fails until you accept it with `cargo insta review` or `INSTA_UPDATE=always`, so read the diff first.
 
 When the engines differ on purpose, say so in `chunks.yaml`, and that query checks the snapshot only:
 
@@ -75,4 +75,4 @@ To turn a bug report into a regression test, put the reported query and chunk in
 
 - The queries need access to the chunk store, so CI doesn't run them.
 - A reference works as long as the store keeps that chunk. A dataset rewritten under a new id needs new references.
-- A snapshot says that an answer changed, and in which table, but not where inside it. While the legacy engine exists, the live comparison shows that.
+- A digest says that an answer changed, and the counts say in which table, but not where inside it. While the legacy engine exists, the live comparison shows that.
