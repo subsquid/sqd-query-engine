@@ -59,6 +59,46 @@ fn hexish() -> impl Strategy<Value = String> {
     ]
 }
 
+fn settle_hex_filters(value: &str) {
+    let v = json(value);
+    settle(
+        &format!(r#"{{"type":"solana","fromBlock":0,"instructions":[{{"d8":[{v}]}}]}}"#),
+        solana(),
+    );
+    settle(
+        &format!(r#"{{"type":"solana","fromBlock":0,"instructions":[{{"d1":[{v}]}}]}}"#),
+        solana(),
+    );
+    settle(
+        &format!(r#"{{"type":"solana","fromBlock":0,"instructions":[{{"discriminator":[{v}]}}]}}"#),
+        solana(),
+    );
+    settle(
+        &format!(r#"{{"type":"evm","fromBlock":0,"logs":[{{"topic0":[{v}]}}]}}"#),
+        evm(),
+    );
+    settle(
+        &format!(r#"{{"type":"evm","fromBlock":0,"transactions":[{{"sighash":[{v}]}}]}}"#),
+        evm(),
+    );
+}
+
+fn settle_string_filters(value: &str) {
+    let v = json(value);
+    settle(
+        &format!(r#"{{"type":"evm","fromBlock":0,"logs":[{{"address":[{v}]}}]}}"#),
+        evm(),
+    );
+    settle(
+        &format!(r#"{{"type":"evm","fromBlock":0,"traces":[{{"type":[{v}]}}]}}"#),
+        evm(),
+    );
+    settle(
+        &format!(r#"{{"type":"solana","fromBlock":0,"instructions":[{{"programId":[{v}]}}]}}"#),
+        solana(),
+    );
+}
+
 proptest! {
     // Where the recorded counterexamples live. The default, `SourceParallel`,
     // resolves against the nearest `lib.rs` or `main.rs` — so merging the suite
@@ -76,31 +116,13 @@ proptest! {
     /// walk inside them.
     #[test]
     fn no_hex_filter_value_panics(value in hexish()) {
-        let v = json(&value);
-        settle(&format!(
-            r#"{{"type":"solana","fromBlock":0,"instructions":[{{"d8":[{v}]}}]}}"#), solana());
-        settle(&format!(
-            r#"{{"type":"solana","fromBlock":0,"instructions":[{{"d1":[{v}]}}]}}"#), solana());
-        settle(&format!(
-            r#"{{"type":"solana","fromBlock":0,"instructions":[{{"discriminator":[{v}]}}]}}"#),
-            solana());
-        settle(&format!(
-            r#"{{"type":"evm","fromBlock":0,"logs":[{{"topic0":[{v}]}}]}}"#), evm());
-        settle(&format!(
-            r#"{{"type":"evm","fromBlock":0,"transactions":[{{"sighash":[{v}]}}]}}"#), evm());
+        settle_hex_filters(&value);
     }
 
     /// String-typed filters take the value as written, but still walk it.
     #[test]
     fn no_string_filter_value_panics(value in hexish()) {
-        let v = json(&value);
-        settle(&format!(
-            r#"{{"type":"evm","fromBlock":0,"logs":[{{"address":[{v}]}}]}}"#), evm());
-        settle(&format!(
-            r#"{{"type":"evm","fromBlock":0,"traces":[{{"type":[{v}]}}]}}"#), evm());
-        settle(&format!(
-            r#"{{"type":"solana","fromBlock":0,"instructions":[{{"programId":[{v}]}}]}}"#),
-            solana());
+        settle_string_filters(&value);
     }
 
     /// Keys are turned into column names before anything looks them up.
@@ -116,6 +138,17 @@ proptest! {
             r#"{{"type":"evm","fromBlock":0,"logs":[{{}}],"fields":{{{n}:{{"address":true}}}}}}"#),
             evm());
     }
+}
+
+/// A value proptest found: a four-byte character inside the hex digits. The
+/// seed file replays it only while `hexish` stays as it is.
+///
+/// Covers CT-9 · INV-E1
+#[test]
+fn a_four_byte_character_in_a_hex_value_does_not_panic() {
+    let value = "0x\u{10000}\0\0 0";
+    settle_hex_filters(value);
+    settle_string_filters(value);
 }
 
 /// The scalars a client can put anywhere: wrong types are refused, but the

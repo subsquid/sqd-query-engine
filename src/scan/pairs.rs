@@ -213,22 +213,58 @@ mod tests {
         }
     }
 
+    /// A dense set is never larger than its keys alone, the least a hash set
+    /// of them holds.
+    fn no_larger_than_its_keys(pairs: Vec<(u64, u64)>) -> Result<(), TestCaseError> {
+        let mut unique = pairs.clone();
+        unique.sort_unstable();
+        unique.dedup();
+
+        if let PairSet::Dense(dense) = PairSet::new(pairs) {
+            prop_assert!(dense_bytes(&dense) <= unique.len() * 16);
+        }
+        Ok(())
+    }
+
+    /// A window proptest found. Its seed file replays the case only while the
+    /// strategy stays as it was, so the case is pinned here too.
+    #[test]
+    fn a_window_of_scattered_indices_is_no_larger_than_its_keys() {
+        #[rustfmt::skip]
+        let window = vec![
+            (2, 192), (2, 89), (0, 200), (5, 114), (1, 377), (7, 115), (1, 222), (11, 296),
+            (13, 397), (11, 332), (5, 304), (6, 321), (6, 220), (2, 394), (6, 83), (5, 324),
+            (7, 180), (14, 97), (1, 270), (2, 200), (6, 46), (4, 114), (1, 266), (9, 15),
+            (11, 361), (0, 254), (12, 16), (3, 62), (8, 355), (9, 335), (3, 81), (10, 190),
+            (0, 32), (10, 317), (12, 184), (5, 7), (1, 126), (9, 302), (12, 398), (12, 143),
+            (5, 118), (5, 281), (6, 36), (1, 284), (8, 24), (4, 264), (5, 196), (15, 74),
+            (2, 195), (5, 249), (3, 183), (3, 167), (13, 167), (2, 228), (12, 327), (8, 391),
+            (15, 23), (14, 374), (4, 138), (9, 74), (12, 20), (2, 325), (15, 333), (7, 293),
+            (15, 380), (4, 242), (5, 127), (12, 193), (9, 4), (2, 117), (8, 60), (1, 5),
+            (2, 307), (11, 230), (7, 175), (8, 92), (9, 389), (3, 165), (11, 69), (12, 307),
+            (4, 170), (2, 91), (3, 358), (9, 88), (10, 170), (1, 368), (3, 211), (11, 109),
+            (0, 14), (12, 357), (15, 256), (2, 21), (7, 288), (5, 19), (12, 156), (14, 195),
+            (12, 287), (0, 373), (5, 113), (10, 239), (1, 123), (5, 365), (9, 271), (11, 29),
+            (10, 56), (14, 166), (6, 143), (14, 114), (13, 73), (0, 25), (15, 181), (10, 0),
+            (2, 344), (8, 202),
+        ];
+        no_larger_than_its_keys(vec![(0, 0)]).unwrap();
+        no_larger_than_its_keys(window).unwrap();
+    }
+
     proptest! {
-        /// A dense set is never larger than its keys alone, the least a hash
-        /// set of them holds.
+        #![proptest_config(ProptestConfig {
+            failure_persistence: crate::testing::seeds_beside_source(),
+            ..ProptestConfig::default()
+        })]
+
         #[test]
         fn a_dense_set_is_no_larger_than_its_keys(
             pairs in prop::collection::vec((0u64..(MAX_SLOTS + 8), 0u64..(1 << 21)), 1..64),
             window in prop::collection::vec((0u64..16, 0u64..400), 0..2000),
         ) {
-            for pairs in [pairs, window] {
-                let mut unique = pairs.clone();
-                unique.sort_unstable();
-                unique.dedup();
-                if let PairSet::Dense(dense) = PairSet::new(pairs) {
-                    prop_assert!(dense_bytes(&dense) <= unique.len() * 16);
-                }
-            }
+            no_larger_than_its_keys(pairs)?;
+            no_larger_than_its_keys(window)?;
         }
 
         #[test]

@@ -1732,6 +1732,11 @@ mod tests {
     }
 
     proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            failure_persistence: crate::testing::seeds_beside_source(),
+            ..proptest::prelude::ProptestConfig::default()
+        })]
+
         #[test]
         fn a_string_renders_as_serde_renders_it(
             text in proptest::string::string_regex("(?s).{0,80}").unwrap(),
