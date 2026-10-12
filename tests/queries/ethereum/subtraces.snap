@@ -1,0 +1,148 @@
+---
+source: tests/queries.rs
+---
+blocks: 3 (17881390 to 17882786)
+traces: 7
+
+[
+  {
+    "header": {
+      "hash": "0xdda0a722c34ab011af33454e333937253d6bdd5a82f18edc4c5b6f332ed6e976",
+      "number": 17881390,
+      "parentHash": "0xb38b7d93d8221ccb406b832f9f545122e54f09ebe5e9f7c89b6f9f11821c649c",
+      "timestamp": 1691633039
+    }
+  },
+  {
+    "header": {
+      "hash": "0xc8b1c4bd44d627f1dc5789379c23a2d907a8e984c2719637a5c9859a240ffe90",
+      "number": 17882154,
+      "parentHash": "0x5ad63ca5a0f25437699b0b81d7b7265ebc2869ada4ea6ce155e8fd4f80db1cfa",
+      "timestamp": 1691642255
+    },
+    "traces": [
+      {
+        "action": {
+          "from": "0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad",
+          "input": "0x128acb08000000000000000000000000139a2d77d8a510cadf7c10612f45ef59b7fba8ef00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000c685fa11e01ec6f00000000000000000000000000000000000000000000000000000000000001000276a400000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000040000000000000000000000000139a2d77d8a510cadf7c10612f45ef59b7fba8ef000000000000000000000000000000000000000000000000000000000000002b06450dee7fd2fb8e39061434babcfc05599a6fb800271080f0c1c49891dcfdd40b6e0f960f84e6042bcb6f000000000000000000000000000000000000000000",
+          "to": "0xffdbe829d5a9afcd50482c23eb387b9050f1f825"
+        },
+        "result": {
+          "output": "0x0000000000000000000000000000000000000000000c685fa11e01ec6f000000ffffffffffffffffffffffffffffffffffffffffffffffffd4cb584740fd5f3d"
+        },
+        "traceAddress": [
+          0
+        ],
+        "transactionIndex": 85,
+        "type": "call"
+      },
+      {
+        "action": {
+          "from": "0xffdbe829d5a9afcd50482c23eb387b9050f1f825",
+          "input": "0xa9059cbb000000000000000000000000139a2d77d8a510cadf7c10612f45ef59b7fba8ef0000000000000000000000000000000000000000000000002b34a7b8bf02a0c3",
+          "to": "0x80f0c1c49891dcfdd40b6e0f960f84e6042bcb6f"
+        },
+        "result": {
+          "output": "0x0000000000000000000000000000000000000000000000000000000000000001"
+        },
+        "traceAddress": [
+          0,
+          0
+        ],
+        "transactionIndex": 85,
+        "type": "call"
+      },
+      {
+        "action": {
+          "from": "0xffdbe829d5a9afcd50482c23eb387b9050f1f825",
+          "input": "0x70a08231000000000000000000000000ffdbe829d5a9afcd50482c23eb387b9050f1f825",
+          "to": "0x06450dee7fd2fb8e39061434babcfc05599a6fb8"
+        },
+        "result": {
+          "output": "0x0000000000000000000000000000000000000000002eea7c217f44c21931a147"
+        },
+        "traceAddress": [
+          0,
+          1
+        ],
+        "transactionIndex": 85,
+        "type": "call"
+      },
+      {
+        "action": {
+          "from": "0xffdbe829d5a9afcd50482c23eb387b9050f1f825",
+          "input": "0xfa461e330000000000000000000000000000000000000000000c685fa11e01ec6f000000ffffffffffffffffffffffffffffffffffffffffffffffffd4cb584740fd5f3d000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000040000000000000000000000000139a2d77d8a510cadf7c10612f45ef59b7fba8ef000000000000000000000000000000000000000000000000000000000000002b06450dee7fd2fb8e39061434babcfc05599a6fb800271080f0c1c49891dcfdd40b6e0f960f84e6042bcb6f000000000000000000000000000000000000000000",
+          "to": "0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad"
+        },
+        "result": {
+          "output": "0x"
+        },
+        "traceAddress": [
+          0,
+          2
+        ],
+        "transactionIndex": 85,
+        "type": "call"
+      },
+      {
+        "action": {
+          "from": "0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad",
+          "input": "0x36c78516000000000000000000000000139a2d77d8a510cadf7c10612f45ef59b7fba8ef000000000000000000000000ffdbe829d5a9afcd50482c23eb387b9050f1f8250000000000000000000000000000000000000000000c685fa11e01ec6f00000000000000000000000000000006450dee7fd2fb8e39061434babcfc05599a6fb8",
+          "to": "0x000000000022d473030f116ddee9f6b43ac78ba3"
+        },
+        "result": {
+          "output": "0x"
+        },
+        "traceAddress": [
+          0,
+          2,
+          0
+        ],
+        "transactionIndex": 85,
+        "type": "call"
+      },
+      {
+        "action": {
+          "from": "0x000000000022d473030f116ddee9f6b43ac78ba3",
+          "input": "0x23b872dd000000000000000000000000139a2d77d8a510cadf7c10612f45ef59b7fba8ef000000000000000000000000ffdbe829d5a9afcd50482c23eb387b9050f1f8250000000000000000000000000000000000000000000c685fa11e01ec6f000000",
+          "to": "0x06450dee7fd2fb8e39061434babcfc05599a6fb8"
+        },
+        "result": {
+          "output": "0x0000000000000000000000000000000000000000000000000000000000000001"
+        },
+        "traceAddress": [
+          0,
+          2,
+          0,
+          0
+        ],
+        "transactionIndex": 85,
+        "type": "call"
+      },
+      {
+        "action": {
+          "from": "0xffdbe829d5a9afcd50482c23eb387b9050f1f825",
+          "input": "0x70a08231000000000000000000000000ffdbe829d5a9afcd50482c23eb387b9050f1f825",
+          "to": "0x06450dee7fd2fb8e39061434babcfc05599a6fb8"
+        },
+        "result": {
+          "output": "0x0000000000000000000000000000000000000000003b52dbc29d46ae8831a147"
+        },
+        "traceAddress": [
+          0,
+          3
+        ],
+        "transactionIndex": 85,
+        "type": "call"
+      }
+    ]
+  },
+  {
+    "header": {
+      "hash": "0x32ee94575704dcf7cd704c34d0521200cdf18b56abe4fee95a718d58e338c076",
+      "number": 17882786,
+      "parentHash": "0x1aa5064ef3ca9a7391565777199bf605ec0190a2a1b88634eb045787766b8856",
+      "timestamp": 1691649887
+    }
+  }
+]

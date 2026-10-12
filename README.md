@@ -53,9 +53,8 @@ tests/
     main.rs     # CT-1 through CT-9 modules (some classes have subdirectories)
     harness/    # Fixture loaders, runners, synthetic chunk writers
   queries.rs
-  queries/      # Queries plus a reference to the chunk they run on; see its README
-  e2e_fixtures.rs
-  fixtures/     # Query/result JSON pairs per dataset; a link into the legacy repo
+  queries/      # Queries, their answers' snapshots, the chunk they run on; see its README
+  fixtures/     # The fixture chunks per dataset; a link into the legacy repo
   reads.rs      # What each bench query reads, as snapshots
   snapshots/    # Those snapshots
   throughput.rs # How the throughput bench counts its rate
@@ -185,8 +184,7 @@ Pick the place for a test by what it checks and what data it needs.
 | One function or module | `#[cfg(test)] mod tests` in `src/` | Nothing, or the chunks in `data/` |
 | A rule of the spec | `tests/conformance/ctN_*`, in its class | A small chunk the harness writes |
 | Generated queries answer as the legacy engine does | `tests/conformance/ct7_differential.rs` | The fixture tree and `--features legacy-query` |
-| A recorded query keeps its recorded answer | `tests/e2e_fixtures.rs` | The fixture tree |
-| A query on a referenced chunk matches the legacy engine and a snapshot | `tests/queries/` | Cached chunks; see [the query guide](tests/queries/README.md) |
+| A query on a real chunk matches the legacy engine and keeps its answer | `tests/queries/` | The chunk; see [the query guide](tests/queries/README.md) |
 | What each bench query reads | `tests/reads.rs` | The chunks in `data/` |
 | CPU and heap cost of each bench query | `benches/instructions` | Linux and `valgrind`; see [BENCHMARKS.md](BENCHMARKS.md) |
 | How `throughput` turns finished queries into a rate | `tests/throughput.rs` | Nothing |
@@ -211,26 +209,12 @@ fn a_selected_null_renders_as_null_at_every_integer_width() { ... }
 that doesn't exist, and a matrix row naming a test that's gone all fail the
 build.
 
-A fixture test is weaker. It says an answer didn't change, but when it fails it
-doesn't say which rule broke. Write one when you need a real chunk and an answer
-recorded from the legacy engine. The files don't go into this repo:
-`tests/fixtures` is a link to `crates/query/fixtures` in the legacy repo, so a
-new fixture is a commit there.
-
-1. Put `query.json` in `tests/fixtures/<dataset>/queries/<name>/`.
-2. Get `result.json` from the legacy engine with
-   `cargo run --bin generate_fixtures --features legacy-query`. It fills only
-   `ethereum` and `solana` directories named `prod_pattern_*` that have no
-   `result.json` yet; for another name or dataset, extend it first.
-3. Add a line such as `evm_fixture!(<name>);` to `tests/e2e_fixtures.rs`.
-
-Don't rename `actual.temp.json` to `result.json`. The test writes that file
-from this engine's output, so a fixture made from it compares the engine with
-itself.
-
-CT-7 builds its queries from the catalog. For a specific query compared live
-with the legacy engine, add it under `tests/queries/`: a `chunks.yaml` naming
-the chunk and query files beside it. See [the query guide](tests/queries/README.md).
+A query on a real chunk is weaker. It says an answer didn't change, but when it
+fails it doesn't say which rule broke. Write one when you need a real chunk:
+put the query in `tests/queries/<dataset>/<name>.json`, beside the
+`chunks.yaml` that names the chunk, and accept its snapshot. CT-7 builds its
+queries from the catalog; a query here is one you chose. See
+[the query guide](tests/queries/README.md).
 
 ### Property tests
 

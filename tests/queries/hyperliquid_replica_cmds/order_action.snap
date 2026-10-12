@@ -1,0 +1,528 @@
+---
+source: tests/queries.rs
+---
+blocks: 13 (748640000 to 748640100)
+actions: 13
+
+[
+  {
+    "actions": [
+      {
+        "action": {
+          "grouping": "na",
+          "orders": [
+            {
+              "a": 1,
+              "b": false,
+              "c": "0x00000000000004110103968020105863",
+              "p": "4294.6",
+              "r": false,
+              "s": "9.3263",
+              "t": {
+                "limit": {
+                  "tif": "Gtc"
+                }
+              }
+            }
+          ],
+          "type": "order"
+        },
+        "actionIndex": 8,
+        "nonce": 1759313971152,
+        "response": "Invalid nonce: duplicate nonce 1759313971152",
+        "signature": {
+          "r": "0xf1f0e5039b4c06663dd71e95237205623b661e91d694e088efe098456a146c34",
+          "s": "0x3b7cfb9984ecfd5633cb6d4b20737e7c2688d38ad238a9845269f9d4503b99b1",
+          "v": 27
+        },
+        "status": "err",
+        "user": "0x4a1b3580f7ac72bc54175f05b76092eeb7a266aa",
+        "vaultAddress": "0x4a1b3580f7ac72bc54175f05b76092eeb7a266aa"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640000
+    }
+  },
+  {
+    "actions": [
+      {
+        "action": {
+          "grouping": "na",
+          "orders": [
+            {
+              "a": 1,
+              "b": false,
+              "c": "0x00000000000004110103968020105923",
+              "p": "4294.6",
+              "r": false,
+              "s": "9.3263",
+              "t": {
+                "limit": {
+                  "tif": "Gtc"
+                }
+              }
+            }
+          ],
+          "type": "order"
+        },
+        "actionIndex": 2,
+        "nonce": 1759313971771,
+        "response": "Invalid nonce: duplicate nonce 1759313971771",
+        "signature": {
+          "r": "0x4eebacd71576b5d400537c72eb13bf2c0cd8ed2c4f7b13ccf5084c054beca3d8",
+          "s": "0x75a2654f44bfca3ec0c34225431e99be74e32d3a2018f6b17205edc9c3489216",
+          "v": 28
+        },
+        "status": "err",
+        "user": "0x4a1b3580f7ac72bc54175f05b76092eeb7a266aa",
+        "vaultAddress": "0x4a1b3580f7ac72bc54175f05b76092eeb7a266aa"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640008
+    }
+  },
+  {
+    "actions": [
+      {
+        "action": {
+          "grouping": "na",
+          "orders": [
+            {
+              "a": 1,
+              "b": false,
+              "c": "0x00000000000004110103968020106016",
+              "p": "4294.6",
+              "r": false,
+              "s": "9.3263",
+              "t": {
+                "limit": {
+                  "tif": "Gtc"
+                }
+              }
+            }
+          ],
+          "type": "order"
+        },
+        "actionIndex": 39,
+        "nonce": 1759313972700,
+        "response": "Invalid nonce: duplicate nonce 1759313972700",
+        "signature": {
+          "r": "0x26cb69d7a5ed240007aba6ab4ff9648aff5612b5ba4c88762ddccbc83a03f11a",
+          "s": "0x31effb2225b88ca83315aec7919bcd4c85f5b9156bbcf0d4aec8e4fb26e9e127",
+          "v": 28
+        },
+        "status": "err",
+        "user": "0x4a1b3580f7ac72bc54175f05b76092eeb7a266aa",
+        "vaultAddress": "0x4a1b3580f7ac72bc54175f05b76092eeb7a266aa"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640017
+    }
+  },
+  {
+    "actions": [
+      {
+        "action": {
+          "grouping": "na",
+          "orders": [
+            {
+              "a": 1,
+              "b": false,
+              "c": "0x00000000000004110103968020106110",
+              "p": "4294.6",
+              "r": false,
+              "s": "9.3263",
+              "t": {
+                "limit": {
+                  "tif": "Gtc"
+                }
+              }
+            }
+          ],
+          "type": "order"
+        },
+        "actionIndex": 24,
+        "nonce": 1759313973615,
+        "response": "Invalid nonce: duplicate nonce 1759313973615",
+        "signature": {
+          "r": "0xf22c569d54f5304d82dc4a5ea23e11a7647e1dc232ae2ef67ad9cb098a597fda",
+          "s": "0x4e6857ba2c146cfb988f491d72ade79b36b9ca914a09557542264887cb4f0f96",
+          "v": 28
+        },
+        "status": "err",
+        "user": "0x4a1b3580f7ac72bc54175f05b76092eeb7a266aa",
+        "vaultAddress": "0x4a1b3580f7ac72bc54175f05b76092eeb7a266aa"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640031
+    }
+  },
+  {
+    "actions": [
+      {
+        "action": {
+          "grouping": "na",
+          "orders": [
+            {
+              "a": 1,
+              "b": false,
+              "c": "0x00000000000004110103968020106248",
+              "p": "4294.6",
+              "r": false,
+              "s": "9.3263",
+              "t": {
+                "limit": {
+                  "tif": "Gtc"
+                }
+              }
+            }
+          ],
+          "type": "order"
+        },
+        "actionIndex": 18,
+        "nonce": 1759313974831,
+        "response": "Invalid nonce: duplicate nonce 1759313974831",
+        "signature": {
+          "r": "0x6cc14a588c5be8360eae86490f9c63e6b02d69c42a386518ec02d470e1a4cb30",
+          "s": "0xcce86984d5beeafba843d84b8b52695149ebeb023d3fdec7e5d7de8f29e00d2",
+          "v": 28
+        },
+        "status": "err",
+        "user": "0x4a1b3580f7ac72bc54175f05b76092eeb7a266aa",
+        "vaultAddress": "0x4a1b3580f7ac72bc54175f05b76092eeb7a266aa"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640047
+    }
+  },
+  {
+    "actions": [
+      {
+        "action": {
+          "grouping": "na",
+          "orders": [
+            {
+              "a": 1,
+              "b": false,
+              "c": "0x00000000000004110103968020106269",
+              "p": "4294.7",
+              "r": false,
+              "s": "9.3263",
+              "t": {
+                "limit": {
+                  "tif": "Gtc"
+                }
+              }
+            }
+          ],
+          "type": "order"
+        },
+        "actionIndex": 3,
+        "nonce": 1759313975035,
+        "response": "Invalid nonce: duplicate nonce 1759313975035",
+        "signature": {
+          "r": "0x25edbb57582406e6ed89dca3babef6d6346bd92851cf6296fd32c4a3434a120a",
+          "s": "0x1e82b835f656fe8b381ec74880bbdf10e0a18b6dff91bfec9cce8c66ecd2b009",
+          "v": 27
+        },
+        "status": "err",
+        "user": "0x4a1b3580f7ac72bc54175f05b76092eeb7a266aa",
+        "vaultAddress": "0x4a1b3580f7ac72bc54175f05b76092eeb7a266aa"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640050
+    }
+  },
+  {
+    "actions": [
+      {
+        "action": {
+          "grouping": "na",
+          "orders": [
+            {
+              "a": 1,
+              "b": false,
+              "c": "0x00000000000004110103968020106337",
+              "p": "4294.7",
+              "r": false,
+              "s": "9.3263",
+              "t": {
+                "limit": {
+                  "tif": "Gtc"
+                }
+              }
+            }
+          ],
+          "type": "order"
+        },
+        "actionIndex": 4,
+        "nonce": 1759313975648,
+        "response": "Invalid nonce: duplicate nonce 1759313975648",
+        "signature": {
+          "r": "0x33f801d6e54affae668c20f3117ab94b5d63ed66b41010ed218277bac6c644b",
+          "s": "0x34030d7562ae5245847c1404fd905905014d8d9b37c8eb9fc9300d78936e8f8f",
+          "v": 28
+        },
+        "status": "err",
+        "user": "0x4a1b3580f7ac72bc54175f05b76092eeb7a266aa",
+        "vaultAddress": "0x4a1b3580f7ac72bc54175f05b76092eeb7a266aa"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640056
+    }
+  },
+  {
+    "actions": [
+      {
+        "action": {
+          "grouping": "na",
+          "orders": [
+            {
+              "a": 1,
+              "b": false,
+              "c": "0x00000000000004110103968020106410",
+              "p": "4294.7",
+              "r": false,
+              "s": "9.3263",
+              "t": {
+                "limit": {
+                  "tif": "Gtc"
+                }
+              }
+            }
+          ],
+          "type": "order"
+        },
+        "actionIndex": 3,
+        "nonce": 1759313976365,
+        "response": "Invalid nonce: duplicate nonce 1759313976365",
+        "signature": {
+          "r": "0xdb1188c7aa5c2863250befaa261426bdd1c92b8b2cb9ca97163f18646c6b1b16",
+          "s": "0xcf576c9c0b499090a264911140c37385f1e610289163ed64699a9f4c42aa368",
+          "v": 27
+        },
+        "status": "err",
+        "user": "0x4a1b3580f7ac72bc54175f05b76092eeb7a266aa",
+        "vaultAddress": "0x4a1b3580f7ac72bc54175f05b76092eeb7a266aa"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640063
+    }
+  },
+  {
+    "actions": [
+      {
+        "action": {
+          "grouping": "na",
+          "orders": [
+            {
+              "a": 1,
+              "b": false,
+              "c": "0x00000000000004110103968020106426",
+              "p": "4294.7",
+              "r": false,
+              "s": "9.3263",
+              "t": {
+                "limit": {
+                  "tif": "Gtc"
+                }
+              }
+            }
+          ],
+          "type": "order"
+        },
+        "actionIndex": 7,
+        "nonce": 1759313976465,
+        "response": "Invalid nonce: duplicate nonce 1759313976465",
+        "signature": {
+          "r": "0x8c839c6552da74ecb28fa94a9252b1f90c498c78f0beb4ee35a5a9273832390",
+          "s": "0x10222060433b47b420e00de0c546be0c52392fe98f2752b4a4ec4792990532fd",
+          "v": 27
+        },
+        "status": "err",
+        "user": "0x4a1b3580f7ac72bc54175f05b76092eeb7a266aa",
+        "vaultAddress": "0x4a1b3580f7ac72bc54175f05b76092eeb7a266aa"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640065
+    }
+  },
+  {
+    "actions": [
+      {
+        "action": {
+          "grouping": "na",
+          "orders": [
+            {
+              "a": 1,
+              "b": false,
+              "c": "0x00000000000004110103968020106466",
+              "p": "4294.7",
+              "r": false,
+              "s": "9.3263",
+              "t": {
+                "limit": {
+                  "tif": "Gtc"
+                }
+              }
+            }
+          ],
+          "type": "order"
+        },
+        "actionIndex": 0,
+        "nonce": 1759313976884,
+        "response": "Invalid nonce: duplicate nonce 1759313976884",
+        "signature": {
+          "r": "0x389817dc265abb23d246170e9a2a83f1610082ffbc3031f67820d6c8fccaf14",
+          "s": "0x6dc72d99035af4b14491864600e45e805779f4295d715ec4479b95bab78d2456",
+          "v": 27
+        },
+        "status": "err",
+        "user": "0x4a1b3580f7ac72bc54175f05b76092eeb7a266aa",
+        "vaultAddress": "0x4a1b3580f7ac72bc54175f05b76092eeb7a266aa"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640070
+    }
+  },
+  {
+    "actions": [
+      {
+        "action": {
+          "grouping": "na",
+          "orders": [
+            {
+              "a": 1,
+              "b": false,
+              "c": "0x00000000000004110103968020106490",
+              "p": "4294.7",
+              "r": false,
+              "s": "9.3263",
+              "t": {
+                "limit": {
+                  "tif": "Gtc"
+                }
+              }
+            }
+          ],
+          "type": "order"
+        },
+        "actionIndex": 9,
+        "nonce": 1759313977089,
+        "response": "Invalid nonce: duplicate nonce 1759313977089",
+        "signature": {
+          "r": "0xb685c6d8c6ab9a46b4e1c934b8675529d368357d95516b1da4ab7c85919f86a3",
+          "s": "0x7651e362d4bd3029353bdbd547360a03818eb38e7e777e773f16226e6aa44355",
+          "v": 27
+        },
+        "status": "err",
+        "user": "0x4a1b3580f7ac72bc54175f05b76092eeb7a266aa",
+        "vaultAddress": "0x4a1b3580f7ac72bc54175f05b76092eeb7a266aa"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640072
+    }
+  },
+  {
+    "actions": [
+      {
+        "action": {
+          "grouping": "na",
+          "orders": [
+            {
+              "a": 1,
+              "b": false,
+              "c": "0x00000000000004110103968020106737",
+              "p": "4294.8",
+              "r": false,
+              "s": "9.3263",
+              "t": {
+                "limit": {
+                  "tif": "Gtc"
+                }
+              }
+            }
+          ],
+          "type": "order"
+        },
+        "actionIndex": 2,
+        "nonce": 1759313979336,
+        "response": "Invalid nonce: duplicate nonce 1759313979336",
+        "signature": {
+          "r": "0x757c758a4a97b00a3498187ce6503b38592408bb8d7f1fcb27ac5d042d0fbe21",
+          "s": "0x6be822d00bd8e71f9465187c0030606f589e672d0ad7d84c369803dcc771551c",
+          "v": 28
+        },
+        "status": "err",
+        "user": "0x4a1b3580f7ac72bc54175f05b76092eeb7a266aa",
+        "vaultAddress": "0x4a1b3580f7ac72bc54175f05b76092eeb7a266aa"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640099
+    }
+  },
+  {
+    "actions": [
+      {
+        "action": {
+          "grouping": "na",
+          "orders": [
+            {
+              "a": 1,
+              "b": false,
+              "c": "0x00000000000004110103968020106758",
+              "p": "4294.8",
+              "r": false,
+              "s": "9.3263",
+              "t": {
+                "limit": {
+                  "tif": "Gtc"
+                }
+              }
+            }
+          ],
+          "type": "order"
+        },
+        "actionIndex": 5,
+        "nonce": 1759313979545,
+        "response": "Invalid nonce: duplicate nonce 1759313979545",
+        "signature": {
+          "r": "0xaf911d7dc90d605f6a995dac0b83cd5e7cea4138743125aa3029e2537549b5d3",
+          "s": "0x6a161783774d3efe6a2e9e36e87a9495520e516859157b24a9b37649710cddae",
+          "v": 28
+        },
+        "status": "err",
+        "user": "0x4a1b3580f7ac72bc54175f05b76092eeb7a266aa",
+        "vaultAddress": "0x4a1b3580f7ac72bc54175f05b76092eeb7a266aa"
+      }
+    ],
+    "header": {
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "number": 748640100
+    }
+  }
+]

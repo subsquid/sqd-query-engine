@@ -5,8 +5,8 @@
 //! throughput / profile harnesses run the exact same portal queries through
 //! the old engine, on the same parquet chunk, for a direct comparison.
 //!
-//! The pipeline mirrors `src/bin/generate_fixtures.rs`: parse → compile →
-//! execute → JSON-lines encode. Polars uses its global rayon pool internally,
+//! The pipeline mirrors `run_legacy` in `tests/conformance/harness/engines.rs`:
+//! parse → compile → execute → JSON-lines encode. Polars uses its global rayon pool internally,
 //! so no explicit `POOL.install` is required (execution dispatches to it from
 //! any caller thread, exactly as in production).
 

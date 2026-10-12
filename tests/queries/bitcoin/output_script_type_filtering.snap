@@ -1,0 +1,54 @@
+---
+source: tests/queries.rs
+---
+blocks: 3 (401050 to 401060)
+outputs: 2
+
+[
+  {
+    "header": {
+      "hash": "00000000000000000290d0a710715a535307136041f7f6f1489aedc537900662",
+      "number": 401050,
+      "parentHash": "00000000000000000453c55edb50aa1e54aebaa8a313c1286b3be6aaed678e7f",
+      "timestamp": 1457059740
+    }
+  },
+  {
+    "header": {
+      "hash": "000000000000000006521a3f88ccd873c9c46485fe43fcd2bc6119f57e11fbc0",
+      "number": 401058,
+      "parentHash": "000000000000000004334a5a534a74546adee787faac76a4b128507e1e60a3b0",
+      "timestamp": 1457064358
+    },
+    "outputs": [
+      {
+        "outputIndex": 0,
+        "scriptPubKeyAddress": null,
+        "scriptPubKeyAsm": "03bec42e5d718b0e5b3853243c9bcf00dd671a335b0eb99fd8ca32f8d5784a9476 OP_CHECKSIG",
+        "scriptPubKeyDesc": "pk(03bec42e5d718b0e5b3853243c9bcf00dd671a335b0eb99fd8ca32f8d5784a9476)#pmnx2fqv",
+        "scriptPubKeyHex": "2103bec42e5d718b0e5b3853243c9bcf00dd671a335b0eb99fd8ca32f8d5784a9476ac",
+        "scriptPubKeyType": "pubkey",
+        "transactionIndex": 472,
+        "value": 0.00005092
+      },
+      {
+        "outputIndex": 0,
+        "scriptPubKeyAddress": null,
+        "scriptPubKeyAsm": "03bec42e5d718b0e5b3853243c9bcf00dd671a335b0eb99fd8ca32f8d5784a9476 OP_CHECKSIG",
+        "scriptPubKeyDesc": "pk(03bec42e5d718b0e5b3853243c9bcf00dd671a335b0eb99fd8ca32f8d5784a9476)#pmnx2fqv",
+        "scriptPubKeyHex": "2103bec42e5d718b0e5b3853243c9bcf00dd671a335b0eb99fd8ca32f8d5784a9476ac",
+        "scriptPubKeyType": "pubkey",
+        "transactionIndex": 473,
+        "value": 0.00009386
+      }
+    ]
+  },
+  {
+    "header": {
+      "hash": "000000000000000003c7de5e76d7a6673d4c658e4deff841c4ca97efa880a3f6",
+      "number": 401060,
+      "parentHash": "000000000000000001006ad8784b217bf313ee7a809b4ee1d88fc42f51131e99",
+      "timestamp": 1457065356
+    }
+  }
+]

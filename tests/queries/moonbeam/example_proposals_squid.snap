@@ -1,0 +1,52 @@
+---
+source: tests/queries.rs
+---
+blocks: 3 (4668500 to 4683849)
+events: 1
+
+[
+  {
+    "header": {
+      "hash": "0x1510e132229fd86814e38465e48d23db96bafdd5d05038689ab7a770f635b448",
+      "implName": "moonbeam",
+      "implVersion": 0,
+      "number": 4668500,
+      "parentHash": "0x46a908b106289dbb344ee8b0c206acccaec23e1a656f041329725fc109423841",
+      "specName": "moonbeam",
+      "specVersion": 2501
+    }
+  },
+  {
+    "events": [
+      {
+        "args": {
+          "proposalIndex": 21
+        },
+        "callAddress": [],
+        "extrinsicIndex": 4,
+        "index": 977,
+        "name": "Treasury.Proposed"
+      }
+    ],
+    "header": {
+      "hash": "0x04e93532f0becb840b085661be3ad2d36ce22341742e973ae7455c1572ea990b",
+      "implName": "moonbeam",
+      "implVersion": 0,
+      "number": 4681237,
+      "parentHash": "0xfd04ed9e71c4195b3a67737653d7e049e1bbdde12b41b884dbecfa49d7c699e5",
+      "specName": "moonbeam",
+      "specVersion": 2501
+    }
+  },
+  {
+    "header": {
+      "hash": "0xe30b19b75d370a0a1f774657ba59c2eb85f8dbc28b3ccd039484d8b5106b7517",
+      "implName": "moonbeam",
+      "implVersion": 0,
+      "number": 4683849,
+      "parentHash": "0x411f3075e989d6ab1564dbc66f1ef9a64de56ff3d18c94c72d52d82687b10215",
+      "specName": "moonbeam",
+      "specVersion": 2501
+    }
+  }
+]

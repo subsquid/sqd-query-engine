@@ -2763,7 +2763,6 @@ dependencies = [
  "libtest-mimic",
  "memmap2 0.9.10",
  "parquet",
- "paste",
  "proptest",
  "rayon",
  "rustc-hash",

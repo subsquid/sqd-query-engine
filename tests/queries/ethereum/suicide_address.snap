@@ -1,0 +1,66 @@
+---
+source: tests/queries.rs
+---
+blocks: 4 (17881390 to 17881870)
+traces: 2
+
+[
+  {
+    "header": {
+      "hash": "0xdda0a722c34ab011af33454e333937253d6bdd5a82f18edc4c5b6f332ed6e976",
+      "number": 17881390,
+      "parentHash": "0xb38b7d93d8221ccb406b832f9f545122e54f09ebe5e9f7c89b6f9f11821c649c"
+    }
+  },
+  {
+    "header": {
+      "hash": "0x97dbb5ddff03bdc40990a7b78f2fde5ace8ebeda5e2e5c10f9f00bcef0bddb62",
+      "number": 17881453,
+      "parentHash": "0x162206a4b3cfeece502ac45f2c9dce82b91ce07ccaf90237734ed5e271b13edb"
+    },
+    "traces": [
+      {
+        "action": {
+          "address": "0x3cb2b4dcc01c8f32e29e9773ed77eca553d7d77a",
+          "balance": "0x0",
+          "refundAddress": "0xa7fb5ca286fc3fd67525629048a4de3ba24cba2e"
+        },
+        "traceAddress": [
+          0,
+          4
+        ],
+        "transactionIndex": 54,
+        "type": "suicide"
+      }
+    ]
+  },
+  {
+    "header": {
+      "hash": "0xcd9f5a68821b229836fff26bb6d50fbdce95dd0232620573ff3c6bc775d52fbe",
+      "number": 17881457,
+      "parentHash": "0xb25dea6ccca509c5a778197cb96a3891a0ab04b31b50d46d0b02a69cc176f201"
+    },
+    "traces": [
+      {
+        "action": {
+          "address": "0x7e1ff6beb30ec4586e23dfae0875f3f414aa07d8",
+          "balance": "0x9aba503142000",
+          "refundAddress": "0xa7fb5ca286fc3fd67525629048a4de3ba24cba2e"
+        },
+        "traceAddress": [
+          0,
+          2
+        ],
+        "transactionIndex": 41,
+        "type": "suicide"
+      }
+    ]
+  },
+  {
+    "header": {
+      "hash": "0x653b76bfc15956e887a6d56fc3e803c736e11a6564753123ed7e0938b55eb7af",
+      "number": 17881870,
+      "parentHash": "0xd1d7b55ca083759cec13ba579be69e9312f16c83fea75e53110031624c77024d"
+    }
+  }
+]

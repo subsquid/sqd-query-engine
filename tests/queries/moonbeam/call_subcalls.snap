@@ -1,0 +1,322 @@
+---
+source: tests/queries.rs
+---
+blocks: 8 (4669460 to 4669500)
+calls: 12
+
+[
+  {
+    "header": {
+      "hash": "0x1fcc12688cddd5da9d6a5f295978cf1885649410cfa4d9cf2c936ddcb7ee57f6",
+      "number": 4669460,
+      "parentHash": "0xcbfac0e2f45a26ed8c3b694bd81620e522dd4524b34212d008d732fcfd7f1439"
+    }
+  },
+  {
+    "calls": [
+      {
+        "address": [],
+        "args": {
+          "call": {
+            "__kind": "Balances",
+            "value": {
+              "__kind": "transfer",
+              "dest": "0xf30f9eb23d9db6359489c8f82f068b81cb43f6c3",
+              "value": "183908182805335670914"
+            }
+          },
+          "real": "0xf51fd3dd05519d870dfb954d8a3a9835d3ad0959"
+        },
+        "extrinsicIndex": 5,
+        "name": "Proxy.proxy",
+        "origin": {
+          "__kind": "system",
+          "value": {
+            "__kind": "Signed",
+            "value": "0x68a20678c2f0a4ec3e958610ea36e671d2332781"
+          }
+        }
+      },
+      {
+        "address": [
+          0
+        ],
+        "args": {
+          "dest": "0xf30f9eb23d9db6359489c8f82f068b81cb43f6c3",
+          "value": "183908182805335670914"
+        },
+        "extrinsicIndex": 5,
+        "name": "Balances.transfer",
+        "origin": {
+          "__kind": "system",
+          "value": {
+            "__kind": "Signed",
+            "value": "0xf51fd3dd05519d870dfb954d8a3a9835d3ad0959"
+          }
+        }
+      }
+    ],
+    "header": {
+      "hash": "0x1347f6c20a9fe88e4a6572c588dcdfc7327840bf15f817f36761a9878459937d",
+      "number": 4669483,
+      "parentHash": "0x978b82904e007ce5f5b0e6680265d57248c1581a6866563da4bb519eb3dd0d79"
+    }
+  },
+  {
+    "calls": [
+      {
+        "address": [],
+        "args": {
+          "call": {
+            "__kind": "Balances",
+            "value": {
+              "__kind": "transfer",
+              "dest": "0xf30f9eb23d9db6359489c8f82f068b81cb43f6c3",
+              "value": "79653933329295223163"
+            }
+          },
+          "real": "0x6444ec0798a022447c0d9d2ec89efce8f541e431"
+        },
+        "extrinsicIndex": 4,
+        "name": "Proxy.proxy",
+        "origin": {
+          "__kind": "system",
+          "value": {
+            "__kind": "Signed",
+            "value": "0x68a20678c2f0a4ec3e958610ea36e671d2332781"
+          }
+        }
+      },
+      {
+        "address": [
+          0
+        ],
+        "args": {
+          "dest": "0xf30f9eb23d9db6359489c8f82f068b81cb43f6c3",
+          "value": "79653933329295223163"
+        },
+        "extrinsicIndex": 4,
+        "name": "Balances.transfer",
+        "origin": {
+          "__kind": "system",
+          "value": {
+            "__kind": "Signed",
+            "value": "0x6444ec0798a022447c0d9d2ec89efce8f541e431"
+          }
+        }
+      }
+    ],
+    "header": {
+      "hash": "0x337f667e0a01969532f8c7fccc2cb88cd74b15116053e2720c5ad62c5a3692ee",
+      "number": 4669485,
+      "parentHash": "0x0f938f5be3d0840a59d12364dd89d130005b9b47fcdd52bc5202072a9e728356"
+    }
+  },
+  {
+    "calls": [
+      {
+        "address": [],
+        "args": {
+          "call": {
+            "__kind": "Balances",
+            "value": {
+              "__kind": "transfer",
+              "dest": "0xf30f9eb23d9db6359489c8f82f068b81cb43f6c3",
+              "value": "81758110318983934874"
+            }
+          },
+          "real": "0xe65c502899b593479335a27945b1b53283f55193"
+        },
+        "extrinsicIndex": 4,
+        "name": "Proxy.proxy",
+        "origin": {
+          "__kind": "system",
+          "value": {
+            "__kind": "Signed",
+            "value": "0x68a20678c2f0a4ec3e958610ea36e671d2332781"
+          }
+        }
+      },
+      {
+        "address": [
+          0
+        ],
+        "args": {
+          "dest": "0xf30f9eb23d9db6359489c8f82f068b81cb43f6c3",
+          "value": "81758110318983934874"
+        },
+        "extrinsicIndex": 4,
+        "name": "Balances.transfer",
+        "origin": {
+          "__kind": "system",
+          "value": {
+            "__kind": "Signed",
+            "value": "0xe65c502899b593479335a27945b1b53283f55193"
+          }
+        }
+      }
+    ],
+    "header": {
+      "hash": "0xe03f057fbc4b282702466991097aa7c44d03c832c2a8ab82574f2e9af94e0aa5",
+      "number": 4669487,
+      "parentHash": "0xdde18a4a8f2a50113cc0d00fd48604025011765627012347d5a22bb56eeb4bbe"
+    }
+  },
+  {
+    "calls": [
+      {
+        "address": [],
+        "args": {
+          "call": {
+            "__kind": "Balances",
+            "value": {
+              "__kind": "transfer",
+              "dest": "0xf30f9eb23d9db6359489c8f82f068b81cb43f6c3",
+              "value": "109352606303526314211"
+            }
+          },
+          "real": "0x58f18db389e5ad3d5d7f6c0f6e17c5c4aae438da"
+        },
+        "extrinsicIndex": 4,
+        "name": "Proxy.proxy",
+        "origin": {
+          "__kind": "system",
+          "value": {
+            "__kind": "Signed",
+            "value": "0x68a20678c2f0a4ec3e958610ea36e671d2332781"
+          }
+        }
+      },
+      {
+        "address": [
+          0
+        ],
+        "args": {
+          "dest": "0xf30f9eb23d9db6359489c8f82f068b81cb43f6c3",
+          "value": "109352606303526314211"
+        },
+        "extrinsicIndex": 4,
+        "name": "Balances.transfer",
+        "origin": {
+          "__kind": "system",
+          "value": {
+            "__kind": "Signed",
+            "value": "0x58f18db389e5ad3d5d7f6c0f6e17c5c4aae438da"
+          }
+        }
+      }
+    ],
+    "header": {
+      "hash": "0xb268b5400030896c01fee3b4235574c383fad9329b5fdb1f5d6b54e56df00acd",
+      "number": 4669489,
+      "parentHash": "0x66a184a797cbdb873e60902dce5c069c064e8e32d4d66e046caa68a0bba86f79"
+    }
+  },
+  {
+    "calls": [
+      {
+        "address": [],
+        "args": {
+          "call": {
+            "__kind": "Balances",
+            "value": {
+              "__kind": "transfer",
+              "dest": "0xf30f9eb23d9db6359489c8f82f068b81cb43f6c3",
+              "value": "8515934317983766489"
+            }
+          },
+          "real": "0xf7db2f2fd217a09e1f02659bca02a609a4b86b18"
+        },
+        "extrinsicIndex": 4,
+        "name": "Proxy.proxy",
+        "origin": {
+          "__kind": "system",
+          "value": {
+            "__kind": "Signed",
+            "value": "0x68a20678c2f0a4ec3e958610ea36e671d2332781"
+          }
+        }
+      },
+      {
+        "address": [
+          0
+        ],
+        "args": {
+          "dest": "0xf30f9eb23d9db6359489c8f82f068b81cb43f6c3",
+          "value": "8515934317983766489"
+        },
+        "extrinsicIndex": 4,
+        "name": "Balances.transfer",
+        "origin": {
+          "__kind": "system",
+          "value": {
+            "__kind": "Signed",
+            "value": "0xf7db2f2fd217a09e1f02659bca02a609a4b86b18"
+          }
+        }
+      }
+    ],
+    "header": {
+      "hash": "0x982dd933c4d8eb023d45307aafd39be7a4ebde5291838b3f7cc4639faf3cc374",
+      "number": 4669491,
+      "parentHash": "0x51f7a346ffc401594b10fbedcff05fa55c536f0589c56a91827f49c7d85e2777"
+    }
+  },
+  {
+    "calls": [
+      {
+        "address": [],
+        "args": {
+          "call": {
+            "__kind": "ParachainStaking",
+            "value": {
+              "__kind": "delegator_bond_more",
+              "candidate": "0xf51fd3dd05519d870dfb954d8a3a9835d3ad0959",
+              "more": "478676841054014204851"
+            }
+          },
+          "real": "0xf30f9eb23d9db6359489c8f82f068b81cb43f6c3"
+        },
+        "extrinsicIndex": 5,
+        "name": "Proxy.proxy",
+        "origin": {
+          "__kind": "system",
+          "value": {
+            "__kind": "Signed",
+            "value": "0x008762811a0c9642598911a0bcffb44e8da3de76"
+          }
+        }
+      },
+      {
+        "address": [
+          0
+        ],
+        "args": {
+          "candidate": "0xf51fd3dd05519d870dfb954d8a3a9835d3ad0959",
+          "more": "478676841054014204851"
+        },
+        "extrinsicIndex": 5,
+        "name": "ParachainStaking.delegator_bond_more",
+        "origin": {
+          "__kind": "system",
+          "value": {
+            "__kind": "Signed",
+            "value": "0xf30f9eb23d9db6359489c8f82f068b81cb43f6c3"
+          }
+        }
+      }
+    ],
+    "header": {
+      "hash": "0x8950a95f0d1d48654d6ea4cdd7e6e63f9c4bb5bc246ff9bc898f145adedc9d8c",
+      "number": 4669493,
+      "parentHash": "0x8d7cd86152f7766f7b4afb0269a59b9bf12d55f6c5ccf5b686a68aa3625b5167"
+    }
+  },
+  {
+    "header": {
+      "hash": "0x93f2b7668dd84e5a70cd7bd5269c3786aa99218fe03b97a7f69a7f901ba384a4",
+      "number": 4669500,
+      "parentHash": "0x09e742f4f9ebe0933b586f914b80c2cbd07bed756bb1d03accd3f167515d4bf1"
+    }
+  }
+]

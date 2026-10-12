@@ -1,0 +1,49 @@
+{
+  "type": "solana",
+  "fromBlock": 217710049,
+  "fields": {
+    "block": {
+      "hash": true,
+      "height": true,
+      "number": true
+    },
+    "balance": {
+      "pre": true,
+      "post": true,
+      "transactionIndex": true,
+      "account": true
+    },
+    "transaction": {
+      "signatures": true,
+      "feePayer": true,
+      "transactionIndex": true
+    },
+    "instruction": {
+      "programId": true,
+      "accounts": true,
+      "data": true,
+      "transactionIndex": true,
+      "instructionAddress": true
+    },
+    "log": {
+      "transactionIndex": true,
+      "logIndex": true
+    },
+    "tokenBalance": {
+      "transactionIndex": true,
+      "account": true
+    },
+    "reward": {
+      "pubkey": true
+    }
+  },
+  "balances": [
+    {
+      "account": [
+        "FSduwbdC1cgtVV7ovQFYt3WrVqym2GxC6b9X7ERaFzG9"
+      ],
+      "transaction": true,
+      "transactionInstructions": true
+    }
+  ]
+}

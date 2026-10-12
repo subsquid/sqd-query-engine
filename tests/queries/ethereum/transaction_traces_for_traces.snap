@@ -1,0 +1,355 @@
+---
+source: tests/queries.rs
+---
+blocks: 1 (17881391 to 17881391)
+traces: 21
+
+[
+  {
+    "header": {
+      "hash": "0x1d878c42a39c1ac9e5db37e5d27a39e6a84eb40fd12e355f4600868b4339c772",
+      "number": 17881391
+    },
+    "traces": [
+      {
+        "action": {
+          "callType": "call",
+          "from": "0xccb94f42de04d6bad7dcf56288bec44ee24b6c74",
+          "gas": "0x3dfb4",
+          "sighash": "0xe21fd0e9",
+          "to": "0x6131b5fae19ea4f9d964eac0408e4408b66337b5",
+          "value": "0x6f05b59d3b20000"
+        },
+        "traceAddress": [],
+        "transactionIndex": 2,
+        "type": "call"
+      },
+      {
+        "action": {
+          "callType": "call",
+          "from": "0x6131b5fae19ea4f9d964eac0408e4408b66337b5",
+          "gas": "0x3978c",
+          "sighash": null,
+          "to": "0x96c195f6643a3d797cb90cb6ba0ae2776d51b5f3",
+          "value": "0x5543df729c000"
+        },
+        "traceAddress": [
+          0
+        ],
+        "transactionIndex": 2,
+        "type": "call"
+      },
+      {
+        "action": {
+          "callType": "staticcall",
+          "from": "0x6131b5fae19ea4f9d964eac0408e4408b66337b5",
+          "gas": "0x37707",
+          "sighash": "0x70a08231",
+          "to": "0x602e61ef26821c477124d15afcde32986c1f8a47",
+          "value": "0x0"
+        },
+        "traceAddress": [
+          1
+        ],
+        "transactionIndex": 2,
+        "type": "call"
+      },
+      {
+        "action": {
+          "callType": "staticcall",
+          "from": "0x6131b5fae19ea4f9d964eac0408e4408b66337b5",
+          "gas": "0x368b0",
+          "sighash": "0x70a08231",
+          "to": "0x602e61ef26821c477124d15afcde32986c1f8a47",
+          "value": "0x0"
+        },
+        "traceAddress": [
+          2
+        ],
+        "transactionIndex": 2,
+        "type": "call"
+      },
+      {
+        "action": {
+          "callType": "call",
+          "from": "0x6131b5fae19ea4f9d964eac0408e4408b66337b5",
+          "gas": "0x330df",
+          "sighash": "0xd9c45357",
+          "to": "0xd1b47490209ccb7a806e8a45d9479490c040abf4",
+          "value": "0x6eb071bdc884000"
+        },
+        "traceAddress": [
+          3
+        ],
+        "transactionIndex": 2,
+        "type": "call"
+      },
+      {
+        "action": {
+          "callType": "call",
+          "from": "0xd1b47490209ccb7a806e8a45d9479490c040abf4",
+          "gas": "0x2e9bc",
+          "sighash": "0xd0e30db0",
+          "to": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "value": "0x6eb071bdc884000"
+        },
+        "traceAddress": [
+          3,
+          0
+        ],
+        "transactionIndex": 2,
+        "type": "call"
+      },
+      {
+        "action": {
+          "callType": "delegatecall",
+          "from": "0xd1b47490209ccb7a806e8a45d9479490c040abf4",
+          "gas": "0x2afd6",
+          "sighash": "0x59361199",
+          "to": "0x37a41f019a08b9c0818dbaa849c1f778d5478918",
+          "value": "0x6eb071bdc884000"
+        },
+        "traceAddress": [
+          3,
+          1
+        ],
+        "transactionIndex": 2,
+        "type": "call"
+      },
+      {
+        "action": {
+          "callType": "staticcall",
+          "from": "0xd1b47490209ccb7a806e8a45d9479490c040abf4",
+          "gas": "0x29dd1",
+          "sighash": "0x70a08231",
+          "to": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "value": "0x0"
+        },
+        "traceAddress": [
+          3,
+          1,
+          0
+        ],
+        "transactionIndex": 2,
+        "type": "call"
+      },
+      {
+        "action": {
+          "callType": "call",
+          "from": "0xd1b47490209ccb7a806e8a45d9479490c040abf4",
+          "gas": "0x297dd",
+          "sighash": "0xa9059cbb",
+          "to": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "value": "0x0"
+        },
+        "traceAddress": [
+          3,
+          1,
+          1
+        ],
+        "transactionIndex": 2,
+        "type": "call"
+      },
+      {
+        "action": {
+          "callType": "staticcall",
+          "from": "0xd1b47490209ccb7a806e8a45d9479490c040abf4",
+          "gas": "0x26cad",
+          "sighash": "0x0902f1ac",
+          "to": "0x27de6d1d3f71c2a2e3f2cc7ae89e619bfde82b12",
+          "value": "0x0"
+        },
+        "traceAddress": [
+          3,
+          1,
+          2
+        ],
+        "transactionIndex": 2,
+        "type": "call"
+      },
+      {
+        "action": {
+          "callType": "staticcall",
+          "from": "0xd1b47490209ccb7a806e8a45d9479490c040abf4",
+          "gas": "0x25fda",
+          "sighash": "0x70a08231",
+          "to": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "value": "0x0"
+        },
+        "traceAddress": [
+          3,
+          1,
+          3
+        ],
+        "transactionIndex": 2,
+        "type": "call"
+      },
+      {
+        "action": {
+          "callType": "staticcall",
+          "from": "0xd1b47490209ccb7a806e8a45d9479490c040abf4",
+          "gas": "0x25127",
+          "sighash": "0xf87576e8",
+          "to": "0xcde3eb49d53d932c605efbc1bc425c6affa5eac2",
+          "value": "0x0"
+        },
+        "traceAddress": [
+          3,
+          1,
+          4
+        ],
+        "transactionIndex": 2,
+        "type": "call"
+      },
+      {
+        "action": {
+          "callType": "call",
+          "from": "0xd1b47490209ccb7a806e8a45d9479490c040abf4",
+          "gas": "0x24782",
+          "sighash": "0x022c0d9f",
+          "to": "0x27de6d1d3f71c2a2e3f2cc7ae89e619bfde82b12",
+          "value": "0x0"
+        },
+        "traceAddress": [
+          3,
+          1,
+          5
+        ],
+        "transactionIndex": 2,
+        "type": "call"
+      },
+      {
+        "action": {
+          "callType": "call",
+          "from": "0x27de6d1d3f71c2a2e3f2cc7ae89e619bfde82b12",
+          "gas": "0x21493",
+          "sighash": "0xa9059cbb",
+          "to": "0x602e61ef26821c477124d15afcde32986c1f8a47",
+          "value": "0x0"
+        },
+        "traceAddress": [
+          3,
+          1,
+          5,
+          0
+        ],
+        "transactionIndex": 2,
+        "type": "call"
+      },
+      {
+        "action": {
+          "callType": "staticcall",
+          "from": "0x27de6d1d3f71c2a2e3f2cc7ae89e619bfde82b12",
+          "gas": "0x13d50",
+          "sighash": "0x70a08231",
+          "to": "0x602e61ef26821c477124d15afcde32986c1f8a47",
+          "value": "0x0"
+        },
+        "traceAddress": [
+          3,
+          1,
+          5,
+          1
+        ],
+        "transactionIndex": 2,
+        "type": "call"
+      },
+      {
+        "action": {
+          "callType": "staticcall",
+          "from": "0x27de6d1d3f71c2a2e3f2cc7ae89e619bfde82b12",
+          "gas": "0x13827",
+          "sighash": "0x70a08231",
+          "to": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "value": "0x0"
+        },
+        "traceAddress": [
+          3,
+          1,
+          5,
+          2
+        ],
+        "transactionIndex": 2,
+        "type": "call"
+      },
+      {
+        "action": {
+          "callType": "staticcall",
+          "from": "0xd1b47490209ccb7a806e8a45d9479490c040abf4",
+          "gas": "0x11d24",
+          "sighash": "0x70a08231",
+          "to": "0x602e61ef26821c477124d15afcde32986c1f8a47",
+          "value": "0x0"
+        },
+        "traceAddress": [
+          3,
+          2
+        ],
+        "transactionIndex": 2,
+        "type": "call"
+      },
+      {
+        "action": {
+          "callType": "staticcall",
+          "from": "0xd1b47490209ccb7a806e8a45d9479490c040abf4",
+          "gas": "0x1159f",
+          "sighash": "0x70a08231",
+          "to": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "value": "0x0"
+        },
+        "traceAddress": [
+          3,
+          3
+        ],
+        "transactionIndex": 2,
+        "type": "call"
+      },
+      {
+        "action": {
+          "callType": "call",
+          "from": "0xd1b47490209ccb7a806e8a45d9479490c040abf4",
+          "gas": "0x10f4b",
+          "sighash": "0xa9059cbb",
+          "to": "0x602e61ef26821c477124d15afcde32986c1f8a47",
+          "value": "0x0"
+        },
+        "traceAddress": [
+          3,
+          4
+        ],
+        "transactionIndex": 2,
+        "type": "call"
+      },
+      {
+        "action": {
+          "callType": "staticcall",
+          "from": "0x6131b5fae19ea4f9d964eac0408e4408b66337b5",
+          "gas": "0xc20c",
+          "sighash": "0x70a08231",
+          "to": "0x602e61ef26821c477124d15afcde32986c1f8a47",
+          "value": "0x0"
+        },
+        "traceAddress": [
+          4
+        ],
+        "transactionIndex": 2,
+        "type": "call"
+      },
+      {
+        "action": {
+          "callType": "staticcall",
+          "from": "0x6131b5fae19ea4f9d964eac0408e4408b66337b5",
+          "gas": "0xbb88",
+          "sighash": "0x70a08231",
+          "to": "0x602e61ef26821c477124d15afcde32986c1f8a47",
+          "value": "0x0"
+        },
+        "traceAddress": [
+          5
+        ],
+        "transactionIndex": 2,
+        "type": "call"
+      }
+    ]
+  }
+]

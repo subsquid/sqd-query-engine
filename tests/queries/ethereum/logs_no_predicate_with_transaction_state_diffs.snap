@@ -1,0 +1,7 @@
+---
+source: tests/queries.rs
+---
+blocks: 1 (17881390 to 17881390)
+logs: 373
+stateDiffs: 704
+digest: 5bf53da8150b55b85c5bc13c3b40827c

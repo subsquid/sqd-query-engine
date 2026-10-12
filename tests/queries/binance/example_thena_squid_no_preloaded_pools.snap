@@ -1,0 +1,7 @@
+---
+source: tests/queries.rs
+---
+blocks: 116 (37623328 to 37623443)
+logs: 35773
+transactions: 11479
+digest: 9e37f8de7226a2fd8c904a3e5cebc710
