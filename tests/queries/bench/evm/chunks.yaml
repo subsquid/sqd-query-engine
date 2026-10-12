@@ -1,0 +1,8 @@
+# The chunk the benches read as data/evm/chunk.
+chunk: s3://ethereum-mainnet-2/0024541717/0024550597-0024550820-4292c586
+xxh3:
+  blocks.parquet: 24ea70dced8902adfb8a635e0fbd139c
+  logs.parquet: 39278146d7db748672372c315df1d059
+  statediffs.parquet: c6f022b88601c0e10206c40c117de832
+  traces.parquet: dd906e26debc4c2861892486e0087436
+  transactions.parquet: d3be9db1c74c1e28472963b2c1d09842

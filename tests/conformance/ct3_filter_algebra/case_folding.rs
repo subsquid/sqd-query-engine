@@ -1,6 +1,6 @@
 //! Case folding follows the column, not the filter.
 
-use crate::harness::fixtures::{fixture_tree_is_present, meta, run};
+use crate::harness::fixtures::{fixture_tree_has, meta, run};
 use crate::harness::json::count_items;
 
 /// Upper-casing a hex filter value must not change the answer, and it must not
@@ -10,7 +10,7 @@ use crate::harness::json::count_items;
 #[test]
 #[ignore = "requires external fixture data"]
 fn hex_filters_fold_case_in_both_shapes() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("ethereum") {
         return;
     }
 
@@ -55,7 +55,7 @@ fn hex_filters_fold_case_in_both_shapes() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn an_alias_folds_case_on_the_column_it_resolves_to() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("moonbeam") {
         return;
     }
 
@@ -97,7 +97,7 @@ fn an_alias_folds_case_on_the_column_it_resolves_to() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn bare_hex_columns_fold_case_too() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("tron") {
         return;
     }
 
@@ -156,7 +156,7 @@ fn bare_hex_columns_fold_case_too() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn non_hex_columns_are_not_folded() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("ethereum") {
         return;
     }
 

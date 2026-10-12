@@ -22,7 +22,7 @@ use crate::harness::chunk::{
     chunk_with_column_retyped, chunk_with_nullable_column, chunk_without_column,
     chunk_without_column_at, chunk_without_table,
 };
-use crate::harness::fixtures::{answers_the_same, fixture_tree_is_present, meta, run, run_against};
+use crate::harness::fixtures::{answers_the_same, fixture_tree_has, meta, run, run_against};
 use crate::harness::json::count_items;
 use crate::harness::synthetic::{catalog, logs_query, uniform, weighted_chunk, BLOCKS};
 use crate::harness::{evm_like, sol_like};
@@ -315,7 +315,7 @@ fn an_ignored_nullable_column_does_not_change_output() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn filtering_an_absent_column_is_an_error() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("ethereum") {
         return;
     }
 
@@ -354,7 +354,7 @@ fn filtering_an_absent_column_is_an_error() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn filtering_a_present_column_still_works() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("ethereum") {
         return;
     }
 
@@ -380,7 +380,7 @@ fn filtering_a_present_column_still_works() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn filtering_an_absent_column_is_an_error_on_a_block_sorted_table() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("ethereum") {
         return;
     }
 
@@ -420,7 +420,7 @@ fn filtering_an_absent_column_is_an_error_on_a_block_sorted_table() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn an_alias_filter_on_a_column_the_chunk_lacks_is_an_error() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("moonbeam") {
         return;
     }
 
@@ -461,7 +461,7 @@ fn an_alias_filter_on_a_column_the_chunk_lacks_is_an_error() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn one_unanswerable_item_rejects_the_whole_request() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("ethereum") {
         return;
     }
 
@@ -905,7 +905,7 @@ fn the_arrow_output_ships_what_json_cannot_render() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn a_variant_column_nothing_reads_is_an_error() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("ethereum") {
         return;
     }
 

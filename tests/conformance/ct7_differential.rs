@@ -22,7 +22,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 
 use crate::harness::engines::{as_blocks, run_legacy, run_new};
-use crate::harness::fixtures::fixture_chunk;
+use crate::harness::fixtures::{fixture_chunk, fixture_tree_has_all};
 
 /// (catalog, fixture directory). Only datasets both engines serve.
 const DATASETS: &[(&str, &str)] = &[
@@ -213,14 +213,15 @@ fn probes_for(metadata: &DatasetDescription, chunk: &Path, from: u64, to: u64) -
 
 #[test]
 fn every_catalog_filter_answers_the_same_as_the_reference() {
+    if !fixture_tree_has_all(DATASETS.iter().map(|(_, dataset)| *dataset)) {
+        return;
+    }
+
     let mut checked = 0usize;
     let mut mismatches: Vec<String> = Vec::new();
 
     for (catalog, dataset) in DATASETS {
         let chunk = fixture_chunk(dataset);
-        if !chunk.is_dir() {
-            continue;
-        }
         let metadata =
             load_dataset_description(Path::new(&format!("metadata/{catalog}.yaml"))).unwrap();
         let Some(first) = first_block(&metadata, &chunk) else {
@@ -284,15 +285,16 @@ const FORK_PROBES_PER_CHUNK: u64 = 100;
 /// Covers CT-7 · INV-E5
 #[test]
 fn the_fork_check_answers_the_same_as_the_reference() {
+    if !fixture_tree_has_all(DATASETS.iter().map(|(_, dataset)| *dataset)) {
+        return;
+    }
+
     let mut checked = 0usize;
     let mut skipped_numbers = 0usize;
     let mut mismatches: Vec<String> = Vec::new();
 
     for (catalog, dataset) in DATASETS {
         let chunk = fixture_chunk(dataset);
-        if !chunk.is_dir() {
-            continue;
-        }
         let metadata =
             load_dataset_description(Path::new(&format!("metadata/{catalog}.yaml"))).unwrap();
 
@@ -538,15 +540,16 @@ fn page_shapes(metadata: &DatasetDescription, chunk: &Path) -> Vec<(String, Stri
 /// Covers CT-7 · INV-B5
 #[test]
 fn every_page_ends_where_the_reference_ends() {
+    if !fixture_tree_has_all(DATASETS.iter().map(|(_, dataset)| *dataset)) {
+        return;
+    }
+
     let mut checked = 0usize;
     let mut cut = 0usize;
     let mut mismatches: Vec<String> = Vec::new();
 
     for (catalog, dataset) in DATASETS {
         let chunk = fixture_chunk(dataset);
-        if !chunk.is_dir() {
-            continue;
-        }
         let metadata =
             load_dataset_description(Path::new(&format!("metadata/{catalog}.yaml"))).unwrap();
         let Some(first) = first_block(&metadata, &chunk) else {

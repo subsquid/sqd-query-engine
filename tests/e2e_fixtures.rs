@@ -13,13 +13,16 @@ use sqd_query_engine::output::execute_plan;
 use sqd_query_engine::query::{compile, parse_query};
 use std::path::Path;
 
-// The conformance suite's guard, not a second one. `fixture_chunk` is unused
-// here; the alternative is a copy of the other two, which is what this replaces.
+// The conformance suite's guard and chunk store, not second copies; this target
+// uses part of each.
+#[allow(dead_code)]
 #[path = "conformance/harness/guard.rs"]
 mod guard;
+#[allow(dead_code)]
+#[path = "conformance/harness/store.rs"]
+mod store;
 
-#[allow(unused_imports)]
-use guard::{fixture_chunk, fixture_dir, fixture_tree_is_present};
+use guard::{fixture_chunk, fixture_dir, fixture_queries_present, fixture_tree_has};
 
 fn run_fixture_query(
     meta_path: &str,
@@ -42,19 +45,15 @@ fn run_fixture_query(
 }
 
 fn test_fixture(dataset: &str, meta_path: &str, query_name: &str) {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has(dataset) {
         return;
     }
 
     let base = fixture_dir().join(dataset);
-    let chunk = base.join("chunk");
+    let chunk = fixture_chunk(dataset);
     let query_file = base.join("queries").join(query_name).join("query.json");
     let result_file = base.join("queries").join(query_name).join("result.json");
 
-    assert!(
-        chunk.exists(),
-        "{dataset}/{query_name}: no chunk at {chunk:?}"
-    );
     assert!(
         query_file.exists(),
         "{dataset}/{query_name}: no query.json at {query_file:?}"
@@ -492,7 +491,7 @@ fn fixture_declarations_match_the_fixture_tree() {
     // the reference implementation and are nothing this suite should account for.
     const UNSUPPORTED_DATASETS: &[&str] = &["fuel"];
 
-    if !fixture_tree_is_present() {
+    if !fixture_queries_present() {
         return;
     }
 

@@ -63,7 +63,7 @@ tempfile = "3"
 proptest = "1"
 zstd = "0.13"
 insta = "1"
-# One test per query file in tests/cases.rs.
+# One test per query file in tests/queries.rs.
 libtest-mimic = "0.8"
 # Instruction and heap counts under Valgrind; the runner binary must match this version.
 gungraun = "=0.20.0"
@@ -89,5 +89,9 @@ name = "instructions"
 harness = false
 
 [[test]]
-name = "cases"
+name = "queries"
 harness = false
+
+# `make fetch` hashes every cached chunk; unoptimized, that runs about thirty times slower.
+[profile.dev.package.xxhash-rust]
+opt-level = 3

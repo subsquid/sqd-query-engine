@@ -2,7 +2,7 @@
 
 use sqd_query_engine::query::{compile, parse_query};
 
-use crate::harness::fixtures::{fixture_tree_is_present, meta, run};
+use crate::harness::fixtures::{fixture_tree_has, meta, plan_error, run};
 
 /// A malformed hex value is an error, not a silently narrowed filter. The
 /// dangerous shape is a list where one of several values is malformed: it used
@@ -132,13 +132,13 @@ fn a_non_boolean_include_all_blocks_is_rejected() {
 #[test]
 fn a_bloom_filter_rejects_a_non_string_element() {
     let solana = meta("solana");
-    let query = br#"{"type":"solana","fromBlock":217710049,"toBlock":217710060,
+    let query = r#"{"type":"solana","fromBlock":217710049,"toBlock":217710060,
         "instructions":[{"mentionsAccount":[123]}]}"#;
 
-    assert!(
-        run("solana", &solana, query).is_err(),
-        "a numeric account is a client error, not a filter on the rest of the list"
-    );
+    // Refused before any chunk is read, so the test needs none: an error from a
+    // missing chunk would pass an `is_err` check just as well.
+    let error = format!("{:#}", plan_error(&solana, query));
+    assert!(error.contains("expected a string"), "{error}");
 }
 
 /// Most of the engine's hex surface is string-typed — every EVM address, topic,
@@ -148,7 +148,7 @@ fn a_bloom_filter_rejects_a_non_string_element() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn a_malformed_hex_filter_is_rejected_on_a_string_column() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("ethereum") {
         return;
     }
 
@@ -190,7 +190,7 @@ fn a_malformed_hex_filter_is_rejected_on_a_string_column() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn a_non_boolean_flag_filter_is_rejected() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("ethereum") {
         return;
     }
 
@@ -223,7 +223,7 @@ fn a_non_boolean_flag_filter_is_rejected() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn a_non_object_fields_is_rejected() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("ethereum") {
         return;
     }
 

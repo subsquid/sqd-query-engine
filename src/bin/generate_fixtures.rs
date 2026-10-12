@@ -9,6 +9,11 @@
 use sqd_query::{JsonLinesWriter, ParquetChunk, Query};
 use std::path::{Path, PathBuf};
 
+// The tests' chunk store, so the answers come from the chunk the tests read.
+#[allow(dead_code)]
+#[path = "../../tests/conformance/harness/store.rs"]
+mod store;
+
 fn run_legacy_query(query_json: &[u8], chunk: &ParquetChunk) -> anyhow::Result<Vec<u8>> {
     let query = Query::from_json_bytes(query_json)?;
     let plan = query.compile();
@@ -96,7 +101,7 @@ fn main() {
     eprintln!("Ethereum:");
     process_dataset(
         "ethereum",
-        &base.join("ethereum/chunk"),
+        &store::dataset_chunk("ethereum"),
         &base.join("ethereum/queries"),
     );
 
@@ -104,7 +109,7 @@ fn main() {
     eprintln!("Solana:");
     process_dataset(
         "solana",
-        &base.join("solana/chunk"),
+        &store::dataset_chunk("solana"),
         &base.join("solana/queries"),
     );
 

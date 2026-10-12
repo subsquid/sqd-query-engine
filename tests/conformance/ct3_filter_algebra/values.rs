@@ -8,7 +8,9 @@ use sqd_query_engine::query::{compile, parse_query};
 use std::path::Path;
 
 use crate::harness::chunk::write_parquet;
-use crate::harness::fixtures::{fixture_tree_is_present, meta, plan_error, run, run_against};
+use crate::harness::fixtures::{
+    fixture_tree_has, fixture_tree_has_all, meta, plan_error, run, run_against,
+};
 use crate::harness::json::{assert_same_response, count_items, items_in, parse_response};
 use crate::harness::sol_like;
 
@@ -20,7 +22,7 @@ use crate::harness::sol_like;
 #[test]
 #[ignore = "requires external fixture data"]
 fn unmatchable_values_are_not_errors() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has_all(["solana", "hyperliquid_replica_cmds"]) {
         return;
     }
 
@@ -51,7 +53,7 @@ fn unmatchable_values_are_not_errors() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn discriminator_hex_is_a_prefix_chain() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("solana") {
         return;
     }
 
@@ -162,7 +164,7 @@ fn an_empty_discriminator_prefix_matches_every_instruction() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn a_scalar_filter_means_the_same_as_a_one_element_list() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has_all(["ethereum", "solana"]) {
         return;
     }
 
@@ -267,7 +269,7 @@ fn a_scalar_filter_means_the_same_as_a_one_element_list() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn a_hex_value_too_wide_for_the_column_matches_nothing() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("solana") {
         return;
     }
 
@@ -332,7 +334,7 @@ fn a_hex_value_too_wide_for_the_column_matches_nothing() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn a_block_bound_past_the_stored_width_matches_nothing() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("ethereum") {
         return;
     }
 
@@ -368,7 +370,7 @@ fn a_block_bound_past_the_stored_width_matches_nothing() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn an_empty_bloom_filter_matches_nothing_rather_than_everything() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("solana") {
         return;
     }
     let solana = meta("solana");
@@ -403,7 +405,7 @@ fn an_empty_bloom_filter_matches_nothing_rather_than_everything() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn a_hex_value_of_the_wrong_width_matches_nothing_without_erroring() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("solana") {
         return;
     }
     let solana = meta("solana");
@@ -477,7 +479,7 @@ fn a_signed_column_takes_negative_filter_values() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn an_empty_filter_list_matches_nothing() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has_all(["ethereum", "solana"]) {
         return;
     }
     let solana = meta("solana");

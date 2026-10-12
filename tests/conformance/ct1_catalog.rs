@@ -26,7 +26,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use crate::harness::chunk::{blocks_parquet_named, read_columns, write_table};
-use crate::harness::fixtures::{fixture_chunk, fixture_tree_is_present, meta, FIXTURE_DATASETS};
+use crate::harness::fixtures::{fixture_chunk, fixture_tree_has_all, meta, FIXTURE_DATASETS};
 use crate::harness::synthetic::run_json;
 
 // ---------------------------------------------------------------------------
@@ -188,7 +188,7 @@ fn a_relation_target_names_its_own_block_column() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn item_keys_are_unique_within_a_chunk() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has_all(FIXTURE_DATASETS.map(|(dataset, _)| dataset)) {
         return;
     }
 
@@ -196,9 +196,6 @@ fn item_keys_are_unique_within_a_chunk() {
 
     for (dataset, catalog) in FIXTURE_DATASETS {
         let chunk = fixture_chunk(dataset);
-        if !chunk.is_dir() {
-            continue;
-        }
 
         let metadata = meta(catalog);
         for (table, desc) in &metadata.tables {

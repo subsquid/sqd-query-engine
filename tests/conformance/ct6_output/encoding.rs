@@ -14,8 +14,7 @@ use sqd_query_engine::scan::ParquetChunkReader;
 use crate::harness::arrow::read_frames;
 use crate::harness::chunk::{chunk_with_column_filled, column_names, write_table};
 use crate::harness::fixtures::{
-    fixture_chunk, fixture_tree_has, fixture_tree_is_present, meta, run, run_against,
-    FIXTURE_DATASETS,
+    fixture_chunk, fixture_tree_has, meta, run, run_against, FIXTURE_DATASETS,
 };
 use crate::harness::json::{items_in, parse_response};
 use crate::harness::synthetic::{
@@ -32,7 +31,7 @@ use crate::harness::synthetic::{
 #[test]
 #[ignore = "requires external fixture data"]
 fn discriminator_columns_render_as_padded_hex() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("solana") {
         return;
     }
 
@@ -83,7 +82,7 @@ fn discriminator_columns_render_as_padded_hex() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn tron_internal_transaction_extra_renders_as_a_string() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("tron") {
         return;
     }
 

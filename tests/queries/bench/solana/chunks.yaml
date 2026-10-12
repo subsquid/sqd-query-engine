@@ -1,0 +1,10 @@
+# The chunk the benches read as data/solana/chunk.
+chunk: s3://solana-mainnet-3/0406021645/0406021645-0406021692-bPC4w7XB
+xxh3:
+  balances.parquet: c1e184cffe873f4dacb3a673e75c7b2f
+  blocks.parquet: ce4434ef21f38d7fb2cdcbce7c39b7b2
+  instructions.parquet: 2df4558cde7798d9ff8be863ba6d1c7c
+  logs.parquet: a71ff25b9de705106c98473f2e257a4b
+  rewards.parquet: b454fd62f612404a2f62d4ed11f94ccd
+  token_balances.parquet: a6ea360f39ad2c51e41a244492f7a566
+  transactions.parquet: 54e9c6376bdb310a8537baa23ab22afd

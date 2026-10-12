@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use crate::harness::chunk::{blocks_parquet, write_parquet};
-use crate::harness::fixtures::{fixture_tree_is_present, meta, run};
+use crate::harness::fixtures::{fixture_tree_has, meta, run};
 use crate::harness::json::items_of;
 use crate::harness::synthetic::run_json as run_chunk;
 
@@ -292,7 +292,7 @@ fn a_relation_whose_join_key_is_missing_is_an_error() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn a_null_join_key_matches_nothing() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("moonbeam") {
         return;
     }
 
@@ -354,7 +354,7 @@ fn a_null_join_key_matches_nothing() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn a_null_address_has_no_ancestors() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("moonbeam") {
         return;
     }
 
@@ -414,7 +414,7 @@ fn a_null_address_has_no_ancestors() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn stacked_relations_do_not_duplicate_rows() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("ethereum") {
         return;
     }
 
@@ -459,7 +459,7 @@ fn stacked_relations_do_not_duplicate_rows() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn adding_an_overlapping_relation_changes_nothing() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("ethereum") {
         return;
     }
 
