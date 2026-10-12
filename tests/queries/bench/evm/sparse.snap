@@ -2,4 +2,20 @@
 source: tests/queries.rs
 ---
 blocks: 2 (24550597 to 24550820)
-digest: 95ea661a8e8bdb0b6f643936cf083534
+
+[
+  {
+    "header": {
+      "hash": "0xe9d2260f072bb3d01dac28a09650d52b7a329eb98c1a1be738fc2ba522797e9b",
+      "number": 24550597,
+      "timestamp": 1772223383
+    }
+  },
+  {
+    "header": {
+      "hash": "0x4292c5860d72ad1938dae776e27093981e44cf3b794f7101ceba33d09fefc8aa",
+      "number": 24550820,
+      "timestamp": 1772226095
+    }
+  }
+]

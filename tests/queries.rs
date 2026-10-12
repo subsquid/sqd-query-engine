@@ -2,9 +2,9 @@
 //!
 //! Each `chunks.yaml` under `tests/queries/` names one chunk, by its storage path or,
 //! until the store holds it, by its place in the fixture tree. Every `*.json`
-//! beside it is a query for that chunk. Git keeps neither the chunk
-//! nor the answer: `make fetch` downloads chunks into a local cache, and an
-//! insta snapshot keeps each answer as counts and a digest.
+//! beside it is a query for that chunk. Git keeps the query and an insta
+//! snapshot of its answer: the counts, then the answer whole, or a digest when
+//! it is over 64 KB. `make fetch` downloads chunks into a local cache.
 //!
 //! With `--features legacy-query` both engines answer, and they must agree before
 //! the snapshot is checked. Without it the snapshot alone guards the answer, which
@@ -338,8 +338,12 @@ fn query_type(query: &[u8]) -> Result<String, Failed> {
     Ok(kind.to_owned())
 }
 
-/// What the snapshot keeps: enough to see which table changed, plus a digest
-/// that catches a change the counts miss.
+/// The largest answer a snapshot keeps whole; a bigger one is too long to
+/// review, so it keeps a digest instead.
+const FULL_ANSWER_BYTES: usize = 64 * 1024;
+
+/// What the snapshot keeps: counts that show which table changed, then the
+/// answer itself, or a digest of it that catches a change the counts miss.
 fn summarize(answer: &Answer) -> String {
     let blocks = match answer {
         Ok(blocks) => blocks,
@@ -359,9 +363,16 @@ fn summarize(answer: &Answer) -> String {
         out += &format!("{table}: {count}\n");
     }
 
+    let blocks: Vec<Value> = blocks.iter().map(sorted_keys).collect();
+    let full = serde_json::to_string_pretty(&blocks).unwrap();
+    if full.len() <= FULL_ANSWER_BYTES {
+        out += &format!("\n{full}\n");
+        return out;
+    }
+
     let mut text = String::new();
-    for block in blocks {
-        canonical(block, &mut text);
+    for block in &blocks {
+        text += &serde_json::to_string(block).unwrap();
         text.push('\n');
     }
     out += &format!(
@@ -394,36 +405,22 @@ fn item_counts(blocks: &[Value]) -> BTreeMap<String, usize> {
     counts
 }
 
-/// JSON with object keys sorted at every level, so the digest does not depend
-/// on the order the engine writes keys in.
-fn canonical(value: &Value, out: &mut String) {
+/// `value` with object keys sorted at every level, so the snapshot does not
+/// depend on the order the engine writes keys in.
+fn sorted_keys(value: &Value) -> Value {
     match value {
         Value::Object(fields) => {
             let mut keys: Vec<&String> = fields.keys().collect();
             keys.sort();
 
-            out.push('{');
-            for (i, key) in keys.into_iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                out.push_str(&serde_json::to_string(key).unwrap());
-                out.push(':');
-                canonical(&fields[key], out);
-            }
-            out.push('}');
+            let sorted = keys
+                .into_iter()
+                .map(|key| (key.clone(), sorted_keys(&fields[key])))
+                .collect();
+            Value::Object(sorted)
         }
-        Value::Array(items) => {
-            out.push('[');
-            for (i, item) in items.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                canonical(item, out);
-            }
-            out.push(']');
-        }
-        scalar => out.push_str(&scalar.to_string()),
+        Value::Array(items) => Value::Array(items.iter().map(sorted_keys).collect()),
+        scalar => scalar.clone(),
     }
 }
 
