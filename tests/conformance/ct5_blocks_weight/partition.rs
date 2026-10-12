@@ -14,7 +14,7 @@ use sqd_query_engine::metadata::DatasetDescription;
 use std::path::Path;
 
 use crate::harness::evm_like;
-use crate::harness::fixtures::{fixture_chunk, fixture_tree_is_present, meta, run_against};
+use crate::harness::fixtures::{fixture_chunk, fixture_tree_has, meta, run_against};
 use crate::harness::json::{block_numbers, items_in, items_of, parse_response};
 
 /// The tables a response may carry items under, in the order the assertions
@@ -137,7 +137,7 @@ fn a_split_adds_only_boundary_headers() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn splitting_a_fixture_range_returns_the_same_items() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("optimism") {
         return;
     }
 
@@ -170,7 +170,7 @@ fn splitting_a_fixture_range_returns_the_same_items() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn splitting_a_hierarchical_range_returns_the_same_items() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("solana") {
         return;
     }
 

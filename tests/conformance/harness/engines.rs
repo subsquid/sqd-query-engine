@@ -1,5 +1,5 @@
 //! Both engines behind one call shape, so a test can put the same query to each.
-//! CT-7 and the real-chunk cases (`tests/cases.rs`) share this file.
+//! CT-7 and the real-chunk queries (`tests/queries.rs`) share this file.
 
 use sqd_query_engine::metadata::DatasetDescription;
 use sqd_query_engine::output::execute_plan;

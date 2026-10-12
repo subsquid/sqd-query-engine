@@ -1,5 +1,5 @@
 .PHONY: spec-check spec-check-strict spec-test test test-pr test-nightly test-data \
-        fetch-cases test-cases fmt lint
+        fetch fmt lint
 
 # MG-6 — the specification's own integrity gate. Runs in well under a second.
 # CI runs exactly this; see .github/workflows/spec.yml.
@@ -37,23 +37,24 @@ test-pr:
 # MG-4's classes. CT-7 needs the reference engine and CT-8 external chunks, so
 # this needs both inputs; no job supplies them yet, which is why MG-4 is advisory.
 test-nightly:
-	SQD_REQUIRE_CHUNKS=1 SQD_REQUIRE_FIXTURES=1 cargo test --features legacy-query \
+	SQD_REQUIRE_CHUNKS=1 cargo test --features legacy-query \
 	  --test conformance -- $(NIGHTLY_CLASSES) --include-ignored
 
 # The data-backed suite. The guards turn missing inputs into failures, and
 # `--ignored` selects the tests omitted from the portable gate.
 test-data:
-	SQD_REQUIRE_CHUNKS=1 SQD_REQUIRE_FIXTURES=1 cargo test --workspace -- --ignored
+	SQD_REQUIRE_CHUNKS=1 cargo test --workspace -- --ignored
 
-# Real-chunk cases, see tests/cases/README.md. The chunks live in a cache outside
-# the repo, and the test reads the same variable.
+# Queries on real chunks, see tests/queries/README.md. The chunks live in a cache
+# outside the repo, and the test reads the same variable.
 export SQD_CHUNK_CACHE ?= $(HOME)/.cache/sqd-chunks
 
-# Downloads each chunk a case names and the cache lacks. The copy lands in a
+# Downloads each chunk a `chunks.yaml` names and the cache lacks. The copy lands in a
 # `.part` directory first, so an interrupted one never looks complete. The AWS
-# CLI must be configured for the chunk store.
-fetch-cases:
-	@refs=$$(cargo test --quiet --test cases -- --list-chunks) || exit 1; \
+# CLI must be configured for the chunk store. Then every cached chunk, new or
+# not, is hashed against its `chunks.yaml`, and the tests read only those that match.
+fetch:
+	@refs=$$(cargo test --quiet --test queries -- --list-chunks) || exit 1; \
 	for ref in $$refs; do \
 	  dest="$(SQD_CHUNK_CACHE)/$$ref"; \
 	  test -d "$$dest" && continue; \
@@ -62,10 +63,7 @@ fetch-cases:
 	  test -d "$$dest.part" || { echo "s3://$$ref holds no files"; exit 1; }; \
 	  mv "$$dest.part" "$$dest" || exit 1; \
 	done
-
-# `legacy-query` adds the live comparison with the reference engine.
-test-cases:
-	cargo test --features legacy-query --test cases -- --ignored
+	@cargo test --quiet --test queries -- --verify-chunks
 
 # MG-8, over the engine, its crates and its tests. `benches/` and `examples/` are outside
 # both static gates: they are not the engine, and bringing them under the

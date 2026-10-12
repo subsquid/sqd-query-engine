@@ -12,7 +12,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::harness::chunk::{blocks_parquet, write_table};
-use crate::harness::fixtures::{fixture_tree_is_present, meta, run};
+use crate::harness::fixtures::{fixture_tree_has, meta, run};
 use crate::harness::guard::reference_query_sources;
 use crate::harness::json::parse_response;
 use crate::harness::synthetic::{catalog, catalog_with_log_weight_key, weighted_chunk, BLOCKS};
@@ -148,7 +148,7 @@ fn a_declared_weight_key_replaces_the_item_key() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn a_field_group_request_key_weighs_what_its_column_weighs() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("ethereum") {
         return;
     }
     let evm = meta("evm");

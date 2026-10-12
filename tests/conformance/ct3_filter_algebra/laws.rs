@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 use tempfile::TempDir;
 
 use crate::harness::evm_like;
-use crate::harness::fixtures::{fixture_chunk, fixture_tree_is_present, meta};
+use crate::harness::fixtures::{fixture_chunk, fixture_tree_has, meta};
 use crate::harness::generator::{Generator, ItemRequest, Rng, TableCorpus};
 use crate::harness::json::{assert_same_response, block_numbers, parse_response, row_set};
 
@@ -601,7 +601,7 @@ fn case_folding_follows_the_column() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn the_laws_hold_over_a_chunk_an_archiver_wrote() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("optimism") {
         return;
     }
 

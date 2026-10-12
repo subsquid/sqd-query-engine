@@ -7,7 +7,7 @@ use sqd_query_engine::query::{compile, parse_query};
 
 use crate::harness::chunk::chunk_without_column;
 use crate::harness::chunk::{write_parquet, write_table_row_groups};
-use crate::harness::fixtures::{fixture_tree_is_present, meta, run, run_against};
+use crate::harness::fixtures::{fixture_tree_has, meta, run, run_against};
 use crate::harness::json::parse_response;
 
 /// The parent hash of the first block a chunk can speak about, read from the
@@ -37,7 +37,7 @@ fn parent_hash_of(dataset: &str, metadata: &DatasetDescription, block: u64) -> S
 #[test]
 #[ignore = "requires external fixture data"]
 fn a_mismatched_parent_block_hash_is_reported() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("ethereum") {
         return;
     }
 
@@ -81,7 +81,7 @@ fn a_mismatched_parent_block_hash_is_reported() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn the_first_block_of_a_chunk_still_settles_its_parent() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("ethereum") {
         return;
     }
 
@@ -117,7 +117,7 @@ fn the_first_block_of_a_chunk_still_settles_its_parent() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn an_invisible_parent_block_is_not_a_fork() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("ethereum") {
         return;
     }
 
@@ -163,7 +163,7 @@ fn a_malformed_parent_block_hash_is_rejected() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn a_chunk_that_cannot_answer_the_fork_check_is_an_error() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("ethereum") {
         return;
     }
 
@@ -354,7 +354,7 @@ tables:
 #[test]
 #[ignore = "requires external fixture data"]
 fn a_parent_block_hash_is_compared_byte_for_byte() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("ethereum") {
         return;
     }
 
@@ -391,7 +391,7 @@ fn a_parent_block_hash_is_compared_byte_for_byte() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn a_from_block_past_the_chunk_is_not_evidence_of_a_fork() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("ethereum") {
         return;
     }
 
@@ -425,7 +425,7 @@ fn a_from_block_past_the_chunk_is_not_evidence_of_a_fork() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn the_row_at_from_block_is_the_one_compared() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("ethereum") {
         return;
     }
 
@@ -457,7 +457,7 @@ fn the_row_at_from_block_is_the_one_compared() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn fork_detection_follows_a_chain_that_skips_numbers() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("solana") {
         return;
     }
 
@@ -660,7 +660,7 @@ tables:
 #[test]
 #[ignore = "requires external fixture data"]
 fn a_skipped_from_block_is_settled_by_the_block_after_the_gap() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("solana") {
         return;
     }
 
@@ -712,7 +712,7 @@ fn a_skipped_from_block_is_settled_by_the_block_after_the_gap() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn a_client_resuming_at_any_slot_is_checked() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("solana") {
         return;
     }
 

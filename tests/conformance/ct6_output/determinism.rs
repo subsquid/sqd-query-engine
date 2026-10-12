@@ -19,8 +19,8 @@ use crate::harness::chunk::{
 use crate::harness::columnar::{run_columnar, MemoryChunk};
 use crate::harness::evm_like;
 use crate::harness::fixtures::{
-    answers_the_same, fixture_chunk, fixture_tree_has, fixture_tree_is_present, meta, run,
-    run_against, FIXTURE_DATASETS,
+    answers_the_same, fixture_chunk, fixture_queries_present, fixture_tree_has,
+    fixture_tree_has_all, meta, run, run_against, FIXTURE_DATASETS,
 };
 use crate::harness::generator::{Generator, ItemRequest, Rng, TableCorpus};
 use crate::harness::guard::fixture_dir;
@@ -379,7 +379,7 @@ fn thread_count_does_not_reach_the_answer() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn a_fixture_chunk_answers_the_same_under_any_layout() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("optimism") {
         return;
     }
 
@@ -410,15 +410,13 @@ fn a_fixture_chunk_answers_the_same_under_any_layout() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn every_fixture_query_answers_the_same_through_the_columnar_reader() {
-    if !fixture_tree_is_present() {
+    let chunks_present = fixture_tree_has_all(FIXTURE_DATASETS.map(|(dataset, _)| dataset));
+    if !chunks_present || !fixture_queries_present() {
         return;
     }
 
     let mut compared = 0;
     for (dataset, catalog) in FIXTURE_DATASETS {
-        if !fixture_tree_has(dataset) {
-            continue;
-        }
         let catalog = meta(catalog);
         let chunk = fixture_chunk(dataset);
         let readers = [None, Some(4096), Some(100)].map(|w| (w, MemoryChunk::load(&chunk, w)));
@@ -463,7 +461,7 @@ fn every_fixture_query_answers_the_same_through_the_columnar_reader() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn a_fixture_chunk_answers_the_same_at_any_width() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("optimism") {
         return;
     }
 
@@ -500,7 +498,7 @@ fn a_fixture_chunk_answers_the_same_at_any_width() {
 #[test]
 #[ignore = "requires external fixture data"]
 fn a_list_key_answers_the_same_at_any_element_width() {
-    if !fixture_tree_is_present() {
+    if !fixture_tree_has("solana") {
         return;
     }
 
