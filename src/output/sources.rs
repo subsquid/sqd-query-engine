@@ -5,19 +5,14 @@
 //! sources a table has and on the order the tables come in.
 
 use crate::metadata::{DatasetDescription, TableDescription};
-use crate::output::weight::TableOutput;
-use crate::query::Plan;
+use crate::output::projection::ResolvedProjection;
 use crate::scan::Rows;
 use arrow::record_batch::RecordBatch;
-use std::collections::HashMap;
 
 /// The block headers of a response.
 pub(crate) struct OutputHeader<'a> {
-    /// The block table's catalog name.
-    pub(crate) table: &'a str,
-    pub(crate) desc: &'a TableDescription,
     /// The header fields the request selects.
-    pub(crate) fields: &'a [String],
+    pub(crate) projection: &'a ResolvedProjection<'a>,
     /// Header rows of the page's blocks, possibly beside other blocks' rows.
     pub(crate) batches: Vec<RecordBatch>,
 }
@@ -25,7 +20,7 @@ pub(crate) struct OutputHeader<'a> {
 /// One source of a response table's rows.
 pub(crate) struct OutputSource<'a> {
     /// The fields this source renders.
-    pub(crate) fields: &'a [String],
+    pub(crate) projection: &'a ResolvedProjection<'a>,
     pub(crate) rows: Rows,
 }
 
@@ -38,21 +33,22 @@ pub(crate) struct OutputTable<'a> {
 }
 
 /// Every table with a source, in catalog order: the order its items take in a
-/// block (INV-O4). A source without rows is kept; each format decides what one
-/// means to it.
+/// block (INV-O4). `sources` come in plan order: each table's own rows, then
+/// the rows of each of its relations. A source without rows is kept; each
+/// format decides what one means to it.
 pub(crate) fn output_tables<'a>(
-    plan: &'a Plan,
     metadata: &'a DatasetDescription,
-    mut outputs: HashMap<String, TableOutput>,
+    sources: Vec<OutputSource<'a>>,
 ) -> Vec<OutputTable<'a>> {
     // Request names are unique per catalog table, so a catalog position
     // identifies a response table.
     let mut tables: Vec<(usize, OutputTable<'a>)> = Vec::new();
-    let mut add = |table: &str, fields: &'a [String], rows: Rows| {
-        let Some((position, key, desc)) = metadata.tables.get_full(table) else {
-            return;
+
+    for source in sources {
+        let Some((position, key, desc)) = metadata.tables.get_full(source.projection.table())
+        else {
+            continue;
         };
-        let source = OutputSource { fields, rows };
 
         match tables.iter_mut().find(|(at, _)| *at == position) {
             Some((_, output)) => output.sources.push(source),
@@ -64,23 +60,6 @@ pub(crate) fn output_tables<'a>(
                     sources: vec![source],
                 },
             )),
-        }
-    };
-
-    for table_plan in &plan.table_plans {
-        let Some(TableOutput {
-            rows,
-            mut relations,
-        }) = outputs.remove(&table_plan.table)
-        else {
-            continue;
-        };
-        add(&table_plan.table, &table_plan.output_columns, rows);
-
-        for (index, relation) in table_plan.relations.iter().enumerate() {
-            if let Some(rows) = relations.remove(&index) {
-                add(&relation.target_table, &relation.output_columns, rows);
-            }
         }
     }
 

@@ -5,13 +5,9 @@ use super::prepare::{Execution, PlannedTable};
 use super::Stopwatch;
 use crate::metadata::TableDescription;
 use crate::output::block_index::compute_block_range;
-use crate::output::columns::{
-    find_address_column, group_keys_for_relation, required_output_columns, resolve_output_columns,
-    resolve_relation_output_columns,
-};
+use crate::output::projection::ResolvedProjection;
 use crate::output::weight::TableOutput;
 use crate::query::{RelationKind, RelationPlan};
-use crate::scan::predicate::RowPredicate;
 use crate::scan::{
     AddressIndex, ChunkReader, HierarchicalFilter, HierarchicalMode, KeyFilter, KeySet, Rows,
     ScanRequest, Window,
@@ -54,20 +50,13 @@ fn scan_table(
     let profile = execution.options.profile;
     let (table_plan, table_desc) = (table.plan, table.desc);
 
-    // Determine all columns needed for output (including virtual field sources)
-    let output_cols = resolve_output_columns(table_plan, table_desc);
-    let output_col_refs: Vec<&str> = output_cols.iter().map(|s| s.as_str()).collect();
-    let req_cols = required_output_columns(&table_plan.output_columns, table_desc);
-    let req_col_refs: Vec<&str> = req_cols.iter().map(|s| s.as_str()).collect();
-    let pred_refs: Vec<&RowPredicate> = table_plan.predicates.iter().collect();
-
-    let mut request = ScanRequest::new(output_col_refs);
-    request.predicates = pred_refs;
+    let mut request = ScanRequest::new(table.scan_columns.clone());
+    request.predicates = table_plan.predicates.iter().collect();
     request.from_block = window.from;
     request.to_block = window.to;
     request.window = Some(window);
     request.block_number_column = Some(table_desc.block_number_column.as_str());
-    request.required_columns = req_col_refs;
+    request.required_columns = table.projection.required().to_vec();
     // A relation some items asked for follows only the rows they matched,
     // which the scan reports as it evaluates them, once per list of items.
     for items in table_plan
@@ -168,8 +157,8 @@ impl<'a> HierarchicalSpec<'a> {
             RelationKind::Parents => HierarchicalMode::Parents,
             RelationKind::Join => return None,
         };
-        let target_address = find_address_column(target)?;
-        let source_address = find_address_column(source).unwrap_or(target_address);
+        let target_address = target.address_column.as_deref()?;
+        let source_address = source.address_column.as_deref().unwrap_or(target_address);
         // Another table's row at the source's address belongs to it (INV-R8),
         // whatever the two address columns are called.
         let inclusive = relation.target_table != source_table;
@@ -197,7 +186,7 @@ fn pushdown_keys<'a>(
             relation.right_key.iter().map(String::as_str).collect(),
         ),
         RelationKind::Children | RelationKind::Parents => {
-            let address = find_address_column(target);
+            let address = target.address_column.as_deref();
             (
                 group_keys_for_relation(&relation.left_key, address),
                 group_keys_for_relation(&relation.right_key, address),
@@ -207,6 +196,15 @@ fn pushdown_keys<'a>(
 
     let usable = !left.is_empty() && !right.is_empty();
     usable.then_some((left, right))
+}
+
+/// A relation's key without the address column: the columns a hierarchical
+/// relation groups rows by.
+fn group_keys_for_relation<'a>(keys: &'a [String], address: Option<&str>) -> Vec<&'a str> {
+    keys.iter()
+        .map(String::as_str)
+        .filter(|key| Some(*key) != address)
+        .collect()
 }
 
 /// Values built once per distinct key, side by side.
@@ -260,7 +258,8 @@ impl<K: PartialEq + Send, V: Send> BuiltOnce<K, V> {
 /// What one relation's target scan needs from its table's rows.
 struct RelationInput<'a> {
     relation: &'a RelationPlan,
-    target: &'a TableDescription,
+    /// The fields of the target.
+    target: &'a ResolvedProjection<'a>,
     /// How a `children` or `parents` relation walks the address; `None` for a
     /// join.
     hierarchy: Option<HierarchicalSpec<'a>>,
@@ -283,7 +282,7 @@ impl RelationInput<'_> {
 /// Each relation's input. Relations that follow the same rows share the key
 /// set and the address index built from them.
 fn relation_inputs<'a>(
-    table: &PlannedTable<'a>,
+    table: &'a PlannedTable<'a>,
     sources: &'a BuiltOnce<Option<&'a [usize]>, Vec<RecordBatch>>,
 ) -> Vec<RelationInput<'a>> {
     let source = (table.plan.table.as_str(), table.desc);
@@ -298,14 +297,14 @@ fn relation_inputs<'a>(
 
     let key_sets = BuiltOnce::build(
         table.relations().filter_map(|(relation, target)| {
-            let (left, _) = pushdown_keys(relation, target)?;
+            let (left, _) = pushdown_keys(relation, target.desc())?;
             Some((followed(relation), left))
         }),
         |(items, left)| KeySet::build(sources.get(items), left, primary_bn),
     );
     let address_indexes = BuiltOnce::build(
         table.relations().filter_map(|(relation, target)| {
-            let spec = address_spec(relation, target)?;
+            let spec = address_spec(relation, target.desc())?;
             Some((followed(relation), spec.group_keys, spec.source_address))
         }),
         |(items, group_keys, address)| AddressIndex::build(sources.get(items), group_keys, address),
@@ -315,11 +314,12 @@ fn relation_inputs<'a>(
         .relations()
         .map(|(relation, target)| {
             let items = followed(relation);
-            let target_bn = target.block_number_column.as_str();
+            let target_desc = target.desc();
+            let target_bn = target_desc.block_number_column.as_str();
 
-            let keys = pushdown_keys(relation, target)
+            let keys = pushdown_keys(relation, target_desc)
                 .map(|(left, right)| (key_sets.get(&(items, left)), right));
-            let hierarchy = hierarchy(relation, target);
+            let hierarchy = hierarchy(relation, target_desc);
             let addresses = hierarchy
                 .as_ref()
                 .filter(|spec| !spec.group_keys.is_empty())
@@ -362,16 +362,13 @@ fn scan_relation(
     profile: bool,
 ) -> Result<Rows> {
     let relation = input.relation;
-    let target_desc = input.target;
+    let target_desc = input.target.desc();
 
-    let output_columns =
-        resolve_relation_output_columns(&relation.output_columns, Some(target_desc));
-    let required = required_output_columns(&relation.output_columns, target_desc);
-    let mut request = ScanRequest::new(output_columns.iter().map(String::as_str).collect());
+    let mut request = ScanRequest::new(input.target.row_columns().to_vec());
     request.from_block = from_block;
     request.to_block = to_block;
     request.window = Some(window);
-    request.required_columns = required.iter().map(String::as_str).collect();
+    request.required_columns = input.target.required().to_vec();
     request.block_number_column = Some(target_desc.block_number_column.as_str());
     request.key_filter = input.key_filter.as_ref();
     request.hierarchical_filter = input.hierarchical_filter.as_ref();

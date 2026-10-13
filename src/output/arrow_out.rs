@@ -39,8 +39,7 @@
 
 use crate::integers::BlockNumbers;
 use crate::metadata::{JsonEncoding, TableDescription};
-use crate::output::columns::physical_output_columns;
-use crate::output::row_order::build_full_sort_columns;
+use crate::output::projection::row_key;
 use crate::output::sources::{OutputHeader, OutputTable};
 use anyhow::Result;
 use arrow::array::{Array, ArrayRef, BinaryBuilder, BooleanArray, StringArray};
@@ -128,15 +127,15 @@ pub(crate) fn arrow_output(
 
     // Block header stream: project + weight-trim.
     {
-        let bd = header.desc;
+        let bd = header.projection.desc();
         let bn = bd.block_number_column.clone();
         let mut wanted = vec![bn.clone()];
-        for c in physical_output_columns(header.fields, bd) {
-            if !wanted.contains(&c) {
-                wanted.push(c);
+        for &c in header.projection.rendered() {
+            if !wanted.iter().any(|w| w == c) {
+                wanted.push(c.to_string());
             }
         }
-        let name = bd.request_name(header.table).to_string();
+        let name = bd.request_name(header.projection.table()).to_string();
         let mut batches: Vec<RecordBatch> = Vec::with_capacity(header.batches.len());
         for b in &header.batches {
             let trimmed = filter_to_blocks(&project_columns(b, &wanted)?, &bn, keep)?;
@@ -157,18 +156,18 @@ pub(crate) fn arrow_output(
         let td = table.desc;
         let bn = td.block_number_column.clone();
         let mut emit_cols = vec![bn.clone()];
-        for c in physical_output_columns(table.sources[0].fields, td) {
-            if !emit_cols.contains(&c) {
-                emit_cols.push(c);
+        for &c in table.sources[0].projection.rendered() {
+            if !emit_cols.iter().any(|e| e == c) {
+                emit_cols.push(c.to_string());
             }
         }
         let multi = table.sources.len() > 1;
         // For a multi-source table, carry the dedup key columns through the
         // projection so they exist at dedup time, then drop them on emit.
-        let sort_cols = build_full_sort_columns(td);
+        let key: Vec<String> = row_key(td).into_iter().map(str::to_owned).collect();
         let mut proc_cols = emit_cols.clone();
         if multi {
-            for c in &sort_cols {
+            for c in &key {
                 if !proc_cols.contains(c) {
                     proc_cols.push(c.clone());
                 }
@@ -191,12 +190,6 @@ pub(crate) fn arrow_output(
         let batches: Vec<RecordBatch> = if multi {
             let schema = projected[0].schema();
             let merged = arrow::compute::concat_batches(&schema, &projected)?;
-            let mut key = vec![bn.clone()];
-            for c in &sort_cols {
-                if !key.contains(c) {
-                    key.push(c.clone());
-                }
-            }
             vec![project_columns(&dedup_first(&merged, &key)?, &emit_cols)?]
         } else {
             projected

@@ -7,11 +7,9 @@ use super::prepare::Execution;
 use super::tables::scan_tables;
 use crate::metadata::TableDescription;
 use crate::output::block_index::{collect_block_numbers, collect_boundary_blocks};
-use crate::output::columns::required_output_columns;
 use crate::output::filter_to_blocks;
 use crate::output::weight::{
-    block_scan_columns, compute_block_weights, weight_range_end, weight_scan_columns,
-    BlockSelection, TableOutput,
+    compute_block_weights, weight_range_end, BlockSelection, TableOutput, WeighedRows,
 };
 use crate::scan::predicate::RowPredicate;
 use crate::scan::{Rows, ScanRequest};
@@ -53,6 +51,7 @@ pub(super) fn select_page(execution: &Execution) -> Result<Option<Page>> {
 
     let mut tables: HashMap<String, TableOutput> = HashMap::new();
     let mut selection = BlockSelection::new(execution.options.weight_budget);
+    let no_rows = Rows::default();
     let mut from_block = plan.from_block;
     let mut read_through = None;
     let mut first_range = true;
@@ -93,23 +92,14 @@ pub(super) fn select_page(execution: &Execution) -> Result<Option<Page>> {
         let exhausted = if blocks.is_empty() {
             false
         } else {
-            let weights = compute_block_weights(
-                &range_outputs,
-                &range_headers,
-                execution.metadata,
-                plan,
-                &blocks,
-            )?;
+            let sources = weighed_sources(execution, &range_outputs, &no_rows);
+            let weights =
+                compute_block_weights(&sources, &execution.header, &range_headers, &blocks)?;
             selection.extend(&blocks, &weights)
         };
 
         if execution.selection.is_some() {
-            retain_selected_keys(
-                &mut range_outputs,
-                plan,
-                execution.metadata,
-                selection.blocks(),
-            )?;
+            retain_selected_keys(&mut range_outputs, &execution.tables, selection.blocks())?;
         }
 
         for (table, output) in range_outputs {
@@ -152,19 +142,17 @@ pub(super) fn select_page(execution: &Execution) -> Result<Option<Page>> {
 
 /// Every header row of the requested range, read once so internal ranges never
 /// add boundary blocks: the block number, the selected fields and the weight
-/// companions those fields declare (see `block_scan_columns`).
+/// companions those fields declare. A declared `weight: <column>` that is never
+/// read is a weight of zero, so the header under-weighs and truncation lands
+/// past the cap (INV-B10).
 fn read_headers(execution: &Execution) -> Result<Rows> {
-    let (plan, desc) = (execution.plan, execution.blocks);
-    let block_cols = block_scan_columns(&plan.block_output_columns, desc);
-    let block_col_vec: Vec<&str> = block_cols.iter().map(|s| s.as_str()).collect();
-    let block_req_cols = required_output_columns(&plan.block_output_columns, desc);
-    let block_req_refs: Vec<&str> = block_req_cols.iter().map(|s| s.as_str()).collect();
+    let (plan, desc, header) = (execution.plan, execution.blocks, &execution.header);
 
-    let mut request = ScanRequest::new(block_col_vec);
+    let mut request = ScanRequest::new(header.row_columns().to_vec());
     request.from_block = Some(plan.from_block);
     request.to_block = plan.to_block;
     request.block_number_column = Some(desc.block_number_column.as_str());
-    request.required_columns = block_req_refs;
+    request.required_columns = header.required().to_vec();
 
     let headers = execution
         .scan_reader()
@@ -257,8 +245,7 @@ fn initial_range_end(execution: &Execution) -> Result<Option<u64>> {
     };
     let (table_plan, desc) = (table.plan, table.desc);
 
-    let columns = weight_scan_columns(&table_plan.output_columns, desc);
-    let mut request = ScanRequest::new(columns.iter().map(String::as_str).collect());
+    let mut request = ScanRequest::new(table.projection.size_columns().to_vec());
     request.predicates = table_plan.predicates.iter().collect();
     request.from_block = Some(plan.from_block);
     request.to_block = plan.to_block;
@@ -267,8 +254,7 @@ fn initial_range_end(execution: &Execution) -> Result<Option<u64>> {
 
     Ok(weight_range_end(
         &batches,
-        &table_plan.output_columns,
-        desc,
+        &table.projection,
         execution.options.weight_budget,
     ))
 }
@@ -282,7 +268,7 @@ fn next_range_end(execution: &Execution, from_block: u64) -> Option<u64> {
         tables.extend(
             table
                 .relations()
-                .map(|(relation, target)| (relation.target_table.as_str(), target)),
+                .map(|(relation, target)| (relation.target_table.as_str(), target.desc())),
         );
     }
 
@@ -323,7 +309,7 @@ fn range_blocks(
         // a table that calls it something else — out of block selection and out
         // of the weight model both (INV-X1).
         for (&relation, rows) in &output.relations {
-            let target = table.targets[relation];
+            let target = table.targets[relation].desc();
             collect_block_numbers(
                 rows.batches(),
                 &target.block_number_column,
@@ -342,4 +328,32 @@ fn range_blocks(
     let mut blocks: Vec<_> = block_numbers.into_iter().collect();
     blocks.sort_unstable();
     Ok(blocks)
+}
+
+/// Every source of a range's rows with the fields it renders: each table's own
+/// rows, and each of its relations', read or not.
+fn weighed_sources<'r>(
+    execution: &'r Execution,
+    outputs: &'r HashMap<String, TableOutput>,
+    no_rows: &'r Rows,
+) -> Vec<WeighedRows<'r>> {
+    let mut sources = Vec::new();
+    for table in &execution.tables {
+        let Some(output) = outputs.get(&table.plan.table) else {
+            continue;
+        };
+        sources.push(WeighedRows {
+            projection: &table.projection,
+            rows: &output.rows,
+        });
+
+        for (index, target) in table.targets.iter().enumerate() {
+            sources.push(WeighedRows {
+                projection: target,
+                rows: output.relations.get(&index).unwrap_or(no_rows),
+            });
+        }
+    }
+
+    sources
 }

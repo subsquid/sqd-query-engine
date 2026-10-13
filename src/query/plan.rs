@@ -1261,9 +1261,13 @@ mod tests {
 
         // Build a ScanRequest from the plan. `output_columns` are logical names,
         // and `topics` is a roll rather than a column of its own.
-        let physical =
-            crate::output::columns::physical_output_columns(&logs_plan.output_columns, table_desc);
-        let output_cols: Vec<&str> = physical.iter().map(|s| s.as_str()).collect();
+        let projection = crate::output::projection::ResolvedProjection::resolve(
+            "logs",
+            table_desc,
+            &logs_plan.output_columns,
+        )
+        .unwrap();
+        let output_cols = projection.rendered().to_vec();
         let pred_refs: Vec<&crate::scan::predicate::RowPredicate> =
             logs_plan.predicates.iter().collect();
 
