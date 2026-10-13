@@ -63,31 +63,33 @@ Notably, the legacy engine does NOT include in weight:
 
 ### New Engine
 
-The new engine uses `weight_projection()` to compute weight columns, matching
-legacy behavior:
+The new engine computes a row's weight once per query, in `RowWeight::of`,
+matching legacy behavior:
 
 ```
-weight_projection = primary_key + user_output_columns
+weighed columns = weight_key + rendered columns
 ```
 
-Where primary key = `block_number_column` + `item_order_keys` + `address_column`.
+The weight key is the catalog's `weight_key`, or else `block_number_column` +
+`item_order_keys` + `address_column` + the variant column.
 
-This is separate from `resolve_output_columns()`, which determines the full set
-of columns to read from parquet (including join keys, source predicates, tag
-columns). Those extra columns are needed for scanning and joining but do NOT
-contribute to weight.
+This is separate from `ResolvedProjection::row_columns()`, the set of columns
+one pass reads from parquet (including the row key and the size columns), and
+from the relation source keys a pass over a relation's source reads as well.
+Those extra columns are needed for scanning and joining but do NOT contribute
+to weight.
 
-| Column Category | In weight_projection? | In resolve_output_columns? |
+| Column Category | Weighed? | In `row_columns`? |
 |---|---|---|
 | Block number column | Yes | Yes |
 | Item order keys | Yes | Yes |
 | Address column | Yes (if exists) | Yes |
 | User-requested fields | Yes | Yes |
 | Virtual field sources | Yes | Yes |
-| Join key columns | No | Yes |
-| Source predicate columns | No | Yes |
-| Tag column (field groups) | No | Yes |
-| Weight/size columns | Yes (if data col projected) | Yes |
+| Join key columns | No | Added by `with_relation_keys` |
+| Source predicate columns | No | No |
+| Variant column | Yes | Yes |
+| Weight/size columns | Their values, when the data column is rendered | Yes |
 
 ## Virtual Fields
 
@@ -170,6 +172,6 @@ Block header weight is always included for blocks that have items (unless
 
 ## Code References
 
-- `src/output/weight.rs`: `apply_weight_limit()`, `compute_weight_params()`
-- `src/output/columns.rs`: `resolve_output_columns()`, `resolve_relation_output_columns()`
+- `src/output/weight.rs`: `RowWeight`, `compute_block_weights()`, `BlockSelection`
+- `src/output/projection.rs`: `ResolvedProjection`
 - `metadata/*.yaml`: Column weight annotations

@@ -6,26 +6,29 @@ use super::materialize::SelectionReader;
 use super::ExecOptions;
 use crate::integers::is_integer;
 use crate::metadata::{DatasetDescription, TableDescription, WeightSource};
-use crate::output::columns::{required_output_columns, resolve_output_columns};
+use crate::output::projection::ResolvedProjection;
 use crate::output::row_order::{build_full_sort_columns, orders_rows};
-use crate::output::weight::block_scan_columns;
+use crate::output::sources::OutputSource;
+use crate::output::weight::TableOutput;
 use crate::output::{resolve_encoder, OutputFormat};
 use crate::query::{Plan, RelationPlan, TablePlan};
 use crate::scan::predicate::RowPredicate;
 use crate::scan::{ChunkReader, ScanRequest};
 use crate::text::StringColumn;
 use anyhow::Result;
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 /// One query's execution: the request, the catalog entries it reads, the
 /// chunk, and how payloads are read. Every step after preparation reads it.
 pub(super) struct Execution<'a> {
     pub(super) plan: &'a Plan,
-    pub(super) metadata: &'a DatasetDescription,
     pub(super) chunk: &'a dyn ChunkReader,
     pub(super) options: ExecOptions,
     /// The block table's catalog entry.
     pub(super) blocks: &'a TableDescription,
+    /// The header fields.
+    pub(super) header: ResolvedProjection<'a>,
     /// Each table plan with its catalog entries, in plan order.
     pub(super) tables: Vec<PlannedTable<'a>>,
     /// Present when payloads are deferred: a page is selected through it from
@@ -36,12 +39,16 @@ pub(super) struct Execution<'a> {
 }
 
 /// A table plan with the catalog entries of its table and of each relation's
-/// target.
+/// target, and the fields each of them renders.
 pub(super) struct PlannedTable<'a> {
     pub(super) plan: &'a TablePlan,
     pub(super) desc: &'a TableDescription,
+    pub(super) projection: ResolvedProjection<'a>,
+    /// What one pass over the table reads: the row columns, and the source key
+    /// of each relation.
+    pub(super) scan_columns: Vec<&'a str>,
     /// One per relation of `plan`, in the same order.
-    pub(super) targets: Vec<&'a TableDescription>,
+    pub(super) targets: Vec<ResolvedProjection<'a>>,
 }
 
 impl<'a> Execution<'a> {
@@ -56,7 +63,8 @@ impl<'a> Execution<'a> {
         format: OutputFormat,
     ) -> Result<Self> {
         let blocks = catalog_entry(metadata, &plan.block_table)?;
-        ensure_fields_resolve(&plan.block_table, blocks, &plan.block_output_columns)?;
+        let header =
+            ResolvedProjection::resolve(&plan.block_table, blocks, &plan.block_output_columns)?;
         let tables = plan
             .table_plans
             .iter()
@@ -65,10 +73,10 @@ impl<'a> Execution<'a> {
 
         let mut execution = Self {
             plan,
-            metadata,
             chunk,
             options,
             blocks,
+            header,
             tables,
             selection: None,
             selection_fits: OnceLock::new(),
@@ -86,7 +94,7 @@ impl<'a> Execution<'a> {
         // costs more than the payloads it would skip.
         let defers = options.range_reads && execution.defers_payloads();
         execution.selection = defers
-            .then(|| SelectionReader::new(chunk, plan, metadata))
+            .then(|| SelectionReader::new(chunk, &execution.header, &execution.tables))
             .flatten();
 
         Ok(execution)
@@ -154,20 +162,12 @@ impl<'a> Execution<'a> {
     /// checked for it.
     fn ensure_columns_renderable(&self, format: OutputFormat) -> Result<()> {
         let json = matches!(format, OutputFormat::Json);
-        let plan = self.plan;
 
-        self.ensure_renderable(
-            &plan.block_table,
-            self.blocks,
-            &plan.block_output_columns,
-            json,
-        )?;
+        self.ensure_renderable(&self.header, json)?;
         for table in &self.tables {
-            let fields = &table.plan.output_columns;
-            self.ensure_renderable(&table.plan.table, table.desc, fields, json)?;
-            for (relation, target) in table.relations() {
-                let fields = &relation.output_columns;
-                self.ensure_renderable(&relation.target_table, target, fields, json)?;
+            self.ensure_renderable(&table.projection, json)?;
+            for (_, target) in table.relations() {
+                self.ensure_renderable(target, json)?;
             }
         }
 
@@ -175,22 +175,17 @@ impl<'a> Execution<'a> {
     }
 
     /// [`Self::ensure_columns_renderable`] for one table.
-    fn ensure_renderable(
-        &self,
-        table: &str,
-        desc: &TableDescription,
-        output_columns: &[String],
-        json: bool,
-    ) -> Result<()> {
+    fn ensure_renderable(&self, projection: &ResolvedProjection, json: bool) -> Result<()> {
+        let (table, desc) = (projection.table(), projection.desc());
         let Some(schema) = self.chunk.table_schema(table) else {
             return Ok(());
         };
 
-        for column in required_output_columns(output_columns, desc) {
-            let Ok(field) = schema.field_with_name(&column) else {
+        for &column in projection.required() {
+            let Ok(field) = schema.field_with_name(column) else {
                 continue;
             };
-            let declared = desc.columns.get(&column);
+            let declared = desc.columns.get(column);
 
             if let Some(WeightSource::Column(companion)) = declared.and_then(|c| c.weight.as_ref())
             {
@@ -278,18 +273,17 @@ impl<'a> Execution<'a> {
             return false;
         }
 
-        let columns = block_scan_columns(&plan.block_output_columns, self.blocks);
+        let columns = self.header.row_columns();
         let mut estimate =
-            self.estimate_range_bytes(self.chunk, &plan.block_table, self.blocks, &columns, &[]);
+            self.estimate_range_bytes(self.chunk, &plan.block_table, self.blocks, columns, &[]);
 
         if self.prescanned_table().is_none() {
             for table in &self.tables {
-                let columns = resolve_output_columns(table.plan, table.desc);
                 let bytes = self.estimate_range_bytes(
                     self.chunk,
                     &table.plan.table,
                     table.desc,
-                    &columns,
+                    &table.scan_columns,
                     &table.plan.predicates,
                 );
                 estimate = estimate.saturating_add(bytes);
@@ -333,7 +327,7 @@ impl<'a> Execution<'a> {
                 let bytes = self.estimate_range_bytes(
                     selection,
                     &relation.target_table,
-                    target,
+                    target.desc(),
                     &columns,
                     &[],
                 );
@@ -352,10 +346,10 @@ impl<'a> Execution<'a> {
         reader: &dyn ChunkReader,
         table: &str,
         desc: &TableDescription,
-        columns: &[String],
+        columns: &[&str],
         predicates: &[RowPredicate],
     ) -> u64 {
-        let mut request = ScanRequest::new(columns.iter().map(String::as_str).collect());
+        let mut request = ScanRequest::new(columns.to_vec());
         request.predicates = predicates.iter().collect();
         request.from_block = Some(self.plan.from_block);
         request.to_block = self.plan.to_block;
@@ -370,29 +364,71 @@ impl<'a> Execution<'a> {
 impl<'a> PlannedTable<'a> {
     fn resolve(plan: &'a TablePlan, metadata: &'a DatasetDescription) -> Result<Self> {
         let desc = catalog_entry(metadata, &plan.table)?;
-        ensure_fields_resolve(&plan.table, desc, &plan.output_columns)?;
+        let projection = ResolvedProjection::resolve(&plan.table, desc, &plan.output_columns)?;
+        let scan_columns = projection.with_relation_keys(&plan.relations);
         let targets = plan
             .relations
             .iter()
             .map(|relation| {
                 let target = catalog_entry(metadata, &relation.target_table)?;
-                ensure_fields_resolve(&relation.target_table, target, &relation.output_columns)?;
-                Ok(target)
+                ResolvedProjection::resolve(
+                    &relation.target_table,
+                    target,
+                    &relation.output_columns,
+                )
             })
             .collect::<Result<_>>()?;
 
         Ok(Self {
             plan,
             desc,
+            projection,
+            scan_columns,
             targets,
         })
     }
 
-    /// Each relation with its target's catalog entry.
+    /// Each relation with the fields of its target.
     pub(super) fn relations(
         &self,
-    ) -> impl Iterator<Item = (&'a RelationPlan, &'a TableDescription)> + '_ {
-        self.plan.relations.iter().zip(self.targets.iter().copied())
+    ) -> impl Iterator<Item = (&'a RelationPlan, &ResolvedProjection<'a>)> + '_ {
+        self.plan.relations.iter().zip(&self.targets)
+    }
+}
+
+impl Execution<'_> {
+    /// The page's rows by source, in plan order, each with the fields it
+    /// renders: every table's own rows, then the rows of each of its relations.
+    pub(super) fn output_sources(
+        &self,
+        mut outputs: HashMap<String, TableOutput>,
+    ) -> Vec<OutputSource<'_>> {
+        let mut sources = Vec::new();
+
+        for table in &self.tables {
+            let Some(TableOutput {
+                rows,
+                mut relations,
+            }) = outputs.remove(&table.plan.table)
+            else {
+                continue;
+            };
+            sources.push(OutputSource {
+                projection: &table.projection,
+                rows,
+            });
+
+            for (index, target) in table.targets.iter().enumerate() {
+                if let Some(rows) = relations.remove(&index) {
+                    sources.push(OutputSource {
+                        projection: target,
+                        rows,
+                    });
+                }
+            }
+        }
+
+        sources
     }
 }
 
@@ -409,20 +445,4 @@ fn catalog_entry<'a>(
             table
         )
     })
-}
-
-/// A plan compiled against another catalog can name a field this one does not
-/// resolve, and such a field can be neither read nor rendered.
-fn ensure_fields_resolve(table: &str, desc: &TableDescription, fields: &[String]) -> Result<()> {
-    for field in fields {
-        crate::engine_ensure!(
-            desc.field_source(field).is_some(),
-            crate::error::ErrorKind::UnknownField,
-            "field '{}' of '{}' is not in the catalog",
-            field,
-            table
-        );
-    }
-
-    Ok(())
 }

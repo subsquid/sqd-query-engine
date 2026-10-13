@@ -174,12 +174,10 @@ fn execute(
     let page = materialize_page(&execution, page)?;
 
     let header = OutputHeader {
-        table: &plan.block_table,
-        desc: execution.blocks,
-        fields: &plan.block_output_columns,
+        projection: &execution.header,
         batches: page.headers.into_batches(),
     };
-    let tables = output_tables(plan, metadata, page.tables);
+    let tables = output_tables(metadata, execution.output_sources(page.tables));
 
     match format {
         OutputFormat::Arrow { compress, binary } => {

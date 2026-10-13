@@ -10,13 +10,13 @@
 
 use crate::integers::OwnedIntColumn;
 use crate::metadata::TableDescription;
+use crate::output::projection::row_key;
 use crate::text::OwnedStringColumn;
 use arrow::array::*;
 use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 use std::cmp::Ordering;
-use std::collections::HashSet;
 use std::ops::Range;
 
 /// One source's rows, ready to order: the key columns of each batch resolved
@@ -260,31 +260,13 @@ fn span(offsets: &OffsetBuffer<i32>, row: usize) -> Range<usize> {
     offsets[row] as usize..offsets[row + 1] as usize
 }
 
-/// Build the full sort column list for a table: item_order_keys + address_column.
-/// These match the legacy engine's primary key (minus block_number) for output ordering.
+/// The columns a table's rows sort by within a block: its row key without the
+/// block number, which every row of the block shares.
 pub(crate) fn build_full_sort_columns(table_desc: &TableDescription) -> Vec<String> {
-    let bn_col = table_desc.block_number_column.as_str();
-
-    let mut used: HashSet<&str> = HashSet::new();
-    used.insert(bn_col);
-
-    let mut cols: Vec<String> = Vec::new();
-
-    // Primary sort: item_order_keys
-    for key in &table_desc.item_order_keys {
-        if used.insert(key.as_str()) {
-            cols.push(key.clone());
-        }
-    }
-
-    // Secondary: address column
-    if let Some(ac) = table_desc.address_column.as_deref() {
-        if used.insert(ac) {
-            cols.push(ac.to_string());
-        }
-    }
-
-    cols
+    row_key(table_desc)[1..]
+        .iter()
+        .map(|column| column.to_string())
+        .collect()
 }
 
 /// Pre-resolve typed sort columns for each batch (done once, reused per block).

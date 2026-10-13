@@ -1,8 +1,8 @@
 mod arrow_out;
 pub(crate) mod block_index;
-pub(crate) mod columns;
 mod encoder;
 pub(crate) mod fork;
+pub(crate) mod projection;
 pub(crate) mod row_order;
 mod row_writer;
 pub(crate) mod sources;

@@ -1,13 +1,12 @@
 use super::page::Page;
-use super::prepare::Execution;
+use super::prepare::{Execution, PlannedTable};
 use super::Stopwatch;
-use crate::metadata::{DatasetDescription, TableDescription};
+use crate::metadata::TableDescription;
 use crate::output::block_index::compute_block_range;
 use crate::output::blocks_mask;
-use crate::output::columns::resolve_relation_output_columns;
-use crate::output::row_order::build_full_sort_columns;
-use crate::output::weight::{block_scan_columns, weight_scan_columns, TableOutput};
-use crate::query::{Plan, RelationKind};
+use crate::output::projection::{push_unique, row_key, ResolvedProjection};
+use crate::output::weight::TableOutput;
+use crate::query::RelationKind;
 use crate::scan::predicate::RowPredicate;
 use crate::scan::{ChunkReader, ColumnCache, KeyFilter, Rows, ScanRequest, Scanned};
 use anyhow::Result;
@@ -21,51 +20,52 @@ use std::collections::{HashMap, HashSet};
 /// back. Required output columns are still checked by the underlying scanner.
 pub(super) struct SelectionReader<'a> {
     inner: &'a dyn ChunkReader,
-    columns: HashMap<String, Vec<String>>,
+    columns: HashMap<&'a str, Vec<&'a str>>,
     track_positions: bool,
     /// Tables more than one scan reads: their columns are decoded once, kept
     /// here, and filtered in memory by each.
-    shared: HashSet<String>,
+    shared: HashSet<&'a str>,
     decoded: ColumnCache,
 }
 
 /// Decoded key and size columns one query may keep while it selects a page.
 const SELECTION_COLUMN_BUDGET: u64 = 64 << 20;
 
-fn row_key(desc: &TableDescription) -> Vec<String> {
-    let mut columns = vec![desc.block_number_column.clone()];
-    columns.extend(build_full_sort_columns(desc));
-    columns
-}
+/// Each table a selection reads, with its catalog entry and the columns read
+/// of it.
+type TableColumns<'a> = HashMap<&'a str, (&'a TableDescription, Vec<&'a str>)>;
 
-fn extend_unique(columns: &mut Vec<String>, extra: impl IntoIterator<Item = String>) {
-    for column in extra {
-        if !columns.contains(&column) {
-            columns.push(column);
-        }
-    }
+/// The columns read of `projection`'s table.
+fn entry<'c, 'a>(
+    columns: &'c mut TableColumns<'a>,
+    projection: &ResolvedProjection<'a>,
+) -> &'c mut Vec<&'a str> {
+    let (_, columns) = columns
+        .entry(projection.table())
+        .or_insert_with(|| (projection.desc(), Vec::new()));
+    columns
 }
 
 impl<'a> SelectionReader<'a> {
     pub(super) fn new(
         inner: &'a dyn ChunkReader,
-        plan: &Plan,
-        metadata: &DatasetDescription,
+        header: &ResolvedProjection<'a>,
+        tables: &[PlannedTable<'a>],
     ) -> Option<Self> {
         let track_positions = inner.supports_row_positions();
-        let mut columns = HashMap::<String, Vec<String>>::new();
         // Only scans that read most of a table share it: a relation from a
         // selective item reads a few row groups, and keeping a table decoded
         // for it costs memory and saves little.
         let mut scans = HashMap::<&str, usize>::new();
-        for table in &plan.table_plans {
-            let unfiltered = table.predicates.iter().all(RowPredicate::matches_every_row);
-            *scans.entry(&table.table).or_default() += usize::from(unfiltered);
-            for relation in &table.relations {
+        for table in tables {
+            let predicates = &table.plan.predicates;
+            let unfiltered = predicates.iter().all(RowPredicate::matches_every_row);
+            *scans.entry(&table.plan.table).or_default() += usize::from(unfiltered);
+            for relation in &table.plan.relations {
                 let broad = match &relation.source_items {
                     Some(items) => items
                         .iter()
-                        .all(|&item| table.predicates[item].matches_every_row()),
+                        .all(|&item| predicates[item].matches_every_row()),
                     None => unfiltered,
                 };
                 *scans.entry(&relation.target_table).or_default() += usize::from(broad);
@@ -74,53 +74,55 @@ impl<'a> SelectionReader<'a> {
         let shared = scans
             .into_iter()
             .filter(|&(_, count)| count > 1)
-            .map(|(table, _)| table.to_owned())
+            .map(|(table, _)| table)
             .collect();
-        let block_desc = metadata.table(&plan.block_table)?;
-        columns.insert(
-            plan.block_table.clone(),
-            weight_scan_columns(&plan.block_output_columns, block_desc),
-        );
-        for table in &plan.table_plans {
-            let desc = metadata.table(&table.table)?;
-            let primary = columns.entry(table.table.clone()).or_default();
+
+        let mut columns = TableColumns::new();
+        entry(&mut columns, header).extend_from_slice(header.size_columns());
+        for table in tables {
+            let desc = table.desc;
+            let primary = entry(&mut columns, &table.projection);
             // Physical positions identify a row both to the weight dedup and to
             // the later read, so wide item keys can stay unread here.
             if !track_positions {
-                extend_unique(primary, row_key(desc));
+                push_unique(primary, row_key(desc));
             }
-            extend_unique(primary, weight_scan_columns(&table.output_columns, desc));
-            for relation in &table.relations {
-                extend_unique(primary, relation.left_key.iter().cloned());
+            push_unique(primary, table.projection.size_columns().iter().copied());
+            for relation in &table.plan.relations {
+                push_unique(primary, relation.left_key.iter().map(String::as_str));
                 if relation.kind != RelationKind::Join {
-                    extend_unique(primary, desc.address_column.iter().cloned());
+                    push_unique(primary, desc.address_column.as_deref());
                 }
             }
-            for relation in &table.relations {
-                let desc = metadata.table(&relation.target_table)?;
-                let target = columns.entry(relation.target_table.clone()).or_default();
+            for (relation, projection) in table.relations() {
+                let desc = projection.desc();
+                let target = entry(&mut columns, projection);
                 if !track_positions {
-                    extend_unique(target, row_key(desc));
+                    push_unique(target, row_key(desc));
                 }
-                extend_unique(target, relation.right_key.iter().cloned());
+                push_unique(target, relation.right_key.iter().map(String::as_str));
                 if relation.kind != RelationKind::Join {
-                    extend_unique(target, desc.address_column.iter().cloned());
+                    push_unique(target, desc.address_column.as_deref());
                 }
-                extend_unique(target, weight_scan_columns(&relation.output_columns, desc));
+                push_unique(target, projection.size_columns().iter().copied());
             }
         }
         // A row without its complete identity cannot be fetched by key. Keep
         // the existing scan path for such schemas, including its error
         // behavior. Only the tables this reader scans are asked (INV-E4).
-        for table in columns.keys() {
+        for (&table, (desc, _)) in &columns {
             let schema = inner.table_schema(table)?;
-            let incomplete_key = row_key(metadata.table(table)?)
+            let incomplete_key = row_key(desc)
                 .iter()
                 .any(|key| schema.index_of(key).is_err());
             if incomplete_key {
                 return None;
             }
         }
+        let columns = columns
+            .into_iter()
+            .map(|(table, (_, columns))| (table, columns))
+            .collect();
         Some(Self {
             inner,
             columns,
@@ -143,7 +145,7 @@ impl SelectionReader<'_> {
         let columns = self.columns.get(table)?;
 
         Some(ScanRequest {
-            output_columns: columns.iter().map(String::as_str).collect(),
+            output_columns: columns.clone(),
             positions: self.track_positions,
             column_cache: self.shared.contains(table).then_some(&self.decoded),
             ..request.clone()
@@ -191,21 +193,21 @@ fn read_rows(
     table: &str,
     desc: &TableDescription,
     rows: &Rows,
-    output_columns: &[String],
+    output_columns: &[&str],
 ) -> Result<Vec<RecordBatch>> {
     let batches = rows.batches();
     if batches.is_empty() {
         return Ok(Vec::new());
     }
     if let Some(positions) = rows.sorted_positions() {
-        let mut request = ScanRequest::new(output_columns.iter().map(String::as_str).collect());
+        let mut request = ScanRequest::new(output_columns.to_vec());
         request.block_number_column = Some(&desc.block_number_column);
         request.row_indices = Some(&positions);
         return chunk.scan(table, &request);
     }
-    let key = row_key(desc);
+    let key: Vec<String> = row_key(desc).into_iter().map(str::to_owned).collect();
     let filter = KeyFilter::for_rows(batches, &key, &desc.block_number_column)?;
-    let mut request = ScanRequest::new(output_columns.iter().map(String::as_str).collect());
+    let mut request = ScanRequest::new(output_columns.to_vec());
     request.block_number_column = Some(&desc.block_number_column);
     request.key_filter = Some(&filter);
     (request.from_block, request.to_block) =
@@ -216,22 +218,19 @@ fn read_rows(
 /// The selected rows of a range, kept until the page is read back: their
 /// identity, and the weight columns no longer needed.
 fn retain_identity(rows: &Rows, desc: &TableDescription, selected: &[u64]) -> Result<Rows> {
-    let key = row_key(desc);
-    retain_blocks(rows, &desc.block_number_column, selected)?.project(&key)
+    retain_blocks(rows, &desc.block_number_column, selected)?.project(&row_key(desc))
 }
 
 pub(super) fn retain_selected_keys(
     outputs: &mut HashMap<String, TableOutput>,
-    plan: &Plan,
-    metadata: &DatasetDescription,
+    tables: &[PlannedTable],
     selected: &[u64],
 ) -> Result<()> {
-    let desc = |table: &str| metadata.table(table).expect("planned table has a catalog");
-    for table in &plan.table_plans {
-        if let Some(output) = outputs.get_mut(&table.table) {
-            output.rows = retain_identity(&output.rows, desc(&table.table), selected)?;
+    for table in tables {
+        if let Some(output) = outputs.get_mut(&table.plan.table) {
+            output.rows = retain_identity(&output.rows, table.desc, selected)?;
             for (&index, rows) in &mut output.relations {
-                let target = desc(&table.relations[index].target_table);
+                let target = table.targets[index].desc();
                 *rows = retain_identity(rows, target, selected)?;
             }
         }
@@ -257,16 +256,11 @@ pub(super) fn materialize_page(execution: &Execution, page: Page) -> Result<Page
     reader.release_columns();
     let started = Stopwatch::start(execution.options.profile);
     let (read, headers) = rayon::join(
-        || materialize_tables(&mut tables, plan, execution.metadata, chunk),
+        || materialize_tables(&mut tables, &execution.tables, chunk),
         || -> Result<Vec<RecordBatch>> {
             let headers = retain_blocks(&headers, &desc.block_number_column, &blocks)?;
-            read_rows(
-                chunk,
-                &plan.block_table,
-                desc,
-                &headers,
-                &block_scan_columns(&plan.block_output_columns, desc),
-            )
+            let columns = execution.header.row_columns();
+            read_rows(chunk, &plan.block_table, desc, &headers, columns)
         },
     );
     read?;
@@ -285,33 +279,26 @@ pub(super) fn materialize_page(execution: &Execution, page: Page) -> Result<Page
 /// source; `output_tables` already unions these sources by table name.
 fn materialize_tables(
     outputs: &mut HashMap<String, TableOutput>,
-    plan: &Plan,
-    metadata: &DatasetDescription,
+    tables: &[PlannedTable],
     chunk: &dyn ChunkReader,
 ) -> Result<()> {
     struct Source<'a> {
-        owner: String,
+        owner: &'a str,
         relation: Option<usize>,
-        table: String,
-        projection: Vec<String>,
+        projection: &'a ResolvedProjection<'a>,
         rows: Rows,
         primary_predicates: Option<&'a [RowPredicate]>,
     }
     let mut sources = Vec::<Source>::new();
     let mut groups = HashMap::new();
-    for table in &plan.table_plans {
-        let Some(output) = outputs.get_mut(&table.table) else {
+    for table in tables {
+        let Some(output) = outputs.get_mut(&table.plan.table) else {
             continue;
         };
-        let primary = (None, table.table.as_str(), &table.output_columns);
-        let relations = table.relations.iter().enumerate().map(|(index, relation)| {
-            (
-                Some(index),
-                relation.target_table.as_str(),
-                &relation.output_columns,
-            )
-        });
-        for (relation, target, projection) in std::iter::once(primary).chain(relations) {
+        let primary = (None, &table.projection);
+        let relations = table.targets.iter().enumerate();
+        let relations = relations.map(|(index, target)| (Some(index), target));
+        for (relation, projection) in std::iter::once(primary).chain(relations) {
             let rows = match relation {
                 None => std::mem::take(&mut output.rows),
                 Some(index) => output.relations.remove(&index).unwrap_or_default(),
@@ -319,20 +306,19 @@ fn materialize_tables(
             if rows.batches().is_empty() {
                 continue;
             }
-            let desc = metadata.table(target).expect("planned table has a catalog");
-            let key = row_key(desc);
-            let rows = rows.project(&key)?;
+            let rows = rows.project(&row_key(projection.desc()))?;
             let is_unfiltered = |predicates: &[RowPredicate]| {
                 predicates.iter().any(RowPredicate::matches_every_row)
             };
-            let primary_predicates = relation.is_none().then_some(table.predicates.as_slice());
-            let group = *groups.entry((target, projection)).or_insert_with(|| {
+            let predicates = table.plan.predicates.as_slice();
+            let primary_predicates = relation.is_none().then_some(predicates);
+            let read = (projection.table(), projection.names());
+            let group = *groups.entry(read).or_insert_with(|| {
                 let index = sources.len();
                 sources.push(Source {
-                    owner: table.table.clone(),
+                    owner: &table.plan.table,
                     relation,
-                    table: target.to_owned(),
-                    projection: projection.clone(),
+                    projection,
                     rows: Rows::default(),
                     primary_predicates,
                 });
@@ -354,24 +340,22 @@ fn materialize_tables(
     let read: Vec<Result<Vec<RecordBatch>>> = sources
         .par_iter()
         .map(|source| {
-            let desc = metadata
-                .table(&source.table)
-                .expect("planned table has a catalog");
-            let columns = resolve_relation_output_columns(&source.projection, Some(desc));
+            let (table, desc) = (source.projection.table(), source.projection.desc());
+            let columns = source.projection.row_columns();
             if source.rows.positions().is_some() {
-                read_rows(chunk, &source.table, desc, &source.rows, &columns)
+                read_rows(chunk, table, desc, &source.rows, columns)
             } else if let Some(predicates) = source.primary_predicates {
                 // A primary source can reproduce its selected rows with the original
                 // predicates and the page bounds. This retains predicate-statistics
                 // pruning and avoids decoding a wide item key just to select it again.
-                let mut request = ScanRequest::new(columns.iter().map(String::as_str).collect());
+                let mut request = ScanRequest::new(columns.to_vec());
                 request.predicates = predicates.iter().collect();
                 request.block_number_column = Some(&desc.block_number_column);
                 (request.from_block, request.to_block) =
                     compute_block_range(source.rows.batches(), &desc.block_number_column)?;
-                chunk.scan(&source.table, &request)
+                chunk.scan(table, &request)
             } else {
-                read_rows(chunk, &source.table, desc, &source.rows, &columns)
+                read_rows(chunk, table, desc, &source.rows, columns)
             }
         })
         .collect();
@@ -380,7 +364,7 @@ fn materialize_tables(
     for (source, batches) in sources.iter().zip(read) {
         let batches = batches?;
         let output = outputs
-            .get_mut(&source.owner)
+            .get_mut(source.owner)
             .expect("source has an output slot");
         let rows = Rows::new(batches);
         match source.relation {

@@ -50,18 +50,25 @@ example, EVM log `topics` reads `topic0` through `topic3`, while a trace variant
 field can refer to a differently named physical column. JSON writers then apply
 the catalog's naming, roll, variant, and encoding rules.
 
-[`output/columns.rs`](../src/output/columns.rs) turns logical selections into
-physical projections:
+[`output/projection.rs`](../src/output/projection.rs) resolves each table's
+selection once per query into a `ResolvedProjection`: every field with its
+`FieldSource`, and the physical column lists each step reads:
 
-- `physical_output_columns` expands only the selected fields, for flat Arrow output.
-- `resolve_output_columns` and `resolve_relation_output_columns` also include
-  grouping, sorting, variant, relation, and weight helpers as needed.
-- `required_output_columns` identifies physical field sources and size companions
-  whose absence is an error.
+- `rendered`: the columns the fields render, the projection of flat Arrow output.
+- `row_columns`: the row key, the variant tag, the rendered columns and their
+  size columns, what one pass, a read-back and the header scan read.
+  `with_relation_keys` adds each relation's source key for a table whose rows
+  relations follow.
+- `size_columns`: the block number and the size columns, what a deferred
+  selection reads to weigh a row.
+- `required`: the field sources and size companions whose absence is an error.
+- `weight`: the row's `RowWeight` ([`weight.rs`](../src/output/weight.rs)).
 
-[`weight.rs`](../src/output/weight.rs) builds the header projection with
-`block_scan_columns` and the narrow selection projection with
-`weight_scan_columns`. Header fields use their physical sources too.
+Execution resolves the header, every table and every relation target in
+`Execution::prepare`; a field the catalog does not resolve is `UnknownField`
+there. JSON writers take the resolved fields, so no step resolves a field name
+again.
+
 `ScanRequest::output_columns` and `ScanRequest::required_columns` are **physical
 column names**. Predicate columns are physical as well. Scan-only helpers need
 not appear in the answer. Missing required sources are covered by

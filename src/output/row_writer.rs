@@ -4,6 +4,7 @@ use crate::output::encoder::{
     encode_json_string, encode_roll, resolve_encoder, snake_to_camel, Encoder, ResolvedRollEncoder,
     RollSource, Unrenderable,
 };
+use crate::output::projection::{ResolvedProjection, SelectedField};
 use crate::output::row_order::RowOrder;
 use crate::output::sources::{OutputHeader, OutputTable};
 use crate::text::StringColumn;
@@ -25,10 +26,10 @@ pub(crate) struct PreparedHeader {
 impl PreparedHeader {
     pub(crate) fn new(header: OutputHeader) -> Result<Self> {
         let batches = header.batches;
-        let number_column = header.desc.block_number_column.as_str();
+        let number_column = header.projection.desc().block_number_column.as_str();
         let index = build_block_index(&batches, number_column)?;
 
-        let writers = build_field_writers(header.fields, Some(header.desc));
+        let writers = build_field_writers(header.projection);
         let resolved = batches
             .iter()
             .map(|batch| resolve_writers(&writers, batch))
@@ -108,9 +109,7 @@ impl PreparedTable {
             .sources
             .into_iter()
             .filter(|source| source.rows.num_rows() > 0)
-            .map(|source| {
-                PreparedSource::new(source.rows.into_batches(), table.desc, source.fields)
-            })
+            .map(|source| PreparedSource::new(source.rows.into_batches(), source.projection))
             .collect::<Result<Vec<_>>>()?;
         if sources.is_empty() {
             return Ok(None);
@@ -177,11 +176,12 @@ impl PreparedTable {
 }
 
 impl PreparedSource {
-    fn new(batches: Vec<RecordBatch>, desc: &TableDescription, fields: &[String]) -> Result<Self> {
+    fn new(batches: Vec<RecordBatch>, projection: &ResolvedProjection) -> Result<Self> {
+        let desc = projection.desc();
         let index = build_block_index(&batches, &desc.block_number_column)?;
         let order = RowOrder::new(&batches, desc);
 
-        let writers = match build_grouped_writers(fields, desc) {
+        let writers = match build_grouped_writers(projection) {
             Some(grouped) => SourceWriters::Grouped(
                 batches
                     .iter()
@@ -189,7 +189,7 @@ impl PreparedSource {
                     .collect::<Result<_>>()?,
             ),
             None => {
-                let writers = build_field_writers(fields, Some(desc));
+                let writers = build_field_writers(projection);
                 SourceWriters::Flat(
                     batches
                         .iter()
@@ -408,60 +408,54 @@ fn unrenderable(column: String, cause: Unrenderable) -> anyhow::Error {
     )
 }
 
-/// Pre-compute the JSON key prefixes and column resolution for a table's output columns.
-fn build_field_writers(
-    output_columns: &[String],
-    table_desc: Option<&TableDescription>,
-) -> Vec<FieldWriter> {
-    output_columns
+/// The writers of the projection's fields, each with its JSON key and the
+/// columns it reads.
+fn build_field_writers(projection: &ResolvedProjection) -> Vec<FieldWriter> {
+    let desc = projection.desc();
+
+    projection
+        .fields()
         .iter()
-        .map(|col_name| {
-            let mut prefix = Vec::with_capacity(col_name.len() + 4);
-            encode_json_string(&snake_to_camel(col_name), &mut prefix);
-            prefix.push(b':');
+        .map(|field| build_field_writer(field, desc))
+        .collect()
+}
 
-            let source = table_desc.and_then(|desc| Some((desc, desc.field_source(col_name)?)));
+fn build_field_writer(field: &SelectedField, desc: &TableDescription) -> FieldWriter {
+    let mut prefix = Vec::with_capacity(field.name.len() + 4);
+    encode_json_string(&snake_to_camel(field.name), &mut prefix);
+    prefix.push(b':');
 
-            match source {
-                Some((desc, FieldSource::Roll(columns))) => {
-                    let sources = columns
-                        .iter()
-                        .map(|name| {
-                            let declared = desc.columns.get(name);
-                            RollSourceColumn {
-                                name: name.clone(),
-                                encoding: declared.and_then(|c| c.encoding.clone()),
-                                declared_type: declared.map(|c| c.data_type.clone()),
-                            }
-                        })
-                        .collect();
-
-                    FieldWriter::Roll {
-                        json_key_prefix: prefix,
-                        sources,
-                    }
-                }
-                Some((desc, FieldSource::Column(column))) => {
-                    let declared = desc.columns.get(column);
-
-                    FieldWriter::Regular {
-                        json_key_prefix: prefix,
-                        column_name: column.to_string(),
+    match field.source {
+        FieldSource::Roll(columns) => {
+            let sources = columns
+                .iter()
+                .map(|name| {
+                    let declared = desc.columns.get(name);
+                    RollSourceColumn {
+                        name: name.clone(),
                         encoding: declared.and_then(|c| c.encoding.clone()),
                         declared_type: declared.map(|c| c.data_type.clone()),
-                        members: declared.and_then(|c| c.members.clone()),
                     }
-                }
-                None => FieldWriter::Regular {
-                    json_key_prefix: prefix,
-                    column_name: col_name.clone(),
-                    encoding: None,
-                    declared_type: None,
-                    members: None,
-                },
+                })
+                .collect();
+
+            FieldWriter::Roll {
+                json_key_prefix: prefix,
+                sources,
             }
-        })
-        .collect()
+        }
+        FieldSource::Column(column) => {
+            let declared = desc.columns.get(column);
+
+            FieldWriter::Regular {
+                json_key_prefix: prefix,
+                column_name: column.to_string(),
+                encoding: declared.and_then(|c| c.encoding.clone()),
+                declared_type: declared.map(|c| c.data_type.clone()),
+                members: declared.and_then(|c| c.members.clone()),
+            }
+        }
+    }
 }
 
 /// Writers for a table whose rows come in variants. A field some variant maps
@@ -470,10 +464,8 @@ fn build_field_writers(
 ///
 /// `None` when the table dispatches on nothing, which is the same table for
 /// which the mappings are empty — the loader ties the two together.
-fn build_grouped_writers(
-    output_columns: &[String],
-    table_desc: &TableDescription,
-) -> Option<GroupedWriters> {
+fn build_grouped_writers(projection: &ResolvedProjection) -> Option<GroupedWriters> {
+    let table_desc = projection.desc();
     let variant_column = table_desc.output.variant_column.as_deref()?;
 
     // Build a reverse map: field -> (variant, group, json_name, physical_column).
@@ -500,18 +492,14 @@ fn build_grouped_writers(
     let mut base_writers = Vec::new();
     let mut variant_groups: HashMap<(&str, &str), Vec<FieldWriter>> = HashMap::new();
 
-    for col_name in output_columns {
-        let Some(&(variant, group, json_name, phys_col)) = field_to_group.get(col_name.as_str())
-        else {
-            base_writers.extend(build_field_writers(
-                std::slice::from_ref(col_name),
-                Some(table_desc),
-            ));
+    for field in projection.fields() {
+        let Some(&(variant, group, json_name, phys_col)) = field_to_group.get(field.name) else {
+            base_writers.push(build_field_writer(field, table_desc));
             continue;
         };
 
         // Grouped field. `phys_col` is the parquet column to read, which may
-        // differ from the field `col_name` (one column, many fields).
+        // differ from the field's name (one column, many fields).
         let mut prefix = Vec::with_capacity(json_name.len() + 4);
         encode_json_string(json_name, &mut prefix);
         prefix.push(b':');
@@ -751,7 +739,8 @@ tables:
         .map(|s| s.to_string())
         .collect();
 
-        let grouped = build_grouped_writers(&selected, table).expect("the table dispatches");
+        let projection = ResolvedProjection::resolve("items", table, &selected).unwrap();
+        let grouped = build_grouped_writers(&projection).expect("the table dispatches");
 
         let flat: Vec<&str> = grouped
             .base_writers
@@ -806,7 +795,8 @@ tables:
         ])
         .unwrap();
 
-        let grouped = build_grouped_writers(&selected, table).expect("the table dispatches");
+        let projection = ResolvedProjection::resolve("items", table, &selected).unwrap();
+        let grouped = build_grouped_writers(&projection).expect("the table dispatches");
         let resolved = resolve_grouped_writers(&grouped, &batch).unwrap();
         let rows: Vec<String> = (0..batch.num_rows())
             .map(|row| {
@@ -894,7 +884,8 @@ tables:
         .unwrap();
         let render = |selected: &[&str]| -> Vec<String> {
             let selected: Vec<String> = selected.iter().map(|s| s.to_string()).collect();
-            let grouped = build_grouped_writers(&selected, table).expect("the table dispatches");
+            let projection = ResolvedProjection::resolve("items", table, &selected).unwrap();
+            let grouped = build_grouped_writers(&projection).expect("the table dispatches");
             let resolved = resolve_grouped_writers(&grouped, &batch).unwrap();
             (0..batch.num_rows())
                 .map(|row| {

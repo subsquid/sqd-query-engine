@@ -1,14 +1,13 @@
 use crate::integers::{BlockNumbers, IntColumn};
-use crate::metadata::{DatasetDescription, TableDescription, WeightSource};
-use crate::output::columns::physical_output_columns;
-use crate::query::Plan;
+use crate::metadata::{TableDescription, WeightSource};
+use crate::output::projection::{push_unique, row_key, ResolvedProjection};
 use crate::scan::Rows;
 use crate::text::StringColumn;
 use anyhow::Result;
 use arrow::array::*;
 use arrow::record_batch::RecordBatch;
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 /// Maximum response size in bytes (20 MB).
@@ -33,11 +32,68 @@ pub(crate) struct TableOutput {
     pub(crate) relations: HashMap<usize, Rows>,
 }
 
-/// A row source with its weight parameters.
-struct WeightContribution<'a> {
-    rows: &'a Rows,
-    fixed_weight: u64,
-    weight_cols: Vec<String>,
+/// What a row weighs (§5.4): a fixed part, and the size columns that add the
+/// rest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RowWeight<'a> {
+    pub(crate) fixed: u64,
+    /// One entry per column weighed by its size, so a size column two columns
+    /// share is charged for each.
+    pub(crate) columns: Vec<&'a str>,
+}
+
+impl<'a> RowWeight<'a> {
+    /// What a row weighs when it renders `rendered`: its weight key, selected
+    /// or not, and the rendered columns.
+    pub(crate) fn of(rendered: &[&'a str], desc: &'a TableDescription) -> Self {
+        // The item key repeats the address column when it orders by it too.
+        let mut charged = Vec::new();
+        push_unique(&mut charged, desc.weight_key());
+        push_unique(&mut charged, rendered.iter().copied());
+        Self::of_columns(&charged, desc)
+    }
+
+    /// What `columns`, each once, weigh. The names are columns, never fields:
+    /// reading one as a field again charges a key column as whatever field
+    /// shares its name.
+    fn of_columns(columns: &[&str], desc: &'a TableDescription) -> Self {
+        let mut weight = Self {
+            fixed: 0,
+            columns: Vec::new(),
+        };
+
+        for &column in columns {
+            let Some(declared) = desc.columns.get(column) else {
+                continue;
+            };
+            if declared.system {
+                continue;
+            }
+
+            match &declared.weight {
+                Some(WeightSource::Column(size)) => weight.columns.push(size),
+                Some(WeightSource::Fixed(fixed)) => {
+                    weight.fixed = weight.fixed.saturating_add(*fixed);
+                }
+                None => weight.fixed = weight.fixed.saturating_add(DEFAULT_ROW_WEIGHT),
+            }
+        }
+
+        weight
+    }
+}
+
+/// One source of a table's rows: the table's own scan or a relation into it.
+pub(crate) struct WeighedRows<'r> {
+    /// The fields the source renders, which decide what its rows weigh.
+    pub(crate) projection: &'r ResolvedProjection<'r>,
+    pub(crate) rows: &'r Rows,
+}
+
+/// Rows and what each of them weighs.
+struct WeightContribution<'r> {
+    rows: &'r Rows,
+    weight: &'r RowWeight<'r>,
 }
 
 /// Compute exact per-block weights after merging all table contributions.
@@ -49,90 +105,69 @@ struct WeightContribution<'a> {
 /// Every block of `candidates` also carries its header, whether or not it holds
 /// items: a boundary block is on the page like any other (§5.5).
 pub(crate) fn compute_block_weights(
-    table_outputs: &HashMap<String, TableOutput>,
-    block_batches: &[RecordBatch],
-    metadata: &DatasetDescription,
-    plan: &Plan,
+    sources: &[WeighedRows<'_>],
+    header: &ResolvedProjection,
+    header_batches: &[RecordBatch],
     candidates: &[u64],
 ) -> Result<FxHashMap<u64, u64>> {
-    let no_rows = Rows::default();
-    // 1. Group all batch contributions by TARGET table name.
-    // Direct batches → target is the table_plan's own table.
-    // Relation batches → target is the relation's target_table.
-    let mut target_contribs: HashMap<&str, Vec<WeightContribution>> = HashMap::new();
-
-    for table_plan in &plan.table_plans {
-        let output = match table_outputs.get(&table_plan.table) {
-            Some(o) => o,
-            None => continue,
-        };
-        let table_desc = metadata.table(&table_plan.table);
-        let (fixed_weight, weight_col_names) = row_weight(&table_plan.output_columns, table_desc);
-
-        target_contribs
-            .entry(&table_plan.table)
-            .or_default()
-            .push(WeightContribution {
-                rows: &output.rows,
-                fixed_weight,
-                weight_cols: weight_col_names,
-            });
-
-        for (rel_idx, rel) in table_plan.relations.iter().enumerate() {
-            let rel_desc = metadata.table(&rel.target_table);
-            let (fixed_weight, weight_cols) = row_weight(&rel.output_columns, rel_desc);
-            target_contribs
-                .entry(&rel.target_table)
-                .or_default()
-                .push(WeightContribution {
-                    rows: output.relations.get(&rel_idx).unwrap_or(&no_rows),
-                    fixed_weight,
-                    weight_cols,
-                });
+    // 1. Group the sources by the table their rows are of.
+    let mut tables: Vec<(&str, Vec<&WeighedRows>)> = Vec::new();
+    for source in sources {
+        let table = source.projection.table();
+        match tables.iter_mut().find(|(name, _)| *name == table) {
+            Some((_, group)) => group.push(source),
+            None => tables.push((table, vec![source])),
         }
     }
 
-    // 2. For each target table, compute deduplicated per-block weights.
+    // 2. For each table, compute deduplicated per-block weights.
     let mut block_weights: FxHashMap<u64, u64> = FxHashMap::default();
 
-    for (table_name, contribs) in &target_contribs {
-        let table_desc = metadata.table(table_name);
-        let bn_col_name = table_desc
-            .map(|d| d.block_number_column.as_str())
-            .unwrap_or("block_number");
-        // The same key the row writer dedups on. `item_order_keys` alone is a
-        // prefix of it for any table with an address column: every EVM trace of
-        // one transaction shares its `transaction_index`, so all of them would
-        // collapse to a single counted row while all of them are emitted, and
-        // the response overshoots the cap by the trace count (INV-B6/B10).
-        let dedup_keys = table_desc
-            .map(crate::output::row_order::build_full_sort_columns)
-            .unwrap_or_default();
-        let dedup_keys: Vec<&str> = dedup_keys.iter().map(String::as_str).collect();
+    for (_, contribs) in &tables {
+        let table_desc = contribs[0].projection.desc();
+        let bn_col_name = table_desc.block_number_column.as_str();
 
-        if contribs.len() == 1 {
+        if let [source] = contribs.as_slice() {
             // Single source — no dedup needed, fast path.
             accumulate_block_weights(
-                contribs[0].rows.batches(),
+                source.rows.batches(),
                 bn_col_name,
-                contribs[0].fixed_weight,
-                &contribs[0].weight_cols,
+                source.projection.weight(),
                 &mut block_weights,
             );
         } else {
-            accumulate_dedup_contributions(contribs, bn_col_name, &dedup_keys, &mut block_weights)?;
+            // The same key the row writer dedups on. `item_order_keys` alone is
+            // a prefix of it for any table with an address column: every EVM
+            // trace of one transaction shares its `transaction_index`, so all of
+            // them would collapse to a single counted row while all of them are
+            // emitted, and the response overshoots the cap by the trace count
+            // (INV-B6/B10).
+            let dedup_keys = &row_key(table_desc)[1..];
+            let contributions: Vec<_> = contribs
+                .iter()
+                .map(|source| WeightContribution {
+                    rows: source.rows,
+                    weight: source.projection.weight(),
+                })
+                .collect();
+            accumulate_dedup_contributions(
+                &contributions,
+                bn_col_name,
+                dedup_keys,
+                &mut block_weights,
+            )?;
         }
     }
 
     // 3. Add block header weight.
-    let block_desc = metadata.table(&plan.block_table);
-    let (header_fixed, header_weight_cols) = row_weight(&plan.block_output_columns, block_desc);
-    let header_bn_col = block_desc
-        .map(|d| d.block_number_column.as_str())
-        .unwrap_or("number");
+    let RowWeight {
+        fixed: header_fixed,
+        columns: header_weight_cols,
+    } = header.weight();
+    let header_bn_col = header.desc().block_number_column.as_str();
     let candidates: FxHashSet<u64> = candidates.iter().copied().collect();
 
-    for batch in block_batches {
+    for batch in header_batches {
         let bn_col = match batch.column_by_name(header_bn_col) {
             Some(c) => c,
             None => continue,
@@ -140,7 +175,7 @@ pub(crate) fn compute_block_weights(
         // A header's weight is its fixed part plus whatever its data-dependent
         // columns say. Counting only the fixed part makes a header carrying
         // withdrawals weigh the same as an empty one.
-        let weight_columns = weight_columns(batch, &header_weight_cols);
+        let weight_columns = weight_columns(batch, header_weight_cols);
 
         // The scan refuses a chunk whose block-number column cannot place a
         // row, so a batch arriving here without a readable one did not come
@@ -211,64 +246,18 @@ impl BlockSelection {
     }
 }
 
-/// Columns needed to compute the response-budget weight *cheaply*, without
-/// decoding wide data columns: the block-number column plus any data-dependent
-/// weight columns (the narrow `*_size` companions). Used for the phase-1 narrow
-/// scan of large single-table full scans.
-pub(crate) fn weight_scan_columns(
-    output_columns: &[String],
-    table_desc: &TableDescription,
-) -> Vec<String> {
-    let (_fixed, weight_cols) = row_weight(output_columns, Some(table_desc));
-    let mut cols = Vec::with_capacity(weight_cols.len() + 1);
-    cols.push(table_desc.block_number_column.clone());
-    for c in weight_cols {
-        if !cols.contains(&c) {
-            cols.push(c);
-        }
-    }
-    cols
-}
-
-/// Columns the block-header scan must read: the block number, the columns the
-/// requested header fields render, and the `*_size` companion of any of them
-/// whose weight is data-dependent. A field is not always a column of its name: a
-/// roll renders the columns it rolls, and reading the field's name reads
-/// nothing, so the field is left out of every header (INV-O7). A declared
-/// `weight: <column>` that is never projected is a weight of zero, so the
-/// header under-weighs and truncation lands past the cap (INV-B10).
-pub(crate) fn block_scan_columns(
-    block_output_columns: &[String],
-    block_desc: &TableDescription,
-) -> Vec<String> {
-    let (_fixed, weight_cols) = row_weight(block_output_columns, Some(block_desc));
-    let rendered = physical_output_columns(block_output_columns, block_desc);
-
-    let mut cols = Vec::with_capacity(rendered.len() + weight_cols.len() + 1);
-    cols.push(block_desc.block_number_column.clone());
-    for col in rendered.iter().chain(weight_cols.iter()) {
-        if !cols.contains(col) {
-            cols.push(col.clone());
-        }
-    }
-    cols
-}
-
 /// Suggest the first range through the block that crosses the estimated budget.
 /// Including that block lets exact selection observe the overflow in this read.
 pub(crate) fn weight_range_end(
     narrow_batches: &[RecordBatch],
-    output_columns: &[String],
-    table_desc: &TableDescription,
+    projection: &ResolvedProjection,
     budget: u64,
 ) -> Option<u64> {
-    let (fixed, columns) = row_weight(output_columns, Some(table_desc));
     let mut weights = FxHashMap::default();
     accumulate_block_weights(
         narrow_batches,
-        &table_desc.block_number_column,
-        fixed,
-        &columns,
+        &projection.desc().block_number_column,
+        projection.weight(),
         &mut weights,
     );
     let mut blocks: Vec<_> = weights.into_iter().collect();
@@ -283,63 +272,12 @@ pub(crate) fn weight_range_end(
     None
 }
 
-/// What a row weighs, its weight key included, when a client selects
-/// `output_columns`: its fixed part, and the size columns that add the rest.
-pub(crate) fn row_weight(
-    output_columns: &[String],
-    table_desc: Option<&TableDescription>,
-) -> (u64, Vec<String>) {
-    let columns = weight_projection(output_columns, table_desc);
-    compute_weight_params(&columns, table_desc)
-}
-
-/// Fixed weight per row and the size columns that add the rest, for a set of
-/// physical columns. The names are columns, never fields: reading one as a field
-/// again charges a key column as whatever field shares its name.
-fn compute_weight_params(
-    columns: &[String],
-    table_desc: Option<&TableDescription>,
-) -> (u64, Vec<String>) {
-    let desc = match table_desc {
-        Some(d) => d,
-        None => return (DEFAULT_ROW_WEIGHT, Vec::new()),
-    };
-
-    let projected: HashSet<&str> = columns.iter().map(String::as_str).collect();
-
-    let mut fixed_weight: u64 = 0;
-    let mut weight_cols = Vec::new();
-
-    for &col_name in &projected {
-        let col_desc = match desc.columns.get(col_name) {
-            Some(c) => c,
-            None => continue,
-        };
-        if col_desc.system {
-            continue;
-        }
-        match &col_desc.weight {
-            Some(WeightSource::Column(wc)) => {
-                weight_cols.push(wc.clone());
-            }
-            Some(WeightSource::Fixed(w)) => {
-                fixed_weight = fixed_weight.saturating_add(*w);
-            }
-            None => {
-                fixed_weight = fixed_weight.saturating_add(DEFAULT_ROW_WEIGHT);
-            }
-        }
-    }
-
-    (fixed_weight, weight_cols)
-}
-
 /// The weight columns of `batch`, resolved once for all its rows.
 ///
 /// A width this cannot read weighs nothing, and that is the one to watch:
 /// `*_size` companions are narrowed like any other integer, and a weight model
 /// blind to `UInt16` charges a whole chunk's rows their fixed part alone.
-fn weight_columns<'b>(batch: &'b RecordBatch, names: &[String]) -> Vec<IntColumn<'b>> {
+fn weight_columns<'b>(batch: &'b RecordBatch, names: &[&str]) -> Vec<IntColumn<'b>> {
     names
         .iter()
         .filter_map(|name| IntColumn::resolve(batch.column_by_name(name)?.as_ref()))
@@ -366,8 +304,7 @@ fn weight_at(column: &IntColumn, row: usize) -> u64 {
 pub(crate) fn accumulate_block_weights(
     batches: &[RecordBatch],
     bn_column: &str,
-    fixed_weight_per_row: u64,
-    weight_columns: &[String],
+    weight: &RowWeight,
     weights: &mut FxHashMap<u64, u64>,
 ) {
     for batch in batches {
@@ -376,7 +313,7 @@ pub(crate) fn accumulate_block_weights(
             None => continue,
         };
 
-        let resolved = self::weight_columns(batch, weight_columns);
+        let resolved = weight_columns(batch, &weight.columns);
 
         // The scan refuses a chunk whose block-number column cannot place a row,
         // so a batch arriving here without a readable one did not come from one.
@@ -389,7 +326,7 @@ pub(crate) fn accumulate_block_weights(
         for i in 0..batch.num_rows() {
             let block_num = blocks.at(i);
 
-            let mut row_weight = fixed_weight_per_row;
+            let mut row_weight = weight.fixed;
             for column in &resolved {
                 row_weight = row_weight.saturating_add(weight_at(column, i));
             }
@@ -480,7 +417,8 @@ fn accumulate_rows(
     let Ok(blocks) = BlockNumbers::resolve(numbers.as_ref(), bn_column) else {
         return;
     };
-    let weight_columns = weight_columns(batch, &source.weight_cols);
+    let weight = source.weight;
+    let weight_columns = weight_columns(batch, &weight.columns);
 
     for row in 0..batch.num_rows() {
         let block = blocks.at(row);
@@ -488,11 +426,9 @@ fn accumulate_rows(
             continue;
         }
 
-        let weight = weight_columns
-            .iter()
-            .fold(source.fixed_weight, |sum, column| {
-                sum.saturating_add(weight_at(column, row))
-            });
+        let weight = weight_columns.iter().fold(weight.fixed, |sum, column| {
+            sum.saturating_add(weight_at(column, row))
+        });
         let total = weights.entry(block).or_default();
         *total = total.saturating_add(weight);
     }
@@ -553,38 +489,6 @@ fn equal_key_value(a: &dyn Array, ai: usize, b: &dyn Array, bi: usize) -> bool {
     a.slice(ai, 1).to_data() == b.slice(bi, 1).to_data()
 }
 
-/// Compute the column set used for weight calculation: the table's weight key
-/// and the columns the selected fields read.
-///
-/// Unlike `resolve_output_columns`, this does NOT include:
-/// - Join key columns (for relations)
-/// - Source predicate columns (e.g., is_committed)
-/// - Size columns: one is read to weigh the column it sizes, and charged for
-///   itself only when it is selected or in the weight key
-fn weight_projection(
-    user_output_columns: &[String],
-    table_desc: Option<&TableDescription>,
-) -> Vec<String> {
-    let desc = match table_desc {
-        Some(d) => d,
-        None => return user_output_columns.to_vec(),
-    };
-
-    let mut cols: HashSet<String> = HashSet::new();
-
-    // 1. The weight key, selected or not.
-    for key in desc.weight_key() {
-        cols.insert(key.to_string());
-    }
-
-    // 2. The columns behind every selected field.
-    for field in user_output_columns {
-        cols.extend(desc.field_columns(field).map(str::to_string));
-    }
-
-    cols.into_iter().collect()
-}
-
 /// Hash a single array value for row dedup.
 ///
 /// Integers hash by value rather than by stored width, so a column narrowed in
@@ -614,8 +518,7 @@ fn hash_array_value(col: &dyn arrow::array::Array, row: usize, hasher: &mut impl
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metadata::{parse_dataset_description, VirtualField};
-    use crate::output::columns::resolve_output_columns;
+    use crate::metadata::{parse_dataset_description, DatasetDescription, VirtualField};
 
     /// Two rows the key hash cannot tell apart are still two rows.
     ///
@@ -684,17 +587,19 @@ mod tests {
         .unwrap();
         let primary = Rows::new(vec![batch.clone()]);
         let duplicate = Rows::new(vec![batch]);
+        let weight = RowWeight {
+            fixed: 100,
+            columns: vec![],
+        };
         for related in [&Rows::default(), &duplicate] {
             let contributions = [
                 WeightContribution {
                     rows: &primary,
-                    fixed_weight: 100,
-                    weight_cols: vec![],
+                    weight: &weight,
                 },
                 WeightContribution {
                     rows: related,
-                    fixed_weight: 100,
-                    weight_cols: vec![],
+                    weight: &weight,
                 },
             ];
             let mut weights = FxHashMap::default();
@@ -734,17 +639,19 @@ mod tests {
                 None => Rows::new(vec![batch]),
             }
         };
+        let weight = RowWeight {
+            fixed: 10,
+            columns: vec![],
+        };
         let weigh = |primary: Rows, related: Rows| {
             let contributions = [
                 WeightContribution {
                     rows: &primary,
-                    fixed_weight: 10,
-                    weight_cols: vec![],
+                    weight: &weight,
                 },
                 WeightContribution {
                     rows: &related,
-                    fixed_weight: 10,
-                    weight_cols: vec![],
+                    weight: &weight,
                 },
             ];
             let mut weights = FxHashMap::default();
@@ -795,71 +702,30 @@ mod tests {
     /// Helper: what `fields` weigh without the weight key.
     fn weight_for(fields: &[&str], table_desc: Option<&TableDescription>) -> (u64, Vec<String>) {
         let desc = table_desc.unwrap();
-        let columns: Vec<String> = fields
-            .iter()
-            .flat_map(|field| desc.field_columns(field))
-            .map(str::to_string)
-            .collect();
-        compute_weight_params(&columns, table_desc)
+        let mut columns = Vec::new();
+        for field in fields {
+            push_unique(&mut columns, desc.field_columns(field));
+        }
+
+        owned(RowWeight::of_columns(&columns, desc))
     }
 
     /// Helper: what a row weighs with `selected` output columns.
     fn weight_of(selected: &[&str], table_desc: Option<&TableDescription>) -> (u64, Vec<String>) {
         let selected: Vec<String> = selected.iter().map(|s| s.to_string()).collect();
-        row_weight(&selected, table_desc)
+        let projection =
+            ResolvedProjection::resolve("table", table_desc.unwrap(), &selected).unwrap();
+
+        owned(projection.weight().clone())
+    }
+
+    fn owned(weight: RowWeight) -> (u64, Vec<String>) {
+        let columns = weight.columns.iter().map(|c| c.to_string()).collect();
+        (weight.fixed, columns)
     }
 
     // -----------------------------------------------------------------------
-    // Tests: block_scan_columns — a declared weight column must be read
-    // -----------------------------------------------------------------------
-
-    /// `withdrawals` and `extra_data` declare a `*_size` companion. The header
-    /// scan used to project the block number and the requested columns only, so
-    /// the companion was absent from the batch, the weight found nothing,
-    /// and a block carrying two kilobytes of withdrawals weighed the 32 bytes of
-    /// an empty one.
-    #[test]
-    fn test_block_scan_reads_the_weight_columns_it_declares() {
-        let meta = evm_meta();
-        let blocks = meta.table("blocks").unwrap();
-
-        let requested: Vec<String> = ["number", "withdrawals", "extra_data"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let scanned = block_scan_columns(&requested, blocks);
-
-        for col in ["number", "withdrawals", "extra_data"] {
-            assert!(scanned.iter().any(|c| c == col), "'{col}' must be read");
-        }
-        for col in ["withdrawals_size", "extra_data_size"] {
-            assert!(
-                scanned.iter().any(|c| c == col),
-                "'{col}' is what makes its column's weight data-dependent"
-            );
-        }
-    }
-
-    /// A fixed-weight column brings no companion, and nothing is read twice.
-    #[test]
-    fn test_block_scan_adds_nothing_for_fixed_weight_columns() {
-        let meta = evm_meta();
-        let blocks = meta.table("blocks").unwrap();
-
-        let requested: Vec<String> = ["number", "logs_bloom"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let scanned = block_scan_columns(&requested, blocks);
-
-        assert_eq!(
-            scanned,
-            vec!["number".to_string(), "logs_bloom".to_string()]
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // Tests: compute_weight_params — documents what columns contribute to weight
+    // Tests: RowWeight — documents what columns contribute to weight
     // -----------------------------------------------------------------------
 
     /// Covers CT-1 · INV-D9
@@ -1196,77 +1062,6 @@ mod tests {
         assert_eq!(dynamic, vec!["input_size"]);
     }
 
-    // -----------------------------------------------------------------------
-    // Tests: resolve_output_columns includes extra columns NOT in legacy weight
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_resolve_includes_join_keys_for_relations() {
-        let meta = solana_meta();
-        let instr = meta.table("instructions").unwrap();
-
-        // When instructions have a "transaction" relation, resolve_output_columns
-        // adds the join key columns (block_number, transaction_index) even if
-        // the user doesn't request them.
-        let table_plan = crate::query::TablePlan {
-            table: "instructions".to_string(),
-            output_columns: vec!["program_id".to_string()],
-            predicates: vec![],
-            relations: vec![crate::query::RelationPlan {
-                target_table: "transactions".to_string(),
-                kind: crate::query::RelationKind::Join,
-                left_key: vec!["block_number".to_string(), "transaction_index".to_string()],
-                right_key: vec!["block_number".to_string(), "transaction_index".to_string()],
-                output_columns: vec![],
-                source_items: None,
-            }],
-        };
-
-        let resolved = resolve_output_columns(&table_plan, instr);
-
-        // resolve_output_columns always includes:
-        // - block_number (block number column)
-        // - transaction_index, instruction_address (item_order_keys)
-        // - program_id (user output)
-        // - block_number, transaction_index (relation join keys — already in set)
-        assert!(resolved.contains(&"block_number".to_string()));
-        assert!(resolved.contains(&"transaction_index".to_string()));
-        assert!(resolved.contains(&"instruction_address".to_string()));
-        assert!(resolved.contains(&"program_id".to_string()));
-    }
-
-    /// A relation some items asked for follows the rows the scan marked as
-    /// theirs, so the columns those items filter on are not read for it.
-    #[test]
-    fn test_resolve_reads_no_source_predicate_columns() {
-        let meta = solana_meta();
-        let instr = meta.table("instructions").unwrap();
-
-        let table_plan = crate::query::TablePlan {
-            table: "instructions".to_string(),
-            output_columns: vec!["program_id".to_string()],
-            predicates: vec![
-                crate::scan::predicate::RowPredicate::new(vec![crate::scan::predicate::col_eq(
-                    "is_committed",
-                    crate::scan::predicate::ScalarValue::Boolean(true),
-                )]),
-                crate::scan::predicate::RowPredicate::new(vec![]),
-            ],
-            relations: vec![crate::query::RelationPlan {
-                target_table: "transactions".to_string(),
-                kind: crate::query::RelationKind::Join,
-                left_key: vec!["block_number".to_string(), "transaction_index".to_string()],
-                right_key: vec!["block_number".to_string(), "transaction_index".to_string()],
-                output_columns: vec![],
-                source_items: Some(vec![0]),
-            }],
-        };
-
-        let resolved = resolve_output_columns(&table_plan, instr);
-
-        assert!(!resolved.contains(&"is_committed".to_string()));
-    }
-
     #[test]
     fn test_weight_projection_excludes_source_predicates() {
         let meta = solana_meta();
@@ -1352,14 +1147,12 @@ mod tests {
         )
         .unwrap();
 
+        let weight = RowWeight {
+            fixed: 32,
+            columns: vec!["data_size"],
+        };
         let mut weights = FxHashMap::default();
-        accumulate_block_weights(
-            &[batch],
-            "block_number",
-            32,
-            &["data_size".to_string()],
-            &mut weights,
-        );
+        accumulate_block_weights(&[batch], "block_number", &weight, &mut weights);
 
         assert_eq!(weights[&7], u64::MAX);
     }
