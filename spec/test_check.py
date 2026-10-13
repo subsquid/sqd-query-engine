@@ -31,6 +31,10 @@ import check  # noqa: E402
 SPEC = Path(__file__).resolve().parent
 CASES = []
 
+# `git commit` starts a detached `git maintenance run --auto`, which can still
+# be writing into .git when the temporary repository is removed.
+GIT = ["git", "-c", "maintenance.auto=false"]
+
 
 def case(fn):
     CASES.append(fn)
@@ -111,7 +115,7 @@ class Suite:
         env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
         for argv in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "spec"]):
-            subprocess.run(["git", *argv], cwd=repo, check=True,
+            subprocess.run([*GIT, *argv], cwd=repo, check=True,
                            capture_output=True, env={**env, "PATH": "/usr/bin:/bin"})
 
     def read(self, name):
@@ -351,7 +355,7 @@ def test_the_matrix_is_stale_when_the_contract_moves_without_it(s):
     env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "PATH": "/usr/bin:/bin",
            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
            "GIT_COMMITTER_DATE": "2030-01-01T00:00:00Z"}
-    subprocess.run(["git", "commit", "-qam", "later"], cwd=repo, check=True,
+    subprocess.run([*GIT, "commit", "-qam", "later"], cwd=repo, check=True,
                    capture_output=True, env=env)
     assert "stale-matrix" in checks_in(run(s.root)[1])
 
