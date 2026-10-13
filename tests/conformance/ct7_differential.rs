@@ -12,6 +12,10 @@
 //! cargo test --test conformance --features legacy-query ct7_ -- --nocapture
 //! ```
 
+use arrow::array::{Array, AsArray};
+use arrow::compute::cast;
+use arrow::datatypes::{DataType, UInt64Type};
+use serde_json::json;
 use sqd_query_engine::metadata::{
     load_dataset_description, DatasetDescription, TableDescription, WeightSource,
 };
@@ -21,8 +25,10 @@ use sqd_query_engine::scan::ParquetChunkReader;
 use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 
+use crate::harness::chunk::{chunk_without_column, column_names, read_columns};
 use crate::harness::engines::{as_blocks, run_legacy, run_new};
 use crate::harness::fixtures::{fixture_chunk, fixture_tree_has_all};
+use crate::harness::hex::{hex_filters, malformed, HexFilter};
 
 /// (catalog, fixture directory). Only datasets both engines serve.
 const DATASETS: &[(&str, &str)] = &[
@@ -267,6 +273,227 @@ fn every_catalog_filter_answers_the_same_as_the_reference() {
         mismatches.join("\n  - ")
     );
     eprintln!("{checked} generated queries agree with the reference");
+}
+
+/// A value of `filter`'s column the chunk holds between `from` and `to`, written
+/// the way a client writes it: a `hexBytes` value as stored, a `hexNumber` one
+/// zero-padded to the declared width.
+fn hex_value(
+    metadata: &DatasetDescription,
+    chunk: &Path,
+    filter: &HexFilter,
+    from: u64,
+    to: u64,
+) -> Option<String> {
+    let block_column = &metadata.table(&filter.table)?.block_number_column;
+    let stored = column_names(chunk, &filter.table)?;
+    if !stored.contains(&filter.column) {
+        return None;
+    }
+
+    let batches = read_columns(chunk, &filter.table, &[block_column, &filter.column])?;
+    let as_type = match filter.digits {
+        None => DataType::Utf8,
+        Some(_) => DataType::UInt64,
+    };
+
+    for batch in batches {
+        let blocks = cast(batch.column_by_name(block_column)?, &DataType::UInt64).ok()?;
+        let blocks = blocks.as_primitive::<UInt64Type>();
+        let values = cast(batch.column_by_name(&filter.column)?, &as_type).ok()?;
+
+        for row in 0..batch.num_rows() {
+            let in_range = blocks.is_valid(row) && (from..=to).contains(&blocks.value(row));
+            if !in_range || values.is_null(row) {
+                continue;
+            }
+
+            let value = match filter.digits {
+                None => values.as_string::<i32>().value(row).to_string(),
+                Some(digits) => format!(
+                    "0x{:0digits$x}",
+                    values.as_primitive::<UInt64Type>().value(row)
+                ),
+            };
+
+            let well_formed = value
+                .strip_prefix("0x")
+                .is_some_and(|digits| digits.len() >= 2 && digits.len().is_multiple_of(2));
+            if well_formed {
+                return Some(value);
+            }
+        }
+    }
+
+    None
+}
+
+/// Put one query to both engines, and say how their answers differ, if they do.
+fn disagreement(query: &str, metadata: &DatasetDescription, chunk: &Path) -> Option<String> {
+    let ours = run_new(query.as_bytes(), metadata, chunk);
+    let theirs = run_legacy(query.as_bytes(), chunk);
+
+    match (ours, theirs) {
+        (Ok(ours), Ok(theirs)) => {
+            let (ours, theirs) = (as_blocks(&ours), as_blocks(&theirs));
+            (ours != theirs).then(|| {
+                format!(
+                    "{} blocks vs {} from the reference",
+                    ours.len(),
+                    theirs.len()
+                )
+            })
+        }
+        (Err(ours), Ok(_)) => Some(format!("we refuse, the reference answers: {ours}")),
+        (Ok(_), Err(theirs)) => Some(format!("we answer, the reference refuses: {theirs}")),
+        (Err(_), Err(_)) => None,
+    }
+}
+
+/// Every hex filter of every dataset, tables and aliases alike, given a value the
+/// chunk holds with a malformed one beside it, and the malformed one alone. The
+/// reference compares a text column's values as written and drops from a
+/// hex-number list what does not parse, so the two must answer the same.
+///
+/// A hex-number filter is asked again of a copy of the chunk without its column.
+/// A list with nothing left in it reads no column there, so an answer that
+/// matches on the full chunk can still be an error on this one.
+///
+/// Covers CT-7 · INV-Q12
+#[test]
+fn malformed_hex_values_answer_the_same_as_the_reference() {
+    if !fixture_tree_has_all(DATASETS.iter().map(|(_, dataset)| *dataset)) {
+        return;
+    }
+
+    let mut checked = 0usize;
+    let mut sampled = 0usize;
+    let mut surfaces: BTreeSet<&str> = BTreeSet::new();
+    let mut mismatches: Vec<String> = Vec::new();
+
+    for (catalog, dataset) in DATASETS {
+        let chunk = fixture_chunk(dataset);
+        let metadata =
+            load_dataset_description(Path::new(&format!("metadata/{catalog}.yaml"))).unwrap();
+        let Some(first) = first_block(&metadata, &chunk) else {
+            continue;
+        };
+        let (from, to) = (first, first + BLOCK_SPAN);
+
+        for filter in hex_filters(&metadata) {
+            let Some(present) = hex_value(&metadata, &chunk, &filter, from, to) else {
+                continue;
+            };
+            sampled += 1;
+            surfaces.insert(match filter.digits {
+                Some(_) => "a hexNumber column",
+                None => "a hexBytes column",
+            });
+            if metadata.aliases.contains_key(&filter.request) {
+                surfaces.insert("an alias");
+            }
+
+            // Only a column stored as bytes or integers drops a value; a text
+            // column reads itself for any value, so its copy would cost a whole
+            // fixture chunk to show what INV-X3 already says.
+            let without = filter
+                .digits
+                .map(|_| chunk_without_column(dataset, &filter.table, &filter.column));
+            let mut chunks = vec![(chunk.as_path(), "the chunk")];
+            if let Some(without) = &without {
+                chunks.push((without.path(), "a chunk without the column"));
+            }
+
+            for (chunk, which) in chunks {
+                for (how, bad) in malformed(&present) {
+                    for list in [json!([present, bad]), json!([bad])] {
+                        let query = json!({
+                            "type": metadata.name,
+                            "fromBlock": from,
+                            "toBlock": to,
+                            (filter.request.clone()): [{ (filter.key.clone()): list }],
+                        })
+                        .to_string();
+                        checked += 1;
+
+                        if let Some(difference) = disagreement(&query, &metadata, chunk) {
+                            mismatches.push(format!(
+                                "{dataset}/{}.{}: {how} in {list} on {which}: {difference}",
+                                filter.request, filter.key
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // EVM alone carries seventeen hex filters, on two chunks.
+    assert!(
+        sampled > 30,
+        "only {sampled} hex filters had a value to start from"
+    );
+    assert_eq!(
+        surfaces.len(),
+        3,
+        "only {surfaces:?} had a value to start from"
+    );
+    assert!(
+        mismatches.is_empty(),
+        "{} of {checked} malformed-value queries disagree with the reference:\n  - {}",
+        mismatches.len(),
+        mismatches.join("\n  - ")
+    );
+    eprintln!("{checked} malformed-value queries agree with the reference");
+}
+
+/// A discriminator list holding the empty prefix, with a value the reference
+/// refuses on either side of it, and with a valid one. `0x` matches every
+/// instruction, but neither engine may let it decide whether the rest of the
+/// list is checked.
+///
+/// Covers CT-7 · INV-Q12
+#[test]
+fn a_discriminator_with_an_empty_prefix_answers_the_same_as_the_reference() {
+    if !fixture_tree_has_all(["solana"]) {
+        return;
+    }
+
+    let chunk = fixture_chunk("solana");
+    let metadata = load_dataset_description(Path::new("metadata/solana.yaml")).unwrap();
+    let first = first_block(&metadata, &chunk).expect("the fixture holds blocks");
+    let prefix = "0xf8c69e91e17587c8";
+
+    let mut others = vec![
+        json!(prefix),
+        json!(1),
+        json!("0x".to_string() + &"ab".repeat(17)),
+    ];
+    others.extend(malformed(prefix).into_iter().map(|(_, bad)| json!(bad)));
+
+    let mut mismatches = Vec::new();
+    for other in others {
+        for list in [json!(["0x", other]), json!([other, "0x"])] {
+            let query = json!({
+                "type": "solana",
+                "fromBlock": first,
+                "toBlock": first + BLOCK_SPAN,
+                "instructions": [{ "discriminator": list }],
+            })
+            .to_string();
+
+            if let Some(difference) = disagreement(&query, &metadata, &chunk) {
+                mismatches.push(format!("{list}: {difference}"));
+            }
+        }
+    }
+
+    assert!(
+        mismatches.is_empty(),
+        "{} discriminator lists disagree with the reference:\n  - {}",
+        mismatches.len(),
+        mismatches.join("\n  - ")
+    );
 }
 
 /// How many `fromBlock` values the fork probe samples from each chunk, besides

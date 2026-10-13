@@ -40,7 +40,8 @@ pub enum ErrorKind {
     TooManyBloomValues,
     /// More than one discriminator-family filter in one item request.
     ConflictingFilters,
-    /// A hex value lacks `0x`, has odd length, or holds a non-hex digit.
+    /// A `discriminator` value lacks `0x`, has odd length, or holds a non-hex
+    /// digit. Column filters answer such a value instead (INV-Q12).
     InvalidHex,
     /// A discriminator value exceeds `P-MAX-DISCRIMINATOR-BYTES`.
     DiscriminatorTooLong,

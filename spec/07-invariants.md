@@ -186,20 +186,30 @@ instructions, at most one of `discriminator`, `d1`, `d2`, `d4`, `d8`. Otherwise
 `ConflictingFilters`.
 
 ### INV-Q12
-**Hex values are well-formed.** `0x` or `0X` prefix, even number of hex digits,
-and nothing but hex digits between them. A discriminator value is at most
-`P-MAX-DISCRIMINATOR-BYTES`. Otherwise `InvalidHex` or `DiscriminatorTooLong`.
+**A malformed hex filter value is answered, except in a discriminator.** A hex
+value is malformed when it lacks the `0x` or `0X` prefix, has an odd number of
+digits, or holds anything but hex digits after the prefix. Only the
+`discriminator` filter refuses one: each of its values MUST be well-formed and at
+most `P-MAX-DISCRIMINATOR-BYTES` long, otherwise `InvalidHex` or
+`DiscriminatorTooLong`.
 
-Which values these are follows the *column*, exactly as case folding does
-([INV-P8](#inv-p8)): every filter value on a `hexBytes` column, whether the
-column is stored as text or as bytes. A `hexBytes` column stores lowercase `0x…`
-values by §1.5, so a filter value that is not one of those can never equal a
-stored value — and answering that with an empty `200` tells the client nothing.
+Every other filter takes the value as written, and what it matches follows the
+*column*, as case folding does ([INV-P8](#inv-p8)):
 
-A bare-hex column carries no prefix to check for, so the rule does not reach it.
-Those columns fold case ([INV-P8](#inv-p8)) and take their values as written.
+- On a column stored as text, the value compares as text, folded where the
+  column folds. A column of addresses or hashes holds only well-formed values,
+  so there a malformed one matches nothing. A column of quantities stores `0x0`,
+  and a filter value of `0x0` matches it.
+- On a column stored as bytes or integers, a string is read as hex. A malformed
+  one has no stored form and matches nothing, as a value outside the column's
+  range does ([INV-P14](#inv-p14)).
 
-*Note:* a well-formed value that cannot match anything is not an error. See [INV-P14](#inv-p14).
+Inside a list, a value that matches nothing is a no-op. A list with no value
+left once those are set aside is an empty list ([INV-P3](#inv-p3)): it matches
+nothing and reads nothing.
+
+*Why:* clients send malformed values — a topic a digit short or a digit over, an address without its prefix — and send the same ones query after query. Refusing the request over one changes no row of the answer and breaks the client. A discriminator is a prefix the client composes itself, and refusing a malformed one breaks no client that works today: [ADR-16](decisions/ADR-16-answer-a-malformed-hex-filter-value.md).
+*Test:* `{"d8": ["0x0123456789abcdef", "0x0123456789abcdef0"]}` returns what `{"d8": ["0x0123456789abcdef"]}` returns. `{"logs":[{"address":["0xabc"]}]}` returns no logs and no error. `{"discriminator":["0xabc"]}` is `InvalidHex`.
 
 ### INV-Q13
 **Requests are bounded in size.** An engine SHOULD reject a request exceeding
@@ -233,7 +243,9 @@ grouping, joining and rolling.
 ### INV-P3
 **An empty list matches nothing.** `"c": []` makes the entire item request
 unsatisfiable, whatever its other filters. It is not an error, and it is not the
-same as omitting the key.
+same as omitting the key. Nothing is read for such an item, so a chunk without
+`c` answers it too; its other filters are still validated
+([§2.6](02-request.md#26-validation-order)).
 
 *Why:* `r[c] ∈ ∅` is false. An engine that reads `[]` as "unconstrained" turns "match none of these addresses" into "match every row in the chunk" — the single most destructive misreading available.
 *Test:* `{"logs":[{"address":[]}]}` returns no logs. `{"logs":[{"address":[], "topic0":["0x…"]}]}` returns no logs.

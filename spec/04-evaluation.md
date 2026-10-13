@@ -130,7 +130,9 @@ that group's column.
 Two consequences:
 
 - A **zero-length** value (`"0x"`) is a prefix of everything. Its presence makes
-  the discriminator filter match all rows. It is not an error.
+  the discriminator filter match all rows. It is not an error, and it does not
+  excuse the rest of the list: every other value is still checked
+  ([INV-Q12](07-invariants.md#inv-q12)), wherever `"0x"` stands.
 - An **empty list** (`[]`) matches nothing, per [INV-P3](07-invariants.md#inv-p3).
   It is not an error either.
 
@@ -178,6 +180,10 @@ may be narrower or of different signedness than the declared type (§1.4).
   ([INV-P14](07-invariants.md#inv-p14)).
 - A value that does fit compares numerically, not bitwise. A stored `-1` in a
   signed column is not equal to `0xFFFFFFFF`.
+- On a column stored as bytes or integers, a string is read as hex. A
+  malformed one has no physical form at all, and matches nothing, for that
+  comparison ([INV-Q12](07-invariants.md#inv-q12)). A column stored as text
+  reads nothing: the value compares as text, malformed or not.
 
 The same holds for the block range: `fromBlock: 2^40` against a chunk whose block
 numbers are stored as 32-bit integers selects nothing and is not an error.
