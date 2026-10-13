@@ -32,6 +32,22 @@ pub fn meta(name: &str) -> DatasetDescription {
     load_dataset_description(Path::new(&format!("metadata/{name}.yaml"))).unwrap()
 }
 
+/// Every catalog the engine ships, so a test over all of them reaches one added
+/// later without being told.
+pub fn bundled_catalogs() -> Vec<DatasetDescription> {
+    let mut paths: Vec<_> = std::fs::read_dir("metadata")
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "yaml"))
+        .collect();
+    paths.sort();
+
+    paths
+        .iter()
+        .map(|path| load_dataset_description(path).unwrap())
+        .collect()
+}
+
 /// Run a query against a bundled dataset's fixture chunk, to completion.
 pub fn run(
     dataset: &str,

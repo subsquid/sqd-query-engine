@@ -1,6 +1,6 @@
 use crate::error::ErrorKind;
 use crate::metadata::{
-    ColumnDescription, ColumnType, DatasetDescription, JsonEncoding, RelationDef,
+    ColumnDescription, ColumnType, DatasetDescription, RelationDef,
     RelationKind as MetaRelationKind, SpecialFilter, TableDescription, MAX_DISCRIMINATOR_BYTES,
 };
 use crate::query::parse::{parse_hex, Query, QueryItem};
@@ -374,12 +374,14 @@ fn compile_item_predicates(item: &QueryItem, table: &TableDescription) -> Result
 
     let mut col_predicates: Vec<ColumnPredicate> = Vec::new();
     let mut discriminator_groups: Option<Vec<Vec<ColumnPredicate>>> = None;
+    let mut unsatisfiable = false;
 
     for (key, value) in &item.filters {
         // `"c": []` is a filter no row passes, not an absent filter, and it
         // sinks the whole item whatever its other filters say (INV-P3). Reading
         // it as "unconstrained" would turn "none of these addresses" into
-        // "every row in the chunk".
+        // "every row in the chunk". The other filters still compile, so they
+        // are checked whichever key arrives first.
         //
         // Only where a list is a value at all: a flag or a range bound takes a
         // scalar, so `[]` there is the wrong type and stays an error.
@@ -393,7 +395,8 @@ fn compile_item_predicates(item: &QueryItem, table: &TableDescription) -> Result
         );
 
         if takes_value_list && value.as_array().is_some_and(|values| values.is_empty()) {
-            return Ok(CompiledItem::Unsatisfiable);
+            unsatisfiable = true;
+            continue;
         }
 
         // Special filters
@@ -441,7 +444,10 @@ fn compile_item_predicates(item: &QueryItem, table: &TableDescription) -> Result
                             Some(arr) => arr,
                             None => std::slice::from_ref(value),
                         };
-                        col_predicates.push(compile_in_list(column, values, col_desc)?);
+                        match compile_in_list(column, values, col_desc)? {
+                            Some(predicate) => col_predicates.push(predicate),
+                            None => unsatisfiable = true,
+                        }
                     } else {
                         engine_bail!(
                             ErrorKind::InvalidFilterValue,
@@ -513,7 +519,10 @@ fn compile_item_predicates(item: &QueryItem, table: &TableDescription) -> Result
                 Some(arr) => arr,
                 None => std::slice::from_ref(value),
             };
-            col_predicates.push(compile_in_list(key, values, col_desc)?);
+            match compile_in_list(key, values, col_desc)? {
+                Some(predicate) => col_predicates.push(predicate),
+                None => unsatisfiable = true,
+            }
         } else {
             engine_bail!(
                 ErrorKind::InvalidFilterValue,
@@ -521,6 +530,10 @@ fn compile_item_predicates(item: &QueryItem, table: &TableDescription) -> Result
                 key
             );
         }
+    }
+
+    if unsatisfiable {
+        return Ok(CompiledItem::Unsatisfiable);
     }
 
     // The item's other filters are shared by every length, so they are kept
@@ -536,25 +549,6 @@ fn compile_item_predicates(item: &QueryItem, table: &TableDescription) -> Result
     };
 
     Ok(CompiledItem::Predicate(predicate))
-}
-
-/// Reject a malformed value on a column declared `encoding: hex_bytes`
-/// (INV-Q12). Columns with any other encoding take their values verbatim.
-fn ensure_hex_for_column(s: &str, column: &str, col_desc: &ColumnDescription) -> Result<()> {
-    if col_desc.encoding != Some(JsonEncoding::HexBytes) {
-        return Ok(());
-    }
-
-    engine_ensure!(
-        crate::query::parse::is_hex_literal(s),
-        ErrorKind::InvalidHex,
-        "invalid hex value '{}' in filter on '{}': expected a 0x-prefixed, \
-         even-length hex string",
-        s,
-        column
-    );
-
-    Ok(())
 }
 
 /// Whether a bare value is one a filter can carry: a string, or an integer of
@@ -579,13 +573,14 @@ fn fold_for_column(s: &str, col_desc: &ColumnDescription) -> String {
 /// Split an IN-list over a binary column into hex byte strings and plain
 /// integers.
 ///
-/// A string element must be well-formed hex — `0x`/`0X` prefix, even digit
-/// count (INV-Q12); anything that is neither a string nor an integer is an
-/// error. Numbers are widened to `i128`, which is the one type that holds both a
-/// `uint64` above `i64::MAX` and a negative value, so the caller narrows once
-/// rather than each branch guessing a signedness. Whether a parsed value *fits*
-/// the column is left to the caller: one that does not fit matches nothing
-/// (INV-P14), and a never-matching disjunct is a no-op inside an IN-list.
+/// A string element is read as hex. One that is not well-formed hex has no byte
+/// form, so no stored value can equal it and it is dropped (INV-Q12); anything
+/// that is neither a string nor an integer is an error. Numbers are widened to
+/// `i128`, which is the one type that holds both a `uint64` above `i64::MAX` and
+/// a negative value, so the caller narrows once rather than each branch guessing
+/// a signedness. Whether a parsed value *fits* the column is left to the caller:
+/// one that does not fit matches nothing (INV-P14), and a never-matching
+/// disjunct is a no-op inside an IN-list.
 fn split_binary_in_list(
     column: &str,
     values: &[serde_json::Value],
@@ -595,16 +590,7 @@ fn split_binary_in_list(
 
     for v in values {
         if let Some(s) = v.as_str() {
-            let bytes = parse_hex(s).ok_or_else(|| {
-                engine_err!(
-                    ErrorKind::InvalidHex,
-                    "invalid hex value '{}' in filter on '{}': expected a 0x-prefixed, \
-                     even-length hex string",
-                    s,
-                    column
-                )
-            })?;
-            hex.push(bytes);
+            hex.extend(parse_hex(s));
         } else if let Some(n) = v.as_u64() {
             numbers.push(i128::from(n));
         } else if let Some(n) = v.as_i64() {
@@ -638,16 +624,18 @@ fn compile_signed_in_list(
     values: &[serde_json::Value],
     range: std::ops::RangeInclusive<i128>,
     declared: &str,
-) -> Result<ColumnPredicate> {
-    let (hex, numbers) = split_binary_in_list(column, values)?;
-
+) -> Result<Option<ColumnPredicate>> {
+    // Checked on the raw values: the split drops a string that is not hex, and
+    // a malformed string is no more a number than a well-formed one.
     engine_ensure!(
-        hex.is_empty(),
+        !values.iter().any(serde_json::Value::is_string),
         ErrorKind::InvalidFilterValue,
-        "invalid value in filter on '{}': a signed {} column takes numbers, not hex strings",
+        "invalid value in filter on '{}': a signed {} column takes numbers, not strings",
         column,
         declared
     );
+
+    let (_, numbers) = split_binary_in_list(column, values)?;
 
     let vals: Vec<i64> = numbers
         .into_iter()
@@ -655,26 +643,33 @@ fn compile_signed_in_list(
         .map(|n| n as i64)
         .collect();
 
-    Ok(col_in_list(
+    Ok(in_list_of(
         column,
         Arc::new(Int64Array::from(vals)) as Arc<dyn Array>,
     ))
 }
 
-/// Compile an IN-list filter for a column based on its type.
+/// An IN-list over the values left once those the column cannot hold are
+/// dropped, or `None` when none are left. The filter then sinks its item as
+/// `[]` does (INV-P3), and nothing of the item is read: a chunk without the
+/// column answers it too.
+fn in_list_of(column: &str, values: Arc<dyn Array>) -> Option<ColumnPredicate> {
+    (!values.is_empty()).then(|| col_in_list(column, values))
+}
+
+/// Compile an IN-list filter for a column based on its type: `None` when no
+/// value of the list can match (see [`in_list_of`]).
 fn compile_in_list(
     column: &str,
     values: &[serde_json::Value],
     col_desc: &ColumnDescription,
-) -> Result<ColumnPredicate> {
+) -> Result<Option<ColumnPredicate>> {
     match &col_desc.data_type {
         ColumnType::String => {
             // Stored as text (base58 keys, `0x…` hex, enum names), so the value
-            // is compared as text rather than parsed. A column declared
-            // `hex` still has its values checked for well-formedness (INV-Q12):
-            // most of the engine's hex surface is string-typed, and an address
-            // missing its `0x` compares unequal to every stored value, so
-            // without the check it answers 200 with no rows and no reason.
+            // is compared as text rather than parsed, malformed hex included
+            // (INV-Q12): a column of quantities stores `0x0`, which is not
+            // well-formed hex and is what a client filtering on zero writes.
             let mut vals: Vec<String> = Vec::with_capacity(values.len());
             for v in values {
                 let s = v.as_str().ok_or_else(|| {
@@ -685,11 +680,10 @@ fn compile_in_list(
                         column
                     )
                 })?;
-                ensure_hex_for_column(s, column, col_desc)?;
                 vals.push(fold_for_column(s, col_desc));
             }
             let str_refs: Vec<&str> = vals.iter().map(|s| s.as_str()).collect();
-            Ok(col_in_list(
+            Ok(in_list_of(
                 column,
                 Arc::new(StringArray::from(str_refs)) as Arc<dyn Array>,
             ))
@@ -698,7 +692,7 @@ fn compile_in_list(
             let (hex, numbers) = split_binary_in_list(column, values)?;
             let mut vals: Vec<u8> = hex.iter().filter(|b| b.len() == 1).map(|b| b[0]).collect();
             vals.extend(numbers.iter().filter_map(|&n| u8::try_from(n).ok()));
-            Ok(col_in_list(
+            Ok(in_list_of(
                 column,
                 Arc::new(UInt8Array::from(vals)) as Arc<dyn Array>,
             ))
@@ -711,7 +705,7 @@ fn compile_in_list(
                 .map(|b| u16::from_be_bytes([b[0], b[1]]))
                 .collect();
             vals.extend(numbers.iter().filter_map(|&n| u16::try_from(n).ok()));
-            Ok(col_in_list(
+            Ok(in_list_of(
                 column,
                 Arc::new(UInt16Array::from(vals)) as Arc<dyn Array>,
             ))
@@ -724,7 +718,7 @@ fn compile_in_list(
                 .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
                 .collect();
             vals.extend(numbers.iter().filter_map(|&n| u32::try_from(n).ok()));
-            Ok(col_in_list(
+            Ok(in_list_of(
                 column,
                 Arc::new(UInt32Array::from(vals)) as Arc<dyn Array>,
             ))
@@ -737,7 +731,7 @@ fn compile_in_list(
                 .map(|b| u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
                 .collect();
             vals.extend(numbers.iter().filter_map(|&n| u64::try_from(n).ok()));
-            Ok(col_in_list(
+            Ok(in_list_of(
                 column,
                 Arc::new(UInt64Array::from(vals)) as Arc<dyn Array>,
             ))
@@ -775,7 +769,7 @@ fn compile_in_list(
             for v in vals {
                 builder.append_value(v)?;
             }
-            Ok(col_in_list(
+            Ok(in_list_of(
                 column,
                 Arc::new(builder.finish()) as Arc<dyn Array>,
             ))
@@ -797,7 +791,7 @@ fn compile_in_list(
                     vals.push(n32);
                 }
             }
-            Ok(col_list_contains_any_u32(column, vals))
+            Ok((!vals.is_empty()).then(|| col_list_contains_any_u32(column, vals)))
         }
         ColumnType::ListString => {
             let mut vals: Vec<String> = Vec::with_capacity(values.len());
@@ -810,10 +804,9 @@ fn compile_in_list(
                         column
                     )
                 })?;
-                ensure_hex_for_column(s, column, col_desc)?;
                 vals.push(fold_for_column(s, col_desc));
             }
-            Ok(col_list_contains_any_string(column, vals))
+            Ok((!vals.is_empty()).then(|| col_list_contains_any_string(column, vals)))
         }
         _ => engine_bail!(
             ErrorKind::InvalidFilterValue,
@@ -825,8 +818,13 @@ fn compile_in_list(
 }
 
 /// Compile a discriminator filter: dispatch hex prefixes to d1-d16 by length.
-/// Returns None if an empty prefix is found (matches everything).
+/// Returns None if an empty prefix is found (matches everything), but only once
+/// every value has been checked: where `0x` sits in the list must not decide
+/// whether the rest of it is refused.
 /// Returns groups of ColumnPredicates, one group per byte length.
+///
+/// Unlike a column filter, this one refuses a malformed or over-long value
+/// rather than matching nothing with it (INV-Q12).
 ///
 /// An empty *list* never reaches here: the caller has already read it as an
 /// item that matches nothing (INV-P3).
@@ -844,6 +842,7 @@ fn compile_discriminator(
     // Parse hex strings and group by byte length
     let mut by_length: std::collections::BTreeMap<usize, Vec<Vec<u8>>> =
         std::collections::BTreeMap::new();
+    let mut matches_every_row = false;
 
     for v in arr {
         let s = v.as_str().ok_or_else(|| {
@@ -863,7 +862,8 @@ fn compile_discriminator(
             bytes.len()
         );
         if bytes.is_empty() {
-            return Ok(None); // empty prefix matches everything
+            matches_every_row = true;
+            continue;
         }
         by_length.entry(bytes.len()).or_default().push(bytes);
     }
@@ -914,6 +914,10 @@ fn compile_discriminator(
             predicate: Arc::new(InListPredicate::new(array)),
         };
         groups.push(vec![pred]);
+    }
+
+    if matches_every_row {
+        return Ok(None);
     }
 
     Ok(Some(groups))

@@ -2,17 +2,20 @@
 //! anything: an unmatchable value is an empty result, not an error, and never a
 //! widening.
 
+use serde_json::json;
 use sqd_query_engine::error::{error_kind, ErrorKind};
 use sqd_query_engine::metadata::DatasetDescription;
+use sqd_query_engine::output::snake_to_camel;
 use sqd_query_engine::query::{compile, parse_query};
 use std::path::Path;
 
-use crate::harness::chunk::write_parquet;
+use crate::harness::chunk::{chunk_without_column_at, write_parquet};
 use crate::harness::fixtures::{
     fixture_tree_has, fixture_tree_has_all, meta, plan_error, run, run_against,
 };
+use crate::harness::hex;
 use crate::harness::json::{assert_same_response, count_items, items_in, parse_response};
-use crate::harness::sol_like;
+use crate::harness::{evm_like, sol_like};
 
 /// INV-P14: a well-formed value the column cannot hold matches nothing. It is
 /// not an error, and it must never be truncated into a *different* value —
@@ -151,6 +154,7 @@ fn an_empty_discriminator_prefix_matches_every_instruction() {
     for item in [
         r#"{"discriminator":["0x"]}"#,
         r#"{"discriminator":["0x07","0x"]}"#,
+        r#"{"discriminator":["0x","0x07"]}"#,
     ] {
         assert_same_response(&everything, &answer(item), item);
     }
@@ -313,16 +317,29 @@ fn a_hex_value_too_wide_for_the_column_matches_nothing() {
         assert_eq!(count_items(&body, "instructions"), 0);
     }
 
-    // Wrong *kind*, on the other hand, is malformed and is refused.
-    for shape in [r#""nonsense""#, r#"["nonsense"]"#, "true"] {
-        let query = format!(
-            r#"{{"type":"solana","fromBlock":217710049,"toBlock":217710050,
-                 "instructions":[{{"d1":{shape}}}]}}"#
-        );
-        let compiled =
-            parse_query(query.as_bytes(), &solana).and_then(|parsed| compile(&parsed, &solana));
-        assert!(compiled.is_err(), "d1 = {shape} must be refused");
+    // A string that is not hex has no `d1` either, and matches nothing (INV-Q12).
+    for shape in [r#""nonsense""#, r#"["nonsense"]"#] {
+        let body = run(
+            "solana",
+            &solana,
+            format!(
+                r#"{{"type":"solana","fromBlock":217710049,"toBlock":217710050,
+                     "instructions":[{{"d1":{shape}}}],
+                     "fields":{{"instruction":{{"programId":true}}}}}}"#
+            )
+            .as_bytes(),
+        )
+        .unwrap_or_else(|e| panic!("d1 = {shape} is malformed, which is not an error: {e}"));
+
+        assert_eq!(count_items(&body, "instructions"), 0);
     }
+
+    // Wrong *kind*, on the other hand, is refused.
+    let query = r#"{"type":"solana","fromBlock":217710049,"toBlock":217710050,
+                    "instructions":[{"d1":true}]}"#;
+    let compiled =
+        parse_query(query.as_bytes(), &solana).and_then(|parsed| compile(&parsed, &solana));
+    assert!(compiled.is_err(), "d1 = true must be refused");
 }
 
 /// INV-P14 covers the block bounds in the same breath as filter values, and the
@@ -424,8 +441,167 @@ fn a_hex_value_of_the_wrong_width_matches_nothing_without_erroring() {
         .expect("a well-formed value that cannot match is not an error");
     assert_eq!(count_items(&narrow, "instructions"), 0);
 
-    // Not hex at all, which is.
-    assert!(run("solana", &solana, &query("zz")).is_err());
+    // Not hex at all: no `d8` either, and answered the same way (INV-Q12).
+    let malformed = run("solana", &solana, &query("zz"))
+        .expect("a malformed value matches nothing, it is not an error");
+    assert_eq!(count_items(&malformed, "instructions"), 0);
+}
+
+/// A malformed hex value is a disjunct that matches nothing: beside a
+/// well-formed value it leaves that value's answer unchanged, alone or bare it
+/// matches nothing, and as an item request of its own it adds nothing to the
+/// others'. On a column stored as text, as a hex number and as a plain integer.
+///
+/// Covers CT-3 · INV-Q12
+#[test]
+fn a_malformed_hex_value_matches_nothing() {
+    fn evm_query(item_requests: &str) -> String {
+        evm_like::query_with(
+            *evm_like::BLOCKS.start(),
+            *evm_like::BLOCKS.end(),
+            item_requests,
+        )
+    }
+
+    let (evm, evm_chunk) = (evm_like::catalog(), evm_like::chunk());
+    let (sol, sol_chunk) = (sol_like::catalog(), sol_like::chunk());
+
+    let surfaces = [
+        Surface {
+            catalog: &evm,
+            chunk: evm_chunk.path(),
+            query: evm_query,
+            items: "logs",
+            key: "address",
+            present: evm_like::address(1),
+        },
+        Surface {
+            catalog: &evm,
+            chunk: evm_chunk.path(),
+            query: evm_query,
+            items: "logs",
+            key: "topic0",
+            present: evm_like::word(1),
+        },
+        Surface {
+            catalog: &sol,
+            chunk: sol_chunk.path(),
+            query: sol_like::query_with,
+            items: "instructions",
+            key: "d1",
+            present: format!("0x{:02x}", sol_like::DISCRIMINATORS[0]),
+        },
+        Surface {
+            catalog: &sol,
+            chunk: sol_chunk.path(),
+            query: sol_like::query_with,
+            items: "instructions",
+            key: "transactionIndex",
+            present: "0x00000001".to_string(),
+        },
+    ];
+
+    for Surface {
+        catalog,
+        chunk,
+        query,
+        items,
+        key,
+        present,
+    } in surfaces
+    {
+        let answer = |item_requests: String| {
+            run_against(catalog, chunk, &query(&item_requests))
+                .unwrap_or_else(|e| panic!("{key}: {item_requests} must be answered: {e:#}"))
+        };
+
+        let expected = answer(json!({ key: [present] }).to_string());
+        assert!(
+            count_items(&expected, items) > 0,
+            "{key} = {present} must match rows, or nothing below is compared"
+        );
+
+        for (how, bad) in hex::malformed(&present) {
+            assert_same_response(
+                &expected,
+                &answer(json!({ key: [present, bad] }).to_string()),
+                &format!("{key}: a value with {how} beside a well-formed one"),
+            );
+            assert_same_response(
+                &expected,
+                &answer(format!(
+                    "{},{}",
+                    json!({ key: [bad] }),
+                    json!({ key: [present] })
+                )),
+                &format!("{key}: an item request of only a value with {how}"),
+            );
+
+            for shape in [json!([bad]), json!(bad)] {
+                let body = answer(json!({ key: shape }).to_string());
+                assert_eq!(
+                    count_items(&body, items),
+                    0,
+                    "{key} = {shape} ({how}) must match nothing"
+                );
+            }
+        }
+    }
+
+    // A relation of an item request that matches nothing pulls nothing in.
+    let bad = format!("{}0", evm_like::address(1));
+    let body = answer_on(
+        &evm,
+        evm_chunk.path(),
+        &evm_query(&json!({ "address": [bad], "transaction": true }).to_string()),
+    );
+    assert_eq!(count_items(&body, "logs"), 0);
+    assert_eq!(count_items(&body, "transactions"), 0);
+}
+
+/// A column stored as text compares a malformed value as text: it is not
+/// dropped. A hex-bytes column of quantities holds minimal-form values with an
+/// odd digit count, and a filter value spelled the same way matches them. A
+/// column stored as bytes cannot hold a malformed value, so there it matches
+/// nothing — for a fixed-width binary column and inside a list of strings alike.
+///
+/// Covers CT-3 · INV-Q12
+#[test]
+fn a_malformed_hex_value_compares_as_text_where_the_column_stores_text() {
+    let (catalog, chunk) = filter_columns_dataset();
+    let matched = |filter: serde_json::Value| -> Vec<i64> {
+        let query = json!({
+            "type": "hexes",
+            "fromBlock": 10,
+            "toBlock": 12,
+            "fields": { "item": { "seq": true } },
+            "items": [filter],
+        });
+        seqs(&catalog, chunk.path(), &query.to_string())
+    };
+
+    // Odd digit counts, so malformed by the rule's own definition — and stored.
+    assert_eq!(matched(json!({ "quantity": ["0x0"] })), vec![0]);
+    assert_eq!(matched(json!({ "quantity": ["0X3938700"] })), vec![1]);
+    assert_eq!(matched(json!({ "quantity": ["0x0", "0x01"] })), vec![0, 2]);
+    assert_eq!(matched(json!({ "quantity": ["0x00"] })), Vec::<i64>::new());
+
+    for (column, present, row) in [("hash", "0xdeadbeef", 0), ("topics", "0xcccc", 1)] {
+        assert_eq!(matched(json!({ column: [present] })), vec![row]);
+
+        for (how, bad) in hex::malformed(present) {
+            assert_eq!(
+                matched(json!({ column: [present, bad] })),
+                vec![row],
+                "{column}: a value with {how} beside a well-formed one"
+            );
+            assert_eq!(
+                matched(json!({ column: [bad] })),
+                Vec::<i64>::new(),
+                "{column}: a value with {how} alone"
+            );
+        }
+    }
 }
 
 /// A signed column is filterable, negatives included.
@@ -462,11 +638,20 @@ fn a_signed_column_takes_negative_filter_values() {
     // returning no rows rather than an error (INV-P14).
     assert_eq!(matched(r#""version":[-40000]"#), Vec::<i64>::new());
 
-    // Hex on a signed column is a category error, not a value that fails to
-    // match: dropping it would silently widen the list to its other elements.
-    let hex = r#"{"type":"signed","fromBlock":10,"toBlock":12,"items":[{"version":["0xffff"]}]}"#;
-    let err = plan_error(&catalog, hex);
-    assert_eq!(error_kind(&err), Some(ErrorKind::InvalidFilterValue));
+    // A string on a signed column is a category error, not a value that fails to
+    // match: dropping it would silently narrow the list to its other elements.
+    // Hex or not — a malformed one is no more a number than a well-formed one.
+    for values in [r#"["0xffff"]"#, r#"["zz"]"#, r#"["zz",-1]"#] {
+        let query = format!(
+            r#"{{"type":"signed","fromBlock":10,"toBlock":12,"items":[{{"version":{values}}}]}}"#
+        );
+        let err = plan_error(&catalog, &query);
+        assert_eq!(
+            error_kind(&err),
+            Some(ErrorKind::InvalidFilterValue),
+            "version = {values}: {err:#}"
+        );
+    }
 }
 
 /// `"c": []` is `r[c] ∈ ∅`, which is false for every row. Reading it as "no
@@ -624,6 +809,275 @@ tables:
     }
 
     (catalog, dir)
+}
+
+/// A list none of whose values the column can hold means what `[]` means: the
+/// item request matches nothing, and nothing of it is read (INV-P3). A value can
+/// be dropped for being malformed hex, for having the wrong width, or for a
+/// number out of range, alone or together. Each list runs on a chunk that lacks
+/// the column, where a read would be an error, and a value that survives is
+/// that error — which is what proves the column is gone.
+///
+/// Covers CT-3 · INV-P3, INV-Q12
+#[test]
+fn a_list_with_no_value_left_reads_no_column() {
+    struct Case<'a> {
+        catalog: &'a DatasetDescription,
+        chunk: &'a Path,
+        table: &'static str,
+        column: &'static str,
+        query: &'a dyn Fn(&str) -> String,
+        dropped: &'static [&'static str],
+        surviving: &'static str,
+    }
+
+    let (sol, sol_chunk) = (sol_like::catalog(), sol_like::chunk());
+    let (filters, filters_chunk) = filter_columns_dataset();
+    let (signed, signed_chunk) = signed_dataset();
+
+    let sol_query = |item: &str| sol_like::query_selecting(item, r#"{"transactionIndex":true}"#);
+    let item_query = |dataset: &'static str| {
+        move |item: &str| {
+            format!(
+                r#"{{"type":"{dataset}","fromBlock":10,"toBlock":12,
+                    "fields":{{"item":{{"seq":true}}}},"items":[{item}]}}"#
+            )
+        }
+    };
+    let filters_query = item_query("hexes");
+    let signed_query = item_query("signed");
+
+    let cases = [
+        Case {
+            catalog: &sol,
+            chunk: sol_chunk.path(),
+            table: "instructions",
+            column: "d1",
+            query: &sol_query,
+            dropped: &[
+                r#"["zz"]"#,
+                r#"["0x0"]"#,
+                r#"[""]"#,
+                r#"["0x1234"]"#,
+                r#"["0x"]"#,
+                "[256]",
+                r#"["zz","0x1234",256]"#,
+                r#""zz""#,
+            ],
+            surviving: r#"["0x2a"]"#,
+        },
+        Case {
+            catalog: &filters,
+            chunk: filters_chunk.path(),
+            table: "items",
+            column: "code",
+            query: &filters_query,
+            dropped: &[r#"["zz"]"#, r#"["0x0001"]"#, "[4294967296]"],
+            surviving: "[7]",
+        },
+        Case {
+            catalog: &filters,
+            chunk: filters_chunk.path(),
+            table: "items",
+            column: "hash",
+            query: &filters_query,
+            dropped: &[r#"["zz"]"#, r#"["0xdead"]"#],
+            surviving: r#"["0xdeadbeef"]"#,
+        },
+        Case {
+            catalog: &filters,
+            chunk: filters_chunk.path(),
+            table: "items",
+            column: "assets",
+            query: &filters_query,
+            dropped: &["[4294967296]"],
+            surviving: "[1]",
+        },
+        Case {
+            catalog: &signed,
+            chunk: signed_chunk.path(),
+            table: "items",
+            column: "version",
+            query: &signed_query,
+            dropped: &["[-40000]", "[40000]"],
+            surviving: "[-1]",
+        },
+    ];
+
+    for case in cases {
+        let key = snake_to_camel(case.column);
+        let chunk = chunk_without_column_at(case.chunk, case.table, case.column);
+        let run = |list: &str| {
+            let query = (case.query)(&format!(r#"{{"{key}":{list}}}"#));
+            run_against(case.catalog, chunk.path(), &query)
+        };
+
+        let empty = run("[]").unwrap_or_else(|e| panic!("{key} = [] must be answered: {e:#}"));
+
+        for list in case.dropped {
+            let body =
+                run(list).unwrap_or_else(|e| panic!("{key} = {list} must read no column: {e:#}"));
+            assert_same_response(&empty, &body, &format!("{key} = {list} against []"));
+        }
+
+        let err = run(case.surviving)
+            .expect_err("a value that survives must read the column, which is gone");
+        assert_eq!(
+            error_kind(&err),
+            Some(ErrorKind::ColumnNotFound),
+            "{key} = {}: {err:#}",
+            case.surviving
+        );
+    }
+
+    // The item's other filters are still checked, whichever kind of empty list
+    // sinks it and in whatever order the keys arrive.
+    for item in [
+        r#"{"d1":["zz"],"programId":[1]}"#,
+        r#"{"programId":[1],"d1":["zz"]}"#,
+        r#"{"d1":[],"programId":[1]}"#,
+    ] {
+        let err = plan_error(&sol, &sol_query(item));
+        assert_eq!(
+            error_kind(&err),
+            Some(ErrorKind::InvalidFilterValue),
+            "{item}: {err:#}"
+        );
+    }
+}
+
+/// One filter to try malformed values on, and a value of it the chunk holds.
+struct Surface<'a> {
+    catalog: &'a DatasetDescription,
+    chunk: &'a Path,
+    query: fn(&str) -> String,
+    /// The key the matched items come back under.
+    items: &'static str,
+    key: &'static str,
+    present: String,
+}
+
+/// Three items with a filterable column for each way a filter value is stored:
+/// text holding minimal-form quantities, whose digit counts are odd;
+/// fixed-width bytes; a list of text; a plain integer; and a list of integers.
+fn filter_columns_dataset() -> (DatasetDescription, tempfile::TempDir) {
+    use arrow::array::builder::{ListBuilder, StringBuilder, UInt32Builder};
+    use arrow::array::{
+        Array, ArrayRef, FixedSizeBinaryArray, StringArray, UInt32Array, UInt64Array,
+    };
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use sqd_query_engine::metadata::parse_dataset_description;
+    use std::sync::Arc;
+
+    let catalog = parse_dataset_description(
+        r#"
+version: v2
+name: hexes
+
+tables:
+  blocks:
+    output:
+      name: block
+      fields: [number]
+    block_number_column: number
+    sort_key: [number]
+    columns:
+      number: { type: uint64 }
+
+  items:
+    request:
+      name: items
+      filters: [quantity, hash, topics, code, assets]
+    output:
+      name: item
+      fields: [seq]
+    block_number_column: block_number
+    item_order_keys: [seq]
+    sort_key: [block_number, seq]
+    columns:
+      block_number: { type: uint64 }
+      seq: { type: uint32 }
+      quantity: { type: string, encoding: hex_bytes }
+      hash: { type: fixed_binary_4, encoding: hex_bytes }
+      topics: { type: list_string, encoding: hex_bytes }
+      code: { type: uint32 }
+      assets: { type: list_uint32 }
+"#,
+    )
+    .unwrap();
+
+    let mut topics = ListBuilder::new(StringBuilder::new());
+    for row in [vec!["0xaaaa", "0xbbbb"], vec!["0xcccc"], vec![]] {
+        for topic in row {
+            topics.values().append_value(topic);
+        }
+        topics.append(true);
+    }
+    let topics = topics.finish();
+
+    let mut assets = ListBuilder::new(UInt32Builder::new());
+    for row in [vec![1u32, 2], vec![3], vec![]] {
+        for asset in row {
+            assets.values().append_value(asset);
+        }
+        assets.append(true);
+    }
+    let assets = assets.finish();
+
+    let items = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("block_number", DataType::UInt64, false),
+            Field::new("seq", DataType::UInt32, false),
+            Field::new("quantity", DataType::Utf8, false),
+            Field::new("hash", DataType::FixedSizeBinary(4), false),
+            Field::new("topics", topics.data_type().clone(), false),
+            Field::new("code", DataType::UInt32, false),
+            Field::new("assets", assets.data_type().clone(), false),
+        ])),
+        vec![
+            Arc::new(UInt64Array::from(vec![10u64, 11, 12])) as ArrayRef,
+            Arc::new(UInt32Array::from(vec![0u32, 1, 2])) as ArrayRef,
+            Arc::new(StringArray::from(vec!["0x0", "0x3938700", "0x01"])) as ArrayRef,
+            Arc::new(
+                FixedSizeBinaryArray::try_from_iter(
+                    [
+                        [0xde, 0xad, 0xbe, 0xef],
+                        [0, 0, 0, 1],
+                        [0xca, 0xfe, 0xba, 0xbe],
+                    ]
+                    .into_iter(),
+                )
+                .unwrap(),
+            ) as ArrayRef,
+            Arc::new(topics) as ArrayRef,
+            Arc::new(UInt32Array::from(vec![7u32, 8, 9])) as ArrayRef,
+            Arc::new(assets) as ArrayRef,
+        ],
+    )
+    .unwrap();
+
+    let blocks = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new(
+            "number",
+            DataType::UInt64,
+            false,
+        )])),
+        vec![Arc::new(UInt64Array::from(vec![10u64, 11, 12])) as ArrayRef],
+    )
+    .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    for (name, batch) in [("items", items), ("blocks", blocks)] {
+        write_parquet(&dir.path().join(format!("{name}.parquet")), &batch);
+    }
+
+    (catalog, dir)
+}
+
+/// The response to `query`, which must be answerable.
+fn answer_on(catalog: &DatasetDescription, chunk: &Path, query: &str) -> Vec<u8> {
+    run_against(catalog, chunk, query).expect("query must be answerable")
 }
 
 /// The `seq` of every item a query returns, in response order.

@@ -14,6 +14,7 @@ pub mod evm_like;
 pub mod fixtures;
 pub mod generator;
 pub mod guard;
+pub mod hex;
 pub mod json;
 pub mod sol_like;
 pub mod store;

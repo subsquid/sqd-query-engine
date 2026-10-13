@@ -54,7 +54,7 @@ Raised from the request and catalog, before any data is read.
 | `TooManyItemRequests` | More than `P-MAX-ITEM-REQUESTS` item requests across all tables. |
 | `TooManyBloomValues` | More than `P-MAX-BLOOM-VALUES` values in one bloom filter. |
 | `ConflictingFilters` | More than one discriminator-family filter in one item request. |
-| `InvalidHex` | A hex value lacks `0x`, has odd length, or contains a non-hex digit. |
+| `InvalidHex` | A `discriminator` value lacks `0x`, has odd length, or contains a non-hex digit. |
 | `DiscriminatorTooLong` | A discriminator value exceeds `P-MAX-DISCRIMINATOR-BYTES`. |
 | `InvalidFilterValue` | A filter value has a form the filter kind does not accept. |
 | `RequestTooLarge` | The request exceeds an engine-configured byte or list-length bound. |

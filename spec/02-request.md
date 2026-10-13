@@ -220,15 +220,15 @@ Every value here is resolved in [09-parameters.md](09-parameters.md).
 | `listContainsAny` | array matching the list's element type | anything else |
 | `discriminator` | array of `0x`-prefixed even-length hex strings, each ≤ `P-MAX-DISCRIMINATOR-BYTES` | anything else |
 
-Hex strings MUST start with `0x` or `0X` and have an even number of hex digits.
-An odd-length or non-hex value is an error, not a value that matches nothing
-([INV-Q12](07-invariants.md#inv-q12)).
+A hex string is well-formed when it starts with `0x` or `0X` and has an even
+number of hex digits. Only a `discriminator` value has to be: a malformed one is
+an error. In every other filter a malformed value is answered as written. It
+compares as text on a column stored as text, and matches nothing on a column
+stored as bytes or integers ([INV-Q12](07-invariants.md#inv-q12)).
 
 A value that is well-formed but cannot possibly match — an address longer than
-the column ever holds, an integer beyond the column's physical width — is **not**
-an error. It matches nothing ([INV-P14](07-invariants.md#inv-p14)). The
-distinction is between *"you wrote nonsense"* and *"nothing here is what you
-asked for"*.
+the column ever holds, an integer beyond the column's physical width — is not an
+error either. It matches nothing ([INV-P14](07-invariants.md#inv-p14)).
 
 ## 2.6 Validation order
 
