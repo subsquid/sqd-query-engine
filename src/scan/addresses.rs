@@ -492,23 +492,29 @@ impl SourceAddresses {
         let element_bytes = values.join_key_bytes();
 
         let mut buf = Vec::new();
-        let found = BooleanBuffer::collect_bool(len, |row| {
-            let candidate = candidates.is_none_or(|c| c.value(row)) && !addresses.is_null(row);
-            let group = match (&pairs, &self.groups) {
-                _ if !candidate => None,
-                (Some((first, second, nulls)), GroupIds::Pair(ids)) => nulls
-                    .as_ref()
-                    .is_none_or(|n| n.is_valid(row))
-                    .then(|| ids.get(&pack16(first[row], second[row])).copied())
-                    .flatten(),
-                (_, groups) => groups.get(&keys, row, &mut buf),
-            };
+        // Left to LLVM, whether this stays a call per row depends on how rustc
+        // splits the crate into codegen units.
+        let found = BooleanBuffer::collect_bool(
+            len,
+            #[inline(always)]
+            |row| {
+                let candidate = candidates.is_none_or(|c| c.value(row)) && !addresses.is_null(row);
+                let group = match (&pairs, &self.groups) {
+                    _ if !candidate => None,
+                    (Some((first, second, nulls)), GroupIds::Pair(ids)) => nulls
+                        .as_ref()
+                        .is_none_or(|n| n.is_valid(row))
+                        .then(|| ids.get(&pack16(first[row], second[row])).copied())
+                        .flatten(),
+                    (_, groups) => groups.get(&keys, row, &mut buf),
+                };
 
-            group.is_some_and(|group| {
-                let path = offsets[row] as usize * 8..offsets[row + 1] as usize * 8;
-                related(self, group, &element_bytes[path])
-            })
-        });
+                group.is_some_and(|group| {
+                    let path = offsets[row] as usize * 8..offsets[row + 1] as usize * 8;
+                    related(self, group, &element_bytes[path])
+                })
+            },
+        );
         BooleanArray::new(found, None)
     }
 
