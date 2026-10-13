@@ -56,6 +56,7 @@ impl<'a> Execution<'a> {
         format: OutputFormat,
     ) -> Result<Self> {
         let blocks = catalog_entry(metadata, &plan.block_table)?;
+        ensure_fields_resolve(&plan.block_table, blocks, &plan.block_output_columns)?;
         let tables = plan
             .table_plans
             .iter()
@@ -369,10 +370,15 @@ impl<'a> Execution<'a> {
 impl<'a> PlannedTable<'a> {
     fn resolve(plan: &'a TablePlan, metadata: &'a DatasetDescription) -> Result<Self> {
         let desc = catalog_entry(metadata, &plan.table)?;
+        ensure_fields_resolve(&plan.table, desc, &plan.output_columns)?;
         let targets = plan
             .relations
             .iter()
-            .map(|relation| catalog_entry(metadata, &relation.target_table))
+            .map(|relation| {
+                let target = catalog_entry(metadata, &relation.target_table)?;
+                ensure_fields_resolve(&relation.target_table, target, &relation.output_columns)?;
+                Ok(target)
+            })
             .collect::<Result<_>>()?;
 
         Ok(Self {
@@ -403,4 +409,20 @@ fn catalog_entry<'a>(
             table
         )
     })
+}
+
+/// A plan compiled against another catalog can name a field this one does not
+/// resolve, and such a field can be neither read nor rendered.
+fn ensure_fields_resolve(table: &str, desc: &TableDescription, fields: &[String]) -> Result<()> {
+    for field in fields {
+        crate::engine_ensure!(
+            desc.field_source(field).is_some(),
+            crate::error::ErrorKind::UnknownField,
+            "field '{}' of '{}' is not in the catalog",
+            field,
+            table
+        );
+    }
+
+    Ok(())
 }

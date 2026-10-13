@@ -13,7 +13,7 @@
 use arrow::datatypes::{DataType, Field, SchemaRef, TimeUnit};
 use sqd_query_engine::error::{error_kind, ErrorKind};
 use sqd_query_engine::output::{execute_chunk, execute_chunk_arrow, execute_plan};
-use sqd_query_engine::query::{compile, parse_query};
+use sqd_query_engine::query::{compile, parse_query, Plan};
 use sqd_query_engine::scan::{ChunkReader, ParquetChunkReader, ScanRequest, Scanned};
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
@@ -345,6 +345,70 @@ fn a_plan_naming_a_table_the_catalog_lacks_is_an_error() {
         assert!(
             asked.is_empty(),
             "{table}: the chunk was asked for {asked:?}"
+        );
+    }
+}
+
+/// A plan can also name a field the catalog passed with it does not resolve,
+/// and such a field can be neither read nor rendered. The header and a table's
+/// own rows left it out of the response, and a relation's rows read a column of
+/// that name.
+#[test]
+fn a_plan_naming_a_field_the_catalog_lacks_is_an_error() {
+    let metadata = catalog();
+    let source = weighted_chunk(BLOCKS, &uniform(BLOCKS, 0), &uniform(BLOCKS, 0));
+    let query = serde_json::json!({
+        "type": "test",
+        "fromBlock": 10,
+        "toBlock": 14,
+        "logs": [{"transaction": true}],
+        "fields": {
+            "block": {"number": true},
+            "log": {"data": true},
+            "transaction": {"input": true}
+        }
+    })
+    .to_string();
+    let parsed = parse_query(query.as_bytes(), &metadata).unwrap();
+
+    type Fields = fn(&mut Plan) -> &mut Vec<String>;
+    let places: [(&str, Fields); 3] = [
+        ("header", |plan| &mut plan.block_output_columns),
+        ("logs", |plan| &mut plan.table_plans[0].output_columns),
+        ("relation", |plan| {
+            &mut plan.table_plans[0].relations[0].output_columns
+        }),
+    ];
+
+    for (place, fields) in places {
+        let mut plan = compile(&parsed, &metadata).unwrap();
+        fields(&mut plan).push("payload".to_owned());
+        let chunk = Recording {
+            inner: ParquetChunkReader::open(source.path()).unwrap(),
+            asked: Mutex::default(),
+        };
+
+        let json = execute_chunk(&plan, &metadata, &chunk, false).err();
+        let arrow = execute_chunk_arrow(&plan, &metadata, &chunk, false, false).err();
+
+        for (format, err) in [("json", json), ("arrow", arrow)] {
+            let err = err
+                .unwrap_or_else(|| panic!("{format}: a plan naming an unknown {place} field ran"));
+            assert_eq!(
+                error_kind(&err),
+                Some(ErrorKind::UnknownField),
+                "{format}, {place}: {err:#}"
+            );
+            assert!(
+                err.root_cause().to_string().contains("payload"),
+                "{format}: the error must name the field, got: {}",
+                err.root_cause()
+            );
+        }
+        let asked = chunk.asked.lock().unwrap();
+        assert!(
+            asked.is_empty(),
+            "{place}: the chunk was asked for {asked:?}"
         );
     }
 }
