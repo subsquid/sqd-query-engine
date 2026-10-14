@@ -1,3 +1,4 @@
+pub mod catalogs;
 pub mod error;
 mod execution;
 pub mod integers;
