@@ -83,20 +83,6 @@ hedera:
     blocks.parquet: 93e883fc5e94c8277274d5ea15803a73
     logs.parquet: 461c3948c0a8fd1061dfc6e7ef9ade26
     transactions.parquet: 33036d792b078712487e4ef66d8d0422
-optimism-16k:
-  ref: s3://optimism-3/0008326360/0011629573-0011645616-b3cbaab0
-  xxh3:
-    blocks.parquet: 3d543a307786496824d255786a77bad0
-    logs.parquet: 1e8585beec0bf872c973a1b85cde4ea3
-    transactions.parquet: 8cb8d50598fe89099122985b3df13369
-hyperliquid-traces:
-  ref: s3://hyperliquid-mainnet-1/0004396280/0006528760-0006542399-8b0db4c9
-  xxh3:
-    blocks.parquet: 48a7a66a1a4088deae7df42acc4a4870
-    logs.parquet: 83b18d00f83e65db0bb87bf2ec6ff39b
-    statediffs.parquet: c46b367942bef48f71b9d115648c908c
-    traces.parquet: 3a84c70f7ae96833e4c735ff57bb6565
-    transactions.parquet: 5c4870f77deb16144e2fdf821d8d98d2
 asset-hub-kusama:
   ref: s3://asset-hub-kusama-4/0012489600/0013377900-0013380299-27d08
   xxh3:
