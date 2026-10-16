@@ -187,7 +187,8 @@ fn execute(
             Ok(FmtOutput::Arrow(Some(output)))
         }
         OutputFormat::Json => {
-            let output = QueryOutput::prepare(page.blocks, header, tables, page.read_through)?;
+            let output =
+                QueryOutput::prepare(page.blocks, header, tables, page.read_through, page.weights)?;
             blocks.report_with("blocks + indexing", || {
                 format!("{} blocks", output.num_blocks())
             });

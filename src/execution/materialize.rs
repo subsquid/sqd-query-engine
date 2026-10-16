@@ -250,6 +250,7 @@ pub(super) fn materialize_page(execution: &Execution, page: Page) -> Result<Page
         headers,
         mut tables,
         read_through,
+        weights,
     } = page;
     let (plan, chunk, desc) = (execution.plan, execution.chunk, execution.blocks);
 
@@ -271,6 +272,7 @@ pub(super) fn materialize_page(execution: &Execution, page: Page) -> Result<Page
         headers: Rows::new(headers?),
         tables,
         read_through,
+        weights,
     })
 }
 
