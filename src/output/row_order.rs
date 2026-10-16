@@ -4,9 +4,10 @@
 //! Comparing two rows column by column resolves each column's type on every
 //! comparison. So a source's integer keys, with at most a trailing path of
 //! integers, are prepared once at their stored types, in the same order the
-//! comparator gives them; deep paths are written out as bytes, so that a long
-//! shared prefix compares as one run of bytes. The comparator stays for any
-//! other keys, and to order rows of different sources against each other.
+//! comparator gives them; keys that fit one word are written out as one, and
+//! deep paths as bytes, so that a long shared prefix compares as one run of
+//! bytes. The comparator stays for any other keys, and to order rows of
+//! different sources against each other.
 
 use crate::integers::OwnedIntColumn;
 use crate::metadata::TableDescription;
@@ -78,6 +79,9 @@ pub(crate) fn orders_rows(data_type: &DataType) -> bool {
 /// Every batch's sort keys, in a form two rows compare by without resolving
 /// their columns' types.
 enum SortKeys {
+    /// Integer columns of at most 64 bits together, one word a row: each value
+    /// at its stored width, sign bit flipped, the first column highest.
+    Words(Vec<Vec<u64>>),
     /// Integer columns and at most a trailing path of integers, read at their
     /// stored types, null slots as stored, as the typed columns read them.
     Typed(Vec<TypedKeys>),
@@ -144,6 +148,17 @@ macro_rules! stored_ints {
                 }
             }
 
+            /// Element `i` at its stored width, sign bit flipped, so that
+            /// words order as the values do.
+            fn word(&self, i: usize) -> u64 {
+                match self {
+                    $(Self::$variant(values) => {
+                        let sign: $unsigned = if $signed { 1 << ($bits - 1) } else { 0 };
+                        ((values[i] as $unsigned) ^ sign) as u64
+                    })+
+                }
+            }
+
             fn value(&self, i: usize) -> i128 {
                 match self {
                     $(Self::$variant(values) => values[i] as i128,)+
@@ -188,6 +203,7 @@ impl SortKeys {
     #[inline]
     fn compare(&self, (ba, ra): (usize, usize), (bb, rb): (usize, usize)) -> Ordering {
         match self {
+            Self::Words(keys) => keys[ba][ra].cmp(&keys[bb][rb]),
             Self::Typed(keys) => {
                 let (a, b) = (&keys[ba], &keys[bb]);
                 for (x, y) in a.fixed.iter().zip(&b.fixed) {
@@ -321,6 +337,10 @@ fn row_sort_keys(batches: &[RecordBatch], sort_columns: &[String]) -> Option<Sor
         .iter()
         .map(|columns| typed_keys(columns))
         .collect::<Option<Vec<_>>>()?;
+    if let Some(words) = typed.iter().map(word_keys).collect() {
+        return Some(SortKeys::Words(words));
+    }
+
     let deep = typed.iter().any(|keys| {
         keys.path.as_ref().is_some_and(|(offsets, _)| {
             let rows = offsets.len() - 1;
@@ -337,6 +357,24 @@ fn row_sort_keys(batches: &[RecordBatch], sort_columns: &[String]) -> Option<Sor
 
 /// Paths at least this deep on average are compared as bytes.
 const PACKED_DEPTH: usize = 8;
+
+/// Typed keys as one word a row, when they have no path and fit one.
+fn word_keys(keys: &TypedKeys) -> Option<Vec<u64>> {
+    let bits: usize = keys.fixed.iter().map(|column| column.width() * 8).sum();
+    if keys.path.is_some() || bits > 64 {
+        return None;
+    }
+
+    let rows = keys.fixed.first().map_or(0, StoredInts::len);
+    let words = (0..rows).map(|row| {
+        keys.fixed.iter().fold(0u64, |word, column| {
+            // A shift by the full 64 bits overflows; only a lone column is that wide.
+            let shifted = word.checked_shl(column.width() as u32 * 8).unwrap_or(0);
+            shifted | column.word(row)
+        })
+    });
+    Some(words.collect())
+}
 
 /// Typed keys written out as bytes.
 fn packed_keys(keys: &TypedKeys) -> PackedKeys {
@@ -409,6 +447,10 @@ fn sort_rows_by_order_keys_indexed(
     sort_rows: Option<&SortKeys>,
 ) {
     if rows.is_empty() {
+        return;
+    }
+    if let Some(SortKeys::Words(words)) = sort_rows {
+        rows.sort_unstable_by_key(|&(batch, row)| (words[batch][row], batch, row));
         return;
     }
     if let Some(keys) = sort_rows {
@@ -655,6 +697,7 @@ mod tests {
                 .collect();
             let keys = row_sort_keys(&batches, &columns);
             let found = match &keys {
+                Some(SortKeys::Words(_)) => "words",
                 Some(SortKeys::Typed(_)) => "typed",
                 Some(SortKeys::Packed(_)) => "packed",
                 None => "none",
@@ -691,9 +734,11 @@ mod tests {
             prop_assert_eq!(&by_comparator, &expected);
             prop_assert_eq!(&by_keys, &expected);
 
-            // Integers with a trailing path of one type are read at their
-            // types, deep paths as bytes; the rest by the comparator alone.
+            // Integers of one word together are read as one, with a trailing
+            // path of one type at their types, deep paths as bytes; the rest by
+            // the comparator alone.
             let has = |name: &str| columns.iter().any(|c| c == name);
+            let bits = 32 * usize::from(has("signed")) + 64 * usize::from(has("unsigned"));
             let path_last = columns
                 .iter()
                 .position(|c| c == "path")
@@ -703,6 +748,8 @@ mod tests {
             let rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
             let expected_form = if (has("path") && widths.len() > 1) || has("text") || !path_last {
                 "none"
+            } else if !has("path") && bits <= 64 {
+                "words"
             } else if has("path") && deep && rows > 0 {
                 "packed"
             } else {
