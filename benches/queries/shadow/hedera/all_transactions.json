@@ -16,7 +16,7 @@
  },
  "fromBlock": 40100000,
  "includeAllBlocks": true,
- "toBlock": 40149999,
+ "toBlock": 40104999,
  "transactions": [
   {}
  ],
