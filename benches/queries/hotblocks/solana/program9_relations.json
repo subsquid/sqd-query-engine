@@ -1,0 +1,68 @@
+{
+ "type": "solana",
+ "fromBlock": 456101222,
+ "fields": {
+  "block": {
+   "timestamp": true,
+   "number": true,
+   "hash": true,
+   "parentHash": true
+  },
+  "transaction": {
+   "signatures": true,
+   "accountKeys": true,
+   "transactionIndex": true
+  },
+  "instruction": {
+   "programId": true,
+   "accounts": true,
+   "data": true,
+   "transactionIndex": true,
+   "instructionAddress": true
+  },
+  "log": {
+   "programId": true,
+   "kind": true,
+   "message": true,
+   "logIndex": true,
+   "transactionIndex": true,
+   "instructionAddress": true
+  },
+  "balance": {
+   "transactionIndex": true,
+   "account": true
+  },
+  "tokenBalance": {
+   "preAmount": true,
+   "postAmount": true,
+   "preOwner": true,
+   "postOwner": true,
+   "transactionIndex": true,
+   "account": true
+  },
+  "reward": {
+   "pubkey": true
+  }
+ },
+ "instructions": [
+  {
+   "programId": [
+    "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+    "cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG",
+    "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+    "HEAVENoP2qxoeuF8Dj2oT1GHEnu49U5mJYkdeC8BAX2o",
+    "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
+    "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
+    "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",
+    "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C",
+    "HpNfyc2Saw7RKkQd8nEL4khUcuPhQ7WwY1B2qjx8jxFq"
+   ],
+   "isCommitted": true,
+   "innerInstructions": true,
+   "transaction": true,
+   "transactionTokenBalances": true,
+   "logs": true
+  }
+ ],
+ "toBlock": 456101269
+}
