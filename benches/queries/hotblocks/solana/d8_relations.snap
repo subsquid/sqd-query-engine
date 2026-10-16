@@ -1,7 +1,0 @@
----
-source: tests/queries.rs
----
-blocks: 48 (456101222 to 456101269)
-instructions: 250
-transactions: 13
-digest: 4b7911c65bf22231c82663ac75d40a65

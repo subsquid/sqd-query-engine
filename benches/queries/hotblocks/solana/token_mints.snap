@@ -1,7 +1,0 @@
----
-source: tests/queries.rs
----
-blocks: 48 (456101222 to 456101269)
-balances: 51758
-tokenBalances: 6084
-digest: 0ea214d6105d0285f28ebe05d96e40f8
