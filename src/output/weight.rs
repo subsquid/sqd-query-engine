@@ -210,6 +210,8 @@ pub(crate) struct BlockSelection {
     budget: u64,
     cumulative: u64,
     blocks: Vec<u64>,
+    /// What each of `blocks` weighs.
+    weights: Vec<u64>,
 }
 
 impl BlockSelection {
@@ -218,17 +220,18 @@ impl BlockSelection {
             budget,
             cumulative: 0,
             blocks: Vec::new(),
+            weights: Vec::new(),
         }
     }
 
     /// Returns true once the budget is exceeded, including by the first block.
     pub(crate) fn extend(&mut self, blocks: &[u64], weights: &FxHashMap<u64, u64>) -> bool {
         for &block in blocks {
-            self.cumulative = self
-                .cumulative
-                .saturating_add(weights.get(&block).copied().unwrap_or(0));
+            let weight = weights.get(&block).copied().unwrap_or(0);
+            self.cumulative = self.cumulative.saturating_add(weight);
             if self.blocks.is_empty() || self.cumulative <= self.budget {
                 self.blocks.push(block);
+                self.weights.push(weight);
             }
             if self.cumulative > self.budget {
                 return true;
@@ -237,8 +240,9 @@ impl BlockSelection {
         false
     }
 
-    pub(crate) fn into_blocks(self) -> Vec<u64> {
-        self.blocks
+    /// The selected blocks, and what each weighs.
+    pub(crate) fn into_blocks(self) -> (Vec<u64>, Vec<u64>) {
+        (self.blocks, self.weights)
     }
 
     pub(crate) fn blocks(&self) -> &[u64] {

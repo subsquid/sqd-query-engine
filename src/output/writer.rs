@@ -6,6 +6,10 @@ use anyhow::Result;
 /// Initial buffer capacity, tuned for typical response sizes.
 const INITIAL_CAPACITY: usize = 256 * 1024;
 
+/// JSON written before the rest of a response is sized from it, inside the
+/// initial buffer.
+const SAMPLE_BYTES: usize = INITIAL_CAPACITY / 2;
+
 /// Result of a query execution: the selected blocks plus everything needed to
 /// encode them on demand.
 ///
@@ -24,16 +28,19 @@ pub struct QueryOutput {
     tables: Vec<PreparedTable>,
     scratch: RowScratch,
     read_through: Option<u64>,
+    /// What each of `selected_blocks` weighs.
+    weights: Vec<u64>,
 }
 
 impl QueryOutput {
     /// Prepare the headers and every table to encode. `selected_blocks` is
-    /// sorted and not empty.
+    /// sorted and not empty, and `weights` holds what each weighs.
     pub(crate) fn prepare(
         selected_blocks: Vec<u64>,
         header: OutputHeader,
         tables: Vec<OutputTable>,
         read_through: Option<u64>,
+        weights: Vec<u64>,
     ) -> Result<Self> {
         let positions = BlockPositions::new(&selected_blocks);
         let header = PreparedHeader::new(header, &positions)?;
@@ -49,6 +56,7 @@ impl QueryOutput {
             tables,
             scratch: RowScratch::default(),
             read_through,
+            weights,
         })
     }
 
@@ -90,13 +98,38 @@ impl QueryOutput {
     }
 
     /// Encodes all blocks (regardless of prior iteration) as JSON Lines.
+    ///
+    /// A buffer grown by doubling copies all it holds each time, so once the
+    /// first blocks are written the buffer is sized for the rest at their bytes
+    /// per unit of weight. No one ratio serves every dataset: the JSON runs from
+    /// half the weight to a third above it.
     pub fn into_json_lines(mut self) -> Vec<u8> {
         self.next = 0;
         let mut out = Vec::with_capacity(INITIAL_CAPACITY);
+        let mut weighed = 0u64;
+        let mut sized = false;
         while self.has_next_block() {
+            weighed = weighed.saturating_add(self.weights[self.next]);
             self.write_next_block(&mut out);
             out.push(b'\n');
+
+            if !sized && out.len() >= SAMPLE_BYTES && weighed > 0 {
+                sized = true;
+                out.reserve(self.bytes_left(out.len(), weighed));
+            }
         }
         out
+    }
+
+    /// What the blocks left take at the bytes per unit of weight of the
+    /// `written` bytes that weighed `weighed`, with an eighth to spare. A ratio
+    /// above two is taken as two: a few light blocks say little of the rest.
+    fn bytes_left(&self, written: usize, weighed: u64) -> usize {
+        let left: u128 = self.weights[self.next..]
+            .iter()
+            .map(|&w| u128::from(w))
+            .sum();
+        let bytes = (left * written as u128 / u128::from(weighed)).min(left * 2);
+        usize::try_from(bytes + bytes / 8).unwrap_or(usize::MAX)
     }
 }

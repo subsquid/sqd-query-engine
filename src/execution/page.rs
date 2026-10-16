@@ -30,6 +30,8 @@ pub(super) struct Page {
     pub(super) tables: HashMap<String, TableOutput>,
     /// The last block read when the page stopped before the requested end.
     pub(super) read_through: Option<u64>,
+    /// What each of `blocks` weighs.
+    pub(super) weights: Vec<u64>,
 }
 
 /// Read and weigh complete block ranges until the page is full or the request
@@ -128,7 +130,7 @@ pub(super) fn select_page(execution: &Execution) -> Result<Option<Page>> {
         first_range = false;
     }
 
-    let blocks = selection.into_blocks();
+    let (blocks, weights) = selection.into_blocks();
     if blocks.is_empty() {
         return Ok(None);
     }
@@ -138,6 +140,7 @@ pub(super) fn select_page(execution: &Execution) -> Result<Option<Page>> {
         headers,
         tables,
         read_through,
+        weights,
     }))
 }
 
