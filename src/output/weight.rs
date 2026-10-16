@@ -244,6 +244,11 @@ impl BlockSelection {
     pub(crate) fn blocks(&self) -> &[u64] {
         &self.blocks
     }
+
+    /// What every block offered so far weighs together.
+    pub(crate) fn weight(&self) -> u64 {
+        self.cumulative
+    }
 }
 
 /// Suggest the first range through the block that crosses the estimated budget.

@@ -65,6 +65,7 @@ pub(super) fn select_page(execution: &Execution) -> Result<Option<Page>> {
     loop {
         let (to_block, last_range) = range_end(
             execution,
+            &selection,
             from_block,
             first_range,
             &header_numbers,
@@ -161,9 +162,10 @@ fn read_headers(execution: &Execution) -> Result<Rows> {
 }
 
 /// Where the range from `from_block` ends, and whether it reaches the end of
-/// the request.
+/// the request. `selection` holds what the ranges before it selected.
 fn range_end(
     execution: &Execution,
+    selection: &BlockSelection,
     from_block: u64,
     first_range: bool,
     header_numbers: &[u64],
@@ -183,7 +185,7 @@ fn range_end(
     // scans across numeric gaps.
     let first = header_numbers.partition_point(|&block| block < from_block);
     let headers_left = header_numbers.len() - first;
-    if let Some(blocks_per_selection) = selection_span(execution, headers_left) {
+    if let Some(blocks_per_selection) = selection_span(execution, selection, first, headers_left) {
         if let Some(&end) = header_numbers.get(first + blocks_per_selection - 1) {
             hint = Some(hint.map_or(end, |hint| hint.min(end)));
         }
@@ -202,17 +204,28 @@ fn range_end(
     Ok((to_block, last_range))
 }
 
-/// How many header blocks one selection pass may span, with `headers_left` of
-/// the request still to read; `None` when it may span the request, or when
-/// payloads are not deferred.
+/// How many header blocks one selection pass may span, with `headers_read` of
+/// the request's headers behind it and `headers_left` still to read; `None`
+/// when it may span the request, or when payloads are not deferred.
 ///
-/// Each pass is bounded even when row groups overlap or have no statistics.
-/// Unfiltered scans fill a page within a few blocks. A selective scan spans the
-/// request when the footer bounds its selection within the budget: a range reads
-/// again every row group whose blocks it shares with another, and a table sorted
-/// by its filter columns shares them all. Otherwise it uses larger ranges to
-/// amortize predicate decoding over overlapping row groups.
-fn selection_span(execution: &Execution, headers_left: usize) -> Option<usize> {
+/// Each pass is bounded even when row groups overlap or have no statistics. A
+/// selective scan spans the request when the footer bounds its selection within
+/// the budget: a range reads again every row group whose blocks it shares with
+/// another, and a table sorted by its filter columns shares them all. Otherwise
+/// it uses larger ranges to amortize predicate decoding over overlapping row
+/// groups.
+///
+/// An item that matches every row fills a page within a few blocks where its
+/// table has rows in most of them, and reading past the page decodes rows for
+/// nothing. So its first pass spans a few blocks, and the next one what the rest
+/// of the budget holds at the weight read so far. Only a page larger than a
+/// selective range spans as a selective scan does.
+fn selection_span(
+    execution: &Execution,
+    selection: &BlockSelection,
+    headers_read: usize,
+    headers_left: usize,
+) -> Option<usize> {
     const UNFILTERED: usize = 16;
     const SELECTIVE: usize = 1024;
 
@@ -224,7 +237,15 @@ fn selection_span(execution: &Execution, headers_left: usize) -> Option<usize> {
         .iter()
         .any(|table| table.predicates.iter().any(RowPredicate::matches_every_row));
     if unfiltered {
-        return Some(UNFILTERED);
+        if headers_read == 0 {
+            return Some(UNFILTERED);
+        }
+
+        let budget = execution.options.weight_budget;
+        let holds = headers_budget_holds(budget, selection.weight(), headers_read);
+        if holds <= SELECTIVE {
+            return Some(holds.max(UNFILTERED));
+        }
     }
 
     // Only a request that a range would split asks the footer.
@@ -234,6 +255,19 @@ fn selection_span(execution: &Execution, headers_left: usize) -> Option<usize> {
     }
 
     Some(SELECTIVE)
+}
+
+/// How many more header blocks the rest of `budget` holds, at the weight per
+/// header block of the `headers_read` ones that weighed `weight`.
+fn headers_budget_holds(budget: u64, weight: u64, headers_read: usize) -> usize {
+    // Headers that weighed nothing say nothing of the ones after them.
+    if weight == 0 {
+        return usize::MAX;
+    }
+
+    let left = u128::from(budget.saturating_sub(weight));
+    let holds = (left * headers_read as u128).div_ceil(u128::from(weight));
+    usize::try_from(holds).unwrap_or(usize::MAX)
 }
 
 /// A narrow size scan avoids decoding wide columns for a large unfiltered query.
