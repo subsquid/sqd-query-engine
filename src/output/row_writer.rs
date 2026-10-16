@@ -1,5 +1,5 @@
 use crate::metadata::{ColumnType, FieldSource, JsonEncoding, MemberDescription, TableDescription};
-use crate::output::block_index::{build_block_index, BlockIndex};
+use crate::output::block_index::{BlockIndex, BlockPositions};
 use crate::output::encoder::{
     encode_json_string, encode_roll, resolve_encoder, snake_to_camel, Encoder, ResolvedRollEncoder,
     RollSource, Unrenderable,
@@ -24,10 +24,10 @@ pub(crate) struct PreparedHeader {
 }
 
 impl PreparedHeader {
-    pub(crate) fn new(header: OutputHeader) -> Result<Self> {
+    pub(crate) fn new(header: OutputHeader, positions: &BlockPositions) -> Result<Self> {
         let batches = header.batches;
         let number_column = header.projection.desc().block_number_column.as_str();
-        let index = build_block_index(&batches, number_column)?;
+        let index = BlockIndex::build(&batches, number_column, positions)?;
 
         let writers = build_field_writers(header.projection);
         let resolved = batches
@@ -47,11 +47,11 @@ impl PreparedHeader {
         })
     }
 
-    /// Write the `"header"` entry of block `block_num`.
-    pub(crate) fn write(&self, buf: &mut Vec<u8>, block_num: u64) {
+    /// Write the `"header"` entry of block `block_num`, the page's `position`th.
+    pub(crate) fn write(&self, buf: &mut Vec<u8>, block_num: u64, position: usize) {
         buf.extend_from_slice(b"\"header\":{");
 
-        let first = self.index.get(&block_num).and_then(|rows| rows.first());
+        let first = self.index.rows(position).first();
         match first {
             Some(&(batch, row)) => {
                 write_row_fields_resolved(buf, &self.batches[batch], row, &self.resolved[batch])
@@ -80,6 +80,7 @@ pub(crate) struct PreparedTable {
 /// its writers resolved against each batch.
 struct PreparedSource {
     batches: Vec<RecordBatch>,
+    /// Each block's rows in item order.
     index: BlockIndex,
     order: RowOrder,
     writers: SourceWriters,
@@ -94,8 +95,6 @@ enum SourceWriters {
 /// Row references reused from block to block.
 #[derive(Default)]
 pub(crate) struct RowScratch {
-    /// `(batch, row)` of one source.
-    sort: Vec<(usize, usize)>,
     /// `(source, batch, row)` of several sources of one table.
     merge: Vec<(usize, usize, usize)>,
 }
@@ -104,12 +103,14 @@ impl PreparedTable {
     /// Sources without rows are left out, and `None` is a table with none left:
     /// a source whose rows were read under another adds nothing to any block,
     /// and as a second source it would only slow the merge.
-    pub(crate) fn new(table: OutputTable) -> Result<Option<Self>> {
+    pub(crate) fn new(table: OutputTable, positions: &BlockPositions) -> Result<Option<Self>> {
         let sources = table
             .sources
             .into_iter()
             .filter(|source| source.rows.num_rows() > 0)
-            .map(|source| PreparedSource::new(source.rows.into_batches(), source.projection))
+            .map(|source| {
+                PreparedSource::new(source.rows.into_batches(), source.projection, positions)
+            })
             .collect::<Result<Vec<_>>>()?;
         if sources.is_empty() {
             return Ok(None);
@@ -122,11 +123,11 @@ impl PreparedTable {
         Ok(Some(Self { prefix, sources }))
     }
 
-    /// Write the table's items of block `block_num`, if it has any.
-    pub(crate) fn write_items(&self, buf: &mut Vec<u8>, block_num: u64, scratch: &mut RowScratch) {
+    /// Write the table's items of the page's `position`th block, if it has any.
+    pub(crate) fn write_items(&self, buf: &mut Vec<u8>, position: usize, scratch: &mut RowScratch) {
         match self.sources.as_slice() {
-            [source] => source.write_items(buf, block_num, &self.prefix, &mut scratch.sort),
-            _ => self.write_merged_items(buf, block_num, &mut scratch.merge),
+            [source] => source.write_items(buf, position, &self.prefix),
+            _ => self.write_merged_items(buf, position, &mut scratch.merge),
         }
     }
 
@@ -135,14 +136,13 @@ impl PreparedTable {
     fn write_merged_items(
         &self,
         buf: &mut Vec<u8>,
-        block_num: u64,
+        position: usize,
         rows: &mut Vec<(usize, usize, usize)>,
     ) {
         rows.clear();
         for (si, source) in self.sources.iter().enumerate() {
-            if let Some(refs) = source.index.get(&block_num) {
-                rows.extend(refs.iter().map(|&(bi, ri)| (si, bi, ri)));
-            }
+            let refs = source.index.rows(position);
+            rows.extend(refs.iter().map(|&(bi, ri)| (si, bi, ri)));
         }
 
         if rows.is_empty() {
@@ -176,10 +176,17 @@ impl PreparedTable {
 }
 
 impl PreparedSource {
-    fn new(batches: Vec<RecordBatch>, projection: &ResolvedProjection) -> Result<Self> {
+    fn new(
+        batches: Vec<RecordBatch>,
+        projection: &ResolvedProjection,
+        positions: &BlockPositions,
+    ) -> Result<Self> {
         let desc = projection.desc();
-        let index = build_block_index(&batches, &desc.block_number_column)?;
+        let mut index = BlockIndex::build(&batches, &desc.block_number_column, positions)?;
         let order = RowOrder::new(&batches, desc);
+        for rows in index.runs_mut() {
+            order.sort(rows);
+        }
 
         let writers = match build_grouped_writers(projection) {
             Some(grouped) => SourceWriters::Grouped(
@@ -207,22 +214,13 @@ impl PreparedSource {
         })
     }
 
-    /// Write this source's items of block `block_num` as the table's array.
-    fn write_items(
-        &self,
-        buf: &mut Vec<u8>,
-        block_num: u64,
-        prefix: &[u8],
-        rows: &mut Vec<(usize, usize)>,
-    ) {
-        let row_refs = match self.index.get(&block_num) {
-            Some(refs) if !refs.is_empty() => refs,
-            _ => return,
-        };
-
-        rows.clear();
-        rows.extend_from_slice(row_refs);
-        self.order.sort(rows);
+    /// Write this source's items of the page's `position`th block as the
+    /// table's array.
+    fn write_items(&self, buf: &mut Vec<u8>, position: usize, prefix: &[u8]) {
+        let rows = self.index.rows(position);
+        if rows.is_empty() {
+            return;
+        }
 
         buf.extend_from_slice(prefix);
 

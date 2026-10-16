@@ -1,3 +1,4 @@
+use crate::output::block_index::BlockPositions;
 use crate::output::row_writer::{json_close, PreparedHeader, PreparedTable, RowScratch};
 use crate::output::sources::{OutputHeader, OutputTable};
 use anyhow::Result;
@@ -34,10 +35,11 @@ impl QueryOutput {
         tables: Vec<OutputTable>,
         read_through: Option<u64>,
     ) -> Result<Self> {
-        let header = PreparedHeader::new(header)?;
+        let positions = BlockPositions::new(&selected_blocks);
+        let header = PreparedHeader::new(header, &positions)?;
         let tables = tables
             .into_iter()
-            .filter_map(|table| PreparedTable::new(table).transpose())
+            .filter_map(|table| PreparedTable::new(table, &positions).transpose())
             .collect::<Result<Vec<_>>>()?;
 
         Ok(Self {
@@ -74,12 +76,13 @@ impl QueryOutput {
     /// Encodes the next block as a JSON object appended to `out`.
     /// Panics if there is no next block — check [`has_next_block`](Self::has_next_block) first.
     pub fn write_next_block(&mut self, out: &mut Vec<u8>) {
-        let block_num = self.selected_blocks[self.next];
+        let position = self.next;
+        let block_num = self.selected_blocks[position];
         out.push(b'{');
 
-        self.header.write(out, block_num);
+        self.header.write(out, block_num, position);
         for table in &self.tables {
-            table.write_items(out, block_num, &mut self.scratch);
+            table.write_items(out, position, &mut self.scratch);
         }
 
         json_close(b'}', out);
