@@ -78,11 +78,26 @@ depend on how a file was written.
 
 The narrow pass is bounded the same way. It covers the whole request when the
 footer bound of its columns, row positions included, fits the budget; otherwise
-it reads ranges of 1 024 header blocks, or of 16 when an item matches every row.
-A range reads again every row group whose blocks it shares with another, and a
-table sorted by its filter columns shares them all: an address-only log query
-over a 10 247-block chunk read the table eleven times, at a sixth of the speed
-of one pass.
+it reads ranges of 1 024 header blocks. A range reads again every row group
+whose blocks it shares with another, and a table sorted by its filter columns
+shares them all: an address-only log query over a 10 247-block chunk read the
+table eleven times, at a sixth of the speed of one pass.
+
+An item that matches every row first reads 16 header blocks, whatever the
+footer says. Where its table has rows in most blocks, they fill the page: on a
+48-block Solana chunk whose page held 3 blocks, one pass over the request cost
+11% more. Past those blocks, each range spans what the rest of the budget holds
+at the weight read so far, and at least 16 header blocks. Where that is more
+than 1 024, the range is the selective one: the rest of the request where the
+footer bound fits, and 1 024 header blocks otherwise. Ranges of 16 alone were
+slow where rows are sparse: on a chain with one transaction in seven blocks,
+5 000 blocks took 313 passes and 52 ms, against 6 ms for the reference. The
+footer alone was slow where they are dense: on a 224-block EVM chunk whose page
+held 46 blocks, the second range read the rest of the chunk, almost seven times
+the log rows the page needed.
+`a_dense_unfiltered_selection_reads_little_past_its_page`,
+`an_unfiltered_selection_that_fits_reads_the_rest_at_once` and
+`an_unfiltered_selection_over_the_budget_sizes_its_ranges_by_weight` pin it.
 
 CT-5 pins the decision. `the_estimate_never_undercounts_what_a_scan_decodes`
 checks the bound against what the scan decodes for eleven column types under

@@ -1,6 +1,6 @@
 use crate::harness::chunk::{
-    chunk_relaid, dictionary_unannounced, edit_footer, repartition, without_byte_counts,
-    write_table, write_table_row_groups, write_table_with, Layout,
+    blocks_parquet, chunk_relaid, dictionary_unannounced, edit_footer, repartition,
+    without_byte_counts, write_table, write_table_row_groups, write_table_with, Layout,
 };
 use crate::harness::evm_like;
 use crate::harness::json::{assert_same_response, block_numbers, parse_response};
@@ -26,12 +26,16 @@ struct Read {
     rows: usize,
     columns: Vec<String>,
     physical_rows: bool,
+    /// The read reports its rows' positions, as a selection does.
+    positions: bool,
     filters: bool,
 }
 
 struct ObservedReader {
     inner: ParquetChunkReader,
     span: Option<u64>,
+    /// Whether the reader bounds a scan from the footer.
+    estimates: bool,
     reads: Mutex<Vec<Read>>,
 }
 
@@ -40,7 +44,15 @@ impl ObservedReader {
         Self {
             inner: ParquetChunkReader::open(path).unwrap(),
             span,
+            estimates: true,
             reads: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn without_estimates(self) -> Self {
+        Self {
+            estimates: false,
+            ..self
         }
     }
 }
@@ -58,6 +70,7 @@ impl ChunkReader for ObservedReader {
             to: request.to_block,
             rows: scanned.rows().num_rows(),
             physical_rows: request.row_indices.is_some(),
+            positions: request.positions,
             filters: !request.predicates.is_empty()
                 || request.key_filter.is_some()
                 || request.hierarchical_filter.is_some(),
@@ -75,6 +88,9 @@ impl ChunkReader for ObservedReader {
             .or_else(|| self.inner.next_block_range_end(table, column, from))
     }
     fn estimate_scan_bytes(&self, table: &str, request: &ScanRequest) -> Option<u64> {
+        if !self.estimates {
+            return None;
+        }
         self.inner.estimate_scan_bytes(table, request)
     }
     fn has_table(&self, table: &str) -> bool {
@@ -500,6 +516,239 @@ fn a_selection_over_the_budget_keeps_its_ranges() {
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }
 
+/// Rows far sparser than headers, as on a quiet chain: one log and one
+/// transaction in every `every`-th of `headers` blocks, each holding `payload`
+/// bytes.
+fn sparse_chunk(headers: u64, every: usize, payload: usize) -> TempDir {
+    let rows: Vec<u64> = (0..headers).step_by(every).collect();
+    let chunk = heavy_chunk(&rows, payload);
+    blocks_parquet(chunk.path(), &(0..headers).collect::<Vec<_>>());
+    chunk
+}
+
+/// An item that matches every row fills a page within a few blocks only where
+/// its table has rows in most of them, and its first range finds out. Past it,
+/// where the rest of the page spans more blocks than a selective range and the
+/// footer bounds the selection within the budget, one read covers the rest of
+/// the request however sparse the rows are: in ranges of a few blocks, a quiet
+/// chain took a read of each table per range.
+///
+/// Covers CT-5 · INV-B7
+#[test]
+fn an_unfiltered_selection_that_fits_reads_the_rest_at_once() {
+    let sparse = sparse_chunk(2_500, 8, 4 * 1024);
+    let unprunable = unprunable_chunk(UNPRUNABLE_BLOCKS, 1024, 1);
+    let fields = |transaction: &str| {
+        serde_json::json!({"block": {"number": true},
+            "log": {"logIndex": true, "data": true},
+            "transaction": {"transactionIndex": true, transaction: true}})
+    };
+    let cases = [
+        (
+            sparse.path(),
+            catalog(),
+            serde_json::json!({"type": "test", "fromBlock": 0, "includeAllBlocks": true,
+                "logs": [{}], "fields": fields("input")}),
+            MB,
+            vec![("logs", "data")],
+            "an item beside every header",
+        ),
+        (
+            sparse.path(),
+            catalog(),
+            serde_json::json!({"type": "test", "fromBlock": 0, "includeAllBlocks": true,
+                "logs": [{"transaction": true}], "fields": fields("input")}),
+            2 * MB,
+            vec![("logs", "data"), ("transactions", "input")],
+            "an item with a relation",
+        ),
+        (
+            unprunable.path(),
+            evm_like::catalog(),
+            serde_json::json!({"type": "test", "fromBlock": 0,
+                "logs": [{"address": [evm_like::address(0)]}], "transactions": [{}],
+                "fields": fields("gasUsed")}),
+            4 * MB,
+            vec![("logs", "data"), ("transactions", "gas_used")],
+            "an item beside a filtered one",
+        ),
+    ];
+
+    let mut failures = Vec::new();
+    for (path, meta, query, budget, tables, what) in cases {
+        let query = query.to_string();
+        let full = run(
+            &meta,
+            &ParquetChunkReader::open(path).unwrap(),
+            &query,
+            budget,
+            false,
+        );
+        let reader = ObservedReader::new(path, None);
+        let paged = run(&meta, &reader, &query, budget, true);
+        assert_same_response(&full, &paged, what);
+
+        for (table, payload) in tables {
+            let reads = narrow_reads(&reader, table, payload);
+            if reads.len() != 2 {
+                failures.push(format!(
+                    "{what}: {table} was selected in {} reads",
+                    reads.len()
+                ));
+            }
+        }
+    }
+
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// Where its table has rows in every block, an item that matches every row
+/// fills the page within a few blocks, inside its first range or soon after
+/// it. A read of the rest of the request would decode every other block's rows
+/// for nothing, even where the footer bounds that read within the budget.
+///
+/// Covers CT-5 · INV-B7
+#[test]
+fn a_dense_unfiltered_selection_reads_little_past_its_page() {
+    let meta = catalog();
+    let query = serde_json::json!({"type": "test", "fromBlock": 0, "includeAllBlocks": true,
+        "logs": [{}],
+        "fields": {"block": {"number": true}, "log": {"logIndex": true, "data": true}}})
+    .to_string();
+    let budget = 64 * 1024;
+
+    let mut failures = Vec::new();
+    for (payload, what) in [
+        (16 * 1024, "a page inside the first range"),
+        (2 * 1024, "a page past the first range"),
+    ] {
+        let chunk = heavy_chunk(&(0..200).collect::<Vec<_>>(), payload);
+        let full = run(
+            &meta,
+            &ParquetChunkReader::open(chunk.path()).unwrap(),
+            &query,
+            budget,
+            false,
+        );
+        let reader = ObservedReader::new(chunk.path(), None);
+        let paged = run(&meta, &reader, &query, budget, true);
+        assert_same_response(&full, &paged, what);
+
+        let page = block_numbers(&parse_response(&paged)).len();
+        assert!(page < 100, "{what}: the budget must cut the page");
+        let reads = reader.reads.lock().unwrap();
+        let selected: usize = reads
+            .iter()
+            .filter(|read| read.table == "logs" && read.positions && !read.physical_rows)
+            .map(|read| read.rows)
+            .sum();
+        if selected > page + 16 {
+            failures.push(format!(
+                "{what}: selection read {selected} rows for a page of {page}"
+            ));
+        }
+    }
+
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// Where the footer cannot bound the selection, an item that matches every row
+/// is selected in ranges sized by what the blocks read so far weigh: few of them
+/// where rows are sparse, and little past the page where they are dense. Ranges
+/// of a fixed few blocks took a read per range on a quiet chain, and ranges of
+/// the most blocks a selection may span decoded far past a dense page.
+///
+/// Covers CT-5 · INV-B7
+#[test]
+fn an_unfiltered_selection_over_the_budget_sizes_its_ranges_by_weight() {
+    const HEADERS: u64 = 20_000;
+    let headers: Vec<u64> = (0..HEADERS).collect();
+    let logs: Vec<(u64, u64)> = headers.iter().step_by(4).map(|&b| (b, 100)).collect();
+    let sparse = weighted_chunk(&headers, &logs, &[]);
+    let dense = unprunable_chunk(UNPRUNABLE_BLOCKS, 16, 20);
+    let budget = 64 * 1024;
+
+    let logs_only = serde_json::json!({"type": "test", "fromBlock": 0, "logs": [{}],
+        "fields": {"block": {"number": true}, "log": {"logIndex": true, "data": true}}});
+    let mut logs_beside_headers = logs_only.clone();
+    logs_beside_headers["includeAllBlocks"] = true.into();
+    let transactions = serde_json::json!({"type": "test", "fromBlock": 0,
+        "includeAllBlocks": true, "transactions": [{}],
+        "fields": {"block": {"number": true},
+                   "transaction": {"transactionIndex": true, "gasUsed": true}}});
+
+    let mut failures = Vec::new();
+    for (path, meta, query, what) in [
+        (sparse.path(), catalog(), &logs_only, "sparse rows"),
+        (
+            sparse.path(),
+            catalog(),
+            &logs_beside_headers,
+            "sparse rows beside every header",
+        ),
+        (
+            dense.path(),
+            evm_like::catalog(),
+            &transactions,
+            "dense rows",
+        ),
+    ] {
+        let query = query.to_string();
+        let full = run(
+            &meta,
+            &ParquetChunkReader::open(path).unwrap(),
+            &query,
+            budget,
+            false,
+        );
+        let reader = ObservedReader::new(path, None);
+        let paged = run(&meta, &reader, &query, budget, true);
+        assert_same_response(&full, &paged, what);
+
+        let (table, payload) = if query.contains("transactions") {
+            ("transactions", "gas_used")
+        } else {
+            ("logs", "data")
+        };
+        let page_rows: usize = parse_response(&paged)
+            .iter()
+            .filter_map(|block| block[table].as_array())
+            .map(Vec::len)
+            .sum();
+        let reads = reader.reads.lock().unwrap();
+        // A narrow size scan can choose the first range; it reports no positions.
+        let narrow: Vec<_> = reads
+            .iter()
+            .filter(|read| read.table == table && read.positions && !read.physical_rows)
+            .filter(|read| !read.columns.iter().any(|c| c == payload))
+            .collect();
+        let selected_rows: usize = narrow.iter().map(|read| read.rows).sum();
+
+        if narrow.len() < 2 {
+            failures.push(format!("{what}: one read held the whole selection"));
+        }
+        if narrow.len() > 4 {
+            failures.push(format!(
+                "{what}: {} reads selected a page of {page_rows} rows",
+                narrow.len()
+            ));
+        }
+        if selected_rows > 2 * page_rows {
+            failures.push(format!(
+                "{what}: selection read {selected_rows} rows for a page of {page_rows}"
+            ));
+        }
+        for read in &narrow {
+            let span = read.to.unwrap_or(HEADERS - 1) - read.from.unwrap_or(0) + 1;
+            if span > 1024 {
+                failures.push(format!("{what}: a read spanned {span} blocks"));
+            }
+        }
+    }
+
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
 #[test]
 fn relations_select_the_page_before_reading_payloads() {
     // Sparse numbers exercise range progress without relying on numeric distance.
@@ -523,30 +772,45 @@ fn relations_select_the_page_before_reading_payloads() {
                 budget,
                 false,
             );
-            let reader = ObservedReader::new(path, None);
-            let selected = run(&meta, &reader, &query.to_string(), budget, true);
-            assert_same_response(&full, &selected, "relations must keep the weighted prefix");
-            let count = block_numbers(&parse_response(&selected)).len();
-            assert!(count < blocks.len());
-            let reads = reader.reads.lock().unwrap();
-            for (table, payload) in [("logs", "data"), ("transactions", "input")] {
-                let wide: Vec<_> = reads
-                    .iter()
-                    .filter(|read| read.table == table && read.columns.iter().any(|c| c == payload))
-                    .collect();
-                assert_eq!(
-                    wide.len(),
-                    1,
-                    "{table}: duplicate payload read through a relation"
-                );
-                assert_eq!(
-                    wide[0].rows, count,
-                    "{table}: decoded rows outside the page"
-                );
-                for narrow in reads.iter().filter(|read| {
-                    read.table == table && !read.columns.iter().any(|c| c == payload)
-                }) {
-                    assert!(narrow.rows <= 256, "{table}: unbounded selection scan");
+            // Where the footer bounds the selection, one read may cover the
+            // request (ADR-15); where it cannot, a read holds about a page.
+            let readers = [
+                ObservedReader::new(path, None),
+                ObservedReader::new(path, None).without_estimates(),
+            ];
+            for reader in readers {
+                let selected = run(&meta, &reader, &query.to_string(), budget, true);
+                assert_same_response(&full, &selected, "relations must keep the weighted prefix");
+                let count = block_numbers(&parse_response(&selected)).len();
+                assert!(count < blocks.len());
+                let reads = reader.reads.lock().unwrap();
+                for (table, payload) in [("logs", "data"), ("transactions", "input")] {
+                    let wide: Vec<_> = reads
+                        .iter()
+                        .filter(|read| {
+                            read.table == table && read.columns.iter().any(|c| c == payload)
+                        })
+                        .collect();
+                    assert_eq!(
+                        wide.len(),
+                        1,
+                        "{table}: duplicate payload read through a relation"
+                    );
+                    assert_eq!(
+                        wide[0].rows, count,
+                        "{table}: decoded rows outside the page"
+                    );
+                    if reader.estimates {
+                        continue;
+                    }
+                    for narrow in reads.iter().filter(|read| {
+                        read.table == table && !read.columns.iter().any(|c| c == payload)
+                    }) {
+                        assert!(
+                            narrow.rows <= count + 16,
+                            "{table}: unbounded selection scan"
+                        );
+                    }
                 }
             }
         }
