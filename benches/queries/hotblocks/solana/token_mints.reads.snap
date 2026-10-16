@@ -1,0 +1,23 @@
+---
+source: tests/queries.rs
+---
+## json
+response 456101222..456101269 n=48 read_through=-
+read balances blocks=456101222..456101269 cols=[account,block_number,post,pre,transaction_index] block_column=block_number required=[account,post,pre,transaction_index] items=[] window=456101222..456101269 -> rows=51758
+read blocks blocks=456101222..456101269 cols=[hash,number,timestamp] block_column=number required=[hash,number,timestamp] -> rows=48
+read token_balances blocks=456101222..456101269 cols=[account,block_number,post_amount,post_mint,post_owner,pre_amount,pre_mint,pre_owner,transaction_index] block_column=block_number required=[account,post_amount,post_mint,post_owner,pre_amount,pre_mint,pre_owner,transaction_index] items=[pre_mint in(#882cf0049a7b63b3); post_mint in(#882cf0049a7b63b3)] window=456101222..456101269 -> rows=6084
+
+## json, page 256 KiB
+response 456101222..456101222 n=1 read_through=456101237
+read balances blocks=-..- cols=[account,block_number,post,pre,transaction_index] block_column=block_number at=1132:c4e802f398d8b7e4 -> rows=1132
+read balances blocks=456101222..456101237 cols=[block_number] block_column=block_number required=[account,post,pre,transaction_index] items=[] positions window=456101222..456101237 -> rows=15156
+read blocks blocks=-..- cols=[hash,number,timestamp] block_column=number at=1:c77b3abb6f87acd9 -> rows=1
+read blocks blocks=456101222..456101269 cols=[number] block_column=number required=[hash,number,timestamp] positions -> rows=48
+read token_balances blocks=-..- cols=[account,block_number,post_amount,post_mint,post_owner,pre_amount,pre_mint,pre_owner,transaction_index] block_column=block_number at=86:727cab4b2e601969 -> rows=86
+read token_balances blocks=456101222..456101237 cols=[block_number] block_column=block_number required=[account,post_amount,post_mint,post_owner,pre_amount,pre_mint,pre_owner,transaction_index] items=[pre_mint in(#882cf0049a7b63b3); post_mint in(#882cf0049a7b63b3)] positions window=456101222..456101237 -> rows=2025
+
+## arrow
+response 456101222..456101269 n=48
+read balances blocks=456101222..456101269 cols=[account,block_number,post,pre,transaction_index] block_column=block_number required=[account,post,pre,transaction_index] items=[] window=456101222..456101269 -> rows=51758
+read blocks blocks=456101222..456101269 cols=[hash,number,timestamp] block_column=number required=[hash,number,timestamp] -> rows=48
+read token_balances blocks=456101222..456101269 cols=[account,block_number,post_amount,post_mint,post_owner,pre_amount,pre_mint,pre_owner,transaction_index] block_column=block_number required=[account,post_amount,post_mint,post_owner,pre_amount,pre_mint,pre_owner,transaction_index] items=[pre_mint in(#882cf0049a7b63b3); post_mint in(#882cf0049a7b63b3)] window=456101222..456101269 -> rows=6084

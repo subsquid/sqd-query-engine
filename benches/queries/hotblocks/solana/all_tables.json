@@ -1,0 +1,94 @@
+{
+ "type": "solana",
+ "fromBlock": 456101222,
+ "toBlock": 456101269,
+ "includeAllBlocks": true,
+ "fields": {
+  "instruction": {
+   "accounts": true,
+   "computeUnitsConsumed": true,
+   "data": true,
+   "error": true,
+   "hasDroppedLogMessages": true,
+   "instructionAddress": true,
+   "isCommitted": true,
+   "programId": true,
+   "transactionIndex": true
+  },
+  "transaction": {
+   "accountKeys": true,
+   "addressTableLookups": true,
+   "computeUnitsConsumed": true,
+   "err": true,
+   "fee": true,
+   "feePayer": true,
+   "hasDroppedLogMessages": true,
+   "loadedAddresses": true,
+   "numReadonlySignedAccounts": true,
+   "numReadonlyUnsignedAccounts": true,
+   "numRequiredSignatures": true,
+   "signatures": true,
+   "transactionIndex": true
+  },
+  "log": {
+   "instructionAddress": true,
+   "kind": true,
+   "message": true,
+   "programId": true,
+   "transactionIndex": true
+  },
+  "balance": {
+   "account": true,
+   "post": true,
+   "pre": true,
+   "transactionIndex": true
+  },
+  "tokenBalance": {
+   "account": true,
+   "postAmount": true,
+   "postDecimals": true,
+   "postMint": true,
+   "postOwner": true,
+   "postProgramId": true,
+   "preAmount": true,
+   "preDecimals": true,
+   "preMint": true,
+   "preOwner": true,
+   "preProgramId": true,
+   "transactionIndex": true
+  },
+  "reward": {
+   "commission": true,
+   "lamports": true,
+   "postBalance": true,
+   "pubkey": true,
+   "rewardType": true
+  },
+  "block": {
+   "hash": true,
+   "height": true,
+   "number": true,
+   "parentHash": true,
+   "parentNumber": true,
+   "timestamp": true
+  }
+ },
+ "instructions": [
+  {}
+ ],
+ "transactions": [
+  {}
+ ],
+ "logs": [
+  {}
+ ],
+ "balances": [
+  {}
+ ],
+ "tokenBalances": [
+  {}
+ ],
+ "rewards": [
+  {}
+ ]
+}

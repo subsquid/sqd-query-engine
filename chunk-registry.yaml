@@ -61,3 +61,16 @@ tempo:
   ref: fixture:tempo
 tron:
   ref: fixture:tron
+
+# 48 recent blocks of Solana, for the query shapes that cost the hot block
+# service the most.
+solana-hot:
+  ref: s3://solana-mainnet-3/0455879196/0456101222-0456101269-QrQ2ikRS
+  xxh3:
+    balances.parquet: 23707cd24de83e7f901099ff9b6e0a3b
+    blocks.parquet: bb5a1d20a1be2f5707ff20dc13d85647
+    instructions.parquet: 31e5d26eacd4c88fcbd05f8c92c22284
+    logs.parquet: 521b689a809f410dfb078a0f7fb45092
+    rewards.parquet: 8c8e22591144a0ef1d1b70c970e69e9e
+    token_balances.parquet: a60954b0be02c3728288b7c8fdb0b5f8
+    transactions.parquet: fa839d854eed75cf25e776b0cc96f101

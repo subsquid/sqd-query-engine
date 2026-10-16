@@ -1,0 +1,48 @@
+{
+ "type": "solana",
+ "fromBlock": 456101222,
+ "toBlock": 456101269,
+ "includeAllBlocks": true,
+ "fields": {
+  "block": {
+   "number": true,
+   "timestamp": true
+  },
+  "instruction": {
+   "programId": true,
+   "accounts": true,
+   "data": true,
+   "isCommitted": true,
+   "transactionIndex": true,
+   "instructionAddress": true
+  },
+  "transaction": {
+   "transactionIndex": true,
+   "err": true,
+   "signatures": true
+  },
+  "log": {
+   "programId": true,
+   "kind": true,
+   "message": true,
+   "transactionIndex": true
+  }
+ },
+ "instructions": [
+  {
+   "programId": [
+    "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+    "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
+   ],
+   "mentionsAccount": [
+    "Gn8Xti76PAzz4v8iir7S7dwiJ1mEHwGYaCTusk8apump",
+    "DTDVuezrmP5o7nmuUtVCWZgDBfoRdZZj9dL62eENEmJ3",
+    "BvyZQp6d6P8XRVSVFvmXuH8TH2hMxazULMpG7g1z5ng5"
+   ],
+   "isCommitted": true,
+   "innerInstructions": true,
+   "transaction": true,
+   "logs": true
+  }
+ ]
+}

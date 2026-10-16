@@ -1,0 +1,20 @@
+---
+source: tests/queries.rs
+---
+## json
+response 456101222..456101269 n=2 read_through=-
+read blocks blocks=-..- cols=[number] block_column=number at=2:54013abf5247688e -> rows=2
+read blocks blocks=456101222..456101269 cols=[number] block_column=number required=[number] positions -> rows=48
+read instructions blocks=456101222..456101269 cols=[block_number,data_size,instruction_address,transaction_index] block_column=block_number required=[d8,data,data_size,program_id] items=[program_id in(Utf8: "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P") accounts_bloom bloom(#4a6a41646806f983) is_committed eq(Boolean(true))] positions window=456101222..456101269 -> rows=0
+
+## json, page 256 KiB
+response 456101222..456101269 n=2 read_through=-
+read blocks blocks=-..- cols=[number] block_column=number at=2:54013abf5247688e -> rows=2
+read blocks blocks=456101222..456101269 cols=[number] block_column=number required=[number] positions -> rows=48
+read instructions blocks=456101222..456101269 cols=[block_number,data_size,instruction_address,transaction_index] block_column=block_number required=[d8,data,data_size,program_id] items=[program_id in(Utf8: "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P") accounts_bloom bloom(#4a6a41646806f983) is_committed eq(Boolean(true))] positions window=456101222..456101269 -> rows=0
+
+## arrow
+response 456101222..456101269 n=2
+read blocks blocks=-..- cols=[number] block_column=number at=2:54013abf5247688e -> rows=2
+read blocks blocks=456101222..456101269 cols=[number] block_column=number required=[number] positions -> rows=48
+read instructions blocks=456101222..456101269 cols=[block_number,data_size,instruction_address,transaction_index] block_column=block_number required=[d8,data,data_size,program_id] items=[program_id in(Utf8: "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P") accounts_bloom bloom(#4a6a41646806f983) is_committed eq(Boolean(true))] positions window=456101222..456101269 -> rows=0
