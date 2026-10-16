@@ -1,0 +1,8 @@
+---
+source: tests/queries.rs
+---
+blocks: 2100 (13377900 to 13379999)
+calls: 4389
+events: 5029
+extrinsics: 4279
+digest: 4161e5f6507e7ca1acf25cbb46f0a06b
