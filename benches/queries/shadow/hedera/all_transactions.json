@@ -1,0 +1,24 @@
+{
+ "fields": {
+  "block": {
+   "hash": true,
+   "number": true,
+   "timestamp": true
+  },
+  "transaction": {
+   "contractAddress": true,
+   "from": true,
+   "hash": true,
+   "status": true,
+   "to": true,
+   "transactionIndex": true
+  }
+ },
+ "fromBlock": 40100000,
+ "includeAllBlocks": true,
+ "toBlock": 40149999,
+ "transactions": [
+  {}
+ ],
+ "type": "evm"
+}

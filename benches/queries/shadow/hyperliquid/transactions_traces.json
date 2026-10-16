@@ -1,0 +1,40 @@
+{
+ "fields": {
+  "block": {
+   "hash": true,
+   "number": true,
+   "timestamp": true
+  },
+  "trace": {
+   "callFrom": true,
+   "callTo": true,
+   "createFrom": true,
+   "createResultAddress": true,
+   "error": true,
+   "rewardAuthor": true,
+   "suicideAddress": true,
+   "suicideRefundAddress": true,
+   "traceAddress": true,
+   "transactionIndex": true,
+   "type": true
+  },
+  "transaction": {
+   "contractAddress": true,
+   "from": true,
+   "hash": true,
+   "status": true,
+   "to": true,
+   "transactionIndex": true
+  }
+ },
+ "fromBlock": 6536672,
+ "includeAllBlocks": true,
+ "toBlock": 6542399,
+ "traces": [
+  {}
+ ],
+ "transactions": [
+  {}
+ ],
+ "type": "evm"
+}
