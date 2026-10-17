@@ -668,13 +668,15 @@ mod tests {
     #[test]
     fn nested_forks_from_many_callers_finish() {
         let pool = Arc::new(pool(2));
+        // Miri runs this some thousand times slower.
+        let rounds = if cfg!(miri) { 3 } else { 200 };
         let (finished, done) = std::sync::mpsc::channel();
 
         for _ in 0..4 {
             let (pool, finished) = (pool.clone(), finished.clone());
             std::thread::spawn(move || {
                 let items: Vec<u64> = (0..6).collect();
-                for _ in 0..200 {
+                for _ in 0..rounds {
                     let sums = pool.install(|| {
                         map(&items, |&outer| {
                             map(&items[..3], |&inner| outer * 10 + inner)
