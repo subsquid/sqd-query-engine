@@ -6,6 +6,7 @@ pub mod join;
 /// so other projects can fetch them; re-exported under the module's old path.
 pub use sqd_metadata as metadata;
 pub mod output;
+mod parallel;
 pub mod query;
 pub mod scan;
 pub mod text;

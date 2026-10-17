@@ -255,9 +255,14 @@ not nested JSON fields. See
 
 ## Parallelism and invariants
 
-Primary tables, relation work, and Parquet row groups use Rayon; deferred table
-and header materialization also overlap via `rayon::join`. They use the active
-Rayon pool. Query concurrency and pool size are separate controls. Collected
+Primary tables, relation work, and Parquet row groups run side by side, and so
+do deferred table and header materialization. They fork through
+`src/parallel.rs`, not through Rayon's `join` or parallel iterators: the
+thread that forks runs the items itself, threads of the active Rayon pool help,
+and a thread that waits for a helper runs nothing else. A Rayon worker that
+waits runs other jobs instead, the root of another caller's query among them,
+and resumes only when that query ends; under steady load some queries then wait
+without bound. Query concurrency and pool size are separate controls. Collected
 results are checked in stable plan or row-group order to preserve deterministic
 errors. JSON blocks encode sequentially.
 
