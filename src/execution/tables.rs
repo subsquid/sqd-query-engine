@@ -7,6 +7,7 @@ use crate::metadata::TableDescription;
 use crate::output::block_index::compute_block_range;
 use crate::output::projection::ResolvedProjection;
 use crate::output::weight::TableOutput;
+use crate::parallel;
 use crate::query::{RelationKind, RelationPlan};
 use crate::scan::{
     AddressIndex, ChunkReader, HierarchicalFilter, HierarchicalMode, KeyFilter, KeySet, Rows,
@@ -14,7 +15,6 @@ use crate::scan::{
 };
 use anyhow::{Context, Result};
 use arrow::record_batch::RecordBatch;
-use rayon::prelude::*;
 use std::collections::HashMap;
 
 /// Read all primary and relation rows for one complete block range.
@@ -30,11 +30,9 @@ pub(super) fn scan_tables(
 
     // Tables are independent, and one table's scan rarely has row groups
     // enough to keep every thread busy.
-    let scanned: Vec<Result<(String, TableOutput)>> = execution
-        .tables
-        .par_iter()
-        .map(|table| scan_table(execution, table, window))
-        .collect();
+    let scanned = parallel::map(&execution.tables, |table| {
+        scan_table(execution, table, window)
+    });
 
     // The first failure in plan order, the one a serial scan would report.
     scanned.into_iter().collect()
@@ -105,17 +103,13 @@ fn scan_table(
         started.report("key filter build");
 
         let started = Stopwatch::start(profile);
-        let related: Vec<(usize, Result<Rows>)> = inputs
-            .par_iter()
-            .enumerate()
-            .filter_map(|(index, input)| {
-                if input.follows_nothing() {
-                    return None;
-                }
-                let rows = scan_relation(input, chunk, window, block_range, profile);
-                Some((index, rows))
-            })
+        let followed: Vec<usize> = (0..inputs.len())
+            .filter(|&index| !inputs[index].follows_nothing())
             .collect();
+        let related = parallel::map(&followed, |&index| {
+            let rows = scan_relation(&inputs[index], chunk, window, block_range, profile);
+            (index, rows)
+        });
         started.report("relation scans+joins");
 
         for (index, rows) in related {
@@ -210,7 +204,7 @@ fn group_keys_for_relation<'a>(keys: &'a [String], address: Option<&str>) -> Vec
 /// Values built once per distinct key, side by side.
 struct BuiltOnce<K, V>(Vec<(K, V)>);
 
-impl<K: PartialEq + Send, V: Send> BuiltOnce<K, V> {
+impl<K: PartialEq + Send + Sync, V: Send> BuiltOnce<K, V> {
     fn build(keys: impl IntoIterator<Item = K>, build: impl Fn(&K) -> V + Sync + Send) -> Self {
         let mut distinct: Vec<K> = Vec::new();
         for key in keys {
@@ -219,14 +213,8 @@ impl<K: PartialEq + Send, V: Send> BuiltOnce<K, V> {
             }
         }
 
-        let built = distinct
-            .into_par_iter()
-            .map(|key| {
-                let value = build(&key);
-                (key, value)
-            })
-            .collect();
-        Self(built)
+        let values = parallel::map(&distinct, build);
+        Self(distinct.into_iter().zip(values).collect())
     }
 
     /// [`Self::build`] where a value may fail to build: the first failure in

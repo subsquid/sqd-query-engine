@@ -2,13 +2,13 @@ use super::predicate::or_masks;
 use super::rows::ScannedBatch;
 use super::scanner::{build_output_schema, project_batch};
 use super::{ParquetTable, ScanRequest};
+use crate::parallel;
 use anyhow::{Context, Result};
 use arrow::array::{Array, AsArray, BooleanArray, UInt64Array};
 use parquet::arrow::arrow_reader::{
     ArrowPredicate, ArrowPredicateFn, ParquetRecordBatchReaderBuilder, RowSelection, RowSelector,
 };
 use parquet::arrow::ProjectionMask;
-use rayon::prelude::*;
 use std::sync::{Arc, Mutex};
 
 /// Observe the existing filter pipeline without evaluating its predicates again.
@@ -189,39 +189,37 @@ pub(super) fn read_rows(
         pending = rest;
         offset = end;
     }
-    let batches = groups
-        .par_iter()
-        .map(|&(group, offset, count, selected)| {
-            let selection = RowSelection::from_consecutive_ranges(
-                selected.iter().map(|&row| {
-                    let position = (row - offset) as usize;
-                    position..position + 1
-                }),
-                count,
-            );
-            let reader = ParquetRecordBatchReaderBuilder::new_with_metadata(
-                table.data(),
-                table.arrow_metadata().clone(),
-            )
-            .with_row_groups(vec![group])
-            .with_row_selection(selection)
-            .with_projection(projection.clone())
-            .with_batch_size(request.batch_size)
-            .build()
-            .context("building selected-row reader")?;
-            let mut position_offset = 0;
-            reader
-                .map(|batch| {
-                    let batch = project_batch(&batch.context("reading selected rows")?, &schema)?;
-                    let end = position_offset + batch.num_rows();
-                    let positions = request
-                        .positions
-                        .then(|| UInt64Array::from(selected[position_offset..end].to_vec()));
-                    position_offset = end;
-                    Ok(ScannedBatch::untagged(request, batch, positions))
-                })
-                .collect::<Result<Vec<_>>>()
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let read = parallel::map(&groups, |&(group, offset, count, selected)| {
+        let selection = RowSelection::from_consecutive_ranges(
+            selected.iter().map(|&row| {
+                let position = (row - offset) as usize;
+                position..position + 1
+            }),
+            count,
+        );
+        let reader = ParquetRecordBatchReaderBuilder::new_with_metadata(
+            table.data(),
+            table.arrow_metadata().clone(),
+        )
+        .with_row_groups(vec![group])
+        .with_row_selection(selection)
+        .with_projection(projection.clone())
+        .with_batch_size(request.batch_size)
+        .build()
+        .context("building selected-row reader")?;
+        let mut position_offset = 0;
+        reader
+            .map(|batch| {
+                let batch = project_batch(&batch.context("reading selected rows")?, &schema)?;
+                let end = position_offset + batch.num_rows();
+                let positions = request
+                    .positions
+                    .then(|| UInt64Array::from(selected[position_offset..end].to_vec()));
+                position_offset = end;
+                Ok(ScannedBatch::untagged(request, batch, positions))
+            })
+            .collect::<Result<Vec<_>>>()
+    });
+    let batches = read.into_iter().collect::<Result<Vec<_>>>()?;
     Ok(batches.into_iter().flatten().collect())
 }

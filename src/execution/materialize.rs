@@ -6,13 +6,13 @@ use crate::output::block_index::compute_block_range;
 use crate::output::blocks_mask;
 use crate::output::projection::{push_unique, row_key, ResolvedProjection};
 use crate::output::weight::TableOutput;
+use crate::parallel;
 use crate::query::RelationKind;
 use crate::scan::predicate::RowPredicate;
 use crate::scan::{ChunkReader, ColumnCache, KeyFilter, Rows, ScanRequest, Scanned};
 use anyhow::Result;
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
-use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 
 /// Read only row identities, relation inputs and size columns while selecting a
@@ -256,7 +256,7 @@ pub(super) fn materialize_page(execution: &Execution, page: Page) -> Result<Page
 
     reader.release_columns();
     let started = Stopwatch::start(execution.options.profile);
-    let (read, headers) = rayon::join(
+    let (read, headers) = parallel::join(
         || materialize_tables(&mut tables, &execution.tables, chunk),
         || -> Result<Vec<RecordBatch>> {
             let headers = retain_blocks(&headers, &desc.block_number_column, &blocks)?;
@@ -339,28 +339,25 @@ fn materialize_tables(
         }
     }
     // Each source is its own read of a few row groups; run them side by side.
-    let read: Vec<Result<Vec<RecordBatch>>> = sources
-        .par_iter()
-        .map(|source| {
-            let (table, desc) = (source.projection.table(), source.projection.desc());
-            let columns = source.projection.row_columns();
-            if source.rows.positions().is_some() {
-                read_rows(chunk, table, desc, &source.rows, columns)
-            } else if let Some(predicates) = source.primary_predicates {
-                // A primary source can reproduce its selected rows with the original
-                // predicates and the page bounds. This retains predicate-statistics
-                // pruning and avoids decoding a wide item key just to select it again.
-                let mut request = ScanRequest::new(columns.to_vec());
-                request.predicates = predicates.iter().collect();
-                request.block_number_column = Some(&desc.block_number_column);
-                (request.from_block, request.to_block) =
-                    compute_block_range(source.rows.batches(), &desc.block_number_column)?;
-                chunk.scan(table, &request)
-            } else {
-                read_rows(chunk, table, desc, &source.rows, columns)
-            }
-        })
-        .collect();
+    let read: Vec<Result<Vec<RecordBatch>>> = parallel::map(&sources, |source| {
+        let (table, desc) = (source.projection.table(), source.projection.desc());
+        let columns = source.projection.row_columns();
+        if source.rows.positions().is_some() {
+            read_rows(chunk, table, desc, &source.rows, columns)
+        } else if let Some(predicates) = source.primary_predicates {
+            // A primary source can reproduce its selected rows with the original
+            // predicates and the page bounds. This retains predicate-statistics
+            // pruning and avoids decoding a wide item key just to select it again.
+            let mut request = ScanRequest::new(columns.to_vec());
+            request.predicates = predicates.iter().collect();
+            request.block_number_column = Some(&desc.block_number_column);
+            (request.from_block, request.to_block) =
+                compute_block_range(source.rows.batches(), &desc.block_number_column)?;
+            chunk.scan(table, &request)
+        } else {
+            read_rows(chunk, table, desc, &source.rows, columns)
+        }
+    });
 
     // The first failure in source order, the one a serial read would report.
     for (source, batches) in sources.iter().zip(read) {

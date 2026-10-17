@@ -4,6 +4,7 @@ use super::positions::{ItemTags, TrackedRows};
 use crate::engine_err;
 use crate::error::ErrorKind;
 use crate::integers::IntColumn;
+use crate::parallel;
 use crate::scan::chunk::ParquetTable;
 use crate::scan::predicate::{ColumnPredicate, RowPredicate, StatRange};
 use crate::scan::rows::{Scanned, ScannedBatch};
@@ -18,7 +19,6 @@ use parquet::arrow::arrow_reader::{
 use parquet::arrow::ProjectionMask;
 use parquet::basic::Encoding;
 use parquet::file::metadata::ColumnChunkMetaData;
-use rayon::prelude::*;
 use rustc_hash::FxHashSet as HashSet;
 use std::sync::Arc;
 
@@ -371,7 +371,7 @@ fn scan_batches(table: &ParquetTable, request: &ScanRequest) -> Result<Vec<Scann
         scan_row_group(table, group, request, &output_schema, union)
     };
 
-    let results: Vec<Result<Vec<ScannedBatch>>> = row_groups.par_iter().map(scan_group).collect();
+    let results = parallel::map(&row_groups, scan_group);
     // The first failure in row group order, whichever finished first.
     let mut batches = Vec::new();
     for result in results {
@@ -819,19 +819,16 @@ impl ItemUnions {
         }
 
         let sets: Vec<&[usize]> = sets.into_iter().collect();
-        let unions = sets
-            .into_par_iter()
-            .map(|active| {
-                let items: Vec<&RowPredicate> = active
-                    .iter()
-                    .map(|&item| request.predicates[item])
-                    .collect();
-                let union = crate::scan::predicate::listed_union(&items).map(Arc::new);
-                (active.to_vec(), union)
-            })
-            .collect();
+        let unions = parallel::map(&sets, |active: &&[usize]| {
+            let items: Vec<&RowPredicate> = active
+                .iter()
+                .map(|&item| request.predicates[item])
+                .collect();
+            let union = crate::scan::predicate::listed_union(&items).map(Arc::new);
+            (active.to_vec(), union)
+        });
 
-        Self(unions)
+        Self(unions.into_iter().collect())
     }
 
     /// The union for the `active` items, when they are several and list values.
