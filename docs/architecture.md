@@ -259,10 +259,12 @@ Primary tables, relation work, and Parquet row groups run side by side, and so
 do deferred table and header materialization. They fork through
 `src/parallel.rs`, not through Rayon's `join` or parallel iterators: the
 thread that forks runs the items itself, threads of the active Rayon pool help,
-and a thread that waits for a helper runs nothing else. A Rayon worker that
-waits runs other jobs instead, the root of another caller's query among them,
-and resumes only when that query ends; under steady load some queries then wait
-without bound. Query concurrency and pool size are separate controls. Collected
+and a thread that waits for a helper runs only unclaimed items of its own
+query's forks. A Rayon worker that waits runs other jobs instead, the root of
+another caller's query among them, and resumes only when that query ends; under
+steady load some queries then wait without bound. A thread that ran nothing
+while it waited would leave a fork nested in another item to that item's thread
+alone, which on a small pool idles the rest of it. Query concurrency and pool size are separate controls. Collected
 results are checked in stable plan or row-group order to preserve deterministic
 errors. JSON blocks encode sequentially.
 
