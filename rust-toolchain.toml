@@ -1,0 +1,5 @@
+# The network worker builds the engine with 1.89; the tests and CI use the same.
+[toolchain]
+channel = "1.89"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
