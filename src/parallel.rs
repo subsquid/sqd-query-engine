@@ -4,11 +4,12 @@
 //! the meantime, the root of another caller's query among them. The waiting
 //! query then resumes only once that query finishes, and under steady load
 //! some queries wait without bound. Here the thread that forks runs the items
-//! itself, pool threads only help, and a thread that waits runs nothing else:
-//! a query moves as fast as its own thread when the pool is busy, and faster
-//! when the pool has threads to spare.
+//! itself, pool threads only help, and a thread that waits runs only items of
+//! its own query: a query moves as fast as its own thread when the pool is
+//! busy, and faster when the pool has threads to spare.
 
 use std::any::Any;
+use std::cell::RefCell;
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -54,6 +55,53 @@ where
     (ra, rb)
 }
 
+thread_local! {
+    /// The query this thread runs items of, while it runs them.
+    static QUERY: RefCell<Option<Arc<Query>>> = const { RefCell::new(None) };
+}
+
+/// The forks open under one root fork, which is one caller's query: the only
+/// ones a thread of it may help while it waits.
+struct Query {
+    open: Mutex<Vec<Arc<Stage>>>,
+    /// A fork opened, or one finished its last item.
+    changed: Condvar,
+}
+
+impl Query {
+    fn open(&self, stage: &Arc<Stage>) {
+        lock(&self.open).push(stage.clone());
+        self.changed.notify_all();
+    }
+
+    fn close(&self, stage: &Arc<Stage>) {
+        lock(&self.open).retain(|open| !Arc::ptr_eq(open, stage));
+    }
+
+    /// Taken after a fork's count reaches zero, so that a waiter checks the
+    /// count either after the change or before it sleeps.
+    fn notify(&self) {
+        drop(lock(&self.open));
+        self.changed.notify_all();
+    }
+}
+
+/// Sets the query of this thread; the previous one comes back on drop.
+struct Enter(Option<Arc<Query>>);
+
+impl Enter {
+    fn new(query: Arc<Query>) -> Self {
+        Self(QUERY.with(|current| current.replace(Some(query))))
+    }
+}
+
+impl Drop for Enter {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        QUERY.with(|current| *current.borrow_mut() = previous);
+    }
+}
+
 /// Run `task` on every index below `len`, on this thread and on helpers from
 /// the current rayon pool, and return once every index has run.
 fn run(len: usize, task: &(dyn Fn(usize) + Sync)) {
@@ -72,15 +120,26 @@ fn run(len: usize, task: &(dyn Fn(usize) + Sync)) {
             task,
         )
     };
+
+    let current = QUERY.with(|current| current.borrow().clone());
+    let query = current.clone().unwrap_or_else(|| {
+        Arc::new(Query {
+            open: Mutex::new(Vec::new()),
+            changed: Condvar::new(),
+        })
+    });
+    let _enter = current.is_none().then(|| Enter::new(query.clone()));
+
     let stage = Arc::new(Stage {
         task,
         len,
         next: AtomicUsize::new(0),
         unspawned: AtomicIsize::new(helpers as isize),
         unfinished: Mutex::new(len),
-        finished: Condvar::new(),
+        query,
         panic: Mutex::new(None),
     });
+    stage.query.open(&stage);
 
     let finish = Finish(&stage);
     stage.spread();
@@ -96,12 +155,13 @@ fn run(len: usize, task: &(dyn Fn(usize) + Sync)) {
 /// Waits for the helpers on every path out of `run`, unwinding included: a
 /// helper may still be inside the task. Before it waits, it runs the items no
 /// one claimed, which only an unwind leaves.
-struct Finish<'a>(&'a Stage);
+struct Finish<'a>(&'a Arc<Stage>);
 
 impl Drop for Finish<'_> {
     fn drop(&mut self) {
         self.0.help();
         self.0.wait();
+        self.0.query.close(self.0);
     }
 }
 
@@ -121,7 +181,7 @@ struct Stage {
     /// A reservation past zero only takes it further below.
     unspawned: AtomicIsize,
     unfinished: Mutex<usize>,
-    finished: Condvar,
+    query: Arc<Query>,
     /// The first panic of any item, raised again on the forking thread.
     panic: Mutex<Option<Box<dyn Any + Send>>>,
 }
@@ -148,6 +208,7 @@ impl Stage {
 
             let stage = self.clone();
             rayon::spawn(move || {
+                let _enter = Enter::new(stage.query.clone());
                 stage.spread();
                 stage.help();
             });
@@ -171,8 +232,10 @@ impl Stage {
 
             let mut unfinished = lock(&self.unfinished);
             *unfinished -= 1;
-            if *unfinished == 0 {
-                self.finished.notify_all();
+            let last = *unfinished == 0;
+            drop(unfinished);
+            if last {
+                self.query.notify();
             }
         }
     }
@@ -193,14 +256,33 @@ impl Stage {
         }
     }
 
-    /// Block, running nothing else, until every item has finished.
+    /// Until every item has finished, run unclaimed items of the query's open
+    /// forks, and block while there are none. A fork nested in another
+    /// thread's item so gets this thread's help, and no job of another query
+    /// runs here.
     fn wait(&self) {
-        let mut unfinished = lock(&self.unfinished);
-        while *unfinished > 0 {
-            unfinished = self
-                .finished
-                .wait(unfinished)
-                .unwrap_or_else(PoisonError::into_inner);
+        loop {
+            let open = lock(&self.query.open);
+            if *lock(&self.unfinished) == 0 {
+                return;
+            }
+
+            let claimable = open
+                .iter()
+                .find(|stage| stage.next.load(Ordering::Relaxed) < stage.len)
+                .cloned();
+            match claimable {
+                Some(stage) => {
+                    drop(open);
+                    stage.help();
+                }
+                None => drop(
+                    self.query
+                        .changed
+                        .wait(open)
+                        .unwrap_or_else(PoisonError::into_inner),
+                ),
+            }
         }
     }
 }
@@ -421,5 +503,195 @@ mod tests {
 
             assert!(took < other, "the fork took {took:?}, behind the other job");
         });
+    }
+
+    /// The first of two items ends early and the second forks again. The
+    /// thread that waits must run items of that nested fork, or a pool of two
+    /// threads runs it on one.
+    #[test]
+    fn a_waiting_thread_helps_a_fork_of_its_own_query() {
+        let pool = pool(2);
+        let threads = Mutex::new(std::collections::HashSet::new());
+
+        pool.install(|| {
+            join(
+                || std::thread::sleep(Duration::from_millis(20)),
+                || {
+                    map(&[0; 8], |_| {
+                        threads.lock().unwrap().insert(std::thread::current().id());
+                        std::thread::sleep(Duration::from_millis(20));
+                    })
+                },
+            )
+        });
+
+        assert_eq!(threads.into_inner().unwrap().len(), 2);
+    }
+
+    /// One caller's fork waits for its long item while another caller's fork,
+    /// started meanwhile on the third thread, has items unclaimed. The waiting
+    /// thread must not take them: they belong to another query.
+    #[test]
+    fn a_waiting_thread_runs_no_fork_of_another_query() {
+        let pool = pool(3);
+        let first = Mutex::new(None);
+        let first_done = AtomicBool::new(false);
+        let second: Mutex<Vec<(ThreadId, bool)>> = Mutex::new(Vec::new());
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(20));
+                pool.install(|| {
+                    map(&[0; 8], |_| {
+                        let done = first_done.load(Ordering::SeqCst);
+                        second
+                            .lock()
+                            .unwrap()
+                            .push((std::thread::current().id(), done));
+                        std::thread::sleep(Duration::from_millis(30));
+                    })
+                });
+            });
+
+            pool.install(|| {
+                *first.lock().unwrap() = Some(std::thread::current().id());
+                map(&[100, 400], |&ms| {
+                    std::thread::sleep(Duration::from_millis(ms))
+                });
+                first_done.store(true, Ordering::SeqCst);
+            });
+        });
+
+        let first = first.into_inner().unwrap().unwrap();
+        let second = second.into_inner().unwrap();
+        assert_eq!(second.len(), 8);
+        assert!(
+            !second
+                .iter()
+                .any(|&(thread, done)| thread == first && !done),
+            "the waiting thread ran another query's items"
+        );
+    }
+
+    /// The query a waiting thread may help is the one its root fork opened:
+    /// nested forks and their helpers join it, another caller's root opens its
+    /// own.
+    #[test]
+    fn each_caller_forks_in_a_query_of_its_own() {
+        let pool = pool(4);
+        let seen: Mutex<Vec<(usize, Arc<Query>)>> = Mutex::new(Vec::new());
+
+        std::thread::scope(|scope| {
+            for caller in 0..2 {
+                let (pool, seen) = (&pool, &seen);
+                scope.spawn(move || {
+                    pool.install(|| {
+                        map(&[0; 4], |_| {
+                            map(&[0; 4], |_| {
+                                let query = QUERY.with(|current| current.borrow().clone());
+                                let query = query.expect("an item runs inside a query");
+                                seen.lock().unwrap().push((caller, query));
+                            })
+                        })
+                    })
+                });
+            }
+        });
+
+        let seen = seen.into_inner().unwrap();
+        assert_eq!(seen.len(), 32);
+        for (caller, query) in &seen {
+            for (other, theirs) in &seen {
+                assert_eq!(caller == other, Arc::ptr_eq(query, theirs));
+            }
+        }
+    }
+
+    /// The waiting thread runs items of a nested fork, and some of them panic:
+    /// a panic still reaches the caller, once every item has finished.
+    #[test]
+    fn a_panic_in_a_helped_fork_reaches_the_caller() {
+        let pool = pool(2);
+        let ran = AtomicUsize::new(0);
+
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            pool.install(|| {
+                join(
+                    || std::thread::sleep(Duration::from_millis(20)),
+                    || {
+                        map(&[0, 1, 2, 3, 4, 5, 6, 7], |&item| {
+                            std::thread::sleep(Duration::from_millis(20));
+                            ran.fetch_add(1, Ordering::Relaxed);
+                            assert!(item < 4, "item {item}");
+                        })
+                    },
+                )
+            })
+        }));
+
+        let panic = result.expect_err("the panic is raised again");
+        let message = panic.downcast_ref::<String>().unwrap();
+        assert!(message.starts_with("item "), "{message}");
+        assert_eq!(ran.into_inner(), 8);
+    }
+
+    /// Every fork leaves its query on the way out, unwinding included, and a
+    /// thread leaves the query once its items end.
+    #[test]
+    fn forks_and_threads_leave_the_query() {
+        let pool = pool(2);
+        let query = Mutex::new(None);
+
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            pool.install(|| {
+                map(&[0, 1], |&item| {
+                    map(&[0; 4], |_| {
+                        *query.lock().unwrap() = QUERY.with(|current| current.borrow().clone());
+                    });
+                    assert_eq!(item, 0, "the second item unwinds");
+                })
+            })
+        }));
+
+        assert!(result.is_err());
+        let query = query
+            .into_inner()
+            .unwrap()
+            .expect("the forks ran in a query");
+        assert!(lock(&query.open).is_empty());
+        let left = pool.broadcast(|_| QUERY.with(|current| current.borrow().is_none()));
+        assert!(left.into_iter().all(|left| left));
+    }
+
+    /// Nested forks from more callers than threads, many times over: every
+    /// answer is right, and no fork waits forever.
+    #[test]
+    fn nested_forks_from_many_callers_finish() {
+        let pool = Arc::new(pool(2));
+        let (finished, done) = std::sync::mpsc::channel();
+
+        for _ in 0..4 {
+            let (pool, finished) = (pool.clone(), finished.clone());
+            std::thread::spawn(move || {
+                let items: Vec<u64> = (0..6).collect();
+                for _ in 0..200 {
+                    let sums = pool.install(|| {
+                        map(&items, |&outer| {
+                            map(&items[..3], |&inner| outer * 10 + inner)
+                                .into_iter()
+                                .sum::<u64>()
+                        })
+                    });
+                    let expected: Vec<u64> = items.iter().map(|outer| outer * 30 + 3).collect();
+                    assert_eq!(sums, expected);
+                }
+                finished.send(()).unwrap();
+            });
+        }
+
+        for _ in 0..4 {
+            done.recv_timeout(Duration::from_secs(60))
+                .expect("every caller finishes");
+        }
     }
 }
