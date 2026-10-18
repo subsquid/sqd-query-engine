@@ -15,6 +15,13 @@ so a catalog is checked with the strict loader before it is published. That
 loader refuses every key it does not know, by its path, and the catalogs here
 are checked with it.
 
+The engine is built with the catalogs in this directory, and renders by them. A
+consumer often keeps a copy of a catalog beside the chunks it was written for,
+and that copy does not change once they are stored. So where a loaded catalog
+has the `name` of one here, each column it stores as the same type takes this
+directory's `encoding` and `members`; the rest of the copy is used as written.
+An encoding added here reaches copies made before it.
+
 A catalog opens with the schema it is written to and the dataset it describes:
 
 | Key | Required | Meaning |

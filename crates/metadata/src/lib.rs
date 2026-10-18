@@ -9,6 +9,7 @@
 //! [`loader`]: crate::load_dataset_description
 
 mod loader;
+mod shipped;
 mod types;
 
 pub use loader::*;

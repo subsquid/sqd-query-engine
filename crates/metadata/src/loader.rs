@@ -27,7 +27,17 @@ pub fn load_dataset_description_strict(path: &Path) -> Result<DatasetDescription
 /// key is skipped the same way, and changes what the engine does —
 /// `parent_hash_colum` turns fork detection off — so a catalog is checked with
 /// [`parse_dataset_description_strict`] before it is published.
+///
+/// A column that the catalog this release ships under the same name stores as
+/// the same type renders as that catalog says: its `encoding` and `members`
+/// come from there, not from the description.
 pub fn parse_dataset_description(yaml: &str) -> Result<DatasetDescription> {
+    let mut desc = parse_as_written(yaml)?;
+    crate::shipped::render_as_shipped(&mut desc);
+    Ok(desc)
+}
+
+pub(crate) fn parse_as_written(yaml: &str) -> Result<DatasetDescription> {
     let desc: DatasetDescription =
         serde_yaml::from_str(yaml).context("parsing dataset description")?;
     validate(&desc)?;
@@ -41,8 +51,10 @@ pub fn parse_dataset_description(yaml: &str) -> Result<DatasetDescription> {
 /// misspelled key from one a later release added; only the release a catalog is
 /// written for knows which keys it should not have.
 pub fn parse_dataset_description_strict(yaml: &str) -> Result<DatasetDescription> {
-    let desc = parse_dataset_description(yaml)?;
+    let mut desc = parse_as_written(yaml)?;
 
+    // Against the keys as written: the shipped rendering may drop a `members`
+    // the document has.
     let unknown = unknown_keys(yaml, &desc)?;
     anyhow::ensure!(
         unknown.is_empty(),
@@ -50,6 +62,7 @@ pub fn parse_dataset_description_strict(yaml: &str) -> Result<DatasetDescription
         unknown.join(", ")
     );
 
+    crate::shipped::render_as_shipped(&mut desc);
     Ok(desc)
 }
 
@@ -1225,6 +1238,70 @@ tables:
             1,
         );
         parse_dataset_description_strict(&explicit_nulls).unwrap();
+    }
+
+    /// A copy of a shipped catalog made before an encoding was added, kept with
+    /// the chunks it was written for, renders with that encoding all the same.
+    #[test]
+    fn test_a_copy_of_a_shipped_catalog_renders_as_shipped() {
+        let shipped = |file: &str| std::fs::read_to_string(catalog_dir().join(file)).unwrap();
+        let transactions = |desc: DatasetDescription, column: &str| {
+            desc.table("transactions")
+                .unwrap()
+                .column(column)
+                .unwrap()
+                .clone()
+        };
+        let member_encoding = |column: &crate::ColumnDescription, member: &str| {
+            let members = column.members.as_ref()?;
+            members.get(member)?.encoding.clone()
+        };
+        let decimal = Some(crate::JsonEncoding::DecimalString);
+
+        for (file, column, member) in [
+            ("solana.yaml", "transaction_config", "priority_fee"),
+            ("evm.yaml", "authorization_list", "nonce"),
+        ] {
+            let declaration = format!(
+                "\n        members:\n          {member}:\n            encoding: decimal_string"
+            );
+            let catalog = shipped(file);
+            assert!(catalog.contains(&declaration), "{file}");
+            let copy = catalog.replacen(&declaration, "", 1);
+
+            let as_written = transactions(parse_as_written(&copy).unwrap(), column);
+            assert!(as_written.members.is_none(), "{file}");
+            for desc in [
+                parse_dataset_description(&copy),
+                parse_dataset_description_strict(&copy),
+            ] {
+                let rendered = transactions(desc.unwrap(), column);
+                assert_eq!(member_encoding(&rendered, member), decimal, "{file}");
+            }
+        }
+
+        let solana = shipped("solana.yaml");
+        let fee = "      fee:\n        type: uint64\n";
+        let copy = solana.replacen(&format!("{fee}        encoding: decimal_string\n"), fee, 1);
+        assert_ne!(copy, solana);
+        let rendered = transactions(parse_dataset_description(&copy).unwrap(), "fee");
+        assert_eq!(rendered.encoding, decimal);
+
+        // Stored as another type, the column is not the shipped one.
+        let config = "      transaction_config:\n        type: ";
+        let members =
+            "\n        members:\n          priority_fee:\n            encoding: decimal_string";
+        let as_text = solana.replacen(
+            &format!("{config}struct{members}"),
+            &format!("{config}string"),
+            1,
+        );
+        assert_ne!(as_text, solana);
+        let rendered = transactions(
+            parse_dataset_description(&as_text).unwrap(),
+            "transaction_config",
+        );
+        assert!(rendered.members.is_none());
     }
 
     /// Covers CT-1 · INV-D1
