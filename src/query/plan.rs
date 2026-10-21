@@ -501,6 +501,26 @@ fn compile_item_predicates(item: &QueryItem, table: &TableDescription) -> Result
             )
         })?;
 
+        #[cfg(feature = "membership-filter")]
+        if value.is_object() {
+            engine_ensure!(
+                matches!(col_desc.data_type, ColumnType::String),
+                ErrorKind::InvalidFilterValue,
+                "filter '{}': a membership filter needs a string column",
+                key
+            );
+            let predicate = crate::scan::membership::MembershipPredicate::from_json(value)
+                .and_then(|p| p.check_canaries(|c| stored_value(c, col_desc)).map(|()| p))
+                .map_err(|e| {
+                    engine_err!(ErrorKind::InvalidFilterValue, "filter '{}': {}", key, e)
+                })?;
+            col_predicates.push(ColumnPredicate {
+                column: key.to_string(),
+                predicate: Arc::new(predicate),
+            });
+            continue;
+        }
+
         // A boolean only means anything on a boolean column. Anywhere else it
         // compiles to a comparison that cannot match, and the query comes back
         // empty with nothing to say why.
@@ -567,6 +587,36 @@ fn fold_for_column(s: &str, col_desc: &ColumnDescription) -> String {
         s.to_ascii_lowercase()
     } else {
         s.to_string()
+    }
+}
+
+/// The value a string column would store for `value`, or why it stores none.
+/// A membership filter's canaries pass through this, so that a structure built
+/// from a form the column cannot hold is refused rather than matched against
+/// nothing: hex without its prefix agrees with itself, not with the chunk.
+#[cfg(feature = "membership-filter")]
+fn stored_value(value: &str, col_desc: &ColumnDescription) -> Result<String, String> {
+    use crate::metadata::JsonEncoding;
+    const BASE58: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+    let folded = fold_for_column(value, col_desc);
+    let holds = match col_desc.encoding {
+        Some(JsonEncoding::HexBytes) => folded.strip_prefix("0x").is_some_and(|digits| {
+            !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_hexdigit())
+        }),
+        Some(JsonEncoding::Base58) => {
+            !folded.is_empty() && folded.bytes().all(|b| BASE58.contains(&b))
+        }
+        _ => true,
+    };
+
+    if holds {
+        Ok(folded)
+    } else {
+        Err(format!(
+            "the column stores {:?} values and none is this one",
+            col_desc.encoding
+        ))
     }
 }
 

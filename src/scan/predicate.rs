@@ -40,7 +40,7 @@ impl std::error::Error for UnsupportedType {}
 /// A mask, or the reason the column could not be masked.
 pub type Mask = Result<BooleanArray, UnsupportedType>;
 
-fn unsupported(expected: &'static str, array: &dyn Array) -> UnsupportedType {
+pub(super) fn unsupported(expected: &'static str, array: &dyn Array) -> UnsupportedType {
     UnsupportedType {
         expected,
         stored: array.data_type().clone(),
@@ -270,7 +270,10 @@ pub trait ArrayPredicate: Send + Sync {
 /// A null key has no value to compare, so its row is false rather than null —
 /// the same as a null value in a plain column under the hand-rolled loops
 /// below.
-fn through_dictionary(predicate: &dyn ArrayPredicate, array: &dyn Array) -> Option<Mask> {
+pub(super) fn through_dictionary(
+    predicate: &dyn ArrayPredicate,
+    array: &dyn Array,
+) -> Option<Mask> {
     let dictionary = array.as_any_dictionary_opt()?;
 
     let mask = match predicate.evaluate(dictionary.values().as_ref()) {

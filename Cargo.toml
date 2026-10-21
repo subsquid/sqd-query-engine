@@ -32,6 +32,8 @@ faster-hex = "0.10"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 ryu = "1.0.23"
 rustc-hash = "2"
+xorf = { version = "0.13", default-features = false, features = ["binary-fuse"], optional = true }
+base64 = { version = "0.22", optional = true }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.6"
@@ -39,6 +41,8 @@ tikv-jemallocator = "0.6"
 [features]
 default = []
 legacy-query = ["dep:sqd-query"]
+# Research prototype for issue #82: a filter value that is an approximate set.
+membership-filter = ["dep:xorf", "dep:base64", "xxhash-rust/xxh64"]
 
 # The legacy engine, for the live comparisons in tests and benchmarks. Cargo
 # resolves the path before feature selection, so standalone checks provide a
@@ -72,6 +76,16 @@ harness = false
 [[bench]]
 name = "instructions"
 harness = false
+
+[[bench]]
+name = "membership"
+harness = false
+required-features = ["membership-filter"]
+
+[[bench]]
+name = "membership_wall"
+harness = false
+required-features = ["membership-filter"]
 
 [[test]]
 name = "queries"

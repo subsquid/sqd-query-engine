@@ -4,6 +4,8 @@ mod columnar;
 mod columns;
 mod key_columns;
 mod keys;
+#[cfg(feature = "membership-filter")]
+pub mod membership;
 mod pairs;
 mod positions;
 pub mod predicate;

@@ -2890,6 +2890,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arrow",
+ "base64",
  "bytes",
  "criterion",
  "faster-hex",
@@ -2911,6 +2912,7 @@ dependencies = [
  "sqd-query",
  "tempfile",
  "tikv-jemallocator",
+ "xorf",
  "xxhash-rust",
  "zstd",
 ]
@@ -3700,6 +3702,15 @@ dependencies = [
  "serde_json",
  "unicode-xid",
  "wasmparser",
+]
+
+[[package]]
+name = "xorf"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f13846c9009c0e550697ddde851e934b5dfafbce757a5ef5edfdb27ea20803e"
+dependencies = [
+ "libm",
 ]
 
 [[package]]
