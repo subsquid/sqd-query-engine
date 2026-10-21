@@ -102,8 +102,9 @@ All reach [`execute`](../src/execution/mod.rs), which runs
 output step. Encoding stays in `output/`. Before scanning for output,
 `Execution::prepare` resolves the catalog entry of every planned table, checks
 required tables and renderable columns, and performs the optional
-`parentBlockHash` check. Relation targets are required only when there
-are source rows to follow; an empty source does not open its target.
+`parentBlockHash` check. A relation target is required like every other
+planned table, also when no source row reaches it; an empty source only spares
+its scan.
 
 ### Where payload deferral is chosen
 
@@ -152,7 +153,7 @@ only their own source items without evaluating those predicates again.
 when possible. Otherwise it applies the equality or hierarchical masks from
 [`join/`](../src/join/mod.rs) after scanning. A pushed-down relation needs no
 second join over its result. A relation whose followed rows all have a null in
-the key or address relates to nothing and never opens its target; when a key
+the key or address relates to nothing and never scans its target; when a key
 column cannot be read at all, the join after the scan is what reports it.
 
 [`compute_block_weights`](../src/output/weight.rs) accounts for selected fields
