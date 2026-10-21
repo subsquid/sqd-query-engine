@@ -108,9 +108,10 @@ impl<'a> Execution<'a> {
         }
     }
 
-    /// The tables every query scans: the block table and each table with an item
-    /// request. A relation's target is not among them — it is opened only when the
-    /// relation has rows to follow, and its absence is reported there (INV-E4).
+    /// Every table the query names: the block table, each table with an item
+    /// request and each relation's target. A relation with no row to follow still
+    /// needs its target, or a chunk's answer would depend on whether a row
+    /// matched (INV-E4).
     fn ensure_required_tables_present(&self) -> Result<()> {
         let ensure_present = |table: &str| {
             crate::engine_ensure!(
@@ -125,6 +126,9 @@ impl<'a> Execution<'a> {
         ensure_present(&self.plan.block_table)?;
         for table in &self.tables {
             ensure_present(&table.plan.table)?;
+            for relation in &table.plan.relations {
+                ensure_present(&relation.target_table)?;
+            }
         }
 
         Ok(())
@@ -147,13 +151,13 @@ impl<'a> Execution<'a> {
         sized.then_some(table)
     }
 
-    /// Refuse a chunk that stores a selected column at a type the output cannot
-    /// use, before any row is read (INV-E3).
+    /// Refuse a chunk that lacks a selected column or stores one at a type the
+    /// output cannot use, before any row is read (INV-E3).
     ///
     /// Off the schema rather than off the batches, so that the same chunk refuses
-    /// whatever the query: the writers resolve against batches, and a range that
-    /// reaches no row of a table resolves nothing. A column the chunk lacks is not
-    /// this check's business — the scan raises `ColumnNotFound` for it.
+    /// whatever the query: the writers resolve against batches, a range that
+    /// reaches no row of a table resolves nothing, and a relation with no row to
+    /// follow scans nothing.
     ///
     /// What "use" means depends on the format. JSON renders through an encoder,
     /// orders rows by the sort keys and groups them by the variant tag; Arrow ships
@@ -183,7 +187,12 @@ impl<'a> Execution<'a> {
 
         for &column in projection.required() {
             let Ok(field) = schema.field_with_name(column) else {
-                continue;
+                crate::engine_bail!(
+                    crate::error::ErrorKind::ColumnNotFound,
+                    "column '{}' is not found in '{}'",
+                    column,
+                    table
+                );
             };
             let declared = desc.columns.get(column);
 

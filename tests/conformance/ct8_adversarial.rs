@@ -12,11 +12,14 @@
 
 use arrow::datatypes::{DataType, Field, SchemaRef, TimeUnit};
 use sqd_query_engine::error::{error_kind, ErrorKind};
+use sqd_query_engine::metadata::DatasetDescription;
 use sqd_query_engine::output::{execute_chunk, execute_chunk_arrow, execute_plan};
 use sqd_query_engine::query::{compile, parse_query, Plan};
 use sqd_query_engine::scan::{ChunkReader, ParquetChunkReader, ScanRequest, Scanned};
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
+use tempfile::TempDir;
 
 use crate::harness::chunk::{
     chunk_with_column_retyped, chunk_with_nullable_column, chunk_without_column,
@@ -94,39 +97,131 @@ fn a_missing_relation_table_is_an_error() {
     );
 }
 
-/// A relation with nothing to follow never opens its target, so a chunk missing
-/// that table answers a query whose primary scan is empty the way a complete
-/// chunk does — and refuses the same query the moment the relation has inputs.
-///
-/// Covers CT-8 · INV-E4
-#[test]
-fn a_missing_relation_table_is_not_observed_without_inputs() {
-    let metadata = catalog();
-    let source = weighted_chunk(BLOCKS, &uniform(&[10, 11], 0), &uniform(BLOCKS, 0));
-    let chunk = chunk_without_table(source.path(), "transactions");
-    let query = |from: u64, to: u64| {
+/// A query whose relation has no row to follow, on a chunk that holds every
+/// table and column the query names.
+struct NothingToFollow {
+    case: &'static str,
+    metadata: DatasetDescription,
+    chunk: TempDir,
+    target: &'static str,
+    /// A column of `target` the query selects.
+    selected: &'static str,
+    query: String,
+}
+
+/// Each way a relation can be left with no row to follow.
+fn nothing_to_follow() -> Vec<NothingToFollow> {
+    let past_the_logs = |include_all_blocks: bool| {
         serde_json::json!({
             "type": "test",
-            "fromBlock": from,
-            "toBlock": to,
-            "includeAllBlocks": true,
+            "fromBlock": 12,
+            "toBlock": 14,
+            "includeAllBlocks": include_all_blocks,
             "logs": [{"transaction": true}],
             "fields": {"block": {"number": true}, "transaction": {"input": true}}
         })
         .to_string()
     };
+    let synthetic = |case, query| NothingToFollow {
+        case,
+        metadata: catalog(),
+        chunk: weighted_chunk(BLOCKS, &uniform(&[10, 11], 0), &uniform(BLOCKS, 0)),
+        target: "transactions",
+        selected: "input",
+        query,
+    };
 
-    answers_the_same(
-        &metadata,
-        &query(12, 14),
-        source.path(),
-        chunk.path(),
-        "dropping a relation target no row points at",
-    );
+    let transactions = |items: serde_json::Value| {
+        serde_json::json!({
+            "type": "test",
+            "fromBlock": 100,
+            "toBlock": 115,
+            "transactions": items,
+            "fields": {"transaction": {"transactionIndex": true}, "trace": {"kind": true}}
+        })
+        .to_string()
+    };
+    let no_such_index = serde_json::json!({"transactionIndex": [9], "transactionTraces": true});
+    let evm = |case, query| NothingToFollow {
+        case,
+        metadata: evm_like::catalog(),
+        chunk: evm_like::chunk(),
+        target: "traces",
+        selected: "kind",
+        query,
+    };
 
-    let err = run_against(&metadata, chunk.path(), &query(10, 11))
-        .expect_err("a relation with inputs must observe its missing target");
-    assert_eq!(error_kind(&err), Some(ErrorKind::TableNotFound));
+    vec![
+        synthetic(
+            "a range with no source rows, every block",
+            past_the_logs(true),
+        ),
+        synthetic("a range with no source rows", past_the_logs(false)),
+        evm(
+            "a filter no source row matches",
+            transactions(serde_json::json!([no_such_index])),
+        ),
+        evm(
+            "the only item asking for the relation matches nothing",
+            transactions(serde_json::json!([{"transactionIndex": [0]}, no_such_index])),
+        ),
+    ]
+}
+
+impl NothingToFollow {
+    /// Assert that both formats refuse the query on `chunk` with `kind`, naming
+    /// `missing`, where the complete chunk answers it.
+    fn assert_refused(&self, chunk: &Path, kind: ErrorKind, missing: &str) {
+        let case = self.case;
+        let complete = run_against(&self.metadata, self.chunk.path(), &self.query).unwrap();
+        assert_eq!(
+            count_items(&complete, self.target),
+            0,
+            "{case}: the relation must have nothing to follow for the check to mean anything"
+        );
+
+        let parsed = parse_query(self.query.as_bytes(), &self.metadata).unwrap();
+        let plan = compile(&parsed, &self.metadata).unwrap();
+        let reader = ParquetChunkReader::open(chunk).unwrap();
+        let json = execute_chunk(&plan, &self.metadata, &reader, false).err();
+        let arrow = execute_chunk_arrow(&plan, &self.metadata, &reader, false, false).err();
+
+        for (format, err) in [("json", json), ("arrow", arrow)] {
+            let err =
+                err.unwrap_or_else(|| panic!("{case}, {format}: answered without '{missing}'"));
+            assert_eq!(error_kind(&err), Some(kind), "{case}, {format}: {err:#}");
+            assert!(
+                err.root_cause().to_string().contains(missing),
+                "{case}, {format}: the error must name '{missing}', got: {}",
+                err.root_cause()
+            );
+        }
+    }
+}
+
+/// A dataset has a table or it does not. A relation target the chunk lacks is
+/// refused also on a page where no row points at it: refused only where one
+/// does, a stream over such a dataset returns its first pages and then fails.
+///
+/// Covers CT-8 · INV-E4
+#[test]
+fn a_missing_relation_table_is_an_error_without_inputs() {
+    for case in nothing_to_follow() {
+        let chunk = chunk_without_table(case.chunk.path(), case.target);
+        case.assert_refused(chunk.path(), ErrorKind::TableNotFound, case.target);
+    }
+}
+
+/// A column the relation target lacks is refused, for the same reason, also
+/// where no row points at the target.
+///
+/// Covers CT-8 · INV-E3
+#[test]
+fn a_relation_target_missing_a_selected_column_is_an_error_without_inputs() {
+    for case in nothing_to_follow() {
+        let chunk = chunk_without_column_at(case.chunk.path(), case.target, case.selected);
+        case.assert_refused(chunk.path(), ErrorKind::ColumnNotFound, case.selected);
+    }
 }
 
 /// Only the tables a query names are opened. A file the query does not touch —
