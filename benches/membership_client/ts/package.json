@@ -1,0 +1,13 @@
+{
+  "name": "membership-client",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.18" },
+  "scripts": {
+    "verify": "node verify.ts",
+    "bench": "node bench.ts"
+  },
+  "dependencies": {
+    "tinybench": "6.2.2"
+  }
+}

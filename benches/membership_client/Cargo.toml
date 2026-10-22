@@ -1,0 +1,36 @@
+[package]
+name = "fuse-build"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Its own workspace: the engine's builds never compile it, and its wasm32
+# build never sees the engine's dependencies.
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The versions and features the prototype engine reads the filter with.
+xorf = { version = "=0.13.0", default-features = false, features = ["binary-fuse"] }
+xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "build"
+harness = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.bench]
+lto = true
+codegen-units = 1
