@@ -29,6 +29,7 @@ Checked before any chunk data is read ([INV-E2](07-invariants.md#inv-e2)).
 | `P-MAX-DISCRIMINATOR-BYTES` | Bytes in one discriminator value ([INV-Q12](07-invariants.md#inv-q12)) | 16 | 16 |
 | `P-MAX-REQUEST-BYTES` | Whole-request size bound ([INV-Q13](07-invariants.md#inv-q13)) | 2 MiB | 2 MiB |
 | `P-MAX-IN-LIST` | Values in one `inList` ([INV-Q13](07-invariants.md#inv-q13)) | 100 000 | 100 000 |
+| `P-MAX-SET-CANARIES` | Canaries in one set ([INV-Q17](07-invariants.md#inv-q17)) | none: sets are not implemented, gap 62 | ⚠ 64 |
 
 The discriminator family is read from the catalog, not named in code: it is the
 `discriminator` special filter plus every column it dispatches to. A dataset with
@@ -39,6 +40,12 @@ a differently-named discriminator is bounded by the same rule with no code chang
 `P-MAX-IN-LIST` independently bounds the set built for one filter, including the
 case where short values allow a large list to fit below the byte cap
 ([ADR-13](decisions/ADR-13-request-resource-bounds.md)).
+
+`P-MAX-SET-CANARIES` bounds the work a set's canaries add to validation: each is
+one lookup, for every column that refers to the set. It is a proposal of
+[ADR-17](decisions/ADR-17-large-value-sets-travel-as-fuse8-with-canaries.md), which is itself proposed. Four canaries already
+let a wrong structure through less than once in a billion requests, so the bound
+is far above what a client needs.
 
 ## 9.2 Response bounds
 
@@ -80,7 +87,7 @@ its target together ([ADR-14](decisions/ADR-14-a-matrix-correction-rebaselines-t
 
 | Parameter | Role | Observed | Target |
 |---|---|---|---|
-| `P-COV-PROPERTY` | Fraction of invariants at status **C** in the traceability matrix ([MG-1](08-conformance.md#812-merge-gates)) | 0.76 (65 of 86) | ⚠ 0.69, then ratchet |
+| `P-COV-PROPERTY` | Fraction of invariants at status **C** in the traceability matrix ([MG-1](08-conformance.md#812-merge-gates)) | 0.71 (65 of 91) | ⚠ 0.69, then ratchet |
 | `P-COV-DIFF` | Line coverage of lines a change touches ([MG-2](08-conformance.md#812-merge-gates)) | unmeasured | ⚠ 0.80 |
 | `P-COV-TOTAL` | Whole-repository line coverage floor ([MG-2](08-conformance.md#812-merge-gates)) | unmeasured | ⚠ 0.70 |
 | `P-FLAKE-RETRIES` | Retries a test gets before it is quarantined ([MG-7](08-conformance.md#812-merge-gates)) | none | ⚠ 1 |

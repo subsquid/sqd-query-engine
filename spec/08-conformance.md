@@ -68,7 +68,7 @@ that returns `Ok`.
 
 Table-driven. One case per row of §6.2, asserting the error *kind*, not the
 message. Covers [INV-Q1](07-invariants.md#inv-q1) –
-[INV-Q13](07-invariants.md#inv-q13), [INV-E2](07-invariants.md#inv-e2),
+[INV-Q18](07-invariants.md#inv-q18), [INV-E2](07-invariants.md#inv-e2),
 [INV-E6](07-invariants.md#inv-e6).
 
 The cases that matter most are the ones an engine is likeliest to get wrong by
@@ -88,6 +88,12 @@ being permissive:
                                                        → ConflictingFilters
 {"type":"solana","instructions":[{"discriminator":["0xabc"]}]}
                                                        → InvalidHex
+{"type":"evm","logs":[{"address":{"set":"s"}}]}        → UnknownSet
+{"type":"evm","sets":{"unused":{"fuse8":"…","canaries":["0x…"]}}}
+                                                       → InvalidSet
+{"type":"evm","sets":{"s":{"fuse8":"<from checksummed text>","canaries":["0xAbC…"]}},
+ "fields":{"log":{"address":true}},"logs":[{"address":{"set":"s"}}]}
+                                                       → SetCanaryMismatch
 ```
 
 Then fuzz — [CT-9](#810-ct-9--fuzz).
@@ -115,6 +121,8 @@ a few that do not. Then assert the laws, over randomly composed queries:
 | `Q(c: [huge])` = ∅, no error | [INV-P14](07-invariants.md#inv-p14) |
 | `Q(c: [a, m])` = `Q(c: [a])` for a malformed hex `m` the chunk does not store | [INV-Q12](07-invariants.md#inv-q12) |
 | `Q` with pruning disabled = `Q` | [INV-P16](07-invariants.md#inv-p16) |
+| `Q(c: set(S)) ⊇ Q(c: S)` for a set built from `S` | [INV-P17](07-invariants.md#inv-p17) |
+| `Q(c: set)` = the rows an independent lookup passes | [INV-P17](07-invariants.md#inv-p17) |
 
 Two of these are worth writing by hand even if you generate the rest, because
 they encode the two catastrophic misreadings:
@@ -279,7 +287,7 @@ reproduce is a rumour.
 
 ## 8.11 Traceability matrix
 
-Dated **2026-09-12**. Every invariant, the class that checks it, and an honest
+Dated **2026-10-22**. Every invariant, the class that checks it, and an honest
 status:
 
 - **C** — covered. A test would fail if the invariant broke.
@@ -341,6 +349,10 @@ renamed out from under a comment inside it.
 | [INV-Q12](07-invariants.md#inv-q12) | CT-2, CT-3, CT-7 | **C** | `a_malformed_hex_value_is_not_refused` tries every malformation on every hex filter of every bundled catalog, tables and aliases alike, beside a well-formed value, alone and bare; `a_malformed_discriminator_is_refused` and `a_hex_filter_refuses_a_value_that_is_not_a_string` hold the two refusals the rule keeps, and `a_discriminator_is_checked_in_full_whatever_its_order` holds them beside an empty prefix on either side of it; `test_parse_hex` the parse. `a_malformed_hex_value_matches_nothing` asserts the no-op and the empty match on a text, a hex-number and a plain integer column, through a second item request and a relation; `a_malformed_hex_value_compares_as_text_where_the_column_stores_text` a stored odd-length quantity, a fixed-width binary column and a list of text; `a_list_with_no_value_left_reads_no_column` a list with nothing left on a chunk without the column. `malformed_hex_values_answer_the_same_as_the_reference` compares every hex filter of every fixture chunk with the reference, and every hex-number filter again on a copy of the chunk without its column; `a_discriminator_with_an_empty_prefix_answers_the_same_as_the_reference` an empty prefix beside every refused value, in both orders |
 | [INV-Q13](07-invariants.md#inv-q13) | CT-2 | **C** | `a_request_is_bounded_in_bytes` and `an_in_list_is_bounded_in_length`, either side of each cap; the list case is written with short values so the byte cap cannot be what it is measuring |
 | [INV-Q14](07-invariants.md#inv-q14) | CT-2 | **C** | `the_field_surface_is_exactly_the_declared_one` compares every table's declared list against a transcription of the reference's, as a set, and then parses each name. The transcription alone stayed green through the thirteen fields of gap 35, so `the_catalogs_serve_every_field_the_reference_serves` recomputes it from the reference's own `item_field_selection!` blocks wherever the fixture tree's checkout is present, both ways: a field the reference adds fails here before a review finds it. `a_column_the_catalog_carries_is_not_a_field` covers `blockNumber` and `topic0` |
+| [INV-Q15](07-invariants.md#inv-q15) | CT-2 | **U** | *known-violated*, gap 62: sets are not implemented, and the research prototype behind a build feature takes another wire form |
+| [INV-Q16](07-invariants.md#inv-q16) | CT-2 | **U** | *known-violated*, gap 62: sets are not implemented, and the research prototype behind a build feature takes another wire form |
+| [INV-Q17](07-invariants.md#inv-q17) | CT-2 | **U** | *known-violated*, gap 62: sets are not implemented, and the research prototype behind a build feature takes another wire form |
+| [INV-Q18](07-invariants.md#inv-q18) | CT-2 | **U** | *known-violated*, gap 62: sets are not implemented, and the research prototype behind a build feature takes another wire form |
 | [INV-P1](07-invariants.md#inv-p1) | CT-3 | **C** | `an_unfiltered_item_request_is_the_whole_table_and_a_filter_only_narrows` counts an unfiltered request against the chunk's own rows in range, read off the parquet rather than from another query |
 | [INV-P2](07-invariants.md#inv-p2) | CT-3 | **C** | `test_in_list_predicate_strings`, `test_in_list_predicate_u64`, `test_numeric_in_list_filter`, and `a_value_list_is_the_union_of_its_values` over generated splits of a column's real values — including the split that leaves one side empty, which is the same law with [INV-P3](07-invariants.md#inv-p3) on one arm. `value_order_repetition_and_misses_do_not_reach_the_answer` pins the list as a set |
 | [INV-P3](07-invariants.md#inv-p3) | CT-3 | **C** | `an_empty_filter_list_matches_nothing` — the discriminator, a discriminator column, an ordinary in-list, and an empty list beside a filter that does match; `a_list_with_no_value_left_reads_no_column` — a list emptied by dropping what the column cannot hold, on a hex-number, a plain integer, a fixed-width binary, a list-of-integers and a signed column, each on a chunk without that column, and the item's other filters still validated whichever key comes first |
@@ -357,6 +369,7 @@ renamed out from under a comment inside it.
 | [INV-P14](07-invariants.md#inv-p14) | CT-3 | **C** | `unmatchable_values_are_not_errors` and `a_hex_value_too_wide_for_the_column_matches_nothing` for values wider than the column, `a_signed_column_takes_negative_filter_values` for one below its floor, and `a_block_bound_past_the_stored_width_matches_nothing` for the half the invariant states about the block bounds — where wrapping would truncate into a block the chunk holds |
 | [INV-P15](07-invariants.md#inv-p15) | CT-3 | **C** | `undeclared_columns_are_not_filterable`, `an_alias_has_its_own_filter_surface`, `an_alias_has_its_own_relation_surface` |
 | [INV-P16](07-invariants.md#inv-p16) | CT-3 | **P** | `pruning_never_drops_a_row_the_mask_would_keep` states the decision as a law — a group may be pruned only where the mask would have emptied it — over the eight widths a writer may pick, each column holding its own extremes, against every filter kind the plan compiles on an integer column (equality, in-list, both ranges) at every value kind it compiles them with (`uint8` through `uint64`, `int16`, `int64`), across each width's boundaries. Each of the fix's three arms fails it under mutation. It caught pruning that read a statistic at the parquet physical type while evaluation narrowed to the stored one, so a `uint8` 255 pruned the group holding the `-1` an `Int8` column stores it as, and the answer turned on whether the writer had recorded statistics. `a_statistic_that_is_not_text_prunes_nothing` covers the decline half the invariant names. The equality run is `a_filter_returns_the_same_rows_with_nothing_to_prune_on`: five filters — matching, non-matching, conjunctive, empty-list, absent — against chunks written with no statistics, a row per row group, a row per data page, and no dictionary, compared as bytes; `a_nested_column_earlier_in_the_schema_does_not_reach_the_answer` adds the case that made the invariant load-bearing, a `List<Struct<…>>` earlier in the schema putting every filter after it on another column's bounds. `a_row_group_an_items_statistics_rule_out_holds_none_of_its_rows` covers pruning per item: random items over sorted text and integer columns, with alternatives, bounds cut to a prefix and a column with no statistics, against every row evaluated by hand. The same sweep covers the other half, a filter the statistics prove and the scan leaves out: row groups holding one value of a column, with and without nulls beside it, and each item's tag checked as well as the rows; `a_proof_holds_exactly_where_the_mask_keeps_every_row` states the proof as a law over the eight widths, exact for equality and lists. What a plausible break still passes: a writer that records no nulls where there are some is believed; the law is stated over integer columns only, so text pruning rests on the byte-equality run and that sweep; filter reordering is not varied; early termination is CT-5's `scan` module; and the equality run is five filters over one query shape rather than the every-fixture-query sweep the invariant asks for |
+| [INV-P17](07-invariants.md#inv-p17) | CT-3 | **U** | *known-violated*, gap 62: sets are not implemented, and the research prototype behind a build feature takes another wire form |
 | [INV-R1](07-invariants.md#inv-r1) | CT-4 | **C** | `a_relation_pulls_only_its_own_item_requests_matches` generates §8.5's two-item-request construction — disjoint halves of one filter's values, only the first carrying the flag. The sweep fails unless some split had a second half reaching a target the first does not, which is the only case that can tell the two behaviours apart: over a filter whose every value shares the same targets, an engine scoping the relation to the whole table answers identically, and no number of cases notices. `test_alias_relation_source_items` is the compile-side half. The scan marks each relation's rows as it evaluates the items, and `a_relation_follows_the_rows_its_own_items_matched` checks every mark against the items evaluated again, through block ranges, positions, batch sizes, null filter values and items that row-group statistics rule out; `relations_on_one_key_follow_only_their_own_items` covers two relations on one key that could share a key set. `a_relation_planned_once_follows_every_item_that_asked_for_it` covers the plan that evaluates one relation for several items: one join under two names, one name meaning two joins through an alias or through two aliases, two joins apart only in the target key, and one relation flagged twice in one item |
 | [INV-R2](07-invariants.md#inv-r2) | CT-4 | **C** | `a_pulled_row_does_not_pull_its_own`. The chain's relations are a cycle on purpose, so a second hop is *observable* rather than merely non-terminating: from a filtered log request it would come back through `transactions.log` carrying the logs the filter excluded, and through `transactions.trace` carrying traces nothing asked for. Both are asserted — the origin table unchanged, the table two hops out empty |
 | [INV-R3](07-invariants.md#inv-r3) | CT-4 | **C** | `a_row_reachable_several_ways_is_returned_once` compares emitted rows against distinct rows for every table of every generated query, over queries that ask every table directly *and* through its relations — which is what builds the overlapping paths nobody enumerates: a row matched by two item requests, a row pulled by two relations, a row both matched and pulled. `test_arrow_multisource_dedup` is the Arrow path's |
@@ -403,10 +416,10 @@ renamed out from under a comment inside it.
 | [INV-X2](07-invariants.md#inv-x2) | CT-8 | **C** | `an_ignored_nullable_column_does_not_change_output` |
 | [INV-X3](07-invariants.md#inv-x3) | CT-8 | **C** | `filtering_an_absent_column_is_an_error` on both scan entry points, `filtering_a_present_column_still_works` for the other direction, `one_unanswerable_item_rejects_the_whole_request` for a filter one item request of several carries, and `an_alias_filter_on_a_column_the_chunk_lacks_is_an_error` for one reached through an alias's extraction column |
 
-**Totals: 65 C, 21 P, 0 U** of 86. Property coverage is therefore 0.76
+**Totals: 65 C, 21 P, 5 U** of 91. Property coverage is therefore 0.71
 (`P-COV-PROPERTY` in [09-parameters.md](09-parameters.md)).
 
-The figure fell from 0.73 to 0.69 on 2026-09-12, and no test was removed to make it fall. [INV-D6](07-invariants.md#inv-d6), [INV-P13](07-invariants.md#inv-p13) and [INV-Q14](07-invariants.md#inv-q14) were read against the tests they name and did not hold at **C**; their rows now say what those tests actually do. A ratchet on a number three rows had inflated would have locked the inflation in, so the baseline moved down once, deliberately, and ratchets from there. INV-Q14 earned its **C** back the same day with a test that recomputes the transcription from the reference, and INV-P13 later with tests that send a mixed-length discriminator and an empty prefix and check the rows.
+The figure fell from 0.73 to 0.69 one day in September 2026, and no test was removed to make it fall. [INV-D6](07-invariants.md#inv-d6), [INV-P13](07-invariants.md#inv-p13) and [INV-Q14](07-invariants.md#inv-q14) were read against the tests they name and did not hold at **C**; their rows now say what those tests actually do. A ratchet on a number three rows had inflated would have locked the inflation in, so the baseline moved down once, deliberately, and ratchets from there. INV-Q14 earned its **C** back the same day with a test that recomputes the transcription from the reference, and INV-P13 later with tests that send a mixed-length discriminator and an empty prefix and check the rows.
 
 Of the 86 rows at **C** or **P**, 75 are backed by a tagged test and 11 rest on
 prose alone. Those 11 are the rows whose note says "fixtures only" or describes a
@@ -421,9 +434,14 @@ invariant broke, but only on a machine that has the chunks. The checker reports
 those rows on every run too, because a status that no job can falsify is a status
 worth seeing.
 
-No row is left at **U**. That is a smaller claim than it sounds: 24 rows are
-partial, and a **P** is a row somebody looked at and did not finish. What it does
-settle is that every invariant now has somewhere for a failure to show up.
+Five rows are at **U**, and they arrived together: [INV-Q15](07-invariants.md#inv-q15)
+to [INV-Q18](07-invariants.md#inv-q18) and [INV-P17](07-invariants.md#inv-p17)
+state the sets of [ADR-17](decisions/ADR-17-large-value-sets-travel-as-fuse8-with-canaries.md), which the engine does not
+implement yet. The figure fell from 0.76 to 0.71 with them, and no test was
+removed to make it fall. Before them no row was left at **U**. That was a smaller
+claim than it sounds: 21 rows are partial, and a **P** is a row somebody looked at
+and did not finish. What it did settle is that every invariant had somewhere for
+a failure to show up.
 
 The last two were closed together and had nothing in common. **INV-P11** needed
 no machinery at all and was unwritten for no reason but that nobody had written

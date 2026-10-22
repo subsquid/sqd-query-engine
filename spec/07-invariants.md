@@ -126,8 +126,8 @@ All checked before any data is read ([INV-E2](#inv-e2)).
 name. Otherwise `UnknownDataset`.
 
 ### INV-Q2
-**No unknown top-level keys.** A top-level key is one of the six reserved keys
-(§2.1) or a request name. Anything else is `UnknownTable`.
+**No unknown top-level keys.** A top-level key is one of the reserved keys of
+§2.1 or a request name. Anything else is `UnknownTable`.
 
 ### INV-Q3
 **`fromBlock ≤ toBlock`.** Otherwise `InvalidBlockRange`.
@@ -164,7 +164,8 @@ output name is `UnknownFieldGroup`. `fields.X` MUST be an object.
 
 ### INV-Q9
 **Defaults.** `fromBlock` = 0. `toBlock` = unbounded. `includeAllBlocks` = false.
-`fields` = `{}`. `parentBlockHash` = absent. Every item request array = `[]`.
+`fields` = `{}`. `sets` = `{}`. `parentBlockHash` = absent. Every item request
+array = `[]`.
 Inside an item request, every filter absent and every relation flag `false`.
 
 A default applies to an *absent* key only. A key that is present with the wrong
@@ -229,6 +230,42 @@ grouping, joining and rolling.
 
 *Why:* the same reason [INV-P15](#inv-p15) closes the filter surface. An open output surface makes the physical column layout part of the wire contract, and every column an archive writer adds becomes a field clients may pin on.
 *Test:* for every dataset and table, assert `fields` accepts exactly the §3 list. In particular `{"fields":{"log":{"blockNumber":true}}}` and `{"fields":{"log":{"topic0":true}}}` error, though `block_number` and `topic0` are real columns.
+
+### INV-Q15
+**Sets are well-formed, declared and used.** Each value of `sets` is an object
+with exactly one structure key, `fuse8`, holding canonical base 64 of a sound
+structure ([§4.2.11](04-evaluation.md#4211-sets)), and a `canaries` array. A
+reference `{"set": name}` names a declared set, otherwise `UnknownSet`. Any other
+defect, a set that no filter refers to among them, is `InvalidSet`.
+
+*Why:* a reference to nothing and a set nobody uses are the same mistake seen from two sides, a filter the client meant to write and did not. Answering either drops a filter without a word.
+*Test:* a reference to an undeclared name is `UnknownSet`. A declared set with no reference, a set with no structure key, with two, with `fuse16`, with bytes that are not canonical base 64, and with a header whose `N + 2L` exceeds its fingerprints are each `InvalidSet`.
+
+### INV-Q16
+**A set stands only in place of a list of text.** A filter value may be a set
+reference only on an `inList` filter whose column's encoding is `hexBytes`,
+`base58` or `utf8`. Anywhere else it is `InvalidFilterValue`.
+
+*Why:* the lookup hashes the text the response renders. A number, a quantity padded to its width, or a discriminator prefix has no text a client could have hashed the same way.
+*Test:* a reference on `transactions.from` passes validation. One on a range filter (`firstNonce`) and one on a Solana `discriminator` are each `InvalidFilterValue`.
+
+### INV-Q17
+**A set's canaries are values it holds.** A set carries at least one canary and
+at most `P-MAX-SET-CANARIES`, otherwise `InvalidSet`. For every column that refers
+to the set, each canary, folded as the column folds a list value
+([INV-P8](#inv-p8)), MUST be a value the column can render and MUST pass the
+set's lookup. Otherwise `SetCanaryMismatch`, before any data is read.
+
+*Why:* a structure is opaque, and every way to build one wrong — hashing a checksummed address, dropping the `0x`, hashing raw bytes, another hash or seed — is accepted and matches almost nothing. That answer looks like a quiet stretch of chain.
+*Test:* build a set from the values of a fixture chunk in each of the wrong ways above; each is `SetCanaryMismatch` with canaries drawn from those values. The right set with its canaries upper-cased passes on a `hexBytes` column. A hex canary on a `base58` column is `SetCanaryMismatch`. No canaries, and one more than `P-MAX-SET-CANARIES`, are each `InvalidSet`.
+
+### INV-Q18
+**A set-filtered column reaches the response.** For every filter that refers to a
+set, the table's selected fields render the filtered column, directly or through
+the virtual field that rolls it. Otherwise `SetFieldNotSelected`.
+
+*Why:* the extra rows a set returns are the client's to remove, and a client can remove only what it can see.
+*Test:* `{"logs":[{"address":{"set":"s"}}]}` without `fields.log.address` is `SetFieldNotSelected` and with it passes. A set on `topic0` passes with `fields.log.topics` and fails without it.
 
 ---
 
@@ -342,6 +379,15 @@ An engine that cannot interpret a statistic MUST decline to prune rather than
 guess.
 
 *Test:* run every fixture query with pruning disabled; assert byte-identical responses.
+
+### INV-P17
+**A set passes what its lookup passes.** A row satisfies a set reference on `c`
+iff `r[c]` is not null and the set's lookup passes the text the response renders
+for `r[c]` ([§4.2.11](04-evaluation.md#4211-sets)). An engine MUST NOT add a row
+the lookup rejects, nor drop one it passes.
+
+*Why:* the lookup is all a client's builder and the engine share. An engine that looks up other bytes — a binary column's stored bytes, a value it did not render, another seed — drops members of the set, and no client can see that.
+*Test:* for every filter of every bundled catalog that takes a set, build one from values a fixture chunk holds. Assert the answer contains the answer to the same values as a list, and equals the rows that an independent implementation of the lookup passes.
 
 ---
 

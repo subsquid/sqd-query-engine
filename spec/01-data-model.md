@@ -240,7 +240,7 @@ Filter kinds:
 
 | Kind | Client supplies | Semantics |
 |---|---|---|
-| `inList` | array of values | Row matches if the column value is in the array. §4.2 |
+| `inList` | array of values, or a set reference on a column rendered as text (§2.7) | Row matches if the column value is in the array, or passes the set's lookup. §4.2, §4.2.11 |
 | `equals` | a scalar | Row matches if the column value equals it. |
 | `rangeGte` / `rangeLte` | a number | Inclusive bound on a named column. |
 | `gteConst` | a boolean | When `true`, constrains a named column to be ≥ a catalog-fixed constant. Used for "is non-zero" flags over minimal-form hex. |

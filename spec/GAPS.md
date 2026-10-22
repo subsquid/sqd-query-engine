@@ -31,6 +31,7 @@ Compared against the reference implementation, as of 2026-10-07.
 | 50 | Several malformed chunk shapes are answered rather than refused | [INV-E3](07-invariants.md#inv-e3), [INV-E7](07-invariants.md#inv-e7) | **S4** |
 | 53 | A damaged chunk can panic the decoder, and the error kinds around it are coarse | [INV-E7](07-invariants.md#inv-e7) | **S4** |
 | 55 | A catalog key that changes the output is skipped by a release that predates it | [INV-X1](07-invariants.md#inv-x1) | **S4** |
+| 62 | Sets are not implemented | [INV-Q15](07-invariants.md#inv-q15) – [INV-Q18](07-invariants.md#inv-q18), [INV-P17](07-invariants.md#inv-p17) | **S2** |
 
 Every dataset [chapter 3](03-catalog.md) names is served except `fuel`, which is
 out of scope ([ADR-10](decisions/ADR-10-fuel-is-out-of-scope.md)). The only
@@ -90,6 +91,31 @@ transcription of the older revision. The lag is closed, and
 `the_catalogs_serve_every_field_the_reference_serves` now reads the reference's
 field macros off the checkout the fixture tree comes from, so the next such
 move fails a test rather than waiting for a review.
+
+---
+
+## S2 — Missing capability
+
+### 62. Sets are not implemented
+
+§2.7 and [ADR-17](decisions/ADR-17-large-value-sets-travel-as-fuse8-with-canaries.md) specify sets. The default build has none,
+and it refuses a request that carries `sets` with `UnknownTable`, which is the
+safe way to fail: no client gets an answer without its filter.
+
+A research prototype sits behind the `membership-filter` build feature, in
+`src/scan/membership.rs`, and differs from the specification in five ways:
+
+- It takes the structure inside the filter value rather than a reference to a
+  declared set, so there is no `sets` key, no `UnknownSet` and no check for a set
+  nothing refers to.
+- It accepts four formats: the RFC draft's Bloom filter, Parquet's split-block
+  Bloom filter, `fuse8` and `fuse16`. Only `fuse8` is specified.
+- It takes a `skipRepeats` flag from the client. Reusing a verdict for a repeated
+  value is pushdown, and the engine should decide it.
+- It does not check that the filtered column is selected
+  ([INV-Q18](07-invariants.md#inv-q18)).
+- Its soundness check does not bound `L`, its canary check accepts hex with an
+  odd number of digits, and every set error is `InvalidFilterValue`.
 
 ---
 

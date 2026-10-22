@@ -22,7 +22,7 @@ A query is a single JSON object.
 }
 ```
 
-Three kinds of key appear at the top level: the six **reserved keys** above, and
+Two kinds of key appear at the top level: the **reserved keys** of §2.1, and
 **item request arrays** named after a table's request name (§1.2). There is no
 third kind. A key that is neither reserved nor a known request name is an error
 ([INV-Q2](07-invariants.md#inv-q2)).
@@ -37,6 +37,7 @@ third kind. A key that is neither reserved nor a known request name is an error
 | `parentBlockHash` | string | absent | Hash the client believes precedes `fromBlock`. |
 | `includeAllBlocks` | boolean | `false` | Emit headers for blocks with no items. |
 | `fields` | object | `{}` | Output field selection, per table. |
+| `sets` | object | `{}` | Named value sets that filters refer to (§2.7). |
 
 Every key but `type` is optional; the defaults above are normative
 ([INV-Q9](07-invariants.md#inv-q9)).
@@ -194,6 +195,7 @@ An engine MUST enforce, before reading any data:
 | Values in one bloom filter | ≤ `P-MAX-BLOOM-VALUES` | [INV-Q10](07-invariants.md#inv-q10) |
 | Discriminator-family filters per item request | ≤ `P-MAX-DISCRIMINATOR-FILTERS` | [INV-Q11](07-invariants.md#inv-q11) |
 | Bytes in one discriminator value | ≤ `P-MAX-DISCRIMINATOR-BYTES` | [INV-Q12](07-invariants.md#inv-q12) |
+| Canaries in one set | at least one, ≤ `P-MAX-SET-CANARIES` | [INV-Q17](07-invariants.md#inv-q17) |
 
 The item-request cap is counted across *all* tables and aliases uniformly
 ([ADR-6](decisions/ADR-6-aliases-count-toward-the-request-cap.md)). A per-table
@@ -206,13 +208,17 @@ and a single `inList` to `P-MAX-IN-LIST` values
 filter list of a million addresses, is a well-formed query by the rules above and
 a memory-amplification attack in practice.
 
+A set (§2.7) counts toward `P-MAX-REQUEST-BYTES` like the rest of the request.
+`P-MAX-IN-LIST` does not apply to it: a set is not a list, and the bytes that
+carry it are its bound.
+
 Every value here is resolved in [09-parameters.md](09-parameters.md).
 
 ## 2.5 Filter value forms
 
 | Filter kind | Accepted value | Rejected |
 |---|---|---|
-| `inList` | array of strings, or of numbers where the column is numeric | anything else |
+| `inList` | array of strings, or of numbers where the column is numeric; or a set reference (§2.7) on a `hexBytes`, `base58` or `utf8` column | anything else |
 | `equals` | string, number, or boolean matching the column's type | arrays |
 | `rangeGte` / `rangeLte` | unsigned integer | strings, floats, negatives |
 | `gteConst` | boolean | anything else |
@@ -232,10 +238,108 @@ error either. It matches nothing ([INV-P14](07-invariants.md#inv-p14)).
 
 ## 2.6 Validation order
 
-All of §2.1–§2.5 MUST be checked before any chunk data is read, and an engine
+All of §2.1–§2.5 and §2.7 MUST be checked before any chunk data is read, and an engine
 MUST NOT emit partial output before a validation error
 ([INV-E2](07-invariants.md#inv-e2)). Validation is a pure function of the request
 and the catalog.
 
 Errors detectable only against a chunk — a missing column, a fork — are
 execution errors and are covered in [06-errors.md](06-errors.md).
+
+## 2.7 Sets
+
+A **set** stands in for a list too long to send. The client builds a compact
+structure over its values and sends that instead, and the engine keeps every row
+whose value the structure may hold. The structure has false positives and no
+false negatives, so the answer contains the one the same values would give as a
+list, and the client removes the extra rows itself
+([ADR-17](decisions/ADR-17-large-value-sets-travel-as-fuse8-with-canaries.md)).
+
+Sets are declared once, under `sets`, and filters refer to them by name:
+
+```jsonc
+{
+  "type": "evm",
+  "sets": {
+    "pairs": {
+      "fuse8": "<base 64>",
+      "canaries": ["0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc", "0x0d4a11d5…"]
+    }
+  },
+  "fields": {
+    "log": { "address": true },
+    "transaction": { "from": true, "to": true }
+  },
+  "logs": [{ "address": { "set": "pairs" }, "topic0": ["0x1c41…"] }],
+  "transactions": [{ "from": { "set": "pairs" } }, { "to": { "set": "pairs" } }]
+}
+```
+
+A name is any string. It means nothing beyond tying references to their set, so
+a client may make names up however it likes.
+
+### The set object
+
+| Key | Value |
+|---|---|
+| `fuse8` | The structure, as canonical base 64 with padding (RFC 4648). §4.2.11 says what its bytes are. |
+| `canaries` | An array of strings: a few of the set's values, as the client holds them. |
+
+A set carries exactly one structure key, and `fuse8` is the only one. The key
+names the format, so a later format can arrive under a key of its own without
+changing what `fuse8` means. A set with no structure key, with two, or with an
+unknown one is `InvalidSet`. So is a structure that is not canonical base 64 or
+whose header does not fit its body (§4.2.11), and so is a set that no filter
+refers to, which is nearly always a reference the client meant to write and did
+not ([INV-Q15](07-invariants.md#inv-q15)).
+
+### References
+
+A filter refers to a set with an object that holds one key, `{"set": "<name>"}`.
+
+- The name MUST be declared under `sets`. Otherwise `UnknownSet`
+  ([INV-Q15](07-invariants.md#inv-q15)).
+- The filter MUST be an `inList` filter on a column whose encoding is
+  `hexBytes`, `base58` or `utf8` (§1.5). A reference anywhere else is
+  `InvalidFilterValue` ([INV-Q16](07-invariants.md#inv-q16)). The structure is
+  looked up with the text the response renders, and only these encodings render a
+  value as the text a client holds.
+- The table's selected fields MUST render the filtered column, directly or
+  through the virtual field that rolls it (§2.3): `address` for a set on
+  `logs.address`, `topics` for one on `logs.topic0`. Otherwise
+  `SetFieldNotSelected` ([INV-Q18](07-invariants.md#inv-q18)). A client can
+  remove only the extra rows it can see.
+
+Any number of filters may refer to one set, and its structure still travels once.
+That is why sets are declared apart from the filters that use them:
+`from ∈ S ∨ to ∈ S` is two item requests ([INV-P5](07-invariants.md#inv-p5)), and
+so are the two owners of a Solana token balance.
+
+A set has at least one value, because each canary is one of its values. A client
+whose set is empty sends `[]` instead, which matches nothing
+([INV-P3](07-invariants.md#inv-p3)).
+
+### Canaries
+
+A structure is opaque. The engine cannot tell one built from the right bytes from
+one built from checksummed addresses, from addresses without their `0x`, from raw
+bytes, or with another hash. Each of those matches almost nothing, and an answer
+that is almost empty looks like a quiet stretch of chain: a wrong answer that
+looks right ([§6.1](06-errors.md#61-principles)). Canaries make the mistake an
+error.
+
+A set carries at least one canary and at most `P-MAX-SET-CANARIES`, otherwise it
+is `InvalidSet`. For every column that refers to the set, the engine folds each
+canary as that column folds a list value ([INV-P8](07-invariants.md#inv-p8)),
+checks that the result is a value the column can render — well-formed hex (§2.5)
+on a `hexBytes` column, a non-empty run of base58 digits on a `base58` one — and
+looks it up in the structure. A canary that fails either check is
+`SetCanaryMismatch` ([INV-Q17](07-invariants.md#inv-q17)).
+
+A wrong structure passes a canary only by a false positive, so each canary a
+client adds multiplies the chance that a wrong structure gets through by the
+format's false-positive rate. A client SHOULD draw its canaries at random from
+the set each time it builds one: a mistake that spoils only some values is caught
+only by a canary among them. No canary catches a set on the wrong field, such as
+a set of addresses on a topic filter, because the canaries are well-formed values
+there too.
