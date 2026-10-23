@@ -203,6 +203,75 @@ stat it cannot interpret MUST decline to prune, not guess.
 The one visible consequence of pruning is where truncation lands (§5.5), and
 that is governed by weight, not by scan order.
 
+### 4.2.11 Sets
+
+A set reference on column `c` (§2.7) is satisfied by a row whose value, as the
+response renders it, passes the set's lookup
+([INV-P17](07-invariants.md#inv-p17)):
+
+```
+satisfies(r, c ∈ set)  ⇔  r[c] is not null  ∧  lookup(set, text(r[c]))
+```
+
+A list that holds values `V` beside references to sets `S₁ … Sₙ` passes what any
+of them passes:
+
+```
+satisfies(r, c ∈ [V, S₁ … Sₙ])  ⇔  r[c] ∈ V  ∨  ∃ i . satisfies(r, c ∈ Sᵢ)
+```
+
+The values mean what they mean in a list without references: they are folded
+(§4.2.4), and a malformed hex value matches nothing
+([INV-Q12](07-invariants.md#inv-q12)).
+
+`text(v)` is the rendered string without its quotes: lowercase `0x` hex on a
+`hexBytes` column, base58 digits on a `base58` one, the stored text on a `utf8`
+one. It is the same text whatever the column's physical type, so a column stored
+as bytes is looked up by the text it renders to, never by its bytes.
+
+Every value the client built the set from passes, and a value it did not build
+it from MAY pass. The answer therefore contains the answer the same values give
+as a list, and the extra rows are the client's to remove, as they are for a bloom
+filter (§4.2.5). An engine cannot remove them, since it never sees the values.
+
+The lookup is the whole contract between a client's builder and the engine. The
+engine never builds a set, so any bytes for which the lookup passes every value
+are a correct set, however they were made.
+
+**`fuse8`.** The structure is a header followed by an array `F` of one-byte
+fingerprints. The header is four unsigned little-endian integers: a 64-bit
+`seed`, then the 32-bit `L`, `M` and `N`. Arithmetic is on unsigned 64-bit
+integers, modulo 2⁶⁴:
+
+```
+sound  ⇔  L is a power of two, L ≤ 2¹⁸, M = L − 1,
+          N > 0, N is a multiple of L, |F| ≥ N + 2L
+
+lookup(v):
+  k  = XXH3-64(UTF-8 bytes of v)        seed 0, default secret
+  h  = mix(k + seed)
+  f  = (h xor (h >> 32)) mod 2⁸
+  i0 = ⌊h · N / 2⁶⁴⌋
+  i1 = (i0 + L) xor ((h >> 18) and M)
+  i2 = (i0 + 2L) xor (h and M)
+  pass  ⇔  f xor F[i0] xor F[i1] xor F[i2] = 0
+
+mix(x):
+  x = x xor (x >> 33);  x = x · 0xff51afd7ed558ccd
+  x = x xor (x >> 33);  x = x · 0xc4ceb9fe1a85ec53
+  x = x xor (x >> 33)
+```
+
+A structure that is not sound is `InvalidSet`, because its lookup could read past
+`F` ([INV-Q15](07-invariants.md#inv-q15)). The share of other values that pass
+is the format's false-positive rate, which the fingerprint's width sets
+([ADR-17](decisions/ADR-17-large-value-sets-travel-as-fuse8-with-canaries.md)).
+
+A minimum and a maximum say nothing about which values a structure holds, so no
+statistic can rule a row group out for a set, nor for a list that holds one
+([INV-P16](07-invariants.md#inv-p16)). Looking a set up once per dictionary value
+rather than once per row is ordinary pushdown.
+
 ## 4.3 Relations
 
 ### 4.3.1 Source scoping

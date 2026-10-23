@@ -32,6 +32,7 @@ faster-hex = "0.10"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 ryu = "1.0.23"
 rustc-hash = "2"
+base64 = "0.22"
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.6"
@@ -64,6 +65,8 @@ libtest-mimic = "0.8"
 gungraun = "=0.20.0"
 # Queries per second under concurrency, against saved baselines.
 criterion = "0.5"
+# Builds the sets tests send; the engine only looks them up.
+xorf = { version = "0.13", default-features = false, features = ["binary-fuse"] }
 
 [[bench]]
 name = "throughput"

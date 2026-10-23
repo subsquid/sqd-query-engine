@@ -535,6 +535,19 @@ pub enum RelationKind {
     Parents,
 }
 
+/// The top-level keys of a request that are not item requests (spec §2.1). A
+/// request is read for these first, so a table or alias whose request name is
+/// one of them could never be addressed.
+pub const RESERVED_REQUEST_KEYS: &[&str] = &[
+    "type",
+    "fromBlock",
+    "toBlock",
+    "includeAllBlocks",
+    "fields",
+    "parentBlockHash",
+    "sets",
+];
+
 /// `P-MAX-DISCRIMINATOR-BYTES` (spec/09-parameters.md §9.1): the longest prefix
 /// a discriminator can dispatch on, and so the largest length a catalog may map
 /// to a column.

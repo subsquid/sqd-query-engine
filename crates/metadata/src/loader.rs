@@ -1,4 +1,7 @@
-use crate::{DatasetDescription, SpecialFilter, MAX_DISCRIMINATOR_BYTES, SCHEMA_VERSION};
+use crate::{
+    DatasetDescription, SpecialFilter, MAX_DISCRIMINATOR_BYTES, RESERVED_REQUEST_KEYS,
+    SCHEMA_VERSION,
+};
 use anyhow::{Context, Result};
 use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use std::collections::HashMap;
@@ -663,8 +666,14 @@ fn check_block_table(desc: &DatasetDescription) -> Result<()> {
 /// request surface entirely. `output.name` has no such default — a table that
 /// declares none is simply not addressable in `fields` — so only declared ones
 /// are claimed there.
+///
+/// The request's reserved keys are claimed before any table: a request is read
+/// for them first, so a table holding one of them could never be addressed.
 fn check_names_are_unique(desc: &DatasetDescription) -> Result<()> {
-    let mut request_names: HashMap<&str, &str> = HashMap::new();
+    let mut request_names: HashMap<&str, &str> = RESERVED_REQUEST_KEYS
+        .iter()
+        .map(|key| (*key, "a reserved key of every request"))
+        .collect();
     let mut output_names: HashMap<&str, &str> = HashMap::new();
 
     for (table_name, table) in &desc.tables {
@@ -2669,12 +2678,13 @@ tables:
     }
 
     /// A duplicate name makes a client's request ambiguous, and iteration order
-    /// — not the catalog — decides which table answers it (INV-D10).
+    /// — not the catalog — decides which table answers it (INV-D10). A request
+    /// name that is a reserved key is held by every request already.
     ///
     /// Covers CT-1 · INV-D10
     #[test]
     fn test_validate_rejects_duplicate_names() {
-        let catalog = |request_name: &str, output_name: &str| {
+        let catalog = |request_name: &str, output_name: &str, alias_name: &str| {
             format!(
                 r#"
 version: v2
@@ -2710,22 +2720,34 @@ tables:
       block_number: {{ type: uint64 }}
       seq: {{ type: uint32 }}
 aliases:
-  aliased:
+  {alias_name}:
     table: items
     filters: []
 "#
             )
         };
 
-        parse_dataset_description(&catalog("others", "other")).expect("distinct names must load");
+        parse_dataset_description(&catalog("others", "other", "aliased"))
+            .expect("distinct names must load");
 
-        for (what, request_name, output_name) in [
-            ("two tables claiming one request name", "items", "other"),
-            ("two tables claiming one output name", "others", "item"),
+        let mut refused = vec![
+            (
+                "two tables claiming one request name",
+                "items",
+                "other",
+                "aliased",
+            ),
+            (
+                "two tables claiming one output name",
+                "others",
+                "item",
+                "aliased",
+            ),
             (
                 "an alias claiming a table's request name",
-                "aliased",
+                "others",
                 "other",
+                "items",
             ),
             // `blocks` declares no request name, so it holds its own — and a
             // table declaring that name takes it, leaving the block table
@@ -2734,11 +2756,18 @@ aliases:
                 "a table claiming another's undeclared request name",
                 "blocks",
                 "other",
+                "aliased",
             ),
-        ] {
+        ];
+        for key in RESERVED_REQUEST_KEYS {
+            refused.push(("a table claiming a reserved key", key, "other", "aliased"));
+            refused.push(("an alias claiming a reserved key", "others", "other", key));
+        }
+
+        for (what, request_name, output_name, alias_name) in refused {
             assert!(
-                parse_dataset_description(&catalog(request_name, output_name)).is_err(),
-                "{what} must be refused"
+                parse_dataset_description(&catalog(request_name, output_name, alias_name)).is_err(),
+                "{what} ({request_name}, {output_name}, {alias_name}) must be refused"
             );
         }
     }

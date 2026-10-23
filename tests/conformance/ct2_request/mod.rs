@@ -9,5 +9,6 @@ mod bounds;
 mod fields;
 mod fork;
 mod kinds;
+mod sets;
 mod surface;
 mod values;

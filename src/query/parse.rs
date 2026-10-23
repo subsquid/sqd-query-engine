@@ -1,5 +1,8 @@
 use crate::error::ErrorKind;
-use crate::metadata::{Alias, DatasetDescription, SpecialFilter, TableDescription};
+use crate::metadata::{
+    Alias, DatasetDescription, SpecialFilter, TableDescription, RESERVED_REQUEST_KEYS,
+};
+use crate::sets::{parse_sets, Sets};
 use crate::{engine_bail, engine_ensure, engine_err};
 use anyhow::Result;
 use std::collections::HashMap;
@@ -18,6 +21,9 @@ pub struct Query {
     pub fields: HashMap<String, Vec<String>>,
     /// Filter items per table: table_name → items.
     pub items: HashMap<String, Vec<QueryItem>>,
+    /// The sets filters may refer to (§2.7), checked well-formed. That each
+    /// reference resolves, and each set has one, is checked by the plan.
+    pub sets: Sets,
 }
 
 /// A single filter item within a table request.
@@ -91,15 +97,6 @@ const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
 /// it: a hundred item requests each carrying a million addresses is well-formed
 /// under every other rule (INV-Q13).
 const MAX_IN_LIST: usize = 100_000;
-
-const KNOWN_TOP_KEYS: &[&str] = &[
-    "type",
-    "fromBlock",
-    "toBlock",
-    "includeAllBlocks",
-    "fields",
-    "parentBlockHash",
-];
 
 /// A block bound is an unsigned 64-bit integer or absent. A present-but-malformed
 /// bound is an error rather than a default: coercing `{"fromBlock": "18000000"}`
@@ -208,12 +205,13 @@ pub fn parse_query(json_bytes: &[u8], metadata: &DatasetDescription) -> Result<Q
 
     // Parse fields
     let fields = parse_fields(obj.get("fields"), metadata, &output_name_to_table)?;
+    let sets = parse_sets(obj.get("sets"))?;
 
     // Parse table filter arrays
     let mut items: HashMap<String, Vec<QueryItem>> = HashMap::new();
 
     for (key, value) in obj {
-        if KNOWN_TOP_KEYS.contains(&key.as_str()) {
+        if RESERVED_REQUEST_KEYS.contains(&key.as_str()) {
             continue;
         }
 
@@ -274,6 +272,7 @@ pub fn parse_query(json_bytes: &[u8], metadata: &DatasetDescription) -> Result<Q
         parent_block_hash,
         fields,
         items,
+        sets,
     })
 }
 

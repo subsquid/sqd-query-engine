@@ -14,5 +14,6 @@ mod gte_const;
 mod items;
 mod laws;
 mod pruning;
+mod sets;
 mod surface;
 mod values;

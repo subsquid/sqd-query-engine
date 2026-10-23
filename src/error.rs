@@ -45,8 +45,19 @@ pub enum ErrorKind {
     InvalidHex,
     /// A discriminator value exceeds `P-MAX-DISCRIMINATOR-BYTES`.
     DiscriminatorTooLong,
-    /// A filter value has a form the filter kind does not accept.
+    /// A filter value has a form the filter kind does not accept, such as a set
+    /// reference on a filter that takes no set.
     InvalidFilterValue,
+    /// A filter refers to a set that `sets` does not declare.
+    UnknownSet,
+    /// A declared set is malformed, unsound, has too few or too many canaries,
+    /// or no filter refers to it.
+    InvalidSet,
+    /// A set's canary is not a value the referring column can render, or the
+    /// set does not hold it.
+    SetCanaryMismatch,
+    /// A filter refers to a set on a column no selected field renders.
+    SetFieldNotSelected,
     /// The request exceeds `P-MAX-REQUEST-BYTES` or `P-MAX-IN-LIST`.
     RequestTooLarge,
     /// A reserved key the dataset cannot honour.
@@ -83,6 +94,10 @@ impl ErrorKind {
             ErrorKind::InvalidHex => "InvalidHex",
             ErrorKind::DiscriminatorTooLong => "DiscriminatorTooLong",
             ErrorKind::InvalidFilterValue => "InvalidFilterValue",
+            ErrorKind::UnknownSet => "UnknownSet",
+            ErrorKind::InvalidSet => "InvalidSet",
+            ErrorKind::SetCanaryMismatch => "SetCanaryMismatch",
+            ErrorKind::SetFieldNotSelected => "SetFieldNotSelected",
             ErrorKind::RequestTooLarge => "RequestTooLarge",
             ErrorKind::UnsupportedRequestField => "UnsupportedRequestField",
             ErrorKind::TableNotFound => "TableNotFound",

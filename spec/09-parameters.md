@@ -29,16 +29,31 @@ Checked before any chunk data is read ([INV-E2](07-invariants.md#inv-e2)).
 | `P-MAX-DISCRIMINATOR-BYTES` | Bytes in one discriminator value ([INV-Q12](07-invariants.md#inv-q12)) | 16 | 16 |
 | `P-MAX-REQUEST-BYTES` | Whole-request size bound ([INV-Q13](07-invariants.md#inv-q13)) | 2 MiB | 2 MiB |
 | `P-MAX-IN-LIST` | Values in one `inList` ([INV-Q13](07-invariants.md#inv-q13)) | 100 000 | 100 000 |
+| `P-MAX-SET-CANARIES` | Canaries in one set ([INV-Q17](07-invariants.md#inv-q17)) | 64 | ⚠ 64 |
+| `P-MAX-SET-REFERENCES` | Set references summed across every list of every item request, a name counted once per list ([INV-Q13](07-invariants.md#inv-q13)) | 64 | ⚠ 64 |
 
 The discriminator family is read from the catalog, not named in code: it is the
 `discriminator` special filter plus every column it dispatches to. A dataset with
 a differently-named discriminator is bounded by the same rule with no code change
 ([INV-X1](07-invariants.md#inv-x1)).
 
-`P-MAX-REQUEST-BYTES` bounds parsing work and total request representation.
-`P-MAX-IN-LIST` independently bounds the set built for one filter, including the
-case where short values allow a large list to fit below the byte cap
-([ADR-13](decisions/ADR-13-request-resource-bounds.md)).
+`P-MAX-REQUEST-BYTES` bounds parsing work and total request representation, and
+it is the only bound on a set's size (§2.7). `P-MAX-IN-LIST` independently bounds the
+set built for one filter, including the case where short values allow a large
+list to fit below the byte cap ([ADR-13](decisions/ADR-13-request-resource-bounds.md)).
+
+`P-MAX-SET-CANARIES` bounds the work a set's canaries add to validation: each is
+one lookup, for every column that refers to the set. It is a proposal of
+[ADR-17](decisions/ADR-17-large-value-sets-travel-as-fuse8-with-canaries.md), which is itself proposed. Four canaries already
+let a wrong structure through less than once in a billion requests, so the bound
+is far above what a client needs.
+
+`P-MAX-SET-REFERENCES` bounds the lookups a request adds to every row: each
+reference is one, for every row its table scans. A set costs a client a few dozen
+bytes to declare again under another name, so the bytes do not bound them, and
+references are counted rather than sets. It is a proposal of the same ADR. A
+client joins a few sets in a list and refers to each from a few filters, well
+under it.
 
 ## 9.2 Response bounds
 
@@ -80,7 +95,7 @@ its target together ([ADR-14](decisions/ADR-14-a-matrix-correction-rebaselines-t
 
 | Parameter | Role | Observed | Target |
 |---|---|---|---|
-| `P-COV-PROPERTY` | Fraction of invariants at status **C** in the traceability matrix ([MG-1](08-conformance.md#812-merge-gates)) | 0.76 (65 of 86) | ⚠ 0.69, then ratchet |
+| `P-COV-PROPERTY` | Fraction of invariants at status **C** in the traceability matrix ([MG-1](08-conformance.md#812-merge-gates)) | 0.77 (70 of 91) | ⚠ 0.69, then ratchet |
 | `P-COV-DIFF` | Line coverage of lines a change touches ([MG-2](08-conformance.md#812-merge-gates)) | unmeasured | ⚠ 0.80 |
 | `P-COV-TOTAL` | Whole-repository line coverage floor ([MG-2](08-conformance.md#812-merge-gates)) | unmeasured | ⚠ 0.70 |
 | `P-FLAKE-RETRIES` | Retries a test gets before it is quarantined ([MG-7](08-conformance.md#812-merge-gates)) | none | ⚠ 1 |
