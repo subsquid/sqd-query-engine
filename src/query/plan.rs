@@ -1,16 +1,20 @@
 use crate::error::ErrorKind;
 use crate::metadata::{
-    ColumnDescription, ColumnType, DatasetDescription, RelationDef,
+    ColumnDescription, ColumnType, DatasetDescription, JsonEncoding, RelationDef,
     RelationKind as MetaRelationKind, SpecialFilter, TableDescription, MAX_DISCRIMINATOR_BYTES,
 };
-use crate::query::parse::{parse_hex, Query, QueryItem};
+use crate::output::{snake_to_camel, BASE58_ALPHABET};
+use crate::query::parse::{is_hex_literal, parse_hex, Query, QueryItem};
 use crate::scan::predicate::{
     col_bloom, col_eq, col_in_list, col_list_contains_any_string, col_list_contains_any_u32,
-    ColumnPredicate, InListPredicate, RowPredicate, ScalarValue,
+    AnyOfPredicate, ArrayPredicate, ColumnPredicate, InListPredicate, InSetPredicate, RowPredicate,
+    ScalarValue,
 };
+use crate::sets::{Set, Sets, MAX_SET_REFERENCES};
 use crate::{engine_bail, engine_ensure, engine_err};
 use anyhow::Result;
 use arrow::array::*;
+use indexmap::IndexSet;
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
@@ -124,6 +128,7 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
         .unwrap_or_default();
 
     let mut table_plans = Vec::new();
+    let mut referred = References::default();
 
     // Catalog order, since the request's map has none: it decides which of two
     // failing tables a query reports, and that must not change between runs.
@@ -158,11 +163,17 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
         // the scan produces.
         let mut total_items = 0usize;
 
+        let scope = SetScope {
+            sets: &query.sets,
+            selected: query.fields.get(table_name).map_or(&[], Vec::as_slice),
+        };
+
         for item in items {
-            let item_predicate = match compile_item_predicates(item, table_desc)? {
-                CompiledItem::Unsatisfiable => continue,
-                CompiledItem::Predicate(predicate) => predicate,
-            };
+            let item_predicate =
+                match compile_item_predicates(item, table_desc, &scope, &mut referred)? {
+                    CompiledItem::Unsatisfiable => continue,
+                    CompiledItem::Predicate(predicate) => predicate,
+                };
             total_items += 1;
             let item_index = all_predicates.len();
             all_predicates.push(item_predicate);
@@ -230,6 +241,20 @@ pub fn compile(query: &Query, metadata: &DatasetDescription) -> Result<Plan> {
             predicates: all_predicates,
             relations: all_relations,
         });
+    }
+
+    // A set nothing refers to is a reference the client meant to write and did
+    // not, and answering drops that filter without a word (INV-Q15).
+    if let Some(name) = query
+        .sets
+        .keys()
+        .find(|name| !referred.named.contains(*name))
+    {
+        engine_bail!(
+            ErrorKind::InvalidSet,
+            "set '{}' is declared, and no filter refers to it",
+            name
+        );
     }
 
     Ok(Plan {
@@ -367,9 +392,51 @@ fn check_item_limits(item: &QueryItem, table: &TableDescription) -> Result<()> {
     Ok(())
 }
 
+/// The references a request's filters make to its sets.
+#[derive(Default)]
+struct References {
+    /// Every set a filter names.
+    named: HashSet<String>,
+    /// The references, summed across every list, a name counted once per list.
+    count: usize,
+}
+
+impl References {
+    /// Adds one list's references, refusing more than `P-MAX-SET-REFERENCES` in
+    /// all (INV-Q13). Each is a lookup for every row its table scans, however
+    /// little the set it names cost to send.
+    fn add(&mut self, key: &str, names: &IndexSet<&str>) -> Result<()> {
+        self.count += names.len();
+        engine_ensure!(
+            self.count <= MAX_SET_REFERENCES,
+            ErrorKind::RequestTooLarge,
+            "filter '{}' brings the request to {} set references, at most {} allowed",
+            key,
+            self.count,
+            MAX_SET_REFERENCES
+        );
+
+        self.named.extend(names.iter().map(|name| name.to_string()));
+        Ok(())
+    }
+}
+
+/// What a set reference resolves against: the request's sets, and the fields
+/// it selects from the referring item's table.
+struct SetScope<'q> {
+    sets: &'q Sets,
+    selected: &'q [String],
+}
+
 /// Compile a single query item's filters into one RowPredicate. A discriminator
-/// that dispatches to several column lengths becomes its alternatives.
-fn compile_item_predicates(item: &QueryItem, table: &TableDescription) -> Result<CompiledItem> {
+/// that dispatches to several column lengths becomes its alternatives. The sets
+/// its filters refer to are added to `referred`, before they are checked.
+fn compile_item_predicates(
+    item: &QueryItem,
+    table: &TableDescription,
+    scope: &SetScope,
+    referred: &mut References,
+) -> Result<CompiledItem> {
     check_item_limits(item, table)?;
 
     let mut col_predicates: Vec<ColumnPredicate> = Vec::new();
@@ -377,6 +444,13 @@ fn compile_item_predicates(item: &QueryItem, table: &TableDescription) -> Result
     let mut unsatisfiable = false;
 
     for (key, value) in &item.filters {
+        let names = set_references(key, value)?;
+        if !names.is_empty() {
+            referred.add(key, &names)?;
+            col_predicates.push(compile_set_filter(key, value, &names, table, scope)?);
+            continue;
+        }
+
         // `"c": []` is a filter no row passes, not an absent filter, and it
         // sinks the whole item whatever its other filters say (INV-P3). Reading
         // it as "unconstrained" would turn "none of these addresses" into
@@ -440,11 +514,7 @@ fn compile_item_predicates(item: &QueryItem, table: &TableDescription) -> Result
                     if let Some(bool_val) = boolean_filter {
                         col_predicates.push(col_eq(column, ScalarValue::Boolean(bool_val)));
                     } else if is_filter_scalar(value) || value.is_array() {
-                        let values = match value.as_array() {
-                            Some(arr) => arr,
-                            None => std::slice::from_ref(value),
-                        };
-                        match compile_in_list(column, values, col_desc)? {
+                        match compile_in_list(column, list_of(value), col_desc)? {
                             Some(predicate) => col_predicates.push(predicate),
                             None => unsatisfiable = true,
                         }
@@ -515,11 +585,7 @@ fn compile_item_predicates(item: &QueryItem, table: &TableDescription) -> Result
             // forms cannot drift: the scalar branch used to compare a `Utf8`
             // against whatever the column was, which worked on a string column
             // and silently matched nothing on a binary one.
-            let values = match value.as_array() {
-                Some(arr) => arr,
-                None => std::slice::from_ref(value),
-            };
-            match compile_in_list(key, values, col_desc)? {
+            match compile_in_list(key, list_of(value), col_desc)? {
                 Some(predicate) => col_predicates.push(predicate),
                 None => unsatisfiable = true,
             }
@@ -549,6 +615,204 @@ fn compile_item_predicates(item: &QueryItem, table: &TableDescription) -> Result
     };
 
     Ok(CompiledItem::Predicate(predicate))
+}
+
+/// A filter's list. A value written alone is a list of one.
+fn list_of(value: &serde_json::Value) -> &[serde_json::Value] {
+    match value.as_array() {
+        Some(values) => values,
+        None => std::slice::from_ref(value),
+    }
+}
+
+/// The sets a filter's list refers to, each once, in the order first named. A
+/// reference is an element of the list, an object holding one key,
+/// `{"set": "<name>"}` (§2.7). No other element is an object.
+fn set_references<'v>(key: &str, value: &'v serde_json::Value) -> Result<IndexSet<&'v str>> {
+    let mut names = IndexSet::new();
+
+    for element in list_of(value) {
+        let Some(object) = element.as_object() else {
+            continue;
+        };
+
+        let name = object.get("set").and_then(|name| name.as_str());
+        match (object.len(), name) {
+            (1, Some(name)) => names.insert(name),
+            _ => engine_bail!(
+                ErrorKind::InvalidFilterValue,
+                "invalid filter value for '{}': an object is a set reference, \
+                 {{\"set\": \"<name>\"}}, and this one is {}",
+                key,
+                element
+            ),
+        };
+    }
+
+    Ok(names)
+}
+
+/// A filter whose list refers to sets, checked in order against the filter's
+/// kind (INV-Q16), the declared sets (INV-Q15), the selected fields (INV-Q18)
+/// and each set's canaries (INV-Q17). The list's values mean what they mean in
+/// a list without references, and a row passes when it equals one of them or
+/// one of the sets passes it.
+fn compile_set_filter(
+    key: &str,
+    value: &serde_json::Value,
+    names: &IndexSet<&str>,
+    table: &TableDescription,
+    scope: &SetScope,
+) -> Result<ColumnPredicate> {
+    let column = match table.request().special_filters.get(key) {
+        None => key,
+        Some(SpecialFilter::ColumnAlias { column }) => column.as_str(),
+        Some(_) => engine_bail!(
+            ErrorKind::InvalidFilterValue,
+            "filter '{}' takes no list of values, so it takes no set",
+            key
+        ),
+    };
+    let col_desc = table.column(column).ok_or_else(|| {
+        engine_err!(
+            ErrorKind::UnknownFilter,
+            "column '{}' not found in table",
+            column
+        )
+    })?;
+
+    // The lookup hashes the text the response renders. A number, a quantity
+    // padded to its width or a list has no text a client could have hashed.
+    let renders_text = matches!(
+        (&col_desc.encoding, &col_desc.data_type),
+        (None, ColumnType::String)
+            | (
+                Some(JsonEncoding::HexBytes | JsonEncoding::Base58),
+                ColumnType::String | ColumnType::FixedBinary(_)
+            )
+    );
+    engine_ensure!(
+        renders_text,
+        ErrorKind::InvalidFilterValue,
+        "filter '{}' refers to a set, and a set stands in a list of hexBytes, base58 or \
+         utf8 text, which column '{}' does not render",
+        key,
+        column
+    );
+
+    let values: Vec<serde_json::Value> = list_of(value)
+        .iter()
+        .filter(|element| !element.is_object())
+        .cloned()
+        .collect();
+    let listed = match values.is_empty() {
+        true => None,
+        false => compile_in_list(column, &values, col_desc)?,
+    };
+
+    let mut sets = Vec::with_capacity(names.len());
+    for &name in names {
+        let set = scope.sets.get(name).ok_or_else(|| {
+            engine_err!(
+                ErrorKind::UnknownSet,
+                "filter '{}' refers to set '{}', which 'sets' does not declare",
+                key,
+                name
+            )
+        })?;
+        sets.push(set);
+    }
+
+    // A set passes rows that are not in it, and a client can remove only the
+    // ones it can see.
+    let renders = |field: &String| table.field_columns(field).any(|c| c == column);
+    if !scope.selected.iter().any(renders) {
+        let fields: Vec<String> = table
+            .output
+            .fields
+            .iter()
+            .filter(|field| renders(field))
+            .map(|field| snake_to_camel(field))
+            .collect();
+        let remedy = if fields.is_empty() {
+            "no field of the table renders it, so no set can filter on it".to_string()
+        } else {
+            format!(
+                "select {} to see, and remove, the rows the set passes that are not in it",
+                fields.join(" or ")
+            )
+        };
+        engine_bail!(
+            ErrorKind::SetFieldNotSelected,
+            "filter '{}' refers to a set, and no selected field renders column '{}': {}",
+            key,
+            column,
+            remedy
+        );
+    }
+
+    for (&name, set) in names.iter().zip(&sets) {
+        for canary in &set.canaries {
+            check_canary(canary, set, name, key, col_desc)?;
+        }
+    }
+
+    let sets = sets.into_iter().map(Arc::clone).collect();
+    let in_sets: Arc<dyn ArrayPredicate> =
+        Arc::new(InSetPredicate::new(sets, col_desc.encoding.clone()));
+    let predicate = match listed {
+        Some(listed) => Arc::new(AnyOfPredicate::new(vec![listed.predicate, in_sets])),
+        None => in_sets,
+    };
+
+    Ok(ColumnPredicate {
+        column: column.to_string(),
+        predicate,
+    })
+}
+
+/// A canary, folded as the column folds a list value, must be a value the
+/// column can render, and the set must hold it (INV-Q17). Every way to build a
+/// set wrong is accepted otherwise and matches almost nothing, an answer that
+/// looks like a quiet stretch of chain.
+fn check_canary(
+    canary: &str,
+    set: &Set,
+    name: &str,
+    key: &str,
+    col_desc: &ColumnDescription,
+) -> Result<()> {
+    let value = fold_for_column(canary, col_desc);
+
+    let renderable = match col_desc.encoding {
+        Some(JsonEncoding::HexBytes) => is_hex_literal(&value),
+        Some(JsonEncoding::Base58) => {
+            !value.is_empty() && value.bytes().all(|b| BASE58_ALPHABET.contains(&b))
+        }
+        _ => true,
+    };
+    engine_ensure!(
+        renderable,
+        ErrorKind::SetCanaryMismatch,
+        "set '{}' on filter '{}': canary {:?} is no value the column can render",
+        name,
+        key,
+        canary
+    );
+
+    engine_ensure!(
+        set.fuse8.contains(value.as_bytes()),
+        ErrorKind::SetCanaryMismatch,
+        "set '{}' on filter '{}': canary {:?} is not in the set, so the set was built from \
+         other text than the response renders, {:?} here: check case, the 0x prefix, the \
+         hash and its seed",
+        name,
+        key,
+        canary,
+        value
+    );
+
+    Ok(())
 }
 
 /// Whether a bare value is one a filter can carry: a string, or an integer of

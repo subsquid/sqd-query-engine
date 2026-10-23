@@ -362,6 +362,9 @@ Permitted; must not change the meaning of anything above.
   [INV-O14](07-invariants.md#inv-o14).
 - `evm.traces.rewardValueNonZero` — present in both, listed here because it is
   easy to miss among the other three `*NonZero` flags.
+- Sets (§2.7). The reference rejects the top-level `sets` key, so a request
+  that carries one goes only to an engine that serves it
+  ([ADR-17](decisions/ADR-17-large-value-sets-travel-as-fuse8-with-canaries.md)).
 
 ---
 

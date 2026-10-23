@@ -33,6 +33,7 @@ body:
 | `parentBlockHash` mismatch | Serve the data | Fork error ([INV-E5](07-invariants.md#inv-e5)) |
 | `parentBlockHash` on a dataset with no parent-hash column | Accept and skip the check | Error ([INV-E5](07-invariants.md#inv-e5)) |
 | Join key of an unsupported type | Match nothing | Error ([INV-E7](07-invariants.md#inv-e7)) |
+| Set built from other bytes than the column renders | Match only the rows it happens to | Error ([INV-Q17](07-invariants.md#inv-q17)) |
 
 **Errors are stable.** Each error has a machine-readable kind. Clients switch on
 the kind; only humans read the message ([INV-E6](07-invariants.md#inv-e6)).
@@ -56,7 +57,11 @@ Raised from the request and catalog, before any data is read.
 | `ConflictingFilters` | More than one discriminator-family filter in one item request. |
 | `InvalidHex` | A `discriminator` value lacks `0x`, has odd length, or contains a non-hex digit. |
 | `DiscriminatorTooLong` | A discriminator value exceeds `P-MAX-DISCRIMINATOR-BYTES`. |
-| `InvalidFilterValue` | A filter value has a form the filter kind does not accept. |
+| `InvalidFilterValue` | A filter value has a form the filter kind does not accept, including a set reference on a filter that cannot take one ([INV-Q16](07-invariants.md#inv-q16)). |
+| `UnknownSet` | A filter refers to a set that `sets` does not declare. |
+| `InvalidSet` | A set has no structure key, two, or an unknown one; a structure that is not canonical base 64 or not sound; a number of canaries out of bounds; or no filter refers to it ([INV-Q15](07-invariants.md#inv-q15), [INV-Q17](07-invariants.md#inv-q17)). |
+| `SetCanaryMismatch` | A canary is not a value the referring column can render, or the set's structure does not hold it ([INV-Q17](07-invariants.md#inv-q17)). |
+| `SetFieldNotSelected` | A filter refers to a set on a column that no selected field renders ([INV-Q18](07-invariants.md#inv-q18)). |
 | `RequestTooLarge` | The request exceeds an engine-configured byte or list-length bound. |
 | `UnsupportedRequestField` | A reserved key the dataset cannot honour — `parentBlockHash` where the block table declares no parent-hash column. |
 

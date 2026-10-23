@@ -16,6 +16,7 @@ pub mod generator;
 pub mod guard;
 pub mod hex;
 pub mod json;
+pub mod sets;
 pub mod sol_like;
 pub mod store;
 pub mod synthetic;

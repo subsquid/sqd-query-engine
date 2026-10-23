@@ -417,7 +417,8 @@ fn encode_base58_fixed_binary(array: &dyn Array, row: usize, buf: &mut Vec<u8>) 
 
 /// The Bitcoin alphabet, which is the one Solana uses. `0`, `O`, `I` and `l` are
 /// absent so no two characters look alike.
-const BASE58_ALPHABET: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+pub(crate) const BASE58_ALPHABET: &[u8; 58] =
+    b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
 /// Base58 of a byte string, quoted.
 ///
@@ -425,7 +426,7 @@ const BASE58_ALPHABET: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghij
 /// emitted as `1`s first — that is what makes the encoding injective, and what
 /// keeps a 32-byte key that starts with a zero byte 32 bytes long on the way
 /// back.
-fn encode_base58_bytes(bytes: &[u8], buf: &mut Vec<u8>) {
+pub(crate) fn encode_base58_bytes(bytes: &[u8], buf: &mut Vec<u8>) {
     buf.push(b'"');
 
     let zeros = bytes.iter().take_while(|b| **b == 0).count();
@@ -801,7 +802,7 @@ fn needs_escape(bytes: &[u8]) -> bool {
     rest.iter().any(|&b| b < 0x20 || b == b'"' || b == b'\\')
 }
 
-fn encode_hex_bytes(bytes: &[u8], buf: &mut Vec<u8>) {
+pub(crate) fn encode_hex_bytes(bytes: &[u8], buf: &mut Vec<u8>) {
     buf.push(b'"');
     buf.extend_from_slice(b"0x");
     let hex_len = bytes.len() * 2;

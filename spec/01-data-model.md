@@ -240,7 +240,7 @@ Filter kinds:
 
 | Kind | Client supplies | Semantics |
 |---|---|---|
-| `inList` | array of values | Row matches if the column value is in the array. §4.2 |
+| `inList` | array of values, and on a column rendered as text of set references (§2.7) | Row matches if the column value is in the array, or passes the lookup of a set it names. §4.2, §4.2.11 |
 | `equals` | a scalar | Row matches if the column value equals it. |
 | `rangeGte` / `rangeLte` | a number | Inclusive bound on a named column. |
 | `gteConst` | a boolean | When `true`, constrains a named column to be ≥ a catalog-fixed constant. Used for "is non-zero" flags over minimal-form hex. |
@@ -369,8 +369,8 @@ They are collected as [INV-D1](07-invariants.md#inv-d1) … [INV-D11](07-invaria
 - Every alias: its target table exists; its implicit-filter columns exist;
   its `columnAlias` filters target real columns and are in its filter list;
   its relations are valid.
-- Request names are unique across tables *and* aliases; output names are
-  unique across tables.
+- Request names are unique across tables *and* aliases, and none is a reserved
+  key of §2.1; output names are unique across tables.
 
 The last check is easy to overlook and easy to violate. A duplicate request name
 makes a client's request ambiguous, and the ambiguity is resolved by iteration

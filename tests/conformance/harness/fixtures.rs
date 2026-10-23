@@ -57,6 +57,26 @@ pub fn run(
     run_against_bytes(metadata, &fixture_chunk(dataset), query_json)
 }
 
+/// One page of a query against a bundled dataset's fixture chunk, and the block
+/// the page ends at; `None` when the range misses the chunk. A page ends where
+/// its weight runs out, so a query that matches much covers less of the chunk
+/// than one that matches little.
+pub fn run_page(
+    dataset: &str,
+    metadata: &DatasetDescription,
+    query: &[u8],
+) -> anyhow::Result<Option<(Vec<u8>, u64)>> {
+    let parsed = parse_query(query, metadata)?;
+    let plan = compile(&parsed, metadata)?;
+
+    Ok(
+        execute_plan(&plan, metadata, &fixture_chunk(dataset))?.map(|output| {
+            let last = output.last_block();
+            (output.into_json_lines(), last)
+        }),
+    )
+}
+
 /// Run a query against a chunk named directly — a synthetic one, or a fixture
 /// chunk rewritten for the test.
 pub fn run_against(

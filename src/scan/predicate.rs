@@ -1,6 +1,9 @@
 use crate::integers::{
     declared_value, slot_of, stored_key, width_of, IntColumn, IntValues, IntVisitor, INT_TYPES,
 };
+use crate::metadata::JsonEncoding;
+use crate::output::{encode_base58_bytes, encode_hex_bytes};
+use crate::sets::Set;
 use crate::text::StringColumn;
 use arrow::array::*;
 use arrow::buffer::BooleanBuffer;
@@ -350,6 +353,15 @@ pub struct BloomFilterPredicate {
     needles: Vec<Vec<u8>>,
     num_bytes: usize,
     num_hashes: usize,
+}
+
+/// Set predicate: the text the response renders for a value passes the lookup
+/// of one of a list's sets (INV-P17).
+pub struct InSetPredicate {
+    sets: Vec<Arc<Set>>,
+    /// How a column stored as bytes renders. A text column holds its rendering
+    /// already.
+    encoding: Option<JsonEncoding>,
 }
 
 /// Range >= predicate: value >= threshold.
@@ -998,6 +1010,166 @@ impl ArrayPredicate for BloomFilterPredicate {
             self.num_hashes,
             needles.join(", ")
         )
+    }
+}
+
+impl InSetPredicate {
+    pub fn new(sets: Vec<Arc<Set>>, encoding: Option<JsonEncoding>) -> Self {
+        Self { sets, encoding }
+    }
+
+    fn contains(&self, text: &[u8]) -> bool {
+        self.sets.iter().any(|set| set.fuse8.contains(text))
+    }
+
+    /// A verdict per row, `false` for a null. A value equal to the previous
+    /// one takes its verdict: values repeat in runs beside the columns a table
+    /// is sorted by, not only in them, and a comparison costs less than a
+    /// lookup where they do not.
+    fn verdicts<'a>(
+        &self,
+        len: usize,
+        value: impl Fn(usize) -> Option<&'a [u8]>,
+        mut passes: impl FnMut(&[u8]) -> bool,
+    ) -> BooleanBuffer {
+        let mut builder = BooleanBufferBuilder::new(len);
+        let mut previous: Option<(&[u8], bool)> = None;
+
+        for row in 0..len {
+            let verdict = match (value(row), previous) {
+                (None, _) => false,
+                (Some(value), Some((last, verdict))) if value == last => verdict,
+                (Some(value), _) => {
+                    let verdict = passes(value);
+                    previous = Some((value, verdict));
+                    verdict
+                }
+            };
+            builder.append(verdict);
+        }
+
+        builder.finish()
+    }
+}
+
+impl ArrayPredicate for InSetPredicate {
+    fn evaluate(&self, array: &dyn Array) -> Mask {
+        if let Some(mask) = through_dictionary(self, array) {
+            return mask;
+        }
+
+        if let Some(column) = StringColumn::resolve(array) {
+            let values = self.verdicts(
+                column.len(),
+                |row| column.value(row).map(str::as_bytes),
+                |text| self.contains(text),
+            );
+            return Ok(BooleanArray::new(values, column.nulls()));
+        }
+
+        // A column stored as bytes is looked up by the text it renders to,
+        // never by its bytes (§4.2.11). The renderers are the response's own,
+        // and only these two array types reach them there.
+        let render: fn(&[u8], &mut Vec<u8>) = match self.encoding {
+            Some(JsonEncoding::HexBytes) => encode_hex_bytes,
+            Some(JsonEncoding::Base58) => encode_base58_bytes,
+            _ => return Err(unsupported("a set", array)),
+        };
+        let mut text = Vec::new();
+        let mut passes = |bytes: &[u8]| {
+            text.clear();
+            render(bytes, &mut text);
+            // Without the quotes the renderer writes around it.
+            self.contains(&text[1..text.len() - 1])
+        };
+
+        macro_rules! rendered {
+            ($($array:ty),+ $(,)?) => {
+                $(if let Some(arr) = array.as_any().downcast_ref::<$array>() {
+                    let values = self.verdicts(
+                        arr.len(),
+                        |row| (!arr.is_null(row)).then(|| arr.value(row)),
+                        &mut passes,
+                    );
+                    return Ok(BooleanArray::new(values, arr.nulls().cloned()));
+                })+
+            };
+        }
+
+        rendered!(FixedSizeBinaryArray, BinaryArray);
+        Err(unsupported("a set", array))
+    }
+
+    /// A minimum and a maximum say nothing about which values a set holds
+    /// (INV-P16).
+    fn can_skip(&self, _stats: &StatRange) -> bool {
+        false
+    }
+
+    fn describe(&self) -> String {
+        let mut sets: Vec<String> = self
+            .sets
+            .iter()
+            .map(|set| {
+                let fuse8 = &set.fuse8;
+                format!(
+                    "fuse8, {} fingerprints, xxh3 {:016x}",
+                    fuse8.fingerprints(),
+                    fuse8.digest()
+                )
+            })
+            .collect();
+        sets.sort();
+        format!("in_set({}; rendered {:?})", sets.join("; "), self.encoding)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AnyOfPredicate
+// ---------------------------------------------------------------------------
+
+/// A row passes when any of `parts` passes it: a list that holds values and
+/// set references beside each other (§4.2.11).
+pub struct AnyOfPredicate {
+    parts: Vec<Arc<dyn ArrayPredicate>>,
+}
+
+impl AnyOfPredicate {
+    pub fn new(parts: Vec<Arc<dyn ArrayPredicate>>) -> Self {
+        Self { parts }
+    }
+}
+
+impl ArrayPredicate for AnyOfPredicate {
+    fn evaluate(&self, array: &dyn Array) -> Mask {
+        let mut any: Option<BooleanArray> = None;
+        for part in &self.parts {
+            let mask = part.evaluate(array)?;
+            any = Some(match any {
+                None => mask,
+                Some(prev) => or_kleene(&prev, &mask).unwrap(),
+            });
+        }
+
+        Ok(any.unwrap_or_else(|| all(array.len(), false)))
+    }
+
+    /// Only a group that no part can match: a set never rules one out, so a
+    /// list with one prunes no more than the set alone.
+    fn can_skip(&self, stats: &StatRange) -> bool {
+        self.parts.iter().all(|part| part.can_skip(stats))
+    }
+
+    fn matches_every_value(&self, stats: &StatRange) -> bool {
+        self.parts
+            .iter()
+            .any(|part| part.matches_every_value(stats))
+    }
+
+    fn describe(&self) -> String {
+        let mut parts: Vec<String> = self.parts.iter().map(|part| part.describe()).collect();
+        parts.sort();
+        format!("any_of({})", parts.join(" | "))
     }
 }
 
@@ -3118,6 +3290,14 @@ mod tests {
                 r#"contains_any(Utf8: "a", "b")"#,
             ),
             (NeverPredicate.describe(), "never"),
+            (
+                AnyOfPredicate::new(vec![
+                    Arc::new(NeverPredicate),
+                    Arc::new(InListPredicate::from_u8s(&[7])),
+                ])
+                .describe(),
+                r#"any_of(in(UInt8: "7") | never)"#,
+            ),
         ];
         for (text, expected) in &described {
             assert_eq!(text, expected);
@@ -3129,6 +3309,14 @@ mod tests {
         assert_eq!(
             ListContainsAnyPredicate::new_u32(vec![2, 3, 1]).describe(),
             ListContainsAnyPredicate::new_u32(vec![3, 1, 2]).describe()
+        );
+        assert_eq!(
+            AnyOfPredicate::new(vec![
+                Arc::new(InListPredicate::from_u8s(&[7])),
+                Arc::new(NeverPredicate),
+            ])
+            .describe(),
+            described.last().unwrap().1
         );
     }
 
@@ -3149,5 +3337,201 @@ mod tests {
         }
 
         assert_eq!(Opaque.describe(), std::any::type_name::<Opaque>());
+    }
+
+    /// The verdict for a row is the lookup of the text the response renders for
+    /// it: stored as text at any of its physical types, through a dictionary, or
+    /// as bytes rendered as hex or base58. Reusing a repeated value's verdict
+    /// changes no verdict, and a null passes nothing.
+    ///
+    /// Covers CT-3 · INV-P17
+    #[test]
+    fn a_set_looks_up_the_text_the_response_renders() {
+        use crate::sets::{wire, Fuse8, Set};
+        use xorf::{BinaryFuse8, Filter};
+        use xxhash_rust::xxh3::xxh3_64;
+
+        // Runs of three, so that a verdict is reused, and a null every seventh row.
+        let bytes: Vec<Option<[u8; 20]>> = (0..600u32)
+            .map(|row| (row % 7 != 0).then_some([(row / 3 % 200) as u8; 20]))
+            .collect();
+
+        type Render = fn(&[u8], &mut Vec<u8>);
+        let renderers: [(JsonEncoding, Render); 2] = [
+            (JsonEncoding::HexBytes, encode_hex_bytes),
+            (JsonEncoding::Base58, encode_base58_bytes),
+        ];
+        for (encoding, render) in renderers {
+            let text = |value: &[u8]| {
+                let mut quoted = Vec::new();
+                render(value, &mut quoted);
+                String::from_utf8(quoted[1..quoted.len() - 1].to_vec()).unwrap()
+            };
+            let texts: Vec<Option<String>> = bytes.iter().map(|b| b.map(|b| text(&b))).collect();
+
+            // Every other value is a member; the rest pass only by a false
+            // positive, which the builder's own lookup says where.
+            let members: Vec<String> = (0..200u8).step_by(2).map(|v| text(&[v; 20])).collect();
+            let keys: Vec<u64> = members.iter().map(|m| xxh3_64(m.as_bytes())).collect();
+            let reference = BinaryFuse8::try_from(&keys).unwrap();
+            let expected: Vec<bool> = texts
+                .iter()
+                .map(|t| {
+                    t.as_ref()
+                        .is_some_and(|t| reference.contains(&xxh3_64(t.as_bytes())))
+                })
+                .collect();
+            assert!(expected.contains(&true) && expected.contains(&false));
+
+            let set = Arc::new(Set {
+                fuse8: Fuse8::from_bytes(&wire(&members)).unwrap(),
+                canaries: vec![members[0].clone()],
+            });
+
+            let strings: Vec<Option<&str>> = texts.iter().map(|t| t.as_deref()).collect();
+            let slices: Vec<Option<&[u8]>> =
+                bytes.iter().map(|b| b.as_ref().map(|b| &b[..])).collect();
+            let arrays: Vec<(&str, ArrayRef)> = vec![
+                ("utf8", Arc::new(StringArray::from(strings.clone()))),
+                (
+                    "large utf8",
+                    Arc::new(LargeStringArray::from(strings.clone())),
+                ),
+                (
+                    "utf8 view",
+                    Arc::new(StringViewArray::from(strings.clone())),
+                ),
+                (
+                    "a dictionary",
+                    Arc::new(
+                        strings
+                            .iter()
+                            .copied()
+                            .collect::<DictionaryArray<Int32Type>>(),
+                    ),
+                ),
+                (
+                    "fixed binary",
+                    Arc::new(
+                        FixedSizeBinaryArray::try_from_sparse_iter_with_size(
+                            slices.iter().copied(),
+                            20,
+                        )
+                        .unwrap(),
+                    ),
+                ),
+                ("binary", Arc::new(BinaryArray::from(slices.clone()))),
+            ];
+
+            let predicate = InSetPredicate::new(vec![Arc::clone(&set)], Some(encoding.clone()));
+            for (stored, array) in &arrays {
+                let mask = predicate.evaluate(array.as_ref()).unwrap();
+                let verdicts: Vec<bool> = (0..mask.len())
+                    .map(|row| mask.is_valid(row) && mask.value(row))
+                    .collect();
+                assert_eq!(verdicts, expected, "{encoding:?} stored as {stored}");
+            }
+        }
+
+        // Bytes a `utf8` column holds have no text a client hashed, and the
+        // response renders large binary as neither hex nor base58 by encoding.
+        let set = Arc::new(Set {
+            fuse8: Fuse8::from_bytes(&wire(&["0xab"])).unwrap(),
+            canaries: vec!["0xab".to_string()],
+        });
+        let hex = Some(JsonEncoding::HexBytes);
+        let refused: [(Option<JsonEncoding>, ArrayRef); 3] = [
+            (None, Arc::new(BinaryArray::from(vec![Some(&[0xabu8][..])]))),
+            (
+                hex.clone(),
+                Arc::new(LargeBinaryArray::from(vec![Some(&[0xabu8][..])])),
+            ),
+            (hex, Arc::new(Int64Array::from(vec![0xab]))),
+        ];
+        for (encoding, array) in refused {
+            let predicate = InSetPredicate::new(vec![Arc::clone(&set)], encoding.clone());
+            assert!(
+                predicate.evaluate(array.as_ref()).is_err(),
+                "{:?} rendered {encoding:?} was looked up",
+                array.data_type()
+            );
+        }
+    }
+
+    /// A list passes what any of its values and sets passes: each of two sets
+    /// contributes its own rows, and so does a value listed beside them. A null
+    /// passes nothing. A row group is ruled out only where every part rules it
+    /// out, which a set never does.
+    ///
+    /// Covers CT-3 · INV-P17
+    #[test]
+    fn a_list_passes_what_any_of_its_values_and_sets_passes() {
+        use crate::sets::{wire, Fuse8, Set};
+
+        let set = |members: &[&str]| {
+            Arc::new(Set {
+                fuse8: Fuse8::from_bytes(&wire(members)).unwrap(),
+                canaries: vec![members[0].to_string()],
+            })
+        };
+        let a = set(&["alice", "bob"]);
+        let b = set(&["carol"]);
+
+        let texts: Vec<Option<String>> = (0..300)
+            .map(|i| match i % 6 {
+                0 => None,
+                1 => Some("alice".to_string()),
+                2 => Some("carol".to_string()),
+                3 => Some("erin".to_string()),
+                _ => Some(format!("other {i}")),
+            })
+            .collect();
+        let array = StringArray::from(texts.clone());
+
+        let in_sets = || -> Arc<dyn ArrayPredicate> {
+            Arc::new(InSetPredicate::new(vec![a.clone(), b.clone()], None))
+        };
+        let erin =
+            || -> Arc<dyn ArrayPredicate> { Arc::new(InListPredicate::from_strings(&["erin"])) };
+        let list = AnyOfPredicate::new(vec![erin(), in_sets()]);
+
+        let verdicts = |predicate: &dyn ArrayPredicate| -> Vec<bool> {
+            let mask = predicate.evaluate(&array).unwrap();
+            (0..mask.len())
+                .map(|row| mask.is_valid(row) && mask.value(row))
+                .collect()
+        };
+        let by_lookup =
+            |text: &str| a.fuse8.contains(text.as_bytes()) || b.fuse8.contains(text.as_bytes());
+
+        let expected: Vec<bool> = texts
+            .iter()
+            .map(|t| t.as_deref().is_some_and(by_lookup))
+            .collect();
+        assert_eq!(verdicts(in_sets().as_ref()), expected);
+        assert!(expected[1] && expected[2], "a member of either set passes");
+
+        let expected: Vec<bool> = texts
+            .iter()
+            .map(|t| t.as_deref().is_some_and(|t| t == "erin" || by_lookup(t)))
+            .collect();
+        assert_eq!(verdicts(&list), expected);
+        assert!(expected[3], "a listed value passes");
+        assert!(!expected[0], "a null passes nothing");
+
+        let elsewhere = StatRange::Text {
+            min: "x".to_string(),
+            max: "z".to_string(),
+        };
+        assert!(erin().can_skip(&elsewhere));
+        assert!(!list.can_skip(&elsewhere));
+        assert!(AnyOfPredicate::new(vec![erin(), erin()]).can_skip(&elsewhere));
+
+        let only_erin = StatRange::Text {
+            min: "erin".to_string(),
+            max: "erin".to_string(),
+        };
+        assert!(list.matches_every_value(&only_erin));
+        assert!(!AnyOfPredicate::new(vec![in_sets()]).matches_every_value(&only_erin));
     }
 }

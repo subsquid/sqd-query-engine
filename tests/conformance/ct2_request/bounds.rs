@@ -1,9 +1,13 @@
 //! The bounds cost, not correctness, motivates: a request the engine will answer
 //! must be one it can afford to answer.
 
+use serde_json::{json, Map, Value};
+use sqd_query_engine::error::{error_kind, ErrorKind};
 use sqd_query_engine::query::{compile, parse_query};
+use sqd_query_engine::sets::MAX_SET_REFERENCES;
 
 use crate::harness::fixtures::meta;
+use crate::harness::sets::BuiltSet;
 
 /// Each bloom value is a separate hash-and-probe over every row, so the length
 /// of the list is a cost multiplier the client picks. `P-MAX-BLOOM-VALUES` caps
@@ -129,4 +133,76 @@ fn a_request_is_bounded_in_bytes() {
         .expect_err("a request over the cap must be refused")
         .to_string();
     assert!(err.contains("bytes"), "got: {err}");
+}
+
+/// Each set reference is a lookup for every row its table scans, and a set
+/// declared under many names is many lookups. `P-MAX-SET-REFERENCES` caps the
+/// references a request makes, summed across every list of every item request,
+/// a name counted once per list.
+///
+/// Covers CT-2 · INV-Q13
+#[test]
+fn set_references_are_bounded_in_number() {
+    let evm = meta("evm");
+
+    // Every set is the same structure under its own name, which is what makes
+    // this cheap to send.
+    let value = "0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc";
+    let set = BuiltSet::of(&[value]).declared(&[value]);
+    let reference = |i: usize| json!({ "set": format!("s{i}") });
+    let outcome = |lists: Vec<Vec<Value>>| {
+        let declared: Map<String, Value> = lists
+            .iter()
+            .flatten()
+            .filter_map(|r| r["set"].as_str())
+            .map(|name| (name.to_owned(), set.clone()))
+            .collect();
+        let items: Vec<Value> = lists
+            .into_iter()
+            .map(|list| json!({ "address": list }))
+            .collect();
+        let query = json!({
+            "type": "evm",
+            "sets": declared,
+            "fields": { "log": { "address": true } },
+            "logs": items,
+        })
+        .to_string();
+
+        let err = parse_query(query.as_bytes(), &evm)
+            .and_then(|parsed| compile(&parsed, &evm))
+            .err()?;
+        Some(error_kind(&err).unwrap_or_else(|| panic!("refused without a kind: {err:#}")))
+    };
+
+    let one_list = |count: usize| vec![(0..count).map(reference).collect()];
+    assert_eq!(outcome(one_list(MAX_SET_REFERENCES)), None);
+    assert_eq!(
+        outcome(one_list(MAX_SET_REFERENCES + 1)),
+        Some(ErrorKind::RequestTooLarge)
+    );
+
+    // Two references per item, so the count runs across items.
+    let spread = |count: usize| {
+        (0..count)
+            .step_by(2)
+            .map(|i| (i..count.min(i + 2)).map(reference).collect())
+            .collect()
+    };
+    assert_eq!(outcome(spread(MAX_SET_REFERENCES)), None);
+    assert_eq!(
+        outcome(spread(MAX_SET_REFERENCES + 1)),
+        Some(ErrorKind::RequestTooLarge)
+    );
+
+    // One set, referred to from more items than the cap: each is a lookup.
+    let one_set_everywhere = vec![vec![reference(0)]; MAX_SET_REFERENCES + 1];
+    assert_eq!(
+        outcome(one_set_everywhere),
+        Some(ErrorKind::RequestTooLarge)
+    );
+
+    // A name written again in one list is one lookup.
+    let repeated = vec![vec![reference(0); 10 * MAX_SET_REFERENCES]];
+    assert_eq!(outcome(repeated), None);
 }

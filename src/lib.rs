@@ -9,6 +9,7 @@ pub mod output;
 mod parallel;
 pub mod query;
 pub mod scan;
+pub mod sets;
 pub mod text;
 
 #[cfg(test)]
