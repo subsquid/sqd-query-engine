@@ -27,7 +27,7 @@ Checked before any chunk data is read ([INV-E2](07-invariants.md#inv-e2)).
 | `P-MAX-BLOOM-VALUES` | Values in one bloom filter ([INV-Q10](07-invariants.md#inv-q10)) | 10 | 10 |
 | `P-MAX-DISCRIMINATOR-FILTERS` | Discriminator-family filters in one item request ([INV-Q11](07-invariants.md#inv-q11)) | 1 | 1 |
 | `P-MAX-DISCRIMINATOR-BYTES` | Bytes in one discriminator value ([INV-Q12](07-invariants.md#inv-q12)) | 16 | 16 |
-| `P-MAX-REQUEST-BYTES` | Whole-request size bound ([INV-Q13](07-invariants.md#inv-q13)) | 2 MiB | 2 MiB |
+| `P-MAX-REQUEST-BYTES` | Whole-request size bound ([INV-Q13](07-invariants.md#inv-q13)) | 16 MiB | 16 MiB |
 | `P-MAX-IN-LIST` | Values in one `inList` ([INV-Q13](07-invariants.md#inv-q13)) | 100 000 | 100 000 |
 | `P-MAX-SET-CANARIES` | Canaries in one set ([INV-Q17](07-invariants.md#inv-q17)) | 64 | ⚠ 64 |
 | `P-MAX-SET-REFERENCES` | Set references summed across every list of every item request, a name counted once per list ([INV-Q13](07-invariants.md#inv-q13)) | 64 | ⚠ 64 |
@@ -38,9 +38,10 @@ a differently-named discriminator is bounded by the same rule with no code chang
 ([INV-X1](07-invariants.md#inv-x1)).
 
 `P-MAX-REQUEST-BYTES` bounds parsing work and total request representation, and
-it is the only bound on a set's size (§2.7). `P-MAX-IN-LIST` independently bounds the
-set built for one filter, including the case where short values allow a large
-list to fit below the byte cap ([ADR-13](decisions/ADR-13-request-resource-bounds.md)).
+it is the only bound on a set's size (§2.7). It is a backstop above the bounds a
+deployment works under, the portal's admission and the network's 4 MiB message.
+`P-MAX-IN-LIST` independently bounds the set built for one filter, including the case where short values allow a large list to fit below the
+byte cap ([ADR-13](decisions/ADR-13-request-resource-bounds.md)).
 
 `P-MAX-SET-CANARIES` bounds the work a set's canaries add to validation: each is
 one lookup, for every column that refers to the set. It is a proposal of
