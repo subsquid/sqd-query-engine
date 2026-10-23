@@ -89,8 +89,10 @@ const MAX_ITEM_REQUESTS: usize = 100;
 
 /// `P-MAX-REQUEST-BYTES` (spec/09-parameters.md §9.1). Checked against the raw
 /// body, before it is parsed: the parse itself is the first thing a large
-/// request makes the engine pay for.
-const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
+/// request makes the engine pay for. A backstop: the portal's admission and the
+/// network's 4 MiB message are the bounds a deployment works under, and this
+/// one sits above them so that either can rise without an engine release.
+const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 
 /// `P-MAX-IN-LIST` (spec/09-parameters.md §9.1). A filter list becomes a hash set
 /// built before a single row is read, and the request cap alone does not bound

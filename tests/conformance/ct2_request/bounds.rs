@@ -98,7 +98,7 @@ fn an_in_list_is_bounded_in_length() {
     };
 
     let at_the_cap = query(100_000);
-    assert!(at_the_cap.len() < 2 * 1024 * 1024);
+    assert!(at_the_cap.len() < 16 * 1024 * 1024);
     parse_query(&at_the_cap, &evm).expect("a list at the cap must be accepted");
 
     let err = parse_query(&query(100_001), &evm)
@@ -123,12 +123,12 @@ fn a_request_is_bounded_in_bytes() {
         .into_bytes()
     };
 
-    let under = query(700_000);
-    assert!(under.len() < 2 * 1024 * 1024);
+    let under = query(8_000_000);
+    assert!(under.len() < 16 * 1024 * 1024);
     parse_query(&under, &evm).expect("a request under the cap must be parsed");
 
-    let over = query(1_200_000);
-    assert!(over.len() > 2 * 1024 * 1024);
+    let over = query(8_500_000);
+    assert!(over.len() > 16 * 1024 * 1024);
     let err = parse_query(&over, &evm)
         .expect_err("a request over the cap must be refused")
         .to_string();

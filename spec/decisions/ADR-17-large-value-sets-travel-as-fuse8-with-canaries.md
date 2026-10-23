@@ -108,4 +108,7 @@ port takes about 87 ms, and is a second implementation to keep in step with the
 lookup.
 
 `P-MAX-REQUEST-BYTES` still bounds a request, and fuse8 costs about 1.5 bytes of
-base 64 per value, so one request carries a set of about 1.4 million values.
+base 64 per value. With this record the bound becomes a 16 MiB backstop
+([ADR-13](ADR-13-request-resource-bounds.md)). What bounds a set in practice is
+the network's 4 MiB message, about 2.8 million values, and the portal decides how
+much of it a client may use.
