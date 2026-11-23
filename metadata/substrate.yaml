@@ -315,10 +315,36 @@ aliases:
         left_key: [ block_number, extrinsic_index ]
         right_key: [ block_number, extrinsic_index ]
 
+  # `Gear.MessageQueued` puts a message into a program's queue; `programId` is the
+  # destination. Served under its historical name and under `gearMessagesQueued`,
+  # the name the SDK sends. It used to pin `Gear.UserMessageEnqueued`, an event no
+  # Gear runtime has, and matched nothing.
   gearMessagesEnqueued:
     table: events
     implicit_filters:
-      name: [ "Gear.UserMessageEnqueued" ]
+      name: [ "Gear.MessageQueued" ]
+    filters: [ program_id ]
+    special_filters:
+      program_id: { kind: column_alias, column: _gear_program_id }
+    relations:
+      extrinsic:
+        table: extrinsics
+        left_key: [ block_number, extrinsic_index ]
+        right_key: [ block_number, index ]
+      call:
+        table: calls
+        left_key: [ block_number, extrinsic_index, call_address ]
+        right_key: [ block_number, extrinsic_index, address ]
+      stack:
+        table: calls
+        kind: parents
+        left_key: [ block_number, extrinsic_index ]
+        right_key: [ block_number, extrinsic_index ]
+
+  gearMessagesQueued:
+    table: events
+    implicit_filters:
+      name: [ "Gear.MessageQueued" ]
     filters: [ program_id ]
     special_filters:
       program_id: { kind: column_alias, column: _gear_program_id }
