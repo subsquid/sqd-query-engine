@@ -10,6 +10,7 @@
 
 mod bloom;
 mod case_folding;
+mod gear;
 mod gte_const;
 mod items;
 mod laws;

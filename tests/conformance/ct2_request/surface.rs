@@ -37,10 +37,20 @@ const REFERENCE_ALIASES: &[(&str, &str, (&str, &str), &[&str], &[&str])] = &[
         &["contractAddress"],
         &["extrinsic", "call", "stack"],
     ),
+    // `Gear.UserMessageEnqueued`, the name both engines once pinned here, is
+    // not an event any Gear runtime has; the request matched nothing.
     (
         "substrate",
         "gearMessagesEnqueued",
-        ("name", "Gear.UserMessageEnqueued"),
+        ("name", "Gear.MessageQueued"),
+        &["programId"],
+        &["extrinsic", "call", "stack"],
+    ),
+    // The same request under the name the SDK sends.
+    (
+        "substrate",
+        "gearMessagesQueued",
+        ("name", "Gear.MessageQueued"),
         &["programId"],
         &["extrinsic", "call", "stack"],
     ),
@@ -218,6 +228,7 @@ fn reference_filters_are_all_accepted() {
         ("substrate", "ethereumTransactions", &["to", "sighash"]),
         ("substrate", "contractsEvents", &["contractAddress"]),
         ("substrate", "gearMessagesEnqueued", &["programId"]),
+        ("substrate", "gearMessagesQueued", &["programId"]),
         ("substrate", "gearUserMessagesSent", &["programId"]),
         (
             "substrate",

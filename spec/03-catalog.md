@@ -317,7 +317,7 @@ remaps its filters onto extraction columns.
 | `evmLogs` | `events` | `name = "EVM.Log"` | `address`→`_evmLogAddress`, `topic0…3`→`_evmLogTopic0…3` (hex, case-folded) | `extrinsic`, `call`, `stack` |
 | `ethereumTransactions` | `calls` | `name = "Ethereum.transact"` | `to`→`_ethereumTransactTo`, `sighash`→`_ethereumTransactSighash` (hex, case-folded) | `extrinsic`, `stack`, `events` |
 | `contractsEvents` | `events` | `name = "Contracts.ContractEmitted"` | `contractAddress`→`_contractAddress` (exact) | `extrinsic`, `call`, `stack` |
-| `gearMessagesEnqueued` | `events` | `name = "Gear.UserMessageEnqueued"` | `programId`→`_gearProgramId` (exact) | `extrinsic`, `call`, `stack` |
+| `gearMessagesEnqueued`, `gearMessagesQueued` | `events` | `name = "Gear.MessageQueued"` | `programId`→`_gearProgramId` (exact) | `extrinsic`, `call`, `stack` |
 | `gearUserMessagesSent` | `events` | `name = "Gear.UserMessageSent"` | `programId`→`_gearProgramId` (exact) | `extrinsic`, `call`, `stack` |
 | `reviveContractEmitted` | `events` | `name = "Revive.ContractEmitted"` | `contract`→`_reviveContract`, `topic0…3`→`_reviveTopic0…3` (exact) | `extrinsic`, `call`, `stack` |
 
